@@ -37,6 +37,9 @@ struct Args {
     #[arg(long = "csv-multiline")]
     csv_multiline: bool,
 
+    #[arg(long = "csv-allow-short-rows")]
+    csv_allow_short_rows: bool,
+
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
@@ -151,31 +154,24 @@ fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
-fn csv_read_options(
-    delimiter: Option<u8>,
-    no_header: bool,
-    schema_rows: Option<usize>,
-    comment: Option<u8>,
-    quote: Option<u8>,
-    escape: Option<u8>,
-    multiline: bool,
-) -> CsvReadOptions<'static> {
+fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     let options = CsvReadOptions::new()
-        .delimiter(delimiter.unwrap_or(b','))
-        .quote(quote.unwrap_or(b'"'))
-        .has_header(!no_header)
-        .newlines_in_values(multiline);
-    let options = if let Some(escape) = escape {
+        .delimiter(args.csv_delimiter.unwrap_or(b','))
+        .quote(args.csv_quote.unwrap_or(b'"'))
+        .has_header(!args.csv_no_header)
+        .newlines_in_values(args.csv_multiline)
+        .truncated_rows(args.csv_allow_short_rows);
+    let options = if let Some(escape) = args.csv_escape {
         options.escape(escape)
     } else {
         options
     };
-    let options = if let Some(comment) = comment {
+    let options = if let Some(comment) = args.csv_comment {
         options.comment(comment)
     } else {
         options
     };
-    if let Some(rows) = schema_rows {
+    if let Some(rows) = args.csv_schema_rows {
         options.schema_infer_max_records(rows)
     } else {
         options
@@ -259,6 +255,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_multiline && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-multiline requires a CSV input".into());
     }
+    if args.csv_allow_short_rows && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-allow-short-rows requires a CSV input".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -274,22 +273,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-array requires a JSON input".into());
     }
-    if let Some(csv) = args.csv {
-        let options = csv_read_options(
-            args.csv_delimiter,
-            args.csv_no_header,
-            args.csv_schema_rows,
-            args.csv_comment,
-            args.csv_quote,
-            args.csv_escape,
-            args.csv_multiline,
-        );
+    if let Some(csv) = args.csv.as_ref() {
+        let options = csv_read_options(&args);
         session
             .register_csv_with_options(&args.table, csv, options)
             .await?;
-    } else if let Some(parquet) = args.parquet {
+    } else if let Some(parquet) = args.parquet.as_ref() {
         session.register_parquet(&args.table, parquet).await?;
-    } else if let Some(json) = args.json {
+    } else if let Some(json) = args.json.as_ref() {
         let options = json_read_options(args.json_array, args.json_schema_rows);
         session
             .register_json_with_options(&args.table, json, options)
@@ -301,15 +292,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = csv_read_options(
-                args.csv_delimiter,
-                args.csv_no_header,
-                args.csv_schema_rows,
-                args.csv_comment,
-                args.csv_quote,
-                args.csv_escape,
-                args.csv_multiline,
-            );
+            let options = csv_read_options(&args);
             session
                 .register_csv_with_options(name, path, options)
                 .await?;
