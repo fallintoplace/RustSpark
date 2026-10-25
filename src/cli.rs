@@ -34,6 +34,9 @@ struct Args {
     #[arg(long = "csv-escape", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_escape: Option<u8>,
 
+    #[arg(long = "csv-multiline")]
+    csv_multiline: bool,
+
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
@@ -155,11 +158,13 @@ fn csv_read_options(
     comment: Option<u8>,
     quote: Option<u8>,
     escape: Option<u8>,
+    multiline: bool,
 ) -> CsvReadOptions<'static> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
         .quote(quote.unwrap_or(b'"'))
-        .has_header(!no_header);
+        .has_header(!no_header)
+        .newlines_in_values(multiline);
     let options = if let Some(escape) = escape {
         options.escape(escape)
     } else {
@@ -251,6 +256,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_escape.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-escape requires a CSV input".into());
     }
+    if args.csv_multiline && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-multiline requires a CSV input".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -274,6 +282,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.csv_comment,
             args.csv_quote,
             args.csv_escape,
+            args.csv_multiline,
         );
         session
             .register_csv_with_options(&args.table, csv, options)
@@ -299,6 +308,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_comment,
                 args.csv_quote,
                 args.csv_escape,
+                args.csv_multiline,
             );
             session
                 .register_csv_with_options(name, path, options)
