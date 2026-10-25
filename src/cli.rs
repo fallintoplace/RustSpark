@@ -105,8 +105,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(csv) = args.csv {
         let options = CsvReadOptions::new()
-                .delimiter(args.csv_delimiter.unwrap_or(b','))
-                .has_header(!args.csv_no_header);
+            .delimiter(args.csv_delimiter.unwrap_or(b','))
+            .has_header(!args.csv_no_header);
         session
             .register_csv_with_options(&args.table, csv, options)
             .await?;
