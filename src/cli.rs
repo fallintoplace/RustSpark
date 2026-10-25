@@ -2,7 +2,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, SessionConfig};
+use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -30,6 +30,9 @@ struct Args {
 
     #[arg(long = "csv-extension", value_name = ".EXT", value_parser = parse_file_extension)]
     csv_extension: Option<String>,
+
+    #[arg(long = "parquet-extension", value_name = ".EXT", value_parser = parse_file_extension)]
+    parquet_extension: Option<String>,
 
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
@@ -261,6 +264,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_extension.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-extension requires a CSV input".into());
     }
+    if args.parquet_extension.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty()
+    {
+        return Err("--parquet-extension requires a Parquet input".into());
+    }
     if args.csv_quote.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-quote requires a CSV input".into());
     }
@@ -297,7 +304,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .register_csv_with_options(&args.table, csv, options)
             .await?;
     } else if let Some(parquet) = args.parquet.as_ref() {
-        session.register_parquet(&args.table, parquet).await?;
+        let options = ParquetReadOptions::new()
+            .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+        session
+            .register_parquet_with_options(&args.table, parquet, options)
+            .await?;
     } else if let Some(json) = args.json.as_ref() {
         let options = json_read_options(args.json_array, args.json_schema_rows);
         session
@@ -320,7 +331,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            session.register_parquet(name, path).await?;
+            let options = ParquetReadOptions::new()
+                .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+            session
+                .register_parquet_with_options(name, path, options)
+                .await?;
         }
         for mapping in &args.json_tables {
             let (name, path) = parse_named_table(mapping)?;
