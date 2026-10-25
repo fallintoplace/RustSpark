@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Parser};
+use datafusion::prelude::CsvReadOptions;
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -17,6 +18,9 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     parquet: Option<PathBuf>,
 
+    #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
+    csv_delimiter: Option<u8>,
+
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
@@ -30,12 +34,25 @@ struct Args {
     sql_file: Option<PathBuf>,
 }
 
+fn parse_delimiter(value: &str) -> Result<u8, String> {
+    match value.as_bytes() {
+        [byte] if *byte != b'\n' && *byte != b'\r' && *byte != b'"' => Ok(*byte),
+        _ => Err("CSV delimiter must be one ASCII character other than a quote or newline".into()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let session = RustSparkSession::new();
+    if args.csv_delimiter.is_some() && args.csv.is_none() {
+        return Err("--csv-delimiter requires --csv".into());
+    }
     if let Some(csv) = args.csv {
-        session.register_csv(&args.table, csv).await?;
+        let options = CsvReadOptions::new().delimiter(args.csv_delimiter.unwrap_or(b','));
+        session
+            .register_csv_with_options(&args.table, csv, options)
+            .await?;
     } else if let Some(parquet) = args.parquet {
         session.register_parquet(&args.table, parquet).await?;
     } else if let Some(json) = args.json {

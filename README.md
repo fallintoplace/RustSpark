@@ -17,3 +17,9 @@ SQL statements can be read from a file:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
+
+Use a custom CSV delimiter with `--csv-delimiter`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales_semicolon.csv --csv-delimiter ';' --sql 'SELECT SUM(amount) FROM data'
+```

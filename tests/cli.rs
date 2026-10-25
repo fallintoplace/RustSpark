@@ -222,3 +222,67 @@ fn reports_missing_sql_file() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn parses_semicolon_delimited_csv() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/sales_semicolon.csv"
+            ),
+            "--csv-delimiter",
+            ";",
+            "--sql",
+            "SELECT SUM(amount) FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "15")
+    );
+}
+
+#[test]
+fn rejects_invalid_csv_delimiters() {
+    for delimiter in ["::", "🔥"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .args([
+                "--csv",
+                sales_csv(),
+                "--csv-delimiter",
+                delimiter,
+                "--sql",
+                "SELECT 1",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{delimiter}");
+    }
+}
+
+#[test]
+fn rejects_csv_delimiter_for_parquet() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--parquet",
+            sales_csv(),
+            "--csv-delimiter",
+            ";",
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--csv-delimiter requires --csv"));
+}
