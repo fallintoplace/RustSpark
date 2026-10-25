@@ -96,9 +96,7 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
 fn parse_file_extension(value: &str) -> Result<String, String> {
     if value.len() > 1
         && value.starts_with('.')
-        && value[1..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric())
+        && value[1..].bytes().all(|byte| byte.is_ascii_alphanumeric())
     {
         Ok(value.to_owned())
     } else {
