@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use datafusion::{
+    arrow::record_batch::RecordBatch,
     error::{DataFusionError, Result},
     prelude::{
         CsvReadOptions, DataFrame, JsonReadOptions, ParquetReadOptions, SessionConfig,
@@ -116,6 +117,14 @@ impl RustSparkSession {
         self.context
             .read_parquet(file_path(path.as_ref())?, options)
             .await
+    }
+
+    /// Create a lazy DataFrame from in-memory Arrow record batches.
+    pub fn read_batches(
+        &self,
+        batches: impl IntoIterator<Item = RecordBatch>,
+    ) -> Result<DataFrame> {
+        self.context.read_batches(batches)
     }
 
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
