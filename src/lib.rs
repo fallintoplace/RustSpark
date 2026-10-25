@@ -147,6 +147,11 @@ impl RustSparkSession {
         Ok(())
     }
 
+    /// Unregister a table or view, returning whether it existed.
+    pub fn deregister_table(&self, name: &str) -> Result<bool> {
+        Ok(self.context.deregister_table(name)?.is_some())
+    }
+
     /// Access a registered SQL table as a lazy DataFrame.
     pub async fn table(&self, name: &str) -> Result<DataFrame> {
         self.context.table(name).await
