@@ -51,6 +51,17 @@ impl RustSparkSession {
             .await
     }
 
+    pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
+        if dataframe.task_ctx().session_id() != self.context.session_id() {
+            return Err(DataFusionError::Execution(
+                "DataFrame belongs to a different RustSpark session".into(),
+            ));
+        }
+
+        self.context.register_table(table, dataframe.into_view())?;
+        Ok(())
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
