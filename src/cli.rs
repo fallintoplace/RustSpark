@@ -30,6 +30,9 @@ struct Args {
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
+    #[arg(long = "csv-schema-rows", value_name = "ROWS", value_parser = parse_csv_schema_rows)]
+    csv_schema_rows: Option<usize>,
+
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
@@ -75,6 +78,31 @@ fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     Ok((name, path))
 }
 
+fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--csv-schema-rows requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--csv-schema-rows must be greater than zero".into());
+    }
+    Ok(count)
+}
+
+fn csv_read_options(
+    delimiter: Option<u8>,
+    no_header: bool,
+    schema_rows: Option<usize>,
+) -> CsvReadOptions<'static> {
+    let options = CsvReadOptions::new()
+        .delimiter(delimiter.unwrap_or(b','))
+        .has_header(!no_header);
+    if let Some(rows) = schema_rows {
+        options.schema_infer_max_records(rows)
+    } else {
+        options
+    }
+}
+
 fn parse_positive_rows(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -103,10 +131,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
+    if args.csv_schema_rows.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-schema-rows requires a CSV input".into());
+    }
     if let Some(csv) = args.csv {
-        let options = CsvReadOptions::new()
-            .delimiter(args.csv_delimiter.unwrap_or(b','))
-            .has_header(!args.csv_no_header);
+        let options =
+            csv_read_options(args.csv_delimiter, args.csv_no_header, args.csv_schema_rows);
         session
             .register_csv_with_options(&args.table, csv, options)
             .await?;
@@ -121,9 +151,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = CsvReadOptions::new()
-                .delimiter(args.csv_delimiter.unwrap_or(b','))
-                .has_header(!args.csv_no_header);
+            let options =
+                csv_read_options(args.csv_delimiter, args.csv_no_header, args.csv_schema_rows);
             session
                 .register_csv_with_options(name, path, options)
                 .await?;

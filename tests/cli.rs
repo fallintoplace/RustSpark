@@ -460,3 +460,42 @@ fn rejects_csv_no_header_without_csv() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires a CSV input"));
 }
+
+#[test]
+fn configures_csv_schema_inference_rows() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--csv-schema-rows",
+            "1",
+            "--sql",
+            "SELECT SUM(amount) FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("35"));
+}
+
+#[test]
+fn rejects_invalid_csv_schema_row_count() {
+    for rows in ["0", "-1", "abc"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .args([
+                "--csv",
+                sales_csv(),
+                "--csv-schema-rows",
+                rows,
+                "--sql",
+                "SELECT 1",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{rows}");
+    }
+}
