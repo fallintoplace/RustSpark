@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
 use datafusion::prelude::CsvReadOptions;
@@ -8,7 +8,7 @@ use rustspark::RustSparkSession;
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(true).args(["csv", "parquet", "json", "csv_tables"])),
+    group(ArgGroup::new("input").required(true).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file"]))
 )]
 struct Args {
@@ -21,13 +21,16 @@ struct Args {
     #[arg(long = "csv-table", value_name = "NAME=PATH")]
     csv_tables: Vec<String>,
 
+    #[arg(long = "parquet-table", value_name = "NAME=PATH")]
+    parquet_tables: Vec<String>,
+
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
-    #[arg(long, default_value = "data", conflicts_with = "csv_tables")]
+    #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables"])]
     table: String,
 
     #[arg(long, value_name = "QUERY")]
@@ -47,10 +50,10 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
     }
 }
 
-fn parse_named_csv(value: &str) -> Result<(&str, &str), String> {
+fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
-        .ok_or_else(|| "CSV table must use NAME=PATH".to_owned())?;
+        .ok_or_else(|| "Named table must use NAME=PATH".to_owned())?;
     let valid_first = name
         .bytes()
         .next()
@@ -61,7 +64,7 @@ fn parse_named_csv(value: &str) -> Result<(&str, &str), String> {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         || path.is_empty()
     {
-        return Err("CSV table needs a SQL identifier and non-empty path".into());
+        return Err("Named table needs a SQL identifier and non-empty path".into());
     }
     Ok((name, path))
 }
@@ -78,6 +81,13 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let single_inputs = u8::from(args.csv.is_some())
+        + u8::from(args.parquet.is_some())
+        + u8::from(args.json.is_some());
+    let has_named = !args.csv_tables.is_empty() || !args.parquet_tables.is_empty();
+    if single_inputs > 1 || (single_inputs > 0 && has_named) {
+        return Err("Use one unnamed input or one or more named tables".into());
+    }
     let session = RustSparkSession::new();
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
@@ -92,12 +102,23 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(json) = args.json {
         session.register_json(&args.table, json).await?;
     } else {
+        let mut names = HashSet::new();
         for mapping in &args.csv_tables {
-            let (name, path) = parse_named_csv(mapping)?;
+            let (name, path) = parse_named_table(mapping)?;
+            if !names.insert(name.to_ascii_lowercase()) {
+                return Err(format!("Duplicate table name: {name}").into());
+            }
             let options = CsvReadOptions::new().delimiter(args.csv_delimiter.unwrap_or(b','));
             session
                 .register_csv_with_options(name, path, options)
                 .await?;
+        }
+        for mapping in &args.parquet_tables {
+            let (name, path) = parse_named_table(mapping)?;
+            if !names.insert(name.to_ascii_lowercase()) {
+                return Err(format!("Duplicate table name: {name}").into());
+            }
+            session.register_parquet(name, path).await?;
         }
     }
     let query = if let Some(sql) = args.sql {
