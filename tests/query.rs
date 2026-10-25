@@ -97,8 +97,7 @@ async fn rejects_non_utf8_csv_paths() {
 }
 
 #[tokio::test]
-async fn executes_queries_with_custom_session_configuration(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn runs_with_custom_batch_size() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::with_config(SessionConfig::new().with_batch_size(1));
     session.register_csv("sales", sales_csv()).await?;
 
