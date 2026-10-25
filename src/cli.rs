@@ -1,6 +1,7 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
+use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
 
@@ -59,6 +60,13 @@ struct Args {
 
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
+
+    #[arg(
+        long = "output-parquet",
+        value_name = "DIR",
+        conflicts_with = "max_rows"
+    )]
+    output_parquet: Option<PathBuf>,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -231,7 +239,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("clap requires either --sql or --sql-file")
     };
     let dataframe = session.sql(&query).await?;
-    if let Some(max_rows) = args.max_rows {
+    if let Some(path) = args.output_parquet {
+        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
+        dataframe
+            .write_parquet(path, DataFrameWriteOptions::new(), None)
+            .await?;
+    } else if let Some(max_rows) = args.max_rows {
         dataframe.show_limit(max_rows).await?;
     } else {
         dataframe.show().await?;

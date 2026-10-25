@@ -614,3 +614,47 @@ fn rejects_invalid_batch_sizes() {
         assert!(!output.status.success(), "{size}");
     }
 }
+
+#[tokio::test]
+async fn exports_query_results_to_parquet() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let export = dir.path().join("parquet_results");
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT city, amount FROM data",
+            "--output-parquet",
+            export.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let session = rustspark::RustSparkSession::new();
+    let count = session.read_parquet(&export).await?.count().await?;
+    assert_eq!(count, 3);
+    Ok(())
+}
+
+#[test]
+fn rejects_parquet_export_with_preview_limit() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT 1",
+            "--output-parquet",
+            "results",
+            "--max-rows",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
