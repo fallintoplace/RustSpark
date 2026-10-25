@@ -29,3 +29,9 @@ Join multiple CSV files in one query by naming each input:
 ```sh
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
+
+Bound the number of result rows printed with `--max-rows`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --max-rows 10
+```
