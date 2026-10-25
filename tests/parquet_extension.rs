@@ -13,11 +13,12 @@ use datafusion::{
 fn queries_parquet_with_custom_extension() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("events.data");
-    let schema = Arc::new(Schema::new(vec![Field::new("amount", DataType::Int64, false)]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(Int64Array::from(vec![20, 5]))],
-    )?;
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "amount",
+        DataType::Int64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![20, 5]))])?;
     let mut writer = ArrowWriter::try_new(File::create(&file)?, batch.schema(), None)?;
     writer.write(&batch)?;
     writer.close()?;
@@ -32,7 +33,11 @@ fn queries_parquet_with_custom_extension() -> Result<(), Box<dyn std::error::Err
             "SELECT SUM(amount) FROM data",
         ])
         .output()?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("25"));
     Ok(())
 }

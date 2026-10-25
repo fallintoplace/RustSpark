@@ -96,9 +96,7 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
 fn parse_file_extension(value: &str) -> Result<String, String> {
     if value.len() > 1
         && value.starts_with('.')
-        && value[1..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric())
+        && value[1..].bytes().all(|byte| byte.is_ascii_alphanumeric())
     {
         Ok(value.to_owned())
     } else {
@@ -197,7 +195,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
-    if args.parquet_extension.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty() {
+    if args.parquet_extension.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty()
+    {
         return Err("--parquet-extension requires a Parquet input".into());
     }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
