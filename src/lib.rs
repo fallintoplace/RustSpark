@@ -37,7 +37,8 @@ impl RustSparkSession {
     }
 
     pub async fn read_csv(&self, path: impl AsRef<Path>) -> Result<DataFrame> {
-        self.read_csv_with_options(path, CsvReadOptions::new()).await
+        self.read_csv_with_options(path, CsvReadOptions::new())
+            .await
     }
 
     pub async fn read_csv_with_options(
@@ -45,7 +46,9 @@ impl RustSparkSession {
         path: impl AsRef<Path>,
         options: CsvReadOptions<'_>,
     ) -> Result<DataFrame> {
-        self.context.read_csv(csv_path(path.as_ref())?, options).await
+        self.context
+            .read_csv(csv_path(path.as_ref())?, options)
+            .await
     }
 
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {

@@ -1,6 +1,6 @@
 use datafusion::{
     arrow::array::{Int64Array, StringArray},
-    prelude::{col, lit, CsvReadOptions},
+    prelude::{CsvReadOptions, col, lit},
 };
 use rustspark::RustSparkSession;
 
@@ -46,7 +46,10 @@ async fn reads_csv_without_registering_table() -> Result<(), Box<dyn std::error:
         }
     }
 
-    assert_eq!(rows, vec![("Berlin".to_owned(), 20), ("Berlin".to_owned(), 10)]);
+    assert_eq!(
+        rows,
+        vec![("Berlin".to_owned(), 20), ("Berlin".to_owned(), 10)]
+    );
     Ok(())
 }
 
@@ -54,10 +57,7 @@ async fn reads_csv_without_registering_table() -> Result<(), Box<dyn std::error:
 async fn supports_custom_csv_options() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     let matching_rows = session
-        .read_csv_with_options(
-            semicolon_csv(),
-            CsvReadOptions::new().delimiter(b';'),
-        )
+        .read_csv_with_options(semicolon_csv(), CsvReadOptions::new().delimiter(b';'))
         .await?
         .filter(col("amount").gt(lit(7)))?
         .count()
