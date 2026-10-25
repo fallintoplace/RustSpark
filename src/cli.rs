@@ -248,7 +248,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let query = if let Some(sql) = args.sql {
         sql
     } else if let Some(path) = args.sql_file {
-        if path == PathBuf::from("-") {
+        if path.as_os_str() == "-" {
             let mut query = String::new();
             std::io::stdin().read_to_string(&mut query)?;
             query
