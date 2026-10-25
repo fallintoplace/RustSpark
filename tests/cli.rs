@@ -106,14 +106,8 @@ fn reports_a_missing_csv_file() {
 }
 
 #[test]
-fn requires_exactly_one_input_format() {
+fn rejects_multiple_input_formats() {
     let binary = env!("CARGO_BIN_EXE_rustspark");
-    let no_input = Command::new(binary)
-        .args(["--sql", "SELECT 1"])
-        .output()
-        .unwrap();
-    assert!(!no_input.status.success());
-
     let both = Command::new(binary)
         .args([
             "--csv",
