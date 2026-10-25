@@ -28,6 +28,9 @@ struct Args {
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
+    #[arg(long = "csv-extension", value_name = ".EXT", value_parser = parse_file_extension)]
+    csv_extension: Option<String>,
+
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
@@ -90,6 +93,19 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
     }
 }
 
+fn parse_file_extension(value: &str) -> Result<String, String> {
+    if value.len() > 1
+        && value.starts_with('.')
+        && value[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("Extension must start with '.' and contain only ASCII letters or digits".into())
+    }
+}
+
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
@@ -119,15 +135,17 @@ fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
-fn csv_read_options(
+fn csv_read_options<'a>(
     delimiter: Option<u8>,
     no_header: bool,
     schema_rows: Option<usize>,
     comment: Option<u8>,
-) -> CsvReadOptions<'static> {
+    extension: Option<&'a str>,
+) -> CsvReadOptions<'a> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
-        .has_header(!no_header);
+        .has_header(!no_header)
+        .file_extension(extension.unwrap_or(".csv"));
     let options = if let Some(comment) = comment {
         options.comment(comment)
     } else {
@@ -181,6 +199,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
+    if args.csv_extension.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-extension requires a CSV input".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -199,6 +220,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.csv_no_header,
             args.csv_schema_rows,
             args.csv_comment,
+            args.csv_extension.as_deref(),
         );
         session
             .register_csv_with_options(&args.table, csv, options)
@@ -222,6 +244,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_no_header,
                 args.csv_schema_rows,
                 args.csv_comment,
+                args.csv_extension.as_deref(),
             );
             session
                 .register_csv_with_options(name, path, options)
