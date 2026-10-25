@@ -28,6 +28,9 @@ struct Args {
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
+    #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
+    csv_quote: Option<u8>,
+
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
@@ -93,6 +96,13 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
     }
 }
 
+fn parse_csv_char(value: &str) -> Result<u8, String> {
+    match value.as_bytes() {
+        [byte] if *byte != b'\n' && *byte != b'\r' => Ok(*byte),
+        _ => Err("CSV character must be one ASCII character other than newline".into()),
+    }
+}
+
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
@@ -137,9 +147,11 @@ fn csv_read_options(
     no_header: bool,
     schema_rows: Option<usize>,
     comment: Option<u8>,
+    quote: Option<u8>,
 ) -> CsvReadOptions<'static> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
+        .quote(quote.unwrap_or(b'"'))
         .has_header(!no_header);
     let options = if let Some(comment) = comment {
         options.comment(comment)
@@ -203,6 +215,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
+    if args.csv_quote.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-quote requires a CSV input".into());
+    }
+    if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
+        return Err("--csv-quote must differ from the CSV delimiter".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -224,6 +242,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.csv_no_header,
             args.csv_schema_rows,
             args.csv_comment,
+            args.csv_quote,
         );
         session
             .register_csv_with_options(&args.table, csv, options)
@@ -247,6 +266,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_no_header,
                 args.csv_schema_rows,
                 args.csv_comment,
+                args.csv_quote,
             );
             session
                 .register_csv_with_options(name, path, options)
