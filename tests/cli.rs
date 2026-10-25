@@ -690,3 +690,56 @@ fn exports_query_results_to_csv() -> Result<(), Box<dyn std::error::Error>> {
     assert!(content.contains("Munich"));
     Ok(())
 }
+
+#[test]
+fn exports_query_results_to_json() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let export = dir.path().join("json_results");
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT city, amount FROM data",
+            "--output-json",
+            export.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut content = String::new();
+    for entry in std::fs::read_dir(&export)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            content.push_str(&std::fs::read_to_string(path)?);
+        }
+    }
+    assert!(content.contains("Berlin"));
+    assert!(content.contains("Munich"));
+    Ok(())
+}
+
+#[test]
+fn rejects_two_export_formats() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT 1",
+            "--output-csv",
+            "csv",
+            "--output-json",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

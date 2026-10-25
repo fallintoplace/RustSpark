@@ -74,6 +74,13 @@ struct Args {
         conflicts_with_all = ["max_rows", "output_parquet"]
     )]
     output_csv: Option<PathBuf>,
+
+    #[arg(
+        long = "output-json",
+        value_name = "DIR",
+        conflicts_with_all = ["max_rows", "output_parquet", "output_csv"]
+    )]
+    output_json: Option<PathBuf>,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -255,6 +262,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_csv(path, DataFrameWriteOptions::new(), None)
+            .await?;
+    } else if let Some(path) = args.output_json {
+        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
+        dataframe
+            .write_json(path, DataFrameWriteOptions::new(), None)
             .await?;
     } else if let Some(max_rows) = args.max_rows {
         dataframe.show_limit(max_rows).await?;
