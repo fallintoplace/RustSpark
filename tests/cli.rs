@@ -4,6 +4,10 @@ fn sales_csv() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.csv")
 }
 
+fn sales_json() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.json")
+}
+
 #[test]
 fn help_explains_options() {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
@@ -15,6 +19,7 @@ fn help_explains_options() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--csv"));
     assert!(stdout.contains("--parquet"));
+    assert!(stdout.contains("--json"));
     assert!(stdout.contains("--sql"));
 }
 
@@ -121,4 +126,44 @@ fn requires_exactly_one_input_format() {
         .output()
         .unwrap();
     assert!(!both.status.success());
+}
+
+#[test]
+fn queries_json_from_the_command_line() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--json",
+            sales_json(),
+            "--sql",
+            "SELECT SUM(amount) AS total FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "35")
+    );
+}
+
+#[test]
+fn refuses_two_input_formats() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--json",
+            sales_json(),
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
 }

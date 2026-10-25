@@ -6,8 +6,8 @@ use rustspark::RustSparkSession;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Run local SQL queries over CSV or Parquet files",
-    group(ArgGroup::new("input").required(true).args(["csv", "parquet"]))
+    about = "Run local SQL queries over CSV, JSON or Parquet files",
+    group(ArgGroup::new("input").required(true).args(["csv", "parquet", "json"]))
 )]
 struct Args {
     #[arg(long, value_name = "PATH")]
@@ -15,6 +15,9 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     parquet: Option<PathBuf>,
+
+    #[arg(long, value_name = "PATH")]
+    json: Option<PathBuf>,
 
     #[arg(long, default_value = "data")]
     table: String,
@@ -31,6 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session.register_csv(&args.table, csv).await?;
     } else if let Some(parquet) = args.parquet {
         session.register_parquet(&args.table, parquet).await?;
+    } else if let Some(json) = args.json {
+        session.register_json(&args.table, json).await?;
     }
     session.sql(&args.sql).await?.show().await?;
     Ok(())
