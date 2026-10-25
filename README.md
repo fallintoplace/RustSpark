@@ -1,3 +1,7 @@
 # RustSpark
 
-An experimental Rust-native, Spark-inspired query engine. Development begins in pull requests.
+Experimental local SQL over CSV files using Apache DataFusion. Not Spark-compatible.
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --table sales --sql 'SELECT city, SUM(amount) FROM sales GROUP BY city'
+```
