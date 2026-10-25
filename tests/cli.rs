@@ -569,13 +569,7 @@ fn queries_json_array_files() {
 #[test]
 fn rejects_json_array_flag_for_csv_inputs() {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args([
-            "--csv",
-            sales_csv(),
-            "--json-array",
-            "--sql",
-            "SELECT 1",
-        ])
+        .args(["--csv", sales_csv(), "--json-array", "--sql", "SELECT 1"])
         .output()
         .unwrap();
     assert!(!output.status.success());
