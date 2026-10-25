@@ -92,11 +92,6 @@ async fn rejects_non_utf8_dataframe_paths() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
 
     let path = PathBuf::from(OsString::from_vec(vec![0xff]));
-    let error = RustSparkSession::new()
-        .read_csv(&path)
-        .await
-        .err()
-        .expect("non-UTF-8 paths must fail");
-
-    assert!(error.to_string().contains("UTF-8"));
+    let result = RustSparkSession::new().read_csv(&path).await;
+    assert!(result.is_err_and(|error| error.to_string().contains("UTF-8")));
 }
