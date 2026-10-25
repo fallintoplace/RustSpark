@@ -18,7 +18,10 @@ fn runs_a_literal_query_without_any_input_file() {
 #[test]
 fn runs_a_values_query_without_any_input_file() {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args(["--sql", "SELECT COUNT(*) FROM (VALUES (1), (2), (3)) AS v(n)"])
+        .args([
+            "--sql",
+            "SELECT COUNT(*) FROM (VALUES (1), (2), (3)) AS v(n)",
+        ])
         .output()
         .unwrap();
 
