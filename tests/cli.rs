@@ -14,6 +14,7 @@ fn help_explains_options() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--csv"));
+    assert!(stdout.contains("--parquet"));
     assert!(stdout.contains("--sql"));
 }
 
@@ -97,4 +98,27 @@ fn reports_a_missing_csv_file() {
 
     assert!(!output.status.success());
     assert!(!output.stderr.is_empty());
+}
+
+#[test]
+fn requires_exactly_one_input_format() {
+    let binary = env!("CARGO_BIN_EXE_rustspark");
+    let no_input = Command::new(binary)
+        .args(["--sql", "SELECT 1"])
+        .output()
+        .unwrap();
+    assert!(!no_input.status.success());
+
+    let both = Command::new(binary)
+        .args([
+            "--csv",
+            sales_csv(),
+            "--parquet",
+            sales_csv(),
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
 }

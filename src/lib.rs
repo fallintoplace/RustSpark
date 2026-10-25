@@ -2,7 +2,7 @@ use std::path::Path;
 
 use datafusion::{
     error::{DataFusionError, Result},
-    prelude::{CsvReadOptions, DataFrame, SessionConfig, SessionContext},
+    prelude::{CsvReadOptions, DataFrame, ParquetReadOptions, SessionConfig, SessionContext},
 };
 
 pub struct RustSparkSession {
@@ -32,7 +32,7 @@ impl RustSparkSession {
         options: CsvReadOptions<'_>,
     ) -> Result<()> {
         self.context
-            .register_csv(table, csv_path(path.as_ref())?, options)
+            .register_csv(table, file_path(path.as_ref())?, options)
             .await
     }
 
@@ -47,7 +47,38 @@ impl RustSparkSession {
         options: CsvReadOptions<'_>,
     ) -> Result<DataFrame> {
         self.context
-            .read_csv(csv_path(path.as_ref())?, options)
+            .read_csv(file_path(path.as_ref())?, options)
+            .await
+    }
+
+    pub async fn register_parquet(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
+        self.register_parquet_with_options(table, path, ParquetReadOptions::new())
+            .await
+    }
+
+    pub async fn register_parquet_with_options(
+        &self,
+        table: &str,
+        path: impl AsRef<Path>,
+        options: ParquetReadOptions<'_>,
+    ) -> Result<()> {
+        self.context
+            .register_parquet(table, file_path(path.as_ref())?, options)
+            .await
+    }
+
+    pub async fn read_parquet(&self, path: impl AsRef<Path>) -> Result<DataFrame> {
+        self.read_parquet_with_options(path, ParquetReadOptions::new())
+            .await
+    }
+
+    pub async fn read_parquet_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: ParquetReadOptions<'_>,
+    ) -> Result<DataFrame> {
+        self.context
+            .read_parquet(file_path(path.as_ref())?, options)
             .await
     }
 
@@ -73,7 +104,7 @@ impl Default for RustSparkSession {
     }
 }
 
-fn csv_path(path: &Path) -> Result<&str> {
+fn file_path(path: &Path) -> Result<&str> {
     path.to_str()
-        .ok_or_else(|| DataFusionError::Execution("CSV path must be valid UTF-8".into()))
+        .ok_or_else(|| DataFusionError::Execution("File path must be valid UTF-8".into()))
 }
