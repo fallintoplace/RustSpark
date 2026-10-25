@@ -61,6 +61,9 @@ struct Args {
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
+    #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
+    target_partitions: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
@@ -150,6 +153,16 @@ fn parse_batch_size(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+fn parse_target_partitions(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--target-partitions requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--target-partitions must be greater than zero".into());
+    }
+    Ok(count)
+}
+
 fn parse_positive_rows(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -174,6 +187,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = SessionConfig::new();
     let config = if let Some(batch_size) = args.batch_size {
         config.with_batch_size(batch_size)
+    } else {
+        config
+    };
+    let config = if let Some(partitions) = args.target_partitions {
+        config.with_target_partitions(partitions)
     } else {
         config
     };
