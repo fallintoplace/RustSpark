@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::Parser;
 use rustspark::RustSparkSession;
@@ -19,12 +19,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let path = args.csv.to_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "CSV path is not valid UTF-8")
-    })?;
-
     let session = RustSparkSession::new();
-    session.register_csv(&args.table, path).await?;
+    session.register_csv(&args.table, &args.csv).await?;
     session.sql(&args.sql).await?.show().await?;
     Ok(())
 }

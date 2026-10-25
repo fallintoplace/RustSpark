@@ -66,3 +66,29 @@ async fn filters_csv_rows() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(counts.value(0), 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn sessions_have_independent_catalogs() -> Result<(), Box<dyn std::error::Error>> {
+    let first = RustSparkSession::new();
+    let second = RustSparkSession::new();
+
+    first.register_csv("sales", sales_csv()).await?;
+
+    assert!(second.sql("SELECT * FROM sales").await.is_err());
+    assert!(first.sql("SELECT * FROM sales").await.is_ok());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rejects_non_utf8_csv_paths() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    let path = PathBuf::from(OsString::from_vec(vec![0xff]));
+    let error = RustSparkSession::new()
+        .register_csv("data", &path)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("UTF-8"));
+}

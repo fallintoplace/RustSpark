@@ -1,5 +1,7 @@
+use std::path::Path;
+
 use datafusion::{
-    error::Result,
+    error::{DataFusionError, Result},
     prelude::{CsvReadOptions, DataFrame, SessionContext},
 };
 
@@ -14,7 +16,11 @@ impl RustSparkSession {
         }
     }
 
-    pub async fn register_csv(&self, table: &str, path: &str) -> Result<()> {
+    pub async fn register_csv(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
+        let path = path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| DataFusionError::Execution("CSV path must be valid UTF-8".into()))?;
         self.context
             .register_csv(table, path, CsvReadOptions::new())
             .await
