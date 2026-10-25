@@ -40,6 +40,9 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
+    #[arg(long = "json-schema-rows", value_name = "ROWS", value_parser = parse_json_schema_rows)]
+    json_schema_rows: Option<usize>,
+
     #[arg(long = "json-array")]
     json_array: bool,
 
@@ -119,6 +122,16 @@ fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--json-schema-rows requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--json-schema-rows must be greater than zero".into());
+    }
+    Ok(count)
+}
+
 fn csv_read_options(
     delimiter: Option<u8>,
     no_header: bool,
@@ -133,6 +146,15 @@ fn csv_read_options(
     } else {
         options
     };
+    if let Some(rows) = schema_rows {
+        options.schema_infer_max_records(rows)
+    } else {
+        options
+    }
+}
+
+fn json_read_options(array: bool, schema_rows: Option<usize>) -> JsonReadOptions<'static> {
+    let options = JsonReadOptions::default().newline_delimited(!array);
     if let Some(rows) = schema_rows {
         options.schema_infer_max_records(rows)
     } else {
@@ -190,6 +212,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
     }
+    if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-schema-rows requires a JSON input".into());
+    }
     if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-array requires a JSON input".into());
     }
@@ -206,7 +231,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(parquet) = args.parquet {
         session.register_parquet(&args.table, parquet).await?;
     } else if let Some(json) = args.json {
-        let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+        let options = json_read_options(args.json_array, args.json_schema_rows);
         session
             .register_json_with_options(&args.table, json, options)
             .await?;
@@ -239,7 +264,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+            let options = json_read_options(args.json_array, args.json_schema_rows);
             session
                 .register_json_with_options(name, path, options)
                 .await?;
