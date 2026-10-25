@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, SessionConfig};
+use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -27,6 +27,9 @@ struct Args {
 
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
+
+    #[arg(long = "parquet-extension", value_name = ".EXT", value_parser = parse_file_extension)]
+    parquet_extension: Option<String>,
 
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
@@ -87,6 +90,19 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
     match value.as_bytes() {
         [byte] if *byte != b'\n' && *byte != b'\r' && *byte != b'"' => Ok(*byte),
         _ => Err("CSV delimiter must be one ASCII character other than a quote or newline".into()),
+    }
+}
+
+fn parse_file_extension(value: &str) -> Result<String, String> {
+    if value.len() > 1
+        && value.starts_with('.')
+        && value[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("Extension must start with '.' and contain only ASCII letters or digits".into())
     }
 }
 
@@ -181,6 +197,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
+    if args.parquet_extension.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty() {
+        return Err("--parquet-extension requires a Parquet input".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -204,7 +223,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .register_csv_with_options(&args.table, csv, options)
             .await?;
     } else if let Some(parquet) = args.parquet {
-        session.register_parquet(&args.table, parquet).await?;
+        let options = ParquetReadOptions::new()
+            .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+        session
+            .register_parquet_with_options(&args.table, parquet, options)
+            .await?;
     } else if let Some(json) = args.json {
         let options = JsonReadOptions::default().newline_delimited(!args.json_array);
         session
@@ -232,7 +255,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            session.register_parquet(name, path).await?;
+            let options = ParquetReadOptions::new()
+                .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+            session
+                .register_parquet_with_options(name, path, options)
+                .await?;
         }
         for mapping in &args.json_tables {
             let (name, path) = parse_named_table(mapping)?;
