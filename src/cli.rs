@@ -298,7 +298,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_schema_rows,
                 args.csv_comment,
                 args.csv_quote,
-            args.csv_escape,
+                args.csv_escape,
             );
             session
                 .register_csv_with_options(name, path, options)
