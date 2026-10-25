@@ -23,3 +23,9 @@ Use a custom CSV delimiter with `--csv-delimiter`:
 ```sh
 cargo run -- --csv tests/fixtures/sales_semicolon.csv --csv-delimiter ';' --sql 'SELECT SUM(amount) FROM data'
 ```
+
+Join multiple CSV files in one query by naming each input:
+
+```sh
+cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
+```
