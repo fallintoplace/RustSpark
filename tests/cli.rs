@@ -658,3 +658,35 @@ fn rejects_parquet_export_with_preview_limit() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn exports_query_results_to_csv() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let export = dir.path().join("csv_results");
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT city, amount FROM data",
+            "--output-csv",
+            export.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut content = String::new();
+    for entry in std::fs::read_dir(&export)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "csv") {
+            content.push_str(&std::fs::read_to_string(path)?);
+        }
+    }
+    assert!(content.contains("Berlin"));
+    assert!(content.contains("Munich"));
+    Ok(())
+}
