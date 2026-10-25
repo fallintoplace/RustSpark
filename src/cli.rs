@@ -27,6 +27,9 @@ struct Args {
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
+    #[arg(long = "csv-no-header")]
+    csv_no_header: bool,
+
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
@@ -97,8 +100,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
+    if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-no-header requires a CSV input".into());
+    }
     if let Some(csv) = args.csv {
-        let options = CsvReadOptions::new().delimiter(args.csv_delimiter.unwrap_or(b','));
+        let options = CsvReadOptions::new()
+            .delimiter(args.csv_delimiter.unwrap_or(b','))
+            .has_header(!args.csv_no_header);
         session
             .register_csv_with_options(&args.table, csv, options)
             .await?;
@@ -113,7 +121,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = CsvReadOptions::new().delimiter(args.csv_delimiter.unwrap_or(b','));
+            let options = CsvReadOptions::new()
+                .delimiter(args.csv_delimiter.unwrap_or(b','))
+                .has_header(!args.csv_no_header);
             session
                 .register_csv_with_options(name, path, options)
                 .await?;

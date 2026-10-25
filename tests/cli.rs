@@ -420,3 +420,43 @@ fn rejects_invalid_named_json_tables() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Named table"));
 }
+
+#[test]
+fn queries_headerless_csv_rows() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sales_no_header.csv"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            path,
+            "--csv-no-header",
+            "--sql",
+            "SELECT COUNT(*) FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("3"));
+}
+
+#[test]
+fn rejects_csv_no_header_without_csv() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--json",
+            sales_json(),
+            "--csv-no-header",
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a CSV input"));
+}
