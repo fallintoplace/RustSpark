@@ -30,6 +30,9 @@ struct Args {
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
+    #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
+    csv_comment: Option<u8>,
+
     #[arg(long = "csv-schema-rows", value_name = "ROWS", value_parser = parse_csv_schema_rows)]
     csv_schema_rows: Option<usize>,
 
@@ -92,10 +95,16 @@ fn csv_read_options(
     delimiter: Option<u8>,
     no_header: bool,
     schema_rows: Option<usize>,
+    comment: Option<u8>,
 ) -> CsvReadOptions<'static> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
         .has_header(!no_header);
+    let options = if let Some(comment) = comment {
+        options.comment(comment)
+    } else {
+        options
+    };
     if let Some(rows) = schema_rows {
         options.schema_infer_max_records(rows)
     } else {
@@ -134,9 +143,16 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_schema_rows.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-schema-rows requires a CSV input".into());
     }
+    if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-comment requires a CSV input".into());
+    }
     if let Some(csv) = args.csv {
-        let options =
-            csv_read_options(args.csv_delimiter, args.csv_no_header, args.csv_schema_rows);
+        let options = csv_read_options(
+            args.csv_delimiter,
+            args.csv_no_header,
+            args.csv_schema_rows,
+            args.csv_comment,
+        );
         session
             .register_csv_with_options(&args.table, csv, options)
             .await?;
@@ -151,8 +167,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options =
-                csv_read_options(args.csv_delimiter, args.csv_no_header, args.csv_schema_rows);
+            let options = csv_read_options(
+                args.csv_delimiter,
+                args.csv_no_header,
+                args.csv_schema_rows,
+                args.csv_comment,
+            );
             session
                 .register_csv_with_options(name, path, options)
                 .await?;

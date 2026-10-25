@@ -499,3 +499,45 @@ fn rejects_invalid_csv_schema_row_count() {
         assert!(!output.status.success(), "{rows}");
     }
 }
+
+#[test]
+fn skips_commented_csv_lines() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sales_commented.csv"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            path,
+            "--csv-comment",
+            "#",
+            "--sql",
+            "SELECT SUM(amount) FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("35"));
+}
+
+#[test]
+fn rejects_csv_comment_for_json_inputs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--json",
+            sales_json(),
+            "--csv-comment",
+            "#",
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a CSV input"));
+}
