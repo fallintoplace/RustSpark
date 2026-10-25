@@ -286,3 +286,59 @@ fn rejects_csv_delimiter_for_parquet() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--csv-delimiter requires --csv"));
 }
+
+#[test]
+fn joins_multiple_named_csv_tables() {
+    let left = format!("left_sales={}", sales_csv());
+    let right = format!("right_sales={}", sales_csv());
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv-table",
+            left.as_str(),
+            "--csv-table",
+            right.as_str(),
+            "--sql",
+            "SELECT COUNT(*) FROM left_sales JOIN right_sales USING (city)",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "5")
+    );
+}
+
+#[test]
+fn rejects_invalid_named_csv_inputs() {
+    for mapping in ["missing_equals", "=file.csv", "123=path.csv", "sales="] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .args(["--csv-table", mapping, "--sql", "SELECT 1"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{mapping}");
+    }
+}
+
+#[test]
+fn rejects_named_and_unnamed_csv_together() {
+    let mapping = format!("sales={}", sales_csv());
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--csv-table",
+            mapping.as_str(),
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

@@ -8,7 +8,7 @@ use rustspark::RustSparkSession;
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(true).args(["csv", "parquet", "json"])),
+    group(ArgGroup::new("input").required(true).args(["csv", "parquet", "json", "csv_tables"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file"]))
 )]
 struct Args {
@@ -18,13 +18,16 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     parquet: Option<PathBuf>,
 
+    #[arg(long = "csv-table", value_name = "NAME=PATH")]
+    csv_tables: Vec<String>,
+
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
-    #[arg(long, default_value = "data")]
+    #[arg(long, default_value = "data", conflicts_with = "csv_tables")]
     table: String,
 
     #[arg(long, value_name = "QUERY")]
@@ -41,11 +44,30 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
     }
 }
 
+fn parse_named_csv(value: &str) -> Result<(&str, &str), String> {
+    let (name, path) = value
+        .split_once('=')
+        .ok_or_else(|| "CSV table must use NAME=PATH".to_owned())?;
+    let valid_first = name
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    if !valid_first
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || path.is_empty()
+    {
+        return Err("CSV table needs a SQL identifier and non-empty path".into());
+    }
+    Ok((name, path))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let session = RustSparkSession::new();
-    if args.csv_delimiter.is_some() && args.csv.is_none() {
+    if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
     if let Some(csv) = args.csv {
@@ -57,6 +79,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session.register_parquet(&args.table, parquet).await?;
     } else if let Some(json) = args.json {
         session.register_json(&args.table, json).await?;
+    } else {
+        for mapping in &args.csv_tables {
+            let (name, path) = parse_named_csv(mapping)?;
+            let options = CsvReadOptions::new().delimiter(args.csv_delimiter.unwrap_or(b','));
+            session
+                .register_csv_with_options(name, path, options)
+                .await?;
+        }
     }
     let query = if let Some(sql) = args.sql {
         sql
