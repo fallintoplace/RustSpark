@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
-use datafusion::prelude::CsvReadOptions;
+use datafusion::prelude::{CsvReadOptions, JsonReadOptions};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -38,6 +38,9 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
+
+    #[arg(long = "json-array")]
+    json_array: bool,
 
     #[arg(long = "json-table", value_name = "NAME=PATH")]
     json_tables: Vec<String>,
@@ -146,6 +149,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
     }
+    if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-array requires a JSON input".into());
+    }
     if let Some(csv) = args.csv {
         let options = csv_read_options(
             args.csv_delimiter,
@@ -159,7 +165,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(parquet) = args.parquet {
         session.register_parquet(&args.table, parquet).await?;
     } else if let Some(json) = args.json {
-        session.register_json(&args.table, json).await?;
+        let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+        session
+            .register_json_with_options(&args.table, json, options)
+            .await?;
     } else {
         let mut names = HashSet::new();
         for mapping in &args.csv_tables {
@@ -189,7 +198,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            session.register_json(name, path).await?;
+            let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+            session.register_json_with_options(name, path, options).await?;
         }
     }
     let query = if let Some(sql) = args.sql {
