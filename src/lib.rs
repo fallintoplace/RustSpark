@@ -2,7 +2,10 @@ use std::path::Path;
 
 use datafusion::{
     error::{DataFusionError, Result},
-    prelude::{CsvReadOptions, DataFrame, ParquetReadOptions, SessionConfig, SessionContext},
+    prelude::{
+        CsvReadOptions, DataFrame, JsonReadOptions, ParquetReadOptions, SessionConfig,
+        SessionContext,
+    },
 };
 
 pub struct RustSparkSession {
@@ -48,6 +51,39 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         self.context
             .read_csv(file_path(path.as_ref())?, options)
+            .await
+    }
+
+    /// Registers newline-delimited JSON as a SQL table.
+    pub async fn register_json(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
+        self.register_json_with_options(table, path, JsonReadOptions::default())
+            .await
+    }
+
+    pub async fn register_json_with_options(
+        &self,
+        table: &str,
+        path: impl AsRef<Path>,
+        options: JsonReadOptions<'_>,
+    ) -> Result<()> {
+        self.context
+            .register_json(table, file_path(path.as_ref())?, options)
+            .await
+    }
+
+    /// Returns a lazy DataFrame over newline-delimited JSON.
+    pub async fn read_json(&self, path: impl AsRef<Path>) -> Result<DataFrame> {
+        self.read_json_with_options(path, JsonReadOptions::default())
+            .await
+    }
+
+    pub async fn read_json_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: JsonReadOptions<'_>,
+    ) -> Result<DataFrame> {
+        self.context
+            .read_json(file_path(path.as_ref())?, options)
             .await
     }
 
