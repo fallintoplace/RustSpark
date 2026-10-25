@@ -11,3 +11,9 @@ NDJSON files can also be queried directly:
 ```sh
 cargo run -- --json tests/fixtures/sales.json --sql 'SELECT COUNT(*) FROM data'
 ```
+
+SQL statements can be read from a file:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
+```
