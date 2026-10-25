@@ -8,7 +8,7 @@ use rustspark::RustSparkSession;
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(true).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
+    group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file"]))
 )]
 struct Args {
