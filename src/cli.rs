@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions};
+use datafusion::prelude::{CsvReadOptions, JsonReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -56,6 +56,9 @@ struct Args {
 
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
+
+    #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
+    batch_size: Option<usize>,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -115,6 +118,16 @@ fn csv_read_options(
     }
 }
 
+fn parse_batch_size(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--batch-size requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--batch-size must be greater than zero".into());
+    }
+    Ok(count)
+}
+
 fn parse_positive_rows(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -136,7 +149,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
-    let session = RustSparkSession::new();
+    let config = SessionConfig::new();
+    let config = if let Some(batch_size) = args.batch_size {
+        config.with_batch_size(batch_size)
+    } else {
+        config
+    };
+    let session = RustSparkSession::with_config(config);
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }

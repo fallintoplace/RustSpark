@@ -575,3 +575,42 @@ fn rejects_json_array_flag_for_csv_inputs() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires a JSON input"));
 }
+
+#[test]
+fn configures_query_execution_batch_size() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--batch-size",
+            "1",
+            "--sql",
+            "SELECT SUM(amount) FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("35"));
+}
+
+#[test]
+fn rejects_invalid_batch_sizes() {
+    for size in ["0", "-1", "nope"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .args([
+                "--csv",
+                sales_csv(),
+                "--batch-size",
+                size,
+                "--sql",
+                "SELECT 1",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{size}");
+    }
+}
