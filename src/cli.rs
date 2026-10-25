@@ -28,6 +28,9 @@ struct Args {
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
+    #[arg(long = "csv-allow-short-rows")]
+    csv_allow_short_rows: bool,
+
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
@@ -124,10 +127,12 @@ fn csv_read_options(
     no_header: bool,
     schema_rows: Option<usize>,
     comment: Option<u8>,
+    allow_short_rows: bool,
 ) -> CsvReadOptions<'static> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
-        .has_header(!no_header);
+        .has_header(!no_header)
+        .truncated_rows(allow_short_rows);
     let options = if let Some(comment) = comment {
         options.comment(comment)
     } else {
@@ -181,6 +186,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
+    if args.csv_allow_short_rows && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-allow-short-rows requires a CSV input".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -199,6 +207,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.csv_no_header,
             args.csv_schema_rows,
             args.csv_comment,
+            args.csv_allow_short_rows,
         );
         session
             .register_csv_with_options(&args.table, csv, options)
@@ -222,6 +231,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_no_header,
                 args.csv_schema_rows,
                 args.csv_comment,
+                args.csv_allow_short_rows,
             );
             session
                 .register_csv_with_options(name, path, options)
