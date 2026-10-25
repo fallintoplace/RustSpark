@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -311,7 +311,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let query = if let Some(sql) = args.sql {
         sql
     } else if let Some(path) = args.sql_file {
-        std::fs::read_to_string(path)?
+        if path.as_os_str() == "-" {
+            let mut query = String::new();
+            std::io::stdin().read_to_string(&mut query)?;
+            query
+        } else {
+            std::fs::read_to_string(path)?
+        }
     } else {
         unreachable!("clap requires either --sql or --sql-file")
     };
