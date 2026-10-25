@@ -1,4 +1,7 @@
-use datafusion::arrow::array::{Int64Array, StringArray};
+use datafusion::{
+    arrow::array::{Int64Array, StringArray},
+    prelude::SessionConfig,
+};
 use rustspark::RustSparkSession;
 
 fn sales_csv() -> &'static str {
@@ -91,4 +94,26 @@ async fn rejects_non_utf8_csv_paths() {
         .unwrap_err();
 
     assert!(error.to_string().contains("UTF-8"));
+}
+
+#[tokio::test]
+async fn executes_queries_with_custom_session_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let session = RustSparkSession::with_config(SessionConfig::new().with_batch_size(1));
+    session.register_csv("sales", sales_csv()).await?;
+
+    let batches = session
+        .sql("SELECT COUNT(*) FROM sales")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches.len(), 1);
+    let counts = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(counts.value(0), 3);
+    Ok(())
 }

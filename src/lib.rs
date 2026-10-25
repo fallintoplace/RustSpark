@@ -2,7 +2,7 @@ use std::path::Path;
 
 use datafusion::{
     error::{DataFusionError, Result},
-    prelude::{CsvReadOptions, DataFrame, SessionContext},
+    prelude::{CsvReadOptions, DataFrame, SessionConfig, SessionContext},
 };
 
 pub struct RustSparkSession {
@@ -11,8 +11,12 @@ pub struct RustSparkSession {
 
 impl RustSparkSession {
     pub fn new() -> Self {
+        Self::with_config(SessionConfig::new())
+    }
+
+    pub fn with_config(config: SessionConfig) -> Self {
         Self {
-            context: SessionContext::new(),
+            context: SessionContext::new_with_config(config),
         }
     }
 
