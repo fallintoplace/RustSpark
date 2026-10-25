@@ -31,6 +31,9 @@ struct Args {
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
 
+    #[arg(long = "csv-escape", value_name = "CHAR", value_parser = parse_csv_char)]
+    csv_escape: Option<u8>,
+
     #[arg(long = "csv-no-header")]
     csv_no_header: bool,
 
@@ -151,11 +154,17 @@ fn csv_read_options(
     schema_rows: Option<usize>,
     comment: Option<u8>,
     quote: Option<u8>,
+    escape: Option<u8>,
 ) -> CsvReadOptions<'static> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
         .quote(quote.unwrap_or(b'"'))
         .has_header(!no_header);
+    let options = if let Some(escape) = escape {
+        options.escape(escape)
+    } else {
+        options
+    };
     let options = if let Some(comment) = comment {
         options.comment(comment)
     } else {
@@ -239,6 +248,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
         return Err("--csv-quote must differ from the CSV delimiter".into());
     }
+    if args.csv_escape.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-escape requires a CSV input".into());
+    }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
     }
@@ -261,6 +273,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.csv_schema_rows,
             args.csv_comment,
             args.csv_quote,
+            args.csv_escape,
         );
         session
             .register_csv_with_options(&args.table, csv, options)
@@ -285,6 +298,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_schema_rows,
                 args.csv_comment,
                 args.csv_quote,
+                args.csv_escape,
             );
             session
                 .register_csv_with_options(name, path, options)
