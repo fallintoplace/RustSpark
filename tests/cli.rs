@@ -541,3 +541,37 @@ fn rejects_csv_comment_for_json_inputs() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires a CSV input"));
 }
+
+#[test]
+fn queries_json_array_files() {
+    let file = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sales_array.json"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--json",
+            file,
+            "--json-array",
+            "--sql",
+            "SELECT SUM(amount) FROM data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("35"));
+}
+
+#[test]
+fn rejects_json_array_flag_for_csv_inputs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(["--csv", sales_csv(), "--json-array", "--sql", "SELECT 1"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a JSON input"));
+}
