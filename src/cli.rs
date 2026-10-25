@@ -199,7 +199,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("Duplicate table name: {name}").into());
             }
             let options = JsonReadOptions::default().newline_delimited(!args.json_array);
-            session.register_json_with_options(name, path, options).await?;
+            session
+                .register_json_with_options(name, path, options)
+                .await?;
         }
     }
     let query = if let Some(sql) = args.sql {
