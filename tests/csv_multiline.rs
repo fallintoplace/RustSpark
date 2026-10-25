@@ -12,7 +12,11 @@ fn reads_newline_inside_quoted_csv_field() {
         .args(["--csv-multiline", "--sql", "SELECT SUM(amount) FROM data"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("12"));
 }
 
