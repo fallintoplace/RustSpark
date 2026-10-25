@@ -148,7 +148,10 @@ fn cli_joins_named_parquet_and_csv_tables() -> Result<(), Box<dyn std::error::Er
     write_sales_parquet(&file)?;
 
     let parquet = format!("facts={}", file.display());
-    let csv = format!("sales={}/tests/fixtures/sales.csv", env!("CARGO_MANIFEST_DIR"));
+    let csv = format!(
+        "sales={}/tests/fixtures/sales.csv",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
             "--parquet-table",
@@ -170,7 +173,10 @@ fn cli_joins_named_parquet_and_csv_tables() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn cli_rejects_duplicate_named_sources() -> Result<(), Box<dyn std::error::Error>> {
-    let csv = format!("sales={}/tests/fixtures/sales.csv", env!("CARGO_MANIFEST_DIR"));
+    let csv = format!(
+        "sales={}/tests/fixtures/sales.csv",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
             "--csv-table",
