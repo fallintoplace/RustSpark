@@ -140,3 +140,48 @@ async fn rejects_non_utf8_parquet_paths() {
     let error = session.read_parquet(&path).await.unwrap_err();
     assert!(error.to_string().contains("UTF-8"));
 }
+
+#[test]
+fn cli_joins_named_parquet_and_csv_tables() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let file = dir.path().join("sales.parquet");
+    write_sales_parquet(&file)?;
+
+    let parquet = format!("facts={}", file.display());
+    let csv = format!("sales={}/tests/fixtures/sales.csv", env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--parquet-table",
+            &parquet,
+            "--csv-table",
+            &csv,
+            "--sql",
+            "SELECT COUNT(*) FROM facts JOIN sales USING (city)",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("5"));
+    Ok(())
+}
+
+#[test]
+fn cli_rejects_duplicate_named_sources() -> Result<(), Box<dyn std::error::Error>> {
+    let csv = format!("sales={}/tests/fixtures/sales.csv", env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv-table",
+            &csv,
+            "--parquet-table",
+            "SALES=missing.parquet",
+            "--sql",
+            "SELECT 1",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Duplicate table name"));
+    Ok(())
+}
