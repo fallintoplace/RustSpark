@@ -21,13 +21,31 @@ impl RustSparkSession {
     }
 
     pub async fn register_csv(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
-        let path = path
-            .as_ref()
-            .to_str()
-            .ok_or_else(|| DataFusionError::Execution("CSV path must be valid UTF-8".into()))?;
-        self.context
-            .register_csv(table, path, CsvReadOptions::new())
+        self.register_csv_with_options(table, path, CsvReadOptions::new())
             .await
+    }
+
+    pub async fn register_csv_with_options(
+        &self,
+        table: &str,
+        path: impl AsRef<Path>,
+        options: CsvReadOptions<'_>,
+    ) -> Result<()> {
+        self.context
+            .register_csv(table, csv_path(path.as_ref())?, options)
+            .await
+    }
+
+    pub async fn read_csv(&self, path: impl AsRef<Path>) -> Result<DataFrame> {
+        self.read_csv_with_options(path, CsvReadOptions::new()).await
+    }
+
+    pub async fn read_csv_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: CsvReadOptions<'_>,
+    ) -> Result<DataFrame> {
+        self.context.read_csv(csv_path(path.as_ref())?, options).await
     }
 
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
@@ -39,4 +57,9 @@ impl Default for RustSparkSession {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn csv_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| DataFusionError::Execution("CSV path must be valid UTF-8".into()))
 }
