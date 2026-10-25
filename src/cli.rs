@@ -28,6 +28,9 @@ struct Args {
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
+    #[arg(long = "csv-extension", value_name = ".EXT", value_parser = parse_file_extension)]
+    csv_extension: Option<String>,
+
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
 
@@ -115,6 +118,17 @@ fn parse_csv_char(value: &str) -> Result<u8, String> {
     }
 }
 
+fn parse_file_extension(value: &str) -> Result<String, String> {
+    if value.len() > 1
+        && value.starts_with('.')
+        && value[1..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("Extension must start with '.' and contain only ASCII letters or digits".into())
+    }
+}
+
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
@@ -160,7 +174,8 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
         .quote(args.csv_quote.unwrap_or(b'"'))
         .has_header(!args.csv_no_header)
         .newlines_in_values(args.csv_multiline)
-        .truncated_rows(args.csv_allow_short_rows);
+        .truncated_rows(args.csv_allow_short_rows)
+        .file_extension(args.csv_extension.as_deref().unwrap_or(".csv"));
     let options = if let Some(escape) = args.csv_escape {
         options.escape(escape)
     } else {
@@ -242,6 +257,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::with_config(config);
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
+    }
+    if args.csv_extension.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-extension requires a CSV input".into());
     }
     if args.csv_quote.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-quote requires a CSV input".into());
