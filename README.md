@@ -35,3 +35,9 @@ Bound the number of result rows printed with `--max-rows`:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --max-rows 10
 ```
+
+Standalone SQL without a file also works:
+
+```sh
+cargo run -- --sql 'SELECT 42 AS answer'
+```

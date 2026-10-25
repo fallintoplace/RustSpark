@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -9,7 +9,7 @@ use rustspark::RustSparkSession;
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(true).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
+    group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file"]))
 )]
 struct Args {
@@ -28,6 +28,12 @@ struct Args {
     #[arg(long, value_name = "CHAR", value_parser = parse_delimiter)]
     csv_delimiter: Option<u8>,
 
+    #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
+    csv_quote: Option<u8>,
+
+    #[arg(long = "csv-escape", value_name = "CHAR", value_parser = parse_csv_char)]
+    csv_escape: Option<u8>,
+
     #[arg(long = "csv-multiline")]
     csv_multiline: bool,
 
@@ -42,6 +48,9 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
+
+    #[arg(long = "json-schema-rows", value_name = "ROWS", value_parser = parse_json_schema_rows)]
+    json_schema_rows: Option<usize>,
 
     #[arg(long = "json-array")]
     json_array: bool,
@@ -63,6 +72,9 @@ struct Args {
 
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
+
+    #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
+    target_partitions: Option<usize>,
 
     #[arg(
         long = "output-parquet",
@@ -90,6 +102,13 @@ fn parse_delimiter(value: &str) -> Result<u8, String> {
     match value.as_bytes() {
         [byte] if *byte != b'\n' && *byte != b'\r' && *byte != b'"' => Ok(*byte),
         _ => Err("CSV delimiter must be one ASCII character other than a quote or newline".into()),
+    }
+}
+
+fn parse_csv_char(value: &str) -> Result<u8, String> {
+    match value.as_bytes() {
+        [byte] if *byte != b'\n' && *byte != b'\r' => Ok(*byte),
+        _ => Err("CSV character must be one ASCII character other than newline".into()),
     }
 }
 
@@ -122,22 +141,49 @@ fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--json-schema-rows requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--json-schema-rows must be greater than zero".into());
+    }
+    Ok(count)
+}
+
 fn csv_read_options(
     delimiter: Option<u8>,
     no_header: bool,
     schema_rows: Option<usize>,
     comment: Option<u8>,
+    quote: Option<u8>,
+    escape: Option<u8>,
     multiline: bool,
 ) -> CsvReadOptions<'static> {
     let options = CsvReadOptions::new()
         .delimiter(delimiter.unwrap_or(b','))
+        .quote(quote.unwrap_or(b'"'))
         .has_header(!no_header)
         .newlines_in_values(multiline);
+    let options = if let Some(escape) = escape {
+        options.escape(escape)
+    } else {
+        options
+    };
     let options = if let Some(comment) = comment {
         options.comment(comment)
     } else {
         options
     };
+    if let Some(rows) = schema_rows {
+        options.schema_infer_max_records(rows)
+    } else {
+        options
+    }
+}
+
+fn json_read_options(array: bool, schema_rows: Option<usize>) -> JsonReadOptions<'static> {
+    let options = JsonReadOptions::default().newline_delimited(!array);
     if let Some(rows) = schema_rows {
         options.schema_infer_max_records(rows)
     } else {
@@ -151,6 +197,16 @@ fn parse_batch_size(value: &str) -> Result<usize, String> {
         .map_err(|_| "--batch-size requires a positive integer".to_owned())?;
     if count == 0 {
         return Err("--batch-size must be greater than zero".into());
+    }
+    Ok(count)
+}
+
+fn parse_target_partitions(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--target-partitions requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--target-partitions must be greater than zero".into());
     }
     Ok(count)
 }
@@ -182,9 +238,23 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         config
     };
+    let config = if let Some(partitions) = args.target_partitions {
+        config.with_target_partitions(partitions)
+    } else {
+        config
+    };
     let session = RustSparkSession::with_config(config);
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
+    }
+    if args.csv_quote.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-quote requires a CSV input".into());
+    }
+    if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
+        return Err("--csv-quote must differ from the CSV delimiter".into());
+    }
+    if args.csv_escape.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-escape requires a CSV input".into());
     }
     if args.csv_multiline && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-multiline requires a CSV input".into());
@@ -198,6 +268,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
     }
+    if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-schema-rows requires a JSON input".into());
+    }
     if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-array requires a JSON input".into());
     }
@@ -207,6 +280,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.csv_no_header,
             args.csv_schema_rows,
             args.csv_comment,
+            args.csv_quote,
+            args.csv_escape,
             args.csv_multiline,
         );
         session
@@ -215,7 +290,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(parquet) = args.parquet {
         session.register_parquet(&args.table, parquet).await?;
     } else if let Some(json) = args.json {
-        let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+        let options = json_read_options(args.json_array, args.json_schema_rows);
         session
             .register_json_with_options(&args.table, json, options)
             .await?;
@@ -231,6 +306,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 args.csv_no_header,
                 args.csv_schema_rows,
                 args.csv_comment,
+                args.csv_quote,
+                args.csv_escape,
                 args.csv_multiline,
             );
             session
@@ -249,7 +326,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+            let options = json_read_options(args.json_array, args.json_schema_rows);
             session
                 .register_json_with_options(name, path, options)
                 .await?;
@@ -258,7 +335,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let query = if let Some(sql) = args.sql {
         sql
     } else if let Some(path) = args.sql_file {
-        std::fs::read_to_string(path)?
+        if path.as_os_str() == "-" {
+            let mut query = String::new();
+            std::io::stdin().read_to_string(&mut query)?;
+            query
+        } else {
+            std::fs::read_to_string(path)?
+        }
     } else {
         unreachable!("clap requires either --sql or --sql-file")
     };
