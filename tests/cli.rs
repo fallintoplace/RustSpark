@@ -167,3 +167,58 @@ fn refuses_two_input_formats() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn runs_query_from_sql_file() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql-file",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/count_sales.sql"
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "3")
+    );
+}
+
+#[test]
+fn rejects_two_query_sources() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT 1",
+            "--sql-file",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/count_sales.sql"
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn reports_missing_sql_file() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(["--csv", sales_csv(), "--sql-file", "missing.sql"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
