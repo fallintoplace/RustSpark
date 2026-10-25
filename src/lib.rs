@@ -127,6 +127,15 @@ impl RustSparkSession {
         self.context.read_batches(batches)
     }
 
+    /// Register in-memory Arrow batches for SQL queries.
+    pub fn register_batches(
+        &self,
+        table: &str,
+        batches: impl IntoIterator<Item = RecordBatch>,
+    ) -> Result<()> {
+        self.register_dataframe(table, self.read_batches(batches)?)
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
