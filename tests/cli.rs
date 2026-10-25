@@ -342,3 +342,45 @@ fn rejects_named_and_unnamed_csv_together() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn limits_printed_query_results() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT city, amount FROM data ORDER BY amount DESC",
+            "--max-rows",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("20"));
+    assert!(!stdout.contains("Munich"));
+    assert!(!stdout.contains("10"));
+}
+
+#[test]
+fn rejects_invalid_row_limits() {
+    for rows in ["0", "-1", "not-a-number"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .args([
+                "--csv",
+                sales_csv(),
+                "--sql",
+                "SELECT 1",
+                "--max-rows",
+                rows,
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{rows}");
+    }
+}

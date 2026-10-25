@@ -35,6 +35,9 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
+
+    #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
+    max_rows: Option<usize>,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -61,6 +64,16 @@ fn parse_named_csv(value: &str) -> Result<(&str, &str), String> {
         return Err("CSV table needs a SQL identifier and non-empty path".into());
     }
     Ok((name, path))
+}
+
+fn parse_positive_rows(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "--max-rows requires a positive integer".to_owned())?;
+    if count == 0 {
+        return Err("--max-rows must be greater than zero".into());
+    }
+    Ok(count)
 }
 
 #[tokio::main]
@@ -95,6 +108,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         unreachable!("clap requires either --sql or --sql-file")
     };
-    session.sql(&query).await?.show().await?;
+    let dataframe = session.sql(&query).await?;
+    if let Some(max_rows) = args.max_rows {
+        dataframe.show_limit(max_rows).await?;
+    } else {
+        dataframe.show().await?;
+    }
     Ok(())
 }
