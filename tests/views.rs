@@ -1,5 +1,6 @@
 use datafusion::{
     arrow::array::Int64Array,
+    error::DataFusionError,
     prelude::{col, lit},
 };
 use rustspark::RustSparkSession;
@@ -58,7 +59,34 @@ async fn rejects_dataframe_from_another_session() -> Result<(), Box<dyn std::err
     let destination = RustSparkSession::new();
     let frame = source.read_csv(sales_csv()).await?;
 
-    assert!(destination.register_dataframe("sales", frame).is_err());
+    let error = destination.register_dataframe("sales", frame).unwrap_err();
+    assert!(matches!(
+        error,
+        DataFusionError::Plan(message) if message.contains("different RustSpark session")
+    ));
     assert!(destination.sql("SELECT * FROM sales").await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn reuses_sql_dataframes_in_joins() -> Result<(), Box<dyn std::error::Error>> {
+    let session = RustSparkSession::new();
+    session.register_csv("sales", sales_csv()).await?;
+    let frame = session
+        .sql("SELECT city, SUM(amount) AS total FROM sales GROUP BY city")
+        .await?;
+    session.register_dataframe("city_totals", frame)?;
+
+    let batches = session
+        .sql("SELECT COUNT(*) FROM city_totals JOIN sales USING (city) WHERE total > 10")
+        .await?
+        .collect()
+        .await?;
+    let counts = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(counts.value(0), 2);
     Ok(())
 }

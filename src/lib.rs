@@ -53,7 +53,7 @@ impl RustSparkSession {
 
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
-            return Err(DataFusionError::Execution(
+            return Err(DataFusionError::Plan(
                 "DataFrame belongs to a different RustSpark session".into(),
             ));
         }
