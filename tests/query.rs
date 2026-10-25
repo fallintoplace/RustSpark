@@ -33,7 +33,10 @@ async fn aggregates_csv_rows() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    assert_eq!(rows, vec![("Berlin".to_owned(), 30), ("Munich".to_owned(), 5)]);
+    assert_eq!(
+        rows,
+        vec![("Berlin".to_owned(), 30), ("Munich".to_owned(), 5)]
+    );
     Ok(())
 }
 
