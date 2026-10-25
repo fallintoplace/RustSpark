@@ -30,14 +30,11 @@ async fn exposes_filtered_dataframe_to_sql() -> Result<(), Box<dyn std::error::E
         .downcast_ref::<Int64Array>()
         .unwrap();
     assert_eq!(totals.value(0), 30);
-    assert!(session
-        .sql("SELECT city FROM filtered_sales")
-        .await
-        .is_err());
-    assert!(RustSparkSession::new()
-        .sql("SELECT * FROM filtered_sales")
-        .await
-        .is_err());
+    let missing_column = session.sql("SELECT city FROM filtered_sales").await;
+    assert!(missing_column.is_err());
+    let other_session = RustSparkSession::new();
+    let other_result = other_session.sql("SELECT * FROM filtered_sales").await;
+    assert!(other_result.is_err());
     Ok(())
 }
 
