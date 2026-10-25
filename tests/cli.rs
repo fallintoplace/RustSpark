@@ -384,3 +384,39 @@ fn rejects_invalid_row_limits() {
         assert!(!output.status.success(), "{rows}");
     }
 }
+
+#[test]
+fn joins_named_json_and_csv_tables() {
+    let csv = format!(
+        "sales={}/tests/fixtures/sales.csv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let json = format!("events={}", sales_json());
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv-table",
+            &csv,
+            "--json-table",
+            &json,
+            "--sql",
+            "SELECT COUNT(*) FROM sales JOIN events USING (city)",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("5"));
+}
+
+#[test]
+fn rejects_invalid_named_json_tables() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(["--json-table", "123=events.json", "--sql", "SELECT 1"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Named table"));
+}

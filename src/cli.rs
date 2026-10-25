@@ -8,7 +8,7 @@ use rustspark::RustSparkSession;
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(true).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables"])),
+    group(ArgGroup::new("input").required(true).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file"]))
 )]
 struct Args {
@@ -30,7 +30,10 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
-    #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables"])]
+    #[arg(long = "json-table", value_name = "NAME=PATH")]
+    json_tables: Vec<String>,
+
+    #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
     table: String,
 
     #[arg(long, value_name = "QUERY")]
@@ -84,7 +87,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some());
-    let has_named = !args.csv_tables.is_empty() || !args.parquet_tables.is_empty();
+    let has_named = !args.csv_tables.is_empty()
+        || !args.parquet_tables.is_empty()
+        || !args.json_tables.is_empty();
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
@@ -119,6 +124,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("Duplicate table name: {name}").into());
             }
             session.register_parquet(name, path).await?;
+        }
+        for mapping in &args.json_tables {
+            let (name, path) = parse_named_table(mapping)?;
+            if !names.insert(name.to_ascii_lowercase()) {
+                return Err(format!("Duplicate table name: {name}").into());
+            }
+            session.register_json(name, path).await?;
         }
     }
     let query = if let Some(sql) = args.sql {
