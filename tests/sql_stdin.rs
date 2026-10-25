@@ -20,6 +20,10 @@ fn accepts_sql_script_from_stdin() {
         .write_all(b"SELECT SUM(amount) FROM data")
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("35"));
 }
