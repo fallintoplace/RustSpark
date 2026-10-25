@@ -22,7 +22,7 @@ fn runs_a_query_from_the_command_line() {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
             "--csv",
-            &sales_csv(),
+            sales_csv(),
             "--table",
             "sales",
             "--sql",
@@ -36,7 +36,13 @@ fn runs_a_query_from_the_command_line() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8(output.stdout).unwrap().contains("35"));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "35"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -49,4 +55,46 @@ fn reports_missing_required_arguments() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr).unwrap().contains("--sql"));
+}
+
+#[test]
+fn runs_query_with_default_table_name() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            sales_csv(),
+            "--sql",
+            "SELECT COUNT(*) AS total FROM data",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "3"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn reports_a_missing_csv_file() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--csv",
+            "tests/fixtures/this_file_does_not_exist.csv",
+            "--sql",
+            "SELECT * FROM data",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(!output.stderr.is_empty());
 }

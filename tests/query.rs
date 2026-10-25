@@ -45,3 +45,24 @@ async fn unknown_table_returns_an_error() {
     let session = RustSparkSession::new();
     assert!(session.sql("SELECT * FROM missing").await.is_err());
 }
+
+#[tokio::test]
+async fn filters_csv_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let session = RustSparkSession::new();
+    session.register_csv("sales", sales_csv()).await?;
+
+    let batches = session
+        .sql("SELECT COUNT(*) FROM sales WHERE amount > 5")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches.len(), 1);
+    let counts = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(counts.value(0), 2);
+    Ok(())
+}
