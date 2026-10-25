@@ -135,11 +135,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--csv-schema-rows requires a CSV input".into());
     }
     if let Some(csv) = args.csv {
-        let options = csv_read_options(
-            args.csv_delimiter,
-            args.csv_no_header,
-            args.csv_schema_rows,
-        );
+        let options =
+            csv_read_options(args.csv_delimiter, args.csv_no_header, args.csv_schema_rows);
         session
             .register_csv_with_options(&args.table, csv, options)
             .await?;
@@ -154,11 +151,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = csv_read_options(
-                args.csv_delimiter,
-                args.csv_no_header,
-                args.csv_schema_rows,
-            );
+            let options =
+                csv_read_options(args.csv_delimiter, args.csv_no_header, args.csv_schema_rows);
             session
                 .register_csv_with_options(name, path, options)
                 .await?;
