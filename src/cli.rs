@@ -52,6 +52,9 @@ struct Args {
     #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
     csv_comment: Option<u8>,
 
+    #[arg(long = "csv-null-regex", value_name = "REGEX")]
+    csv_null_regex: Option<String>,
+
     #[arg(long = "csv-schema-rows", value_name = "ROWS", value_parser = parse_csv_schema_rows)]
     csv_schema_rows: Option<usize>,
 
@@ -184,6 +187,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     } else {
         options
     };
+    let options = if let Some(pattern) = args.csv_null_regex.as_ref() {
+        options.null_regex(Some(pattern.clone()))
+    } else {
+        options
+    };
     let options = if let Some(comment) = args.csv_comment {
         options.comment(comment)
     } else {
@@ -291,6 +299,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
+    }
+    if args.csv_null_regex.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-null-regex requires a CSV input".into());
     }
     if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema-rows requires a JSON input".into());
