@@ -12,9 +12,7 @@ async fn select_columns_projects_in_requested_order_without_changing_source() ->
         )
         .await?;
 
-    let selected = session
-        .select_columns("items", &["city", "amount"])
-        .await?;
+    let selected = session.select_columns("items", &["city", "amount"]).await?;
     let names: Vec<_> = selected
         .schema()
         .fields()
