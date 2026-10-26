@@ -11,7 +11,10 @@ fn refuses_csv_export_directory_containing_input_file() -> Result<(), Box<dyn st
         .args(["--sql", "SELECT amount FROM data", "--output-csv"])
         .arg(temp.path())
         .output()?;
-    assert!(!output.status.success(), "export must not write next to its own source");
+    assert!(
+        !output.status.success(),
+        "export must not write next to its own source"
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("Output path must not overwrite"));
     assert_eq!(fs::read_to_string(&input)?, "amount\n42\n");
     Ok(())
