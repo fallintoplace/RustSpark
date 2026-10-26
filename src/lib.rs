@@ -388,6 +388,65 @@ impl RustSparkSession {
         }
     }
 
+    /// Rename several columns atomically, like Spark withColumnsRenamed.
+    ///
+    /// All names refer to the original schema, so swaps such as a -> b and
+    /// b -> a work without intermediate collisions. This does not change the
+    /// registered table or collect its rows.
+    pub async fn rename_columns(
+        &self,
+        table: &str,
+        renames: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::{HashMap, HashSet};
+
+        let dataframe = self.table(table).await?;
+        if renames.is_empty() {
+            return Ok(dataframe);
+        }
+
+        let mut mappings = HashMap::new();
+        for &(source, target) in renames {
+            if source.trim().is_empty() || target.trim().is_empty() {
+                return Err(DataFusionError::Plan(
+                    "Column rename requires non-empty names".into(),
+                ));
+            }
+            if mappings.insert(source, target).is_some() {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate column rename source: {source}"
+                )));
+            }
+        }
+        for source in mappings.keys() {
+            if !dataframe.schema().fields().iter().any(|field| field.name() == *source) {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown column rename source: {source}"
+                )));
+            }
+        }
+
+        let mut names = HashSet::new();
+        let mut projection = Vec::new();
+        for field in dataframe.schema().fields() {
+            let source = field.name().as_str();
+            let target = mappings.get(source).copied().unwrap_or(source);
+            if !names.insert(target.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Column rename produces duplicate name: {target}"
+                )));
+            }
+            let column = Expr::Column(Column::from_name(source));
+            projection.push(if target == source {
+                column
+            } else {
+                column.alias(target)
+            });
+        }
+        dataframe.select(projection)
+    }
+
     /// Materialize a registered table in memory for repeated queries.
     ///
     /// This executes the table's plan once and keeps its contents in memory.
