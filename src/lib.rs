@@ -184,6 +184,29 @@ impl RustSparkSession {
             .collect())
     }
 
+    /// Inspect output columns from a parameterized, read-only SQL query.
+    ///
+    /// This plans the query without scanning input rows.
+    pub async fn describe_sql_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
+        let dataframe = self.sql_read_only_with_params(query, params).await?;
+        Ok(dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    field.name().to_owned(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect())
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
