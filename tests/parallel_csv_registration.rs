@@ -46,7 +46,10 @@ fn registers_many_named_tables_across_parallel_batches() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), r#"{"rows":9}"#);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        r#"{"rows":9}"#
+    );
 }
 
 #[test]
