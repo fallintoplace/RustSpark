@@ -331,6 +331,12 @@ fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
         options
     };
     if let Some(rows) = args.json_schema_rows {
+        options.schema_infer_max_records(rows)
+    } else {
+        options
+    }
+}
+
 // DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
 // Read as strings and normalize before casting to the inferred input types.
 async fn register_csv_with_null_value(
@@ -367,12 +373,6 @@ async fn register_csv_with_null_value(
         .collect::<Vec<_>>();
     session.register_dataframe(name, raw.select(expressions)?)?;
     Ok(())
-}
-
-        options.schema_infer_max_records(rows)
-    } else {
-        options
-    }
 }
 
 fn parse_batch_size(value: &str) -> Result<usize, String> {
