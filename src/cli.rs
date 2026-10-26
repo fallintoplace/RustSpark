@@ -661,7 +661,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let delimiter = args.csv_delimiter.unwrap_or(b',');
     let quote = args.csv_quote.unwrap_or(b'"');
-    if args.csv_comment.is_some_and(|comment| comment == delimiter || comment == quote) {
+    if args
+        .csv_comment
+        .is_some_and(|comment| comment == delimiter || comment == quote)
+    {
         return Err("--csv-comment must differ from the CSV delimiter and quote".into());
     }
     if args.csv_escape == Some(delimiter) {
