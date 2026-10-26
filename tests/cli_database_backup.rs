@@ -105,6 +105,34 @@ fn backups_include_empty_typed_tables() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn backup_copies_many_independent_parquet_parts() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let db = temp.path().join("db");
+    let snapshot = temp.path().join("snapshot");
+    assert_ok(sql(&db, "CREATE TABLE events AS SELECT 7 AS value"))?;
+
+    // Multiple parts exercise the bounded parallel-copy path on multi-core
+    // machines. Each part is valid Parquet and must remain independently readable.
+    let directory = db.join("events");
+    let original = fs::read_dir(&directory)?
+        .next()
+        .ok_or("missing Parquet part")??
+        .path();
+    for index in 1..=12 {
+        fs::copy(&original, directory.join(format!("extra-{index:02}.parquet")))?;
+    }
+    assert_ok(backup(&db, &snapshot))?;
+    let output = sql(&snapshot, "SELECT COUNT(*) AS count FROM events");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), r#"{"count":13}"#);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn backup_parts_do_not_share_inodes() -> TestResult {
