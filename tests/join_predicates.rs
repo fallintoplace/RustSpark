@@ -113,5 +113,16 @@ async fn empty_predicates_and_missing_columns_fail_during_planning() -> TestResu
             .await
             .is_err()
     );
+    assert!(
+        session
+            .join_tables_on(
+                "points",
+                "missing",
+                JoinType::Inner,
+                [col("point").eq(col("upper_bound"))],
+            )
+            .await
+            .is_err()
+    );
     Ok(())
 }
