@@ -12,6 +12,14 @@ NDJSON files can also be queried directly:
 cargo run -- --json tests/fixtures/sales.json --sql 'SELECT COUNT(*) FROM data'
 ```
 
+Provide a typed JSON schema when types must remain stable across files:
+
+```sh
+cargo run -- --json tests/fixtures/sales.json --json-schema 'city:utf8,amount:int64' --sql 'SELECT SUM(amount) FROM data'
+```
+
+The schema is shared by named JSON inputs too.
+
 SQL statements can be read from a file:
 
 ```sh
