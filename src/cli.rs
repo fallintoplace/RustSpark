@@ -521,7 +521,7 @@ mod persistence;
 use persistence::register_database_tables;
 
 mod query;
-use query::{execute_script, plan_query};
+use query::execute_script;
 
 mod interactive;
 use interactive::run_interactive;

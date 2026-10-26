@@ -1,8 +1,30 @@
-use std::{collections::HashSet, io::Read};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+};
 
 use rustspark::RustSparkSession;
 
-use super::{Args, parse_named_view, parse_union_by_name, plan_query};
+use super::{Args, parse_named_view, parse_union_by_name};
+
+// A view is a read-only query, not an opportunity to execute SQL mutations.
+async fn plan_view_query(
+    session: &RustSparkSession,
+    sql: &str,
+    args: &Args,
+) -> Result<datafusion::prelude::DataFrame, Box<dyn std::error::Error>> {
+    let dataframe = if !args.named_params.is_empty() {
+        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
+        session.sql_read_only_with_params(sql, params).await?
+    } else if !args.params.is_empty() {
+        session
+            .sql_read_only_with_params(sql, args.params.clone())
+            .await?
+    } else {
+        session.sql_read_only(sql).await?
+    };
+    Ok(dataframe)
+}
 
 pub(super) async fn register_derived_tables(
     session: &RustSparkSession,
@@ -26,7 +48,7 @@ pub(super) async fn register_derived_tables(
         if !view_names.insert(name.to_ascii_lowercase()) {
             return Err(format!("Duplicate SQL view: {name}").into());
         }
-        let dataframe = plan_query(session, sql, args).await?;
+        let dataframe = plan_view_query(session, sql, args).await?;
         session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
@@ -34,7 +56,7 @@ pub(super) async fn register_derived_tables(
         if !view_names.insert(name.to_ascii_lowercase()) {
             return Err(format!("Duplicate SQL view: {name}").into());
         }
-        let dataframe = plan_query(session, sql, args).await?.cache().await?;
+        let dataframe = plan_view_query(session, sql, args).await?.cache().await?;
         session.register_dataframe(name, dataframe)?;
     }
     Ok(())
