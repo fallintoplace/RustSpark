@@ -24,6 +24,22 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(mod.canonical_type("Timestamp(Microsecond, None)"), "timestamp")
         self.assertEqual(mod.canonical_type("Utf8"), "string")
 
+
+    def test_parse_rustspark_description_rejects_incomplete_fields(self):
+        self.assertEqual(
+            mod.parse_rustspark_description("count\tInt64\tNULL\n"),
+            (["count"], ["bigint"], [True]),
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
+            mod.parse_rustspark_description("bad-field\n")
+        with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
+            mod.parse_rustspark_description("count\tInt64\tUNKNOWN\n")
+
+    def test_parse_rustspark_json_uses_described_column_order(self):
+        result = mod.parse_rustspark_json('{"x":1,"y":null}\n{"x":2,"y":3}\n', ["y", "x"])
+        self.assertEqual(result.columns, ["y", "x"])
+        self.assertEqual(result.rows, [[None, 1], [3, 2]])
+
     def test_type_difference_is_not_silenced(self):
         result = mod.QueryResult(["v"], [[42]])
         left = mod.TypedResult(result, ["bigint"])
