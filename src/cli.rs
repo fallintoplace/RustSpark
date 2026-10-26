@@ -426,7 +426,6 @@ async fn reject_duplicate_csv_headers(
     Ok(())
 }
 
-
 // DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
 // Read as strings and normalize before casting to the inferred input types.
 async fn register_csv_with_null_value(
