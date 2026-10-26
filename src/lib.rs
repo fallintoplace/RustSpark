@@ -1084,8 +1084,11 @@ impl RustSparkSession {
     ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
         use datafusion::common::ScalarValue;
 
-        let batches = dataframe.limit(0, Some(1))?.collect().await?;
-        for batch in batches {
+        use futures::StreamExt;
+
+        let mut batches = dataframe.limit(0, Some(1))?.execute_stream().await?;
+        while let Some(batch) = batches.next().await {
+            let batch = batch?;
             if batch.num_rows() > 0 {
                 let values = (0..batch.num_columns())
                     .map(|index| ScalarValue::try_from_array(batch.column(index).as_ref(), 0))
