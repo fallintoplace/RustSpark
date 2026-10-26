@@ -1136,12 +1136,7 @@ impl RustSparkSession {
         limit: usize,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<DataFrame> {
-        Self::paginate(
-            self.sql_read_only_with_params(query, params),
-            offset,
-            limit,
-        )
-        .await
+        Self::paginate(self.sql_read_only_with_params(query, params), offset, limit).await
     }
 
     /// Plan a parameterized SQL page with bounded row count.
