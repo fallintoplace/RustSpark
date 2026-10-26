@@ -1,6 +1,6 @@
 use std::{error::Error, fs, path::Path};
 
-use datafusion::{dataframe::DataFrameWriteOptions, prelude::DataFrame};
+use datafusion::{dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader, prelude::DataFrame};
 use rustspark::RustSparkSession;
 
 use super::valid_identifier;
@@ -35,6 +35,25 @@ pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     Ok(file)
 }
 
+/// Remove reserved staging and drop tombstone directories after an interrupted
+/// session. The caller holds the exclusive database lock.
+fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let filename = entry.file_name();
+        let Some(name) = filename.to_str() else {
+            continue;
+        };
+        let reserved = name.starts_with(".rustspark-stage-")
+            || name.starts_with(".rustspark-drop-");
+        // Never follow symlinks or touch user-owned tables.
+        if reserved && entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Load only complete, valid table directories. Hidden staging directories and
 /// symlinks are not part of the on-disk catalog.
 pub(super) async fn register_database_tables(
@@ -42,6 +61,7 @@ pub(super) async fn register_database_tables(
     root: &Path,
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(root)?;
+    recover_incomplete_operations(root)?;
     let mut entries = fs::read_dir(root)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -59,12 +79,21 @@ pub(super) async fn register_database_tables(
         let mut found_parquet = false;
         for file in fs::read_dir(entry.path())? {
             let file = file?;
-            if file.file_type()?.is_file()
-                && file.path().extension().is_some_and(|ext| ext == "parquet")
+            let path = file.path();
+            if !file.file_type()?.is_file()
+                || !path.extension().is_some_and(|ext| ext == "parquet")
             {
-                found_parquet = true;
-                break;
+                return Err(format!(
+                    "Persistent table '{name}' has an unexpected entry: {}",
+                    path.display()
+                )
+                .into());
             }
+            // Validate Parquet footers before exposing damaged tables to SQL.
+            SerializedFileReader::new(fs::File::open(&path)?).map_err(|error| {
+                format!("Cannot read persistent Parquet file '{}': {error}", path.display())
+            })?;
+            found_parquet = true;
         }
         if !found_parquet {
             return Err(format!("Database table '{name}' contains no Parquet files").into());
