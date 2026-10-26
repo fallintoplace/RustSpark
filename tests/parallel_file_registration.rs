@@ -13,7 +13,11 @@ use datafusion::{
 fn registers_many_mixed_file_types() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let parquet = dir.path().join("sales.parquet");
-    let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, false)]));
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Int64,
+        false,
+    )]));
     let batch = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))])?;
     let mut writer = ArrowWriter::try_new(File::create(&parquet)?, batch.schema(), None)?;
     writer.write(&batch)?;
@@ -67,7 +71,10 @@ fn rejects_duplicate_names_across_formats() -> Result<(), Box<dyn std::error::Er
 fn rejects_missing_json_and_parquet_paths() -> Result<(), Box<dyn std::error::Error>> {
     for (kind, path) in [
         ("--json-table", "missing=tests/fixtures/does-not-exist.json"),
-        ("--parquet-table", "missing=tests/fixtures/does-not-exist.parquet"),
+        (
+            "--parquet-table",
+            "missing=tests/fixtures/does-not-exist.parquet",
+        ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
             .args([kind, path, "--sql", "SELECT 1"])
