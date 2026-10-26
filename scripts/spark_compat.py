@@ -89,6 +89,10 @@ def load_cases(path: pathlib.Path):
     for case in cases:
         if not isinstance(case, dict) or not isinstance(case.get("id"), str):
             raise ValueError("Each case needs a string id")
+        if not case["id"].strip():
+            raise ValueError("SQL case id must not be empty")
+        if "ordered" in case and not isinstance(case["ordered"], bool):
+            raise ValueError(f"SQL case {case['id']} ordered must be a boolean")
         if case["id"] in ids:
             raise ValueError(f"Duplicate SQL case id: {case['id']}")
         if not isinstance(case.get("sql"), str) or not case["sql"].strip():
@@ -97,10 +101,11 @@ def load_cases(path: pathlib.Path):
     return cases
 
 
+
 def compare_case(case, rustspark_runner, spark_runner):
     ours = rustspark_runner(case["sql"])
     reference = spark_runner(case["sql"])
-    return compare(ours, reference, bool(case.get("ordered", False)))
+    return compare(ours, reference, case.get("ordered", False))
 
 
 def run_cases(cases, rustspark_runner, spark_runner):
