@@ -119,7 +119,12 @@ fn validate_parts(root: &Path) -> Result<(), Box<dyn Error>> {
                 path.display()
             )
         })?;
-        fs::File::open(&path)?.sync_all()?;
+        // Windows FlushFileBuffers requires write access to the file handle.
+        #[cfg(windows)]
+        let durable_file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        #[cfg(not(windows))]
+        let durable_file = fs::File::open(&path)?;
+        durable_file.sync_all()?;
         count += 1;
     }
     if count == 0 {
