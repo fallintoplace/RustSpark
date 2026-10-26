@@ -551,9 +551,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     } else {
         let mut names = HashSet::new();
-        // CSV schema inference performs file I/O, so overlap it across inputs.
-        // Cap the tasks to avoid opening an unbounded number of files at once.
-        let mut csv_jobs = tokio::task::JoinSet::new();
+        let mut registration_jobs = tokio::task::JoinSet::new();
         for mapping in &args.csv_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
@@ -563,7 +561,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let args = Arc::clone(&args);
             let name = name.to_owned();
             let path = path.to_owned();
-            csv_jobs.spawn(async move {
+            registration_jobs.spawn(async move {
                 let options = csv_read_options(&args);
                 if let Some(marker) = args.csv_null_value.as_deref() {
                     register_csv_with_null_value(&session, &name, &path, options, marker).await
@@ -573,33 +571,60 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .await
                 }
             });
-            if csv_jobs.len() >= 4 {
-                csv_jobs.join_next().await.expect("CSV task exists")??;
+            if registration_jobs.len() >= 4 {
+                registration_jobs
+                    .join_next()
+                    .await
+                    .expect("registration task exists")??;
             }
-        }
-        while let Some(result) = csv_jobs.join_next().await {
-            result??;
         }
         for mapping in &args.parquet_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = ParquetReadOptions::new()
-                .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
-            session
-                .register_parquet_with_options(name, path, options)
-                .await?;
+            let session = Arc::clone(&session);
+            let args = Arc::clone(&args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            registration_jobs.spawn(async move {
+                let options = ParquetReadOptions::new()
+                    .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+                session
+                    .register_parquet_with_options(&name, &path, options)
+                    .await
+            });
+            if registration_jobs.len() >= 4 {
+                registration_jobs
+                    .join_next()
+                    .await
+                    .expect("registration task exists")??;
+            }
         }
         for mapping in &args.json_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = json_read_options(&args);
-            session
-                .register_json_with_options(name, path, options)
-                .await?;
+            let session = Arc::clone(&session);
+            let args = Arc::clone(&args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            registration_jobs.spawn(async move {
+                let options = json_read_options(&args);
+                session
+                    .register_json_with_options(&name, &path, options)
+                    .await
+            });
+            if registration_jobs.len() >= 4 {
+                registration_jobs
+                    .join_next()
+                    .await
+                    .expect("registration task exists")??;
+            }
+        }
+        while let Some(result) = registration_jobs.join_next().await {
+            result??;
         }
     }
     for definition in &args.sql_views {
