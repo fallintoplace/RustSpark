@@ -196,15 +196,51 @@ fn recover_interrupted_insert(
     let old = staging.join("old");
     match fs::symlink_metadata(&live) {
         Ok(metadata) if metadata.file_type().is_dir() => {
-            // The new data has been published, or the old table is
-            // still live. Either way, the staging area is disposable.
+            // The new data has been published, or the old table is still
+            // live. Never discard a valid backup before verifying the live
+            // Parquet parts, or a failed publication could destroy recovery.
+            if let Err(corruption) = validate_table_files(&live, table) {
+                if !old.is_dir() {
+                    return Err(format!(
+                        "Invalid live table '{table}' and no recoverable backup: {corruption}"
+                    )
+                    .into());
+                }
+                validate_table_files(&old, table).map_err(|backup_error| {
+                    format!(
+                        "Both live and backup snapshots of '{table}' are invalid: live: {corruption}; backup: {backup_error}"
+                    )
+                })?;
+
+                // Retain the corrupt snapshot outside the reserved stage.
+                // Startup skips this hidden directory. Keeping it also
+                // protects evidence if restoration fails halfway through.
+                let quarantine = tempfile::Builder::new()
+                    .prefix(".rustspark-corrupt-")
+                    .tempdir_in(root)?
+                    .keep();
+                let corrupt_path = quarantine.join(table);
+                fs::rename(&live, &corrupt_path)?;
+                if let Err(restore_error) = fs::rename(&old, &live) {
+                    return Err(format!(
+                        "Cannot restore valid INSERT backup for '{table}': {restore_error}; corrupt data retained at {}",
+                        corrupt_path.display()
+                    )
+                    .into());
+                }
+                eprintln!(
+                    "Recovered previous snapshot for '{table}'; corrupt data retained at {}",
+                    corrupt_path.display()
+                );
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // A crash happened between moving out the old table and
-            // publishing the new one. Restore the previous snapshot.
+            // Interrupted between moving out the old snapshot and
+            // publishing the new one. Validate before restoring it.
             if !fs::symlink_metadata(&old)?.file_type().is_dir() {
                 return Err(format!("Missing INSERT backup for table '{table}'").into());
             }
+            validate_table_files(&old, table)?;
             fs::rename(&old, &live)?;
         }
         Ok(_) => {

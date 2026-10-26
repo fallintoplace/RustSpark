@@ -196,3 +196,90 @@ fn timed_out_insert_can_retry_in_same_interactive_session() -> TestResult {
     assert!(!db.path().join(".rustspark-insert-items").exists());
     Ok(())
 }
+
+fn corrupt_parquet_part(directory: &Path) -> TestResult {
+    let part = fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "parquet")
+        })
+        .ok_or("missing parquet part")?;
+    fs::write(part, b"truncated parquet")?;
+    Ok(())
+}
+
+#[test]
+fn corrupt_published_snapshot_restores_valid_backup() -> TestResult {
+    let db = tempfile::tempdir()?;
+    run_ok(db.path(), "CREATE TABLE items (id BIGINT)")?;
+    run_ok(db.path(), "INSERT INTO items VALUES (1)")?;
+    let interrupted = run(
+        db.path(),
+        "INSERT INTO items VALUES (2)",
+        Some("after_publish"),
+    );
+    assert_eq!(interrupted.status.code(), Some(97));
+
+    corrupt_parquet_part(&db.path().join("items"))?;
+    assert_eq!(total(db.path())?, 1);
+    assert!(!db.path().join(".rustspark-insert-items").exists());
+    let quarantines: Vec<_> = fs::read_dir(db.path())?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rustspark-corrupt-")
+        })
+        .collect();
+    assert_eq!(quarantines.len(), 1);
+    assert!(quarantines[0].path().join("items").is_dir());
+    assert_eq!(total(db.path())?, 1);
+    Ok(())
+}
+
+#[test]
+fn two_corrupt_snapshots_fail_closed_without_removing_backup() -> TestResult {
+    let db = tempfile::tempdir()?;
+    run_ok(db.path(), "CREATE TABLE items (id BIGINT)")?;
+    run_ok(db.path(), "INSERT INTO items VALUES (1)")?;
+    let interrupted = run(
+        db.path(),
+        "INSERT INTO items VALUES (2)",
+        Some("after_publish"),
+    );
+    assert_eq!(interrupted.status.code(), Some(97));
+
+    let stage = db.path().join(".rustspark-insert-items");
+    corrupt_parquet_part(&db.path().join("items"))?;
+    corrupt_parquet_part(&stage.join("old"))?;
+    let failed = run(db.path(), "SELECT COUNT(*) FROM items", None);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("Both live and backup snapshots"));
+    assert!(db.path().join("items").is_dir());
+    assert!(stage.join("old").is_dir());
+    Ok(())
+}
+
+#[test]
+fn invalid_backup_between_swap_steps_is_not_promoted() -> TestResult {
+    let db = tempfile::tempdir()?;
+    run_ok(db.path(), "CREATE TABLE items (id BIGINT)")?;
+    run_ok(db.path(), "INSERT INTO items VALUES (1)")?;
+    let interrupted = run(
+        db.path(),
+        "INSERT INTO items VALUES (2)",
+        Some("after_old_moved"),
+    );
+    assert_eq!(interrupted.status.code(), Some(97));
+
+    let stage = db.path().join(".rustspark-insert-items");
+    corrupt_parquet_part(&stage.join("old"))?;
+    let failed = run(db.path(), "SELECT COUNT(*) FROM items", None);
+    assert!(!failed.status.success());
+    assert!(!db.path().join("items").exists());
+    assert!(stage.join("old").is_dir());
+    Ok(())
+}
