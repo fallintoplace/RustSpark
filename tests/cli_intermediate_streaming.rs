@@ -29,7 +29,10 @@ fn intermediate_query_errors_still_fail_the_script() {
         "SELECT CAST('not_an_integer' AS INT); SELECT 42 AS answer",
         &["--stdout-format", "csv"],
     );
-    assert!(!output.status.success(), "execution errors must be propagated");
+    assert!(
+        !output.status.success(),
+        "execution errors must be propagated"
+    );
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("42"),
         "final result must not be executed after intermediate failure"
