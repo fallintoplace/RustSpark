@@ -43,7 +43,14 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
             .collect();
         // DataFusion can place the merged key after other left columns.
         assert_eq!(column_names.len(), 3);
-        assert_eq!(column_names.iter().filter(|name| name.as_str() == "id").count(), 1);
+        assert_eq!(
+            column_names
+                .iter()
+                .filter(|name| name.as_str() == "id")
+                .count(),
+            1
+        );
+        assert_eq!(column_names[0], "id");
         assert!(column_names.contains(&"left_payload".to_owned()));
         assert!(column_names.contains(&"right_payload".to_owned()));
         assert_eq!(frame.count().await?, expected, "{kind:?}");
