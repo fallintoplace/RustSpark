@@ -190,14 +190,21 @@ impl RustSparkSession {
         // Quote every identifier instead of interpolating user-supplied SQL.
         let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
         let quote_table = |path: &str| -> Result<String> {
-            if path.split('.').any(|part| part.is_empty() || part.trim() != part) {
+            if path
+                .split('.')
+                .any(|part| part.is_empty() || part.trim() != part)
+            {
                 return Err(DataFusionError::Plan(
                     "Join table name must be a non-empty catalog path".into(),
                 ));
             }
             Ok(path.split('.').map(&quote).collect::<Vec<_>>().join("."))
         };
-        let keys = columns.iter().map(|name| quote(name)).collect::<Vec<_>>().join(", ");
+        let keys = columns
+            .iter()
+            .map(|name| quote(name))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "SELECT * FROM {} {operator} JOIN {} USING ({keys})",
             quote_table(left)?,
