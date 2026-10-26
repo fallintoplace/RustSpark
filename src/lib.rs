@@ -141,10 +141,14 @@ impl RustSparkSession {
     /// Use ORDER BY in the SQL query for deterministic pages.
     pub async fn sql_page(&self, query: &str, offset: usize, limit: usize) -> Result<DataFrame> {
         if limit == 0 {
-            return Err(DataFusionError::Plan("SQL page limit must be positive".into()));
+            return Err(DataFusionError::Plan(
+                "SQL page limit must be positive".into(),
+            ));
         }
         if offset.checked_add(limit).is_none() {
-            return Err(DataFusionError::Plan("SQL page offset plus limit overflows".into()));
+            return Err(DataFusionError::Plan(
+                "SQL page offset plus limit overflows".into(),
+            ));
         }
         self.sql(query).await?.limit(offset, Some(limit))
     }
