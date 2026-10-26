@@ -140,6 +140,12 @@ async fn using_rejects_invalid_declarations_without_running_sql() -> TestResult 
     );
     assert!(
         session
+            .join_tables_using("missing", "lookup", JoinType::Inner, &["id"])
+            .await
+            .is_err()
+    );
+    assert!(
+        session
             .join_tables_using("order", "lookup", JoinType::Inner, &["missing"])
             .await
             .is_err()

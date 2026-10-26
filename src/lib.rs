@@ -248,8 +248,9 @@ impl RustSparkSession {
             }
         };
 
-        let left_frame = self.table(left).await?;
-        let right_frame = self.table(right).await?;
+        // The two read-only table lookups are independent. Resolve them
+        // together, but keep the left/right schema order in the final plan.
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
         for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
             for column in columns {
                 if !frame
