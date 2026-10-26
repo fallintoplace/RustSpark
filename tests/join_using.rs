@@ -41,28 +41,32 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
             .iter()
             .map(|field| field.name().to_owned())
             .collect();
-        assert_eq!(
-            column_names,
-            vec![
-                "id".to_owned(),
-                "left_payload".to_owned(),
-                "right_payload".to_owned()
-            ]
-        );
+        // DataFusion can place the merged key after other left columns.
+        assert_eq!(column_names.len(), 3);
+        assert_eq!(column_names.iter().filter(|name| name.as_str() == "id").count(), 1);
+        assert!(column_names.contains(&"left_payload".to_owned()));
+        assert!(column_names.contains(&"right_payload".to_owned()));
         assert_eq!(frame.count().await?, expected, "{kind:?}");
     }
 
     // A full USING join must retain the right-only key value, not NULL.
-    let batches = session
+    let frame = session
         .join_tables_using("order", "lookup", JoinType::Full, &["id"])
-        .await?
+        .await?;
+    let key_column = frame
+        .schema()
+        .fields()
+        .iter()
+        .position(|field| field.name() == "id")
+        .expect("USING must return the shared key");
+    let batches = frame
         .sort(vec![col("id").sort(true, true)])?
         .collect()
         .await?;
     let mut ids = Vec::new();
     for batch in batches {
         let column = batch
-            .column(0)
+            .column(key_column)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
