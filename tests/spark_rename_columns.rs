@@ -26,10 +26,7 @@ async fn rename_columns_supports_atomic_swaps() -> TestResult {
         .collect();
     assert_eq!(names, ["right_col", "left_col"]);
     assert_eq!(swapped.count().await?, 1);
-    assert_eq!(
-        session.describe_table("numbers").await?[0].0,
-        "left_col"
-    );
+    assert_eq!(session.describe_table("numbers").await?[0].0, "left_col");
 
     assert!(
         session
@@ -49,6 +46,13 @@ async fn rename_columns_supports_atomic_swaps() -> TestResult {
             .await
             .is_err()
     );
-    assert_eq!(session.rename_columns("numbers", &[]).await?.count().await?, 1);
+    assert_eq!(
+        session
+            .rename_columns("numbers", &[])
+            .await?
+            .count()
+            .await?,
+        1
+    );
     Ok(())
 }
