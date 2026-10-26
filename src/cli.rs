@@ -118,6 +118,9 @@ struct Args {
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
+    #[arg(long, value_name = "ROWS", requires = "max_rows")]
+    offset: Option<usize>,
+
     #[arg(
         long = "count-only",
         conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json"]
@@ -675,7 +678,17 @@ async fn execute_query(
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
-        dataframe.show_limit(max_rows).await?;
+        if let Some(offset) = args.offset {
+            offset
+                .checked_add(max_rows)
+                .ok_or("--offset plus --max-rows exceeds the supported range")?;
+            dataframe
+                .limit(offset, Some(max_rows))?
+                .show_limit(max_rows)
+                .await?;
+        } else {
+            dataframe.show_limit(max_rows).await?;
+        }
     } else {
         dataframe.show().await?;
     }
