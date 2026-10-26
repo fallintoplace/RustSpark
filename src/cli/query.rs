@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use datafusion::{
     config::TableParquetOptions,
     dataframe::DataFrameWriteOptions,
-    logical_expr::sqlparser::ast::{ObjectType, Statement as SqlStatement},
+    logical_expr::sqlparser::ast::{
+        AlterTableOperation, ObjectType, RenameTableNameKind, Statement as SqlStatement,
+    },
     prelude::DataFrame,
     sql::parser::{DFParser, Statement as DFStatement},
 };
@@ -34,6 +36,14 @@ pub(super) async fn execute_script(
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
     for statement in statements {
+        if let Some((source, destination)) = persistent_rename_table(&statement, args)? {
+            let root = args
+                .database_dir
+                .as_deref()
+                .ok_or("Missing database directory")?;
+            super::persistence::rename_saved_table(session, root, &source, &destination).await?;
+            continue;
+        }
         validate_persistent_table_name(&statement, args)?;
         let dropped = persistent_drop_table(&statement, args)?;
         plan_query(session, &statement.to_string(), args)
@@ -42,6 +52,13 @@ pub(super) async fn execute_script(
             .await?;
         persist_created_table(session, &statement, args).await?;
         persist_dropped_table(dropped, args)?;
+    }
+    if let Some((source, destination)) = persistent_rename_table(&last, args)? {
+        let root = args
+            .database_dir
+            .as_deref()
+            .ok_or("Missing database directory")?;
+        return super::persistence::rename_saved_table(session, root, &source, &destination).await;
     }
     validate_persistent_table_name(&last, args)?;
     let dropped = persistent_drop_table(&last, args)?;
@@ -78,6 +95,39 @@ fn validate_persistent_table_name(
         }
     }
     Ok(())
+}
+
+/// Handle only simple, single-table renames owned by the on-disk database.
+/// Other ALTER TABLE operations keep DataFusion's normal unsupported behavior.
+fn persistent_rename_table(
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(None);
+    };
+    let DFStatement::Statement(statement) = statement else {
+        return Ok(None);
+    };
+    let SqlStatement::AlterTable(alter) = statement.as_ref() else {
+        return Ok(None);
+    };
+    let [AlterTableOperation::RenameTable { table_name }] = alter.operations.as_slice() else {
+        return Ok(None);
+    };
+    let new_name = match table_name {
+        RenameTableNameKind::To(name) | RenameTableNameKind::As(name) => {
+            name.to_string().to_ascii_lowercase()
+        }
+    };
+    let old_name = alter.name.to_string().to_ascii_lowercase();
+    if !super::valid_identifier(&old_name) || !super::valid_identifier(&new_name) {
+        return Err("Persistent ALTER TABLE RENAME requires simple SQL table names".into());
+    }
+    if !root.join(&old_name).is_dir() {
+        return Ok(None);
+    }
+    Ok(Some((old_name, new_name)))
 }
 
 /// Remember persistent DROP TABLE targets before DataFusion unregisters them.

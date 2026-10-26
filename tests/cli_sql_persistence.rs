@@ -254,3 +254,74 @@ fn drop_is_case_insensitive_for_unquoted_table_names() -> TestResult {
     assert!(!run(root, "SELECT id FROM mixedcase").status.success());
     Ok(())
 }
+
+#[test]
+fn rename_saved_table_updates_current_session_and_survives_restart() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    assert!(
+        run(root, "CREATE TABLE numbers AS SELECT 42 AS n")
+            .status
+            .success()
+    );
+    let renamed = run(
+        root,
+        "ALTER TABLE numbers RENAME TO answers; SELECT n FROM answers",
+    );
+    assert_row(renamed, "42");
+    assert!(!directory.path().join("numbers").exists());
+    assert!(directory.path().join("answers").is_dir());
+    assert_row(run(root, "SELECT n FROM answers"), "42");
+    assert!(!run(root, "SELECT n FROM numbers").status.success());
+    Ok(())
+}
+
+#[test]
+fn rename_rejects_name_collisions_without_changing_data() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    assert!(
+        run(root, "CREATE TABLE source AS SELECT 1 AS n")
+            .status
+            .success()
+    );
+    assert!(
+        run(root, "CREATE TABLE destination AS SELECT 2 AS n")
+            .status
+            .success()
+    );
+    let collision = run(root, "ALTER TABLE source RENAME TO destination");
+    assert!(!collision.status.success());
+    assert_row(run(root, "SELECT n FROM source"), "1");
+    assert_row(run(root, "SELECT n FROM destination"), "2");
+    Ok(())
+}
+
+#[test]
+fn rename_rejects_unsafe_or_qualified_destination_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    assert!(
+        run(root, "CREATE TABLE items AS SELECT 42 AS id")
+            .status
+            .success()
+    );
+    let rename = run(root, "ALTER TABLE items RENAME TO other_schema.items");
+    assert!(!rename.status.success());
+    assert_row(run(root, "SELECT id FROM items"), "42");
+    Ok(())
+}
+
+#[test]
+fn rename_is_case_insensitive_for_unquoted_table_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(root, "CREATE TABLE MixedCase AS SELECT 7 AS id");
+    assert!(created.status.success());
+    let renamed = run(root, "ALTER TABLE MIXEDCASE RENAME TO ANSWERS");
+    assert!(renamed.status.success());
+    assert!(!directory.path().join("mixedcase").exists());
+    assert!(directory.path().join("answers").is_dir());
+    assert_row(run(root, "SELECT id FROM answers"), "7");
+    Ok(())
+}
