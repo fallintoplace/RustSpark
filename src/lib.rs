@@ -319,6 +319,13 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
+    /// Union SQL query results by column name and remove duplicate rows.
+    ///
+    /// Column order can differ, and missing columns are filled with NULL.
+    pub async fn union_sql_distinct_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
+        self.union_sql_by_name(queries).await?.distinct()
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
