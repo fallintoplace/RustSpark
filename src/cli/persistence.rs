@@ -390,6 +390,73 @@ pub(super) async fn save_table(
     Ok(())
 }
 
+/// Create an independent, consistent copy of a local database while its
+/// process lock is held. Copy rather than hard-link parts so later external
+/// edits to one snapshot cannot corrupt the other.
+pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    let source = root.canonicalize()?;
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()?;
+    let name = destination
+        .file_name()
+        .ok_or("Backup destination must name a directory")?;
+    let normalized = parent.join(name);
+    if normalized.starts_with(&source) {
+        return Err("Backup destination must be outside --database-dir".into());
+    }
+    if fs::symlink_metadata(&normalized).is_ok() {
+        return Err(format!(
+            "Backup destination already exists: {}",
+            normalized.display()
+        )
+        .into());
+    }
+
+    let temporary = tempfile::Builder::new()
+        .prefix(".rustspark-backup-stage-")
+        .tempdir_in(&parent)?;
+    let snapshot = temporary.path().join("snapshot");
+    fs::create_dir(&snapshot)?;
+    let mut tables = Vec::new();
+    for entry in fs::read_dir(&source)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let filename = entry.file_name();
+        let Some(table) = filename.to_str() else {
+            continue;
+        };
+        if !valid_identifier(table) {
+            continue;
+        }
+        validate_table_files(&entry.path(), table)?;
+        let target = snapshot.join(table);
+        fs::create_dir(&target)?;
+        for part in fs::read_dir(entry.path())? {
+            let part = part?;
+            if !part.file_type()?.is_file() {
+                return Err(format!("Unexpected database part: {}", part.path().display()).into());
+            }
+            fs::copy(part.path(), target.join(part.file_name()))?;
+        }
+        validate_table_files(&target, table)?;
+        tables.push(table.to_owned());
+    }
+    tables.sort();
+    let manifest = format!("rustspark-backup-v1\n{}\n", tables.join("\n"));
+    fs::write(snapshot.join(".rustspark-backup-manifest"), manifest)?;
+    // A second pre-publication check avoids overwriting a known destination.
+    if fs::symlink_metadata(&normalized).is_ok() {
+        return Err("Backup destination appeared during copy".into());
+    }
+    fs::rename(&snapshot, &normalized)?;
+    Ok(())
+}
+
 /// Move a dropped table out of the visible catalog before deleting its files.
 /// The hidden directory is ignored after a crash; we never delete the input
 /// file registrations or arbitrary paths outside the local database root.

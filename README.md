@@ -376,3 +376,24 @@ Like CSV, TSV writes one header row and escapes fields when needed:
 cargo run -- --csv tests/fixtures/sales.csv \
   --sql 'SELECT city, amount FROM data ORDER BY amount' --stdout-format tsv
 ```
+
+
+### Back up a persistent RustSpark database
+
+Use a database-wide, read-consistent file snapshot without running a SQL query:
+
+```sh
+cargo run -- --database-dir /tmp/rustspark-db --backup-database /tmp/rustspark-snapshot
+```
+
+The backup copies and validates each persistent table's Parquet parts while
+holding RustSpark's exclusive database lock. The destination must be new and
+outside the source database. All tables are staged under a temporary sibling
+directory and published together by rename after successful copying. An
+`.rustspark-backup-manifest` identifies the backup format and table names.
+Copies are independent, **not hard links**. To inspect a backup, point
+`--database-dir` to its directory.
+
+This is a locally consistent, best-effort backup, not an online multi-writer
+snapshot or a guarantee against OS power loss. External processes changing the
+data directory are not coordinated. Keep multiple independent backups.

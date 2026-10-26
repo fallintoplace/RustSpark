@@ -19,7 +19,7 @@ enum StdoutFormat {
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
     group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables", "auto_input"])),
-    group(ArgGroup::new("query").required(true).args(["sql", "sql_file", "interactive"]))
+    group(ArgGroup::new("query").required(true).args(["sql", "sql_file", "interactive", "backup_database"]))
 )]
 struct Args {
     /// Infer the input reader from a single file extension.
@@ -145,6 +145,15 @@ struct Args {
         ]
     )]
     save_table: Option<String>,
+
+    /// Copy a consistent snapshot of all saved Parquet tables to a new directory.
+    /// No SQL statement is required for this operation.
+    #[arg(
+        long = "backup-database",
+        value_name = "DIR",
+        requires = "database_dir"
+    )]
+    backup_database: Option<PathBuf>,
 
     /// Start a SQL shell that executes semicolon-terminated statements.
     #[arg(long)]
@@ -665,6 +674,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     register_inputs(&session, &args).await?;
     if let Some(directory) = args.database_dir.as_deref() {
         register_database_tables(&session, directory).await?;
+    }
+    if let Some(destination) = args.backup_database.as_deref() {
+        let root = args
+            .database_dir
+            .as_deref()
+            .ok_or("Missing database directory")?;
+        return persistence::backup_database(root, destination);
     }
     if args.interactive {
         return run_interactive(&session, &args).await;
