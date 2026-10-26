@@ -921,7 +921,11 @@ impl RustSparkSession {
     }
 
     async fn union_sql_internal(&self, queries: &[&str], by_name: bool) -> Result<DataFrame> {
-        let operation = if by_name { "union_sql_by_name" } else { "union_sql" };
+        let operation = if by_name {
+            "union_sql_by_name"
+        } else {
+            "union_sql"
+        };
         let (first, rest) = queries.split_first().ok_or_else(|| {
             DataFusionError::Plan(format!("{operation} requires at least one query"))
         })?;
