@@ -401,6 +401,37 @@ impl RustSparkSession {
         result.ok_or_else(|| DataFusionError::Plan("Scalar query returned no rows".into()))
     }
 
+    /// Read a single typed SQL value with bound parameters.
+    ///
+    /// The query must produce exactly one column and one row.
+    pub async fn sql_scalar_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<datafusion::common::ScalarValue> {
+        use datafusion::common::ScalarValue;
+
+        let dataframe = self.sql_with_params(query, params).await?;
+        if dataframe.schema().fields().len() != 1 {
+            return Err(DataFusionError::Plan(
+                "Scalar query must return exactly one column".into(),
+            ));
+        }
+        let batches = dataframe.limit(0, Some(2))?.collect().await?;
+        let mut result = None;
+        for batch in batches {
+            if batch.num_rows() > 1 || (batch.num_rows() > 0 && result.is_some()) {
+                return Err(DataFusionError::Plan(
+                    "Scalar query must return exactly one row".into(),
+                ));
+            }
+            if batch.num_rows() == 1 {
+                result = Some(ScalarValue::try_from_array(batch.column(0).as_ref(), 0)?);
+            }
+        }
+        result.ok_or_else(|| DataFusionError::Plan("Scalar query returned no rows".into()))
+    }
+
     /// Plan a paginated query without collecting all its rows.
     ///
     /// Use ORDER BY in the SQL query for deterministic pages.
