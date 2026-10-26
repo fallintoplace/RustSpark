@@ -48,7 +48,7 @@ Provide column types to avoid CSV schema inference:
 cargo run -- --csv tests/fixtures/sales.csv --csv-schema 'city:utf8,amount:int64' --sql 'SELECT SUM(amount) FROM data'
 ```
 
-Supported types: `utf8`, `int64`, `float64`, `bool` (and `string`, `bigint`, `double`, `boolean` aliases). Named CSV inputs share this schema.
+Supported types: `utf8`, signed integers `int8`/`int16`/`int32`/`int64`, unsigned integers `uint8`/`uint16`/`uint32`/`uint64`, `float32`/`float64`, `bool`, and `date32`. Aliases include `string`, `tinyint`, `smallint`, `int`, `bigint`, `float`, `double`, `boolean`, and `date`. Named CSV inputs share this schema.
 
 Inspect query output columns without executing the query:
 
