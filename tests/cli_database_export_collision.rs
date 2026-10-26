@@ -19,7 +19,10 @@ fn rejects_exports_into_local_database_catalog() -> Result<(), Box<dyn std::erro
             .arg(option)
             .arg(destination)
             .output()?;
-        assert!(!output.status.success(), "{option} must not write into the catalog");
+        assert!(
+            !output.status.success(),
+            "{option} must not write into the catalog"
+        );
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("inside --database-dir"),
             "{}",
