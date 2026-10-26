@@ -316,6 +316,14 @@ cargo run -- --sql 'SELECT 42 AS answer' --stdout-format arrow > /tmp/query.stre
 This is the Arrow IPC **stream** format, not the seekable IPC file format
 written by `--output-arrow`.
 
+For a standard JSON array instead of newline-delimited JSON, choose
+`--stdout-format json-array`. The result is streamed as one valid JSON array,
+preserves explicit NULL fields, and emits `[]` for empty results:
+
+```sh
+cargo run -- --sql 'SELECT 1 AS id UNION ALL SELECT 2' --stdout-format json-array
+```
+
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
 

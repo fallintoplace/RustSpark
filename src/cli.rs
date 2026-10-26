@@ -10,6 +10,7 @@ enum StdoutFormat {
     Csv,
     Tsv,
     Json,
+    JsonArray,
     Arrow,
 }
 
