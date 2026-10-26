@@ -10,10 +10,19 @@ fn single_file_export_replaces_completed_output() -> Result<(), Box<dyn std::err
         .arg(&destination)
         .arg("--output-single-file")
         .output()?;
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(fs::read_to_string(&destination)?, "answer\n42\n");
-    assert!(!fs::read_dir(directory.path())?
-        .filter_map(Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().starts_with(".rustspark-export-")));
+    assert!(
+        !fs::read_dir(directory.path())?
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rustspark-export-"))
+    );
     Ok(())
 }
