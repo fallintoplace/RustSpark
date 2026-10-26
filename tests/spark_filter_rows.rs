@@ -30,12 +30,7 @@ async fn filter_rows_uses_typed_predicates_and_sql_null_semantics() -> TestResul
             .await
             .is_err()
     );
-    assert!(
-        session
-            .filter_rows("events", lit(1i64))
-            .await
-            .is_err()
-    );
+    assert!(session.filter_rows("events", lit(1i64)).await.is_err());
     assert_eq!(session.table("events").await?.count().await?, 3);
     Ok(())
 }
