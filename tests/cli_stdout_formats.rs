@@ -114,18 +114,27 @@ fn stdout_format_conflicts_with_other_output_modes() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn closed_output_pipe_is_not_a_query_failure() -> TestResult {
-    use std::process::Stdio;
+    use std::{io::{Read, Write}, process::Stdio};
+
+    let temp = tempfile::tempdir()?;
+    let csv = temp.path().join("large.csv");
+    let mut file = std::fs::File::create(&csv)?;
+    writeln!(file, "payload")?;
+    for _ in 0..512 {
+        writeln!(file, "{}", "x".repeat(2048))?;
+    }
+    drop(file);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args([
-            "--sql",
-            "SELECT 'hello' AS greeting",
-            "--stdout-format",
-            "csv",
-        ])
+        .arg("--csv")
+        .arg(&csv)
+        .args(["--sql", "SELECT payload FROM data", "--stdout-format", "csv"])
         .stdout(Stdio::piped())
         .spawn()?;
-    drop(child.stdout.take());
+    let mut output = child.stdout.take().ok_or("missing child stdout")?;
+    let mut first = [0u8; 1];
+    output.read_exact(&mut first)?;
+    drop(output);
     assert!(child.wait()?.success());
     Ok(())
 }
