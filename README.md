@@ -122,6 +122,17 @@ Repeat `--param` in `$1`, `$2`, ... order. Supported types are
 String values may contain colons. Parameters use DataFusion binding, not
 SQL text substitution.
 
+Use named parameters for queries where argument order may change:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \\
+  --sql 'SELECT COUNT(*) FROM data WHERE amount > $minimum AND city = $city' \\
+  --named-param minimum=int64:10 --named-param city=utf8:Berlin
+```
+
+Names must be SQL identifiers. Use either `--named-param` or `--param`,
+not both. Values are bound safely without rewriting SQL text.
+
 Provide column types to avoid CSV schema inference:
 
 ```sh

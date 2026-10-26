@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
+use std::{collections::{HashMap, HashSet}, io::Read, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -112,6 +112,14 @@ struct Args {
 
     #[arg(long = "param", value_name = "TYPE:VALUE", value_parser = parse_sql_param)]
     params: Vec<ScalarValue>,
+
+    #[arg(
+        long = "named-param",
+        value_name = "NAME=TYPE:VALUE",
+        value_parser = parse_named_param,
+        conflicts_with = "params"
+    )]
+    named_params: Vec<(String, ScalarValue)>,
 
     #[arg(
         long = "describe",
@@ -330,6 +338,13 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
         _ => Err("--param supports int64, float64, bool, utf8, or null:".into()),
     }
+}
+
+fn parse_named_param(value: &str) -> Result<(String, ScalarValue), String> {
+    let (name, raw) = parse_named_table(value)
+        .map_err(|_| "--named-param requires NAME=TYPE:VALUE and a valid identifier".to_owned())?;
+    let value = parse_sql_param(raw).map_err(|error| error.replace("--param", "--named-param"))?;
+    Ok((name.to_owned(), value))
 }
 
 fn parse_csv_schema(value: &str) -> Result<Schema, String> {
@@ -763,10 +778,18 @@ async fn execute_query(
     query: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = if args.params.is_empty() {
-        session.sql(query).await?
-    } else {
+    let dataframe = if !args.named_params.is_empty() {
+        let mut params = HashMap::new();
+        for (name, value) in &args.named_params {
+            if params.insert(name.clone(), value.clone()).is_some() {
+                return Err(format!("Duplicate named parameter: {name}").into());
+            }
+        }
+        session.sql_with_params(query, params).await?
+    } else if !args.params.is_empty() {
         session.sql_with_params(query, args.params.clone()).await?
+    } else {
+        session.sql(query).await?
     };
     if args.describe {
         for field in dataframe.schema().fields() {
