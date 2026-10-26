@@ -889,6 +889,13 @@ async fn execute_registered_query(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut union_names = HashSet::new();
+    for declaration in &args.unions_by_name {
+        let (name, _) = parse_union_by_name(declaration)?;
+        if !union_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate union destination: {name}").into());
+        }
+    }
     for declaration in &args.unions_by_name {
         let (name, sources) = parse_union_by_name(declaration)?;
         let union = session.union_tables_by_name(&sources).await?;
