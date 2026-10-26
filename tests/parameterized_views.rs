@@ -25,11 +25,7 @@ async fn binds_positional_parameters_in_lazy_views() -> TestResult {
     assert_eq!(session.table("filtered").await?.count().await?, 2);
     assert!(
         session
-            .register_sql_view_with_params(
-                "filtered",
-                "SELECT 1",
-                vec![ScalarValue::from(1_i64)],
-            )
+            .register_sql_view_with_params("filtered", "SELECT 1", vec![ScalarValue::from(1_i64)],)
             .await
             .is_err()
     );
