@@ -35,3 +35,29 @@ async fn unions_sql_with_reordered_and_missing_columns() -> Result<(), Box<dyn s
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn name_union_plans_more_than_one_concurrency_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = RustSparkSession::new();
+    let queries: Vec<String> = (0..20)
+        .map(|index| {
+            if index % 2 == 0 {
+                format!("SELECT {index} AS a, 1 AS b")
+            } else {
+                format!("SELECT 1 AS b, {index} AS a")
+            }
+        })
+        .collect();
+    let references: Vec<&str> = queries.iter().map(String::as_str).collect();
+    let dataframe = session.union_sql_by_name(&references).await?;
+    assert_eq!(dataframe.clone().count().await?, 20);
+    assert_eq!(dataframe.schema().field(0).name(), "a");
+    session.register_dataframe("union_values", dataframe)?;
+    let actual = session
+        .sql_scalar("SELECT SUM(a) FROM union_values")
+        .await?;
+    let expected = session.sql_scalar("SELECT 190").await?;
+    assert_eq!(actual, expected);
+    Ok(())
+}
