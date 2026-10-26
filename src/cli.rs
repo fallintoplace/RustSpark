@@ -799,11 +799,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        session.register_sql_view(name, sql).await?;
+        let dataframe = plan_query(&session, sql, &args).await?;
+        session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        session.register_materialized_sql_view(name, sql).await?;
+        let dataframe = plan_query(&session, sql, &args).await?.cache().await?;
+        session.register_dataframe(name, dataframe)?;
     }
     let query = if let Some(sql) = args.sql.as_ref() {
         sql.clone()
