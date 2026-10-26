@@ -411,43 +411,61 @@ fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
     Ok(Schema::new(fields))
 }
 
+fn parse_integer_param<T: std::str::FromStr>(
+    raw: &str,
+    message: &str,
+    wrap: fn(Option<T>) -> ScalarValue,
+) -> Result<ScalarValue, String> {
+    raw.parse::<T>()
+        .map(|value| wrap(Some(value)))
+        .map_err(|_| message.to_owned())
+}
+
 fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
     let (kind, raw) = value
         .split_once(':')
         .ok_or_else(|| "--param must use TYPE:VALUE".to_owned())?;
     match kind.to_ascii_lowercase().as_str() {
-        "int8" | "tinyint" => raw
-            .parse::<i8>()
-            .map(|number| ScalarValue::Int8(Some(number)))
-            .map_err(|_| "--param int8 needs a signed 8-bit integer".to_owned()),
-        "int16" | "smallint" => raw
-            .parse::<i16>()
-            .map(|number| ScalarValue::Int16(Some(number)))
-            .map_err(|_| "--param int16 needs a signed 16-bit integer".to_owned()),
-        "int32" | "int" | "integer" => raw
-            .parse::<i32>()
-            .map(|number| ScalarValue::Int32(Some(number)))
-            .map_err(|_| "--param int32 needs a signed 32-bit integer".to_owned()),
-        "int64" | "bigint" => raw
-            .parse::<i64>()
-            .map(|number| ScalarValue::Int64(Some(number)))
-            .map_err(|_| "--param int64 needs a signed 64-bit integer".to_owned()),
-        "uint8" => raw
-            .parse::<u8>()
-            .map(|number| ScalarValue::UInt8(Some(number)))
-            .map_err(|_| "--param uint8 needs an unsigned 8-bit integer".to_owned()),
-        "uint16" => raw
-            .parse::<u16>()
-            .map(|number| ScalarValue::UInt16(Some(number)))
-            .map_err(|_| "--param uint16 needs an unsigned 16-bit integer".to_owned()),
-        "uint32" => raw
-            .parse::<u32>()
-            .map(|number| ScalarValue::UInt32(Some(number)))
-            .map_err(|_| "--param uint32 needs an unsigned 32-bit integer".to_owned()),
-        "uint64" => raw
-            .parse::<u64>()
-            .map(|number| ScalarValue::UInt64(Some(number)))
-            .map_err(|_| "--param uint64 needs an unsigned 64-bit integer".to_owned()),
+        "int8" | "tinyint" => parse_integer_param::<i8>(
+            raw,
+            "--param int8 needs a signed 8-bit integer",
+            ScalarValue::Int8,
+        ),
+        "int16" | "smallint" => parse_integer_param::<i16>(
+            raw,
+            "--param int16 needs a signed 16-bit integer",
+            ScalarValue::Int16,
+        ),
+        "int32" | "int" | "integer" => parse_integer_param::<i32>(
+            raw,
+            "--param int32 needs a signed 32-bit integer",
+            ScalarValue::Int32,
+        ),
+        "int64" | "bigint" => parse_integer_param::<i64>(
+            raw,
+            "--param int64 needs a signed 64-bit integer",
+            ScalarValue::Int64,
+        ),
+        "uint8" => parse_integer_param::<u8>(
+            raw,
+            "--param uint8 needs an unsigned 8-bit integer",
+            ScalarValue::UInt8,
+        ),
+        "uint16" => parse_integer_param::<u16>(
+            raw,
+            "--param uint16 needs an unsigned 16-bit integer",
+            ScalarValue::UInt16,
+        ),
+        "uint32" => parse_integer_param::<u32>(
+            raw,
+            "--param uint32 needs an unsigned 32-bit integer",
+            ScalarValue::UInt32,
+        ),
+        "uint64" => parse_integer_param::<u64>(
+            raw,
+            "--param uint64 needs an unsigned 64-bit integer",
+            ScalarValue::UInt64,
+        ),
         "float32" | "real" => {
             let number = raw
                 .parse::<f32>()
