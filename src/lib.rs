@@ -17,20 +17,22 @@ fn quote_join_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn quote_join_table(path: &str) -> Result<String> {
+fn quote_catalog_table(path: &str, invalid_name_message: &str) -> Result<String> {
     if path
         .split('.')
         .any(|part| part.is_empty() || part.trim() != part)
     {
-        return Err(DataFusionError::Plan(
-            "Join table name must be a non-empty catalog path".into(),
-        ));
+        return Err(DataFusionError::Plan(invalid_name_message.into()));
     }
     Ok(path
         .split('.')
         .map(quote_join_identifier)
         .collect::<Vec<_>>()
         .join("."))
+}
+
+fn quote_join_table(path: &str) -> Result<String> {
+    quote_catalog_table(path, "Join table name must be a non-empty catalog path")
 }
 
 /// Null filtering policy for Spark-style dropna operations.
@@ -781,25 +783,16 @@ impl RustSparkSession {
     /// The result has left_rows * right_rows entries. This operation can
     /// produce very large results and should be used deliberately.
     pub async fn cross_join_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
-        let quote_table = |path: &str| -> Result<String> {
-            if path
-                .split('.')
-                .any(|part| part.is_empty() || part.trim() != part)
-            {
-                return Err(DataFusionError::Plan(
-                    "Cross join table name must be a non-empty catalog path".into(),
-                ));
-            }
-            Ok(path
-                .split('.')
-                .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join("."))
-        };
         let query = format!(
             "SELECT * FROM {} AS \"__rustspark_left\" CROSS JOIN {} AS \"__rustspark_right\"",
-            quote_table(left)?,
-            quote_table(right)?
+            quote_catalog_table(
+                left,
+                "Cross join table name must be a non-empty catalog path",
+            )?,
+            quote_catalog_table(
+                right,
+                "Cross join table name must be a non-empty catalog path",
+            )?
         );
         self.sql(&query).await
     }
