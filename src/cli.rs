@@ -593,6 +593,54 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     }
 }
 
+fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(destination) = [
+        args.output_arrow.as_ref(),
+        args.output_parquet.as_ref(),
+        args.output_csv.as_ref(),
+        args.output_json.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    else {
+        return Ok(());
+    };
+    let Ok(destination) = destination.canonicalize() else {
+        return Ok(());
+    };
+    let mut sources: Vec<&std::path::Path> = Vec::new();
+    for path in [
+        args.csv.as_ref(),
+        args.parquet.as_ref(),
+        args.json.as_ref(),
+        args.sql_file.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path.as_os_str() != "-" {
+            sources.push(path.as_path());
+        }
+    }
+    for mapping in args
+        .csv_tables
+        .iter()
+        .chain(&args.parquet_tables)
+        .chain(&args.json_tables)
+    {
+        let (_, path) = parse_named_table(mapping)?;
+        sources.push(std::path::Path::new(path));
+    }
+    if sources
+        .iter()
+        .any(|source| source.canonicalize().is_ok_and(|path| path == destination))
+    {
+        return Err("Output path must not overwrite an input file or SQL script".into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
     let single_inputs = u8::from(args.csv.is_some())
@@ -612,6 +660,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
+    reject_output_input_collision(&args)?;
     if args.parquet_pushdown_filters && args.parquet.is_none() && args.parquet_tables.is_empty() {
         return Err("--parquet-pushdown-filters requires a Parquet input".into());
     }
