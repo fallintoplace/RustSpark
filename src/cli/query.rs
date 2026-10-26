@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
+};
 
 use datafusion::{
     config::TableParquetOptions,
@@ -21,6 +25,62 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     } else {
         options
     }
+}
+
+enum FileExport {
+    Parquet(Option<TableParquetOptions>),
+    Csv,
+    Json,
+}
+
+/// Keep the old destination untouched until the entire single-file export
+/// completes. The temporary directory is deleted on every error path.
+async fn write_file_export(
+    dataframe: DataFrame,
+    destination: &Path,
+    format: FileExport,
+    single_file: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = if single_file {
+        Some(
+            tempfile::Builder::new()
+                .prefix(".rustspark-export-")
+                .tempdir_in(parent)?,
+        )
+    } else {
+        None
+    };
+    let path = staging
+        .as_ref()
+        .map(|directory| directory.path().join("result"))
+        .unwrap_or_else(|| destination.to_path_buf());
+    let output = path.to_str().ok_or("Output path must be valid UTF-8")?;
+    let options = output_write_options(single_file);
+    match format {
+        FileExport::Parquet(parquet_options) => {
+            dataframe.write_parquet(output, options, parquet_options).await?;
+        }
+        FileExport::Csv => {
+            dataframe.write_csv(output, options, None).await?;
+        }
+        FileExport::Json => {
+            dataframe.write_json(output, options, None).await?;
+        }
+    }
+    if single_file {
+        // NamedTempFile::persist replaces an existing destination across
+        // platforms. Copying through it keeps the completed file on the same
+        // filesystem and avoids publishing a partial result on failure.
+        let mut completed = tempfile::NamedTempFile::new_in(parent)?;
+        io::copy(&mut fs::File::open(&path)?, completed.as_file_mut())?;
+        completed.as_file_mut().sync_all()?;
+        completed.persist(destination)?;
+    }
+    Ok(())
 }
 
 // Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
@@ -259,29 +319,22 @@ async fn execute_query(
     } else if args.explain_analyze {
         dataframe.explain(true, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         let writer_options = args.parquet_compression.as_ref().map(|codec| {
             let mut options = TableParquetOptions::default();
             options.global.compression = Some(codec.clone());
             options
         });
-        dataframe
-            .write_parquet(
-                path,
-                output_write_options(args.output_single_file),
-                writer_options,
-            )
-            .await?;
+        write_file_export(
+            dataframe,
+            path,
+            FileExport::Parquet(writer_options),
+            args.output_single_file,
+        )
+        .await?;
     } else if let Some(path) = args.output_csv.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_csv(path, output_write_options(args.output_single_file), None)
-            .await?;
+        write_file_export(dataframe, path, FileExport::Csv, args.output_single_file).await?;
     } else if let Some(path) = args.output_json.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_json(path, output_write_options(args.output_single_file), None)
-            .await?;
+        write_file_export(dataframe, path, FileExport::Json, args.output_single_file).await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
         write_arrow_ipc(dataframe, path).await?;
     } else if let Some(format) = args.stdout_format {
