@@ -15,10 +15,7 @@ async fn inspects_bound_sql_without_running_it() -> Result<(), Box<dyn std::erro
     assert_eq!(columns[0].1, DataType::Int64);
     assert!(
         session
-            .describe_sql_with_params(
-                "DROP TABLE data",
-                Vec::<ScalarValue>::new(),
-            )
+            .describe_sql_with_params("DROP TABLE data", Vec::<ScalarValue>::new())
             .await
             .is_err()
     );
