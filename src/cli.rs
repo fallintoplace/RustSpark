@@ -97,7 +97,7 @@ struct Args {
 
     #[arg(
         long = "count-only",
-        conflicts_with_all = ["describe", "explain", "max_rows", "output_parquet", "output_csv", "output_json"]
+        conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json"]
     )]
     count_only: bool,
 
