@@ -8,7 +8,8 @@ use datafusion::prelude::JsonReadOptions;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn multi_file_json_supports_array_format_and_explicit_schema() -> Result<(), Box<dyn std::error::Error>> {
+async fn multi_file_json_supports_array_format_and_explicit_schema()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let first = dir.path().join("first.json");
     let second = dir.path().join("second.json");
@@ -24,7 +25,9 @@ async fn multi_file_json_supports_array_format_and_explicit_schema() -> Result<(
         session
             .read_json_files_with_options(
                 &files,
-                JsonReadOptions::default().newline_delimited(false).schema(&schema),
+                JsonReadOptions::default()
+                    .newline_delimited(false)
+                    .schema(&schema),
             )
             .await?
             .count()
@@ -35,7 +38,9 @@ async fn multi_file_json_supports_array_format_and_explicit_schema() -> Result<(
         .register_json_files_with_options(
             "sales",
             &files,
-            JsonReadOptions::default().newline_delimited(false).schema(&schema),
+            JsonReadOptions::default()
+                .newline_delimited(false)
+                .schema(&schema),
         )
         .await?;
     let batches = session
@@ -43,7 +48,11 @@ async fn multi_file_json_supports_array_format_and_explicit_schema() -> Result<(
         .await?
         .collect()
         .await?;
-    let total = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let total = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert_eq!(total.value(0), 30);
     assert!(
         session
