@@ -1,11 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::Read,
+    io::{Read, Write},
     path::PathBuf,
     sync::Arc,
 };
 
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, ValueEnum};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::ipc::writer::FileWriter;
 use datafusion::common::ScalarValue;
@@ -18,6 +18,12 @@ use datafusion::prelude::{
 use datafusion::sql::parser::DFParser;
 use futures::StreamExt;
 use rustspark::RustSparkSession;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum StdoutFormat {
+    Csv,
+    Json,
+}
 
 #[derive(Parser)]
 #[command(
@@ -154,6 +160,14 @@ struct Args {
 
     #[arg(long, value_name = "ROWS", requires = "max_rows")]
     offset: Option<usize>,
+
+    #[arg(
+        long = "stdout-format",
+        value_enum,
+        value_name = "FORMAT",
+        conflicts_with_all = ["describe", "explain", "explain_analyze", "count_only", "output_parquet", "output_csv", "output_json", "output_arrow"]
+    )]
+    stdout_format: Option<StdoutFormat>,
 
     #[arg(
         long = "count-only",
@@ -871,6 +885,17 @@ async fn execute_query(
             .await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
         write_arrow_ipc(dataframe, path).await?;
+    } else if let Some(format) = args.stdout_format {
+        let dataframe = if let Some(max_rows) = args.max_rows {
+            let offset = args.offset.unwrap_or(0);
+            offset
+                .checked_add(max_rows)
+                .ok_or("--offset plus --max-rows exceeds the supported range")?;
+            dataframe.limit(offset, Some(max_rows))?
+        } else {
+            dataframe
+        };
+        write_stdout(dataframe, format).await?;
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
@@ -888,6 +913,42 @@ async fn execute_query(
     } else {
         dataframe.show().await?;
     }
+    Ok(())
+}
+
+// Write one record batch at a time so stdout never requires collecting all results.
+async fn write_stdout(
+    dataframe: datafusion::prelude::DataFrame,
+    format: StdoutFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = dataframe.execute_stream().await?;
+    let schema = stream.schema();
+    let stdout = std::io::stdout();
+    let mut output = std::io::BufWriter::new(stdout.lock());
+    match format {
+        StdoutFormat::Csv => {
+            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut output);
+            let mut wrote_batch = false;
+            while let Some(batch) = stream.next().await {
+                writer.write(&batch?)?;
+                wrote_batch = true;
+            }
+            if !wrote_batch {
+                // Include column headers even when the query returns no rows.
+                writer.write(&datafusion::arrow::record_batch::RecordBatch::new_empty(schema))?;
+            }
+        }
+        StdoutFormat::Json => {
+            let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
+                .with_explicit_nulls(true)
+                .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut output);
+            while let Some(batch) = stream.next().await {
+                writer.write(&batch?)?;
+            }
+            writer.finish()?;
+        }
+    }
+    output.flush()?;
     Ok(())
 }
 
