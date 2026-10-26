@@ -89,7 +89,11 @@ fn view_declarations_bind_named_parameters() -> TestResult {
         "--sql",
         "SELECT COUNT(*) FROM filtered",
     ])?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1"));
     Ok(())
 }
@@ -104,7 +108,11 @@ fn materialized_views_bind_positional_parameters() -> TestResult {
         "--sql",
         "SELECT value FROM constant",
     ])?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("42"));
     Ok(())
 }
