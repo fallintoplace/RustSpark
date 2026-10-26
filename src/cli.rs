@@ -644,6 +644,11 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
+    if let (Some(offset), Some(max_rows)) = (args.offset, args.max_rows) {
+        offset
+            .checked_add(max_rows)
+            .ok_or("--offset plus --max-rows exceeds the supported range")?;
+    }
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some());
