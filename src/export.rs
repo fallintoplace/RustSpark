@@ -55,10 +55,14 @@ impl RustSparkSession {
         let frame = self.sql_read_only(query).await?;
         let options = DataFrameWriteOptions::new();
         match format {
-            SqlExportFormat::Csv => frame.write_csv(staged_path, options, None).await?,
-            SqlExportFormat::Json => frame.write_json(staged_path, options, None).await?,
+            SqlExportFormat::Csv => {
+                frame.write_csv(staged_path, options, None).await?;
+            }
+            SqlExportFormat::Json => {
+                frame.write_json(staged_path, options, None).await?;
+            }
             SqlExportFormat::Parquet => {
-                frame.write_parquet(staged_path, options, None).await?
+                frame.write_parquet(staged_path, options, None).await?;
             }
         }
         // A concurrent creator should not be overwritten after our query finishes.

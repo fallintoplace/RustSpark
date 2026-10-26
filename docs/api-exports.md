@@ -18,9 +18,8 @@ session
 The destination is a **directory**, not a single file. DataFusion writes
 one or more part files inside it and does not collect all rows in memory.
 Only read-only SQL is allowed, but this is not a security sandbox.
-Exports are not atomic. On errors or cancellation a partial directory may remain.
-Use the CLI's `--output-single-file` option if you need an atomic single-file
-export for supported output formats.
+The Rust API publishes exported directories atomically after complete writes.
+Use the CLI's `--output-single-file` option for atomic single-file exports.
 
 ## Atomic directory publication
 
