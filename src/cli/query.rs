@@ -142,7 +142,7 @@ async fn execute_persistent_insert(
         table: temporary_table.clone(),
         insert: &staging,
     };
-    super::persistence::register_saved_table(session, &temporary_table, staging.next_dir()).await?;
+    super::persistence::register_saved_table(session, &temporary_table, &staging.next_dir()).await?;
 
     // Change the parsed INSERT target rather than manipulating SQL strings.
     // Source SELECTs still read the original snapshot, including self-inserts.
