@@ -1,7 +1,7 @@
 use std::{
     fs,
-    path::Path,
     io::Write,
+    path::Path,
     process::{Command, Output, Stdio},
 };
 
@@ -136,7 +136,10 @@ fn interactive_timeout_restores_live_table_provider() -> TestResult {
         writeln!(stdin, "SELECT SUM(id) FROM items;")?;
     }
     let output = child.wait_with_output()?;
-    assert!(output.status.success(), "The interactive shell should survive SQL errors");
+    assert!(
+        output.status.success(),
+        "The interactive shell should survive SQL errors"
+    );
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("SQL query timed out"), "{stderr}");
     let stdout = String::from_utf8(output.stdout)?;
