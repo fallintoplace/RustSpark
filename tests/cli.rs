@@ -747,12 +747,24 @@ fn rejects_conflicting_csv_parser_characters() {
         ["--csv-escape", ","],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-            .args(["--csv", path, flags[0], flags[1], "--sql", "SELECT COUNT(*) FROM data"])
+            .args([
+                "--csv",
+                path,
+                flags[0],
+                flags[1],
+                "--sql",
+                "SELECT COUNT(*) FROM data",
+            ])
             .output()
             .unwrap();
         assert!(!output.status.success(), "{flags:?}");
+        let expected = if flags == ["--csv-comment", "\""] {
+            "invalid value"
+        } else {
+            "must differ"
+        };
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("must differ"),
+            String::from_utf8_lossy(&output.stderr).contains(expected),
             "{flags:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
