@@ -100,6 +100,19 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 
 Column order can differ between inputs. Rows are appended without deduplication.
 
+To remove duplicate rows after matching columns by name, use
+`--union-distinct-by-name` instead:
+
+```sh
+cargo run -- --csv-table first=tests/fixtures/sales.csv \
+  --csv-table second=tests/fixtures/sales.csv \
+  --union-distinct-by-name unique_sales=first,second \
+  --sql 'SELECT COUNT(*) FROM unique_sales'
+```
+
+Missing columns are filled with NULL and duplicates are removed across all
+sources. Union destination names must be unique across both union flags.
+
 Enable Parquet late materialization for selective filters:
 
 ```sh
