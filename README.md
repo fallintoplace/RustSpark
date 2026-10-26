@@ -38,11 +38,27 @@ Join multiple CSV files in one query by naming each input:
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
 
+Create lazy SQL views for reusable queries. Views can refer to earlier views:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \\
+  --sql-view 'large=SELECT * FROM data WHERE amount >= 10' \\
+  --sql 'SELECT SUM(amount) FROM large'
+```
+
 Bound the number of result rows printed with `--max-rows`:
 
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --max-rows 10
 ```
+
+Cache a table in memory before running SQL (use only when it fits in RAM):
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --cache-table data --sql 'SELECT SUM(amount) FROM data'
+```
+
+The `--cache-table` flag can be repeated for distinct tables.
 
 Standalone SQL without a file also works:
 
@@ -69,3 +85,11 @@ Inspect logical and physical query plans without running the query:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
 ```
+
+Execute a query with physical operator metrics using `--explain-analyze`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data' --explain-analyze
+```
+
+Unlike `--explain`, this mode runs the query to collect execution metrics.

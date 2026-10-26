@@ -77,11 +77,17 @@ struct Args {
     #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
     table: String,
 
+    #[arg(long = "cache-table", value_name = "NAME")]
+    cache_tables: Vec<String>,
+
     #[arg(long, value_name = "QUERY")]
     sql: Option<String>,
 
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
+
+    #[arg(long = "sql-view", value_name = "NAME=SQL")]
+    sql_views: Vec<String>,
 
     #[arg(
         long = "describe",
@@ -94,6 +100,12 @@ struct Args {
         conflicts_with_all = ["describe", "max_rows", "output_parquet", "output_csv", "output_json"]
     )]
     explain: bool,
+
+    #[arg(
+        long = "explain-analyze",
+        conflicts_with_all = ["describe", "explain", "max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    explain_analyze: bool,
 
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
@@ -168,6 +180,15 @@ fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
         return Err("Named table needs a SQL identifier and non-empty path".into());
     }
     Ok((name, path))
+}
+
+fn parse_named_view(value: &str) -> Result<(&str, &str), String> {
+    let (name, sql) = parse_named_table(value)
+        .map_err(|_| "--sql-view must use NAME=SQL with a valid SQL identifier".to_owned())?;
+    if sql.trim().is_empty() {
+        return Err("--sql-view SQL query cannot be empty".into());
+    }
+    Ok((name, sql))
 }
 
 fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
@@ -440,6 +461,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
         }
     }
+    for definition in &args.sql_views {
+        let (name, sql) = parse_named_view(definition)?;
+        session.register_sql_view(name, sql).await?;
+    }
     let query = if let Some(sql) = args.sql.as_ref() {
         sql.clone()
     } else if let Some(path) = args.sql_file.as_ref() {
@@ -453,6 +478,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         unreachable!("clap requires either --sql or --sql-file")
     };
+    let mut cached_names = HashSet::new();
+    for name in &args.cache_tables {
+        if !cached_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate cached table: {name}").into());
+        }
+        session.cache_table(name).await?;
+    }
     let dataframe = session.sql(&query).await?;
     if args.describe {
         for field in dataframe.schema().fields() {
@@ -465,6 +497,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if args.explain {
         dataframe.explain(false, false)?.show().await?;
+    } else if args.explain_analyze {
+        dataframe.explain(true, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
