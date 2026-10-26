@@ -41,6 +41,9 @@ struct Args {
     #[arg(long = "parquet-extension", value_name = ".EXT", value_parser = parse_file_extension)]
     parquet_extension: Option<String>,
 
+    #[arg(long = "parquet-partitions", value_name = "NAME:TYPE,...", value_parser = parse_parquet_partitions)]
+    parquet_partitions: Option<Vec<(String, DataType)>>,
+
     #[arg(long = "parquet-pushdown-filters")]
     parquet_pushdown_filters: bool,
 
@@ -332,6 +335,15 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
     }
 }
 
+fn parse_parquet_partitions(value: &str) -> Result<Vec<(String, DataType)>, String> {
+    let schema = parse_column_schema(value, "Parquet partition")?;
+    Ok(schema
+        .fields()
+        .iter()
+        .map(|field| (field.name().clone(), field.data_type().clone()))
+        .collect())
+}
+
 fn parse_csv_schema(value: &str) -> Result<Schema, String> {
     parse_column_schema(value, "CSV")
 }
@@ -562,6 +574,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--parquet-extension requires a Parquet input".into());
     }
+    if args.parquet_partitions.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty()
+    {
+        return Err("--parquet-partitions requires a Parquet input".into());
+    }
     if args.csv_quote.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-quote requires a CSV input".into());
     }
@@ -615,7 +631,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if let Some(parquet) = args.parquet.as_ref() {
         let options = ParquetReadOptions::new()
-            .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+            .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"))
+            .table_partition_cols(args.parquet_partitions.clone().unwrap_or_default());
         session
             .register_parquet_with_options(&args.table, parquet, options)
             .await?;
@@ -664,7 +681,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let path = path.to_owned();
             registration_jobs.spawn(async move {
                 let options = ParquetReadOptions::new()
-                    .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+                    .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"))
+                    .table_partition_cols(args.parquet_partitions.clone().unwrap_or_default());
                 session
                     .register_parquet_with_options(&name, &path, options)
                     .await

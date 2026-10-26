@@ -73,6 +73,19 @@ estimated selectivity. They are opt-in because the benefit depends on file
 layout and filter cost. Row-group pruning and page-index reads remain on by
 default in DataFusion.
 
+Query Hive-style directory partitions as typed SQL columns:
+
+```sh
+# For files such as /data/events/year=2025/month=10/part-0.parquet
+cargo run -- --parquet /data/events \\
+  --parquet-partitions year:int32,month:int32 \\
+  --sql 'SELECT month, COUNT(*) FROM data WHERE year = 2025 GROUP BY month'
+```
+
+Partition columns are supplied by directory names, not read from Parquet
+file contents. DataFusion can prune directories for predicates on those
+columns. The flag also applies to all `--parquet-table` inputs.
+
 Create lazy SQL views for reusable queries. Views can refer to earlier views:
 
 ```sh
