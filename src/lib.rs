@@ -544,6 +544,46 @@ impl RustSparkSession {
         result
     }
 
+    /// Fill NULLs in several columns, like Spark DataFrame.na.fill(map).
+    ///
+    /// Values are typed Arrow scalars. Each replacement is applied to its
+    /// selected column only, preserving other values and column order.
+    /// DataFusion ignores replacements incompatible with a column type.
+    pub async fn fill_nulls(
+        &self,
+        table: &str,
+        replacements: &[(&str, datafusion::common::ScalarValue)],
+    ) -> Result<DataFrame> {
+        use std::collections::HashSet;
+
+        let mut dataframe = self.table(table).await?;
+        let mut seen = HashSet::new();
+        for (name, value) in replacements {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate fillna column: {name}"
+                )));
+            }
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == *name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown fillna column: {name}"
+                )));
+            }
+            if value.is_null() {
+                return Err(DataFusionError::Plan(format!(
+                    "fillna replacement cannot be NULL: {name}"
+                )));
+            }
+            dataframe = dataframe.fill_null(value, &[*name])?;
+        }
+        Ok(dataframe)
+    }
+
     pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
         let dataframe = self.table(source).await?;
         self.register_dataframe(alias, dataframe)
