@@ -33,5 +33,135 @@
     "id": "table_window",
     "ordered": true,
     "sql": "SELECT id, SUM(amount) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_count",
+    "ordered": true,
+    "sql": "SELECT COUNT(*) AS total FROM events_left"
+  },
+  {
+    "id": "table_distinct",
+    "ordered": true,
+    "sql": "SELECT DISTINCT label FROM events_left ORDER BY label"
+  },
+  {
+    "id": "table_filter",
+    "ordered": true,
+    "sql": "SELECT id, amount FROM events_left WHERE amount >= 20 ORDER BY id"
+  },
+  {
+    "id": "table_in_predicate",
+    "ordered": true,
+    "sql": "SELECT id FROM events_left WHERE id IN (1, 3) ORDER BY id"
+  },
+  {
+    "id": "table_between",
+    "ordered": true,
+    "sql": "SELECT id FROM events_left WHERE amount BETWEEN 10 AND 30 ORDER BY id"
+  },
+  {
+    "id": "table_having",
+    "ordered": true,
+    "sql": "SELECT label, SUM(amount) AS total FROM events_left GROUP BY label HAVING SUM(amount) >= 20 ORDER BY label"
+  },
+  {
+    "id": "table_group_count",
+    "ordered": true,
+    "sql": "SELECT label, COUNT(*) AS total FROM events_left GROUP BY label ORDER BY label"
+  },
+  {
+    "id": "table_group_avg",
+    "ordered": true,
+    "sql": "SELECT label, AVG(amount) AS average FROM events_left GROUP BY label ORDER BY label"
+  },
+  {
+    "id": "table_union_all",
+    "ordered": true,
+    "sql": "SELECT id FROM events_left UNION ALL SELECT id FROM events_right ORDER BY id"
+  },
+  {
+    "id": "table_union_distinct",
+    "ordered": true,
+    "sql": "SELECT id FROM events_left UNION SELECT id FROM events_right ORDER BY id"
+  },
+  {
+    "id": "table_right_join",
+    "ordered": true,
+    "sql": "SELECT l.id AS left_id, r.id AS right_id FROM events_left l RIGHT JOIN events_right r ON l.id = r.id ORDER BY r.id"
+  },
+  {
+    "id": "table_full_join",
+    "ordered": true,
+    "sql": "SELECT l.id AS left_id, r.id AS right_id FROM events_left l FULL JOIN events_right r ON l.id = r.id ORDER BY COALESCE(l.id, r.id)"
+  },
+  {
+    "id": "table_exists",
+    "ordered": true,
+    "sql": "SELECT l.id FROM events_left l WHERE EXISTS (SELECT 1 FROM events_right r WHERE r.id = l.id) ORDER BY l.id"
+  },
+  {
+    "id": "table_not_exists",
+    "ordered": true,
+    "sql": "SELECT l.id FROM events_left l WHERE NOT EXISTS (SELECT 1 FROM events_right r WHERE r.id = l.id) ORDER BY l.id"
+  },
+  {
+    "id": "table_case",
+    "ordered": true,
+    "sql": "SELECT id, CASE WHEN amount > 20 THEN 'large' ELSE 'small' END AS size FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_coalesce",
+    "ordered": true,
+    "sql": "SELECT id, COALESCE(label, 'unknown') AS name FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_nullif",
+    "ordered": true,
+    "sql": "SELECT id, NULLIF(amount, 20) AS amount FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_string_upper",
+    "ordered": true,
+    "sql": "SELECT id, UPPER(label) AS uppercase FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_substring",
+    "ordered": true,
+    "sql": "SELECT id, SUBSTRING(label, 1, 2) AS prefix FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_like",
+    "ordered": true,
+    "sql": "SELECT id FROM events_left WHERE label LIKE '%a%' ORDER BY id"
+  },
+  {
+    "id": "table_window_rank",
+    "ordered": true,
+    "sql": "SELECT id, RANK() OVER (ORDER BY amount DESC) AS rank FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_window_lag",
+    "ordered": true,
+    "sql": "SELECT id, LAG(amount, 1) OVER (ORDER BY id) AS previous FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_window_lead",
+    "ordered": true,
+    "sql": "SELECT id, LEAD(amount, 1) OVER (ORDER BY id) AS next_value FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_window_partition",
+    "ordered": true,
+    "sql": "SELECT id, SUM(amount) OVER (PARTITION BY (id % 2)) AS bucket_sum FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_cast_date",
+    "ordered": true,
+    "sql": "SELECT id, CAST(event_time AS DATE) AS day FROM events_left ORDER BY id"
+  },
+  {
+    "id": "table_decimal_arithmetic",
+    "ordered": true,
+    "sql": "SELECT id, CAST(amount AS DECIMAL(10,2)) + CAST(1 AS DECIMAL(10,2)) AS plus_one FROM events_left ORDER BY id"
   }
 ]

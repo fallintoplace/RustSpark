@@ -36,9 +36,34 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         self.assertIsNone(mod.compare_typed(left, right, False))
         self.assertIsNotNone(mod.compare_typed(left, right, True))
 
+    def test_timestamp_and_decimal_encodings_are_normalized(self):
+        ours = mod.TypedResult(
+            mod.QueryResult(["ts", "money"], [["2024-01-02 12:00:00", "10.00"]]),
+            ["timestamp", "decimal(10,2)"],
+        )
+        import datetime
+        import decimal
+        reference = mod.TypedResult(
+            mod.QueryResult(["ts", "money"], [[datetime.datetime(2024, 1, 2, 12), decimal.Decimal("10.0")]]),
+            ["timestamp", "decimal(10,2)"],
+        )
+        self.assertIsNone(mod.compare_typed(ours, reference, True))
+
+    def test_nullability_is_opt_in_and_reports_mismatch(self):
+        ours = mod.TypedResult(mod.QueryResult(["n"], [[1]]), ["bigint"], [True])
+        reference = mod.TypedResult(mod.QueryResult(["n"], [[1]]), ["bigint"], [False])
+        self.assertIsNone(mod.compare_typed(ours, reference, True))
+        self.assertIn("nullability differs", mod.compare_typed(
+            ours, reference, True, check_nullability=True))
+
+    def test_result_shape_is_validated(self):
+        bad = mod.TypedResult(mod.QueryResult(["n"], [[1, 2]]), ["bigint"])
+        with self.assertRaisesRegex(ValueError, "Row length"):
+            mod.compare_typed(bad, bad, True)
+
     def test_fixture_corpus_is_valid(self):
         cases = mod.load_cases(mod.CASES)
-        self.assertGreaterEqual(len(cases), 5)
+        self.assertGreaterEqual(len(cases), 30)
         for name in mod.TABLES:
             self.assertTrue((mod.FIXTURES / (name + ".csv")).is_file())
 

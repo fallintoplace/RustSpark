@@ -58,3 +58,16 @@ The manually triggered and weekly GitHub workflow runs real PySpark and
 publishes the JSON report even when differences occur. Regular PR CI runs only
 the Python unit tests to avoid a large Spark download on every change.
 This is a differential measurement tool, not a compatibility guarantee.
+
+## Extended typed SQL compatibility checks
+
+The table-backed differential suite now contains 33 deterministic cases,
+including full and anti-joins, aggregations, date and decimal conversions,
+window expressions, filters, NULL logic, and set operations. Timestamp values
+and decimal representations are normalized by their logical types before row
+comparison. Column names and normalized types are always checked, while
+SQL nullability is optionally checked with `--check-nullability`.
+
+Run the real PySpark 4 suite with `--check-nullability` to see NULL metadata
+differences. Every mismatch and error remains visible in the JSON report.
+Normalization does not establish full Spark compatibility.
