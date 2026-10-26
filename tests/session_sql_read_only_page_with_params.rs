@@ -2,7 +2,8 @@ use datafusion::{arrow::array::Int64Array, common::ScalarValue};
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn pages_bound_read_only_sql_with_validated_bounds() -> Result<(), Box<dyn std::error::Error>> {
+async fn pages_bound_read_only_sql_with_validated_bounds() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     session
         .register_csv(
