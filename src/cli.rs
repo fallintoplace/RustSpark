@@ -497,6 +497,23 @@ fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
     }
 }
 
+async fn reject_duplicate_csv_headers(
+    session: &RustSparkSession,
+    name: &str,
+) -> datafusion::error::Result<()> {
+    let dataframe = session.table(name).await?;
+    let mut names = HashSet::new();
+    for field in dataframe.schema().fields() {
+        if !names.insert(field.name().to_ascii_lowercase()) {
+            return Err(datafusion::error::DataFusionError::Plan(format!(
+                "Duplicate CSV column: {}",
+                field.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
 // DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
 // Read as strings and normalize before casting to the inferred input types.
 async fn register_csv_with_null_value(
@@ -701,6 +718,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .register_csv_with_options(&args.table, csv, options)
                 .await?;
         }
+        reject_duplicate_csv_headers(&session, &args.table).await?;
     } else if let Some(parquet) = args.parquet.as_ref() {
         let options = parquet_read_options(&args);
         session
@@ -726,12 +744,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             registration_jobs.spawn(async move {
                 let options = csv_read_options(&args);
                 if let Some(marker) = args.csv_null_value.as_deref() {
-                    register_csv_with_null_value(&session, &name, &path, options, marker).await
+                    register_csv_with_null_value(&session, &name, &path, options, marker).await?;
                 } else {
                     session
                         .register_csv_with_options(&name, &path, options)
-                        .await
+                        .await?;
                 }
+                reject_duplicate_csv_headers(&session, &name).await
             });
             if registration_jobs.len() >= 4 {
                 registration_jobs
