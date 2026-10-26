@@ -327,7 +327,12 @@ impl RustSparkSession {
     ///
     /// Limits the plan to one row to avoid collecting the full result.
     pub async fn sql_exists(&self, query: &str) -> Result<bool> {
-        let batches = self.sql_read_only(query).await?.limit(0, Some(1))?.collect().await?;
+        let batches = self
+            .sql_read_only(query)
+            .await?
+            .limit(0, Some(1))?
+            .collect()
+            .await?;
         Ok(batches.iter().any(|batch| batch.num_rows() > 0))
     }
 
