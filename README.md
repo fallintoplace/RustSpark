@@ -119,3 +119,16 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data'
 ```
 
 Unlike `--explain`, this mode runs the query to collect execution metrics.
+
+Bind typed positional SQL parameters instead of interpolating user values into SQL:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'SELECT COUNT(*) FROM data WHERE amount > $1 AND city = $2' \
+  --param int64:10 --param utf8:Berlin
+```
+
+Repeat `--param` in `$1`, `$2`, ... order. Supported types are
+`int64`, `float64`, `bool`, `utf8`, and `null:`.
+String values may contain colons. Parameters use DataFusion binding, not
+SQL text substitution.
