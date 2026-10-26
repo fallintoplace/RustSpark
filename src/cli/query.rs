@@ -9,8 +9,8 @@ use datafusion::{
     prelude::DataFrame,
     sql::parser::{DFParser, Statement as DFStatement},
 };
-use rustspark::RustSparkSession;
 use futures::StreamExt;
+use rustspark::RustSparkSession;
 
 use super::output::is_broken_pipe;
 use super::{Args, write_arrow_ipc, write_stdout};
