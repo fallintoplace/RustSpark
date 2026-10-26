@@ -636,19 +636,21 @@ impl RustSparkSession {
         use std::collections::HashSet;
 
         let mut dataframe = self.table(table).await?;
+        let columns: HashSet<_> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_owned())
+            .collect();
         let mut seen = HashSet::new();
+        let mut grouped = Vec::<(&datafusion::common::ScalarValue, Vec<&str>)>::new();
         for (name, value) in replacements {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate fillna column: {name}"
                 )));
             }
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == *name)
-            {
+            if !columns.contains(*name) {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown fillna column: {name}"
                 )));
@@ -658,7 +660,18 @@ impl RustSparkSession {
                     "fillna replacement cannot be NULL: {name}"
                 )));
             }
-            dataframe = dataframe.fill_null(value, &[*name])?;
+            // The same typed value can fill several columns in one projection.
+            if let Some((_, names)) = grouped
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == value)
+            {
+                names.push(*name);
+            } else {
+                grouped.push((value, vec![*name]));
+            }
+        }
+        for (value, names) in grouped {
+            dataframe = dataframe.fill_null(value, &names)?;
         }
         Ok(dataframe)
     }
