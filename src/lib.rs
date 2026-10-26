@@ -906,9 +906,9 @@ impl RustSparkSession {
                 "join_tables_on requires at least one predicate; use SQL CROSS JOIN for Cartesian products".into(),
             ));
         }
-        self.table(left)
-            .await?
-            .join_on(self.table(right).await?, join_type, predicates)
+        // Provider discovery does not depend on the other join input.
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        left_frame.join_on(right_frame, join_type, predicates)
     }
 
     /// Cross join two registered tables, like Spark DataFrame.crossJoin.
