@@ -12,7 +12,7 @@ use datafusion::common::ScalarValue;
 use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::prelude::{CsvReadOptions, SessionConfig, cast, ident, lit, nullif};
+use datafusion::prelude::SessionConfig;
 use datafusion::sql::parser::DFParser;
 use futures::StreamExt;
 use rustspark::RustSparkSession;
@@ -426,43 +426,8 @@ async fn reject_duplicate_csv_headers(
     Ok(())
 }
 
-// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
-// Read as strings and normalize before casting to the inferred input types.
-async fn register_csv_with_null_value(
-    session: &RustSparkSession,
-    name: &str,
-    path: impl AsRef<std::path::Path>,
-    options: CsvReadOptions<'_>,
-    marker: &str,
-) -> datafusion::error::Result<()> {
-    let inferred = session
-        .read_csv_with_options(&path, options.clone())
-        .await?;
-    let fields = inferred.schema().fields();
-    let string_schema = Schema::new(
-        fields
-            .iter()
-            .map(|field| Field::new(field.name(), DataType::Utf8, true))
-            .collect::<Vec<_>>(),
-    );
-    let raw = session
-        .read_csv_with_options(path, options.schema(&string_schema).null_regex(None))
-        .await?;
-    let expressions = fields
-        .iter()
-        .map(|field| {
-            let value = nullif(ident(field.name()), lit(marker));
-            let typed = if field.data_type() == &DataType::Utf8 {
-                value
-            } else {
-                cast(value, field.data_type().clone())
-            };
-            typed.alias(field.name())
-        })
-        .collect::<Vec<_>>();
-    session.register_dataframe(name, raw.select(expressions)?)?;
-    Ok(())
-}
+mod csv_input;
+use csv_input::register_csv_with_null_value;
 
 fn parse_query_timeout(value: &str) -> Result<u64, String> {
     let seconds = value
