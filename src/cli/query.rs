@@ -517,7 +517,7 @@ async fn execute_query(
         } else {
             dataframe
         };
-        if let Err(error) = write_stdout(dataframe, format).await
+        if let Err(error) = write_stdout(dataframe, format, !args.stdout_no_header).await
             && !is_broken_pipe(error.as_ref())
         {
             return Err(error);

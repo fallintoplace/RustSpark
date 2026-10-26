@@ -338,6 +338,10 @@ The Arrow output is always one file. It preserves Arrow column types and
 supports empty results. Like other exports, a failed or timed-out query can
 leave a partial output file.
 
+To omit the header row in CSV or TSV pipelines, add `--stdout-no-header`
+alongside `--stdout-format csv` or `--stdout-format tsv`. This also
+produces empty stdout for a query returning no rows.
+
 Stream tab-separated output for spreadsheet and Unix tool pipelines.
 Like CSV, TSV writes one header row and escapes fields when needed:
 

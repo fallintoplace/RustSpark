@@ -81,6 +81,7 @@ fn preserve_writer_pipe_error(
 pub(super) async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
     format: StdoutFormat,
+    include_header: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
@@ -100,6 +101,7 @@ pub(super) async fn write_stdout(
             };
             let mut writer = datafusion::arrow::csv::WriterBuilder::new()
                 .with_delimiter(delimiter)
+                .with_header(include_header)
                 .build(&mut tracked);
             let mut wrote_batch = false;
             while let Some(batch) = stream.next().await {
@@ -108,7 +110,7 @@ pub(super) async fn write_stdout(
                     .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
                 wrote_batch = true;
             }
-            if !wrote_batch {
+            if !wrote_batch && include_header {
                 // Include column headers even when the query returns no rows.
                 writer
                     .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
