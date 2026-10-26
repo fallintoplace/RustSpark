@@ -1009,10 +1009,10 @@ async fn execute_query(
         } else {
             dataframe
         };
-        if let Err(error) = write_stdout(dataframe, format).await {
-            if !is_broken_pipe(error.as_ref()) {
-                return Err(error);
-            }
+        if let Err(error) = write_stdout(dataframe, format).await
+            && !is_broken_pipe(error.as_ref())
+        {
+            return Err(error);
         }
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
