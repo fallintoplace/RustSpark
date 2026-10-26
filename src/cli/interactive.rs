@@ -9,6 +9,61 @@ use rustspark::RustSparkSession;
 
 use super::{Args, cache_tables, execute_script, register_derived_tables};
 
+// Detect a semicolon outside quoted strings and comments, including a final
+// SQL comment on the same line as the terminator.
+fn has_sql_terminator(sql: &str) -> bool {
+    let mut chars = sql.chars().peekable();
+    let mut quote = None;
+    let mut block_depth = 0usize;
+    let mut line_comment = false;
+    let mut last_significant = None;
+    while let Some(ch) = chars.next() {
+        if line_comment {
+            if ch == '\n' {
+                line_comment = false;
+            }
+            continue;
+        }
+        if block_depth > 0 {
+            if ch == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                block_depth += 1;
+            } else if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block_depth -= 1;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                if chars.peek() == Some(&delimiter) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                line_comment = true;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                block_depth = 1;
+            }
+            '\'' | '"' | '\u{60}' => {
+                quote = Some(ch);
+                last_significant = Some(ch);
+            }
+            other if !other.is_whitespace() => last_significant = Some(other),
+            _ => {}
+        }
+    }
+    quote.is_none() && block_depth == 0 && last_significant == Some(';')
+}
+
 /// Run SQL statements in one session so views and DDL survive between prompts.
 pub(super) async fn run_interactive(
     session: &RustSparkSession,
@@ -48,7 +103,7 @@ pub(super) async fn run_interactive(
             }
         }
         pending.push_str(&line);
-        if !pending.trim_end().ends_with(';') {
+        if !has_sql_terminator(&pending) {
             continue;
         }
 
