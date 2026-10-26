@@ -3,6 +3,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::{
     CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
 };
@@ -126,6 +127,9 @@ struct Args {
 
     #[arg(long = "query-timeout", value_name = "SECONDS", value_parser = parse_query_timeout)]
     query_timeout: Option<u64>,
+
+    #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
+    memory_limit_bytes: Option<usize>,
 
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
@@ -405,6 +409,15 @@ fn parse_query_timeout(value: &str) -> Result<u64, String> {
     Ok(seconds)
 }
 
+fn parse_memory_limit_mib(value: &str) -> Result<usize, String> {
+    let mib = value
+        .parse::<usize>()
+        .map_err(|_| "--memory-limit-mb requires a positive integer".to_owned())?;
+    mib.checked_mul(1024 * 1024)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| "--memory-limit-mb must fit in a positive number of bytes".to_owned())
+}
+
 fn parse_batch_size(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -473,7 +486,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         config
     };
-    let session = Arc::new(RustSparkSession::with_config(config));
+    let session = if let Some(limit) = args.memory_limit_bytes {
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_limit(limit, 1.0)
+            .build_arc()?;
+        Arc::new(RustSparkSession::with_config_and_runtime(config, runtime))
+    } else {
+        Arc::new(RustSparkSession::with_config(config))
+    };
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
