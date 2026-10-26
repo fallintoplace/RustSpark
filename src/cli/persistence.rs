@@ -599,12 +599,7 @@ pub(super) async fn compact_saved_table(
     if !part.exists() {
         // A zero-row DataFrame may not write a Parquet part. Persist its
         // original schema so that it remains queryable after a restart.
-        let writer = datafusion::parquet::arrow::ArrowWriter::try_new(
-            fs::File::create(&part)?,
-            schema,
-            None,
-        )?;
-        writer.close()?;
+        write_empty_parquet_part(stage.data_path(), schema)?;
     }
     stage.commit()?;
     if !session.deregister_table(name)? {
