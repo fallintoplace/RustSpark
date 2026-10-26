@@ -136,6 +136,28 @@ impl RustSparkSession {
             .collect())
     }
 
+    /// Inspect the names, types and nullability of a read-only SQL query.
+    ///
+    /// Query results are not executed or collected.
+    pub async fn describe_sql(
+        &self,
+        query: &str,
+    ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
+        let dataframe = self.sql_read_only(query).await?;
+        Ok(dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    field.name().to_owned(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect())
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
