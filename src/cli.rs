@@ -893,13 +893,20 @@ async fn execute_registered_query(
         let union = session.union_tables_by_name(&sources).await?;
         session.register_dataframe(name, union)?;
     }
+    let mut view_names = HashSet::new();
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
+        if !view_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate SQL view: {name}").into());
+        }
         let dataframe = plan_query(session, sql, args).await?;
         session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
+        if !view_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate SQL view: {name}").into());
+        }
         let dataframe = plan_query(session, sql, args).await?.cache().await?;
         session.register_dataframe(name, dataframe)?;
     }
