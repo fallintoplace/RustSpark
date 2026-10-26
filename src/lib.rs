@@ -309,9 +309,9 @@ impl RustSparkSession {
     ///
     /// Each query must return a compatible schema. Duplicate rows remain.
     pub async fn union_sql(&self, queries: &[&str]) -> Result<DataFrame> {
-        let (first, rest) = queries.split_first().ok_or_else(|| {
-            DataFusionError::Plan("union_sql requires at least one query".into())
-        })?;
+        let (first, rest) = queries
+            .split_first()
+            .ok_or_else(|| DataFusionError::Plan("union_sql requires at least one query".into()))?;
         let mut dataframe = self.sql(first).await?;
         for query in rest {
             dataframe = dataframe.union(self.sql(query).await?)?;
