@@ -65,7 +65,10 @@ fn only_the_last_statement_is_displayed() -> TestResult {
 #[test]
 fn stops_on_failed_intermediate_statement() -> TestResult {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args(["--sql", "SELECT * FROM table_that_does_not_exist; SELECT 42"])
+        .args([
+            "--sql",
+            "SELECT * FROM table_that_does_not_exist; SELECT 42",
+        ])
         .output()?;
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("42"));
@@ -75,12 +78,10 @@ fn stops_on_failed_intermediate_statement() -> TestResult {
 #[test]
 fn rejects_comment_only_scripts() -> TestResult {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args(["--sql", "-- only a comment"])
+        .arg("--sql=-- only a comment")
         .output()?;
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("at least one statement")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at least one statement"));
     Ok(())
 }
 
