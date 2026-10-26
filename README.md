@@ -60,6 +60,19 @@ Join multiple CSV files in one query by naming each input:
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
 
+Union named inputs by column name, filling missing columns with NULL.
+The `--union-by-name` flag accepts existing tables and earlier unions.
+SQL views can query the combined result:
+
+```sh
+cargo run -- --csv-table first=tests/fixtures/sales.csv \
+  --csv-table second=tests/fixtures/sales.csv \
+  --union-by-name combined=first,second \
+  --sql 'SELECT city, SUM(amount) FROM combined GROUP BY city'
+```
+
+Column order can differ between inputs. Rows are appended without deduplication.
+
 Enable Parquet late materialization for selective filters:
 
 ```sh
