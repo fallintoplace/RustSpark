@@ -24,6 +24,14 @@ impl RustSparkSession {
         }
     }
 
+    /// Wrap a preconfigured DataFusion context, including an externally
+    /// provided execution backend such as Apache DataFusion Ballista.
+    ///
+    /// RustSpark does not take ownership of any scheduler or executor process.
+    pub fn from_context(context: SessionContext) -> Self {
+        Self { context }
+    }
+
     pub fn with_config_and_runtime(config: SessionConfig, runtime: Arc<RuntimeEnv>) -> Self {
         Self {
             context: SessionContext::new_with_config_rt(config, runtime),

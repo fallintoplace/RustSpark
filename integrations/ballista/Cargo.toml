@@ -1,0 +1,13 @@
+[package]
+name = "rustspark-ballista-remote"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This is intentionally a separate Cargo project. Ballista dependencies must
+# not enlarge the default RustSpark CLI or change its existing Cargo.lock.
+[dependencies]
+ballista = { version = "=55.0.0", default-features = false }
+datafusion = { version = "=55.1.0", default-features = false, features = ["sql", "parquet"] }
+rustspark = { path = "../.." }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
