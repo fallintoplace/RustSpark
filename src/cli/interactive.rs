@@ -92,6 +92,9 @@ pub(super) async fn run_interactive(
         if reader.read_line(&mut line)? == 0 {
             break;
         }
+        if pending.is_empty() && line.starts_with('\u{feff}') {
+            line = line.trim_start_matches('\u{feff}').to_owned();
+        }
         if pending.trim().is_empty() {
             match line.trim() {
                 "\\q" | ".quit" | ".exit" => break,
