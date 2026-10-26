@@ -31,8 +31,8 @@ fn prepare_staged_insert_files(
 ) -> Result<(), Box<dyn Error>> {
     let new = staging.join("new");
     fs::create_dir(&new)?;
-    validate_table_files(&original, table)?;
-    for entry in fs::read_dir(&original)? {
+    validate_table_files(original, table)?;
+    for entry in fs::read_dir(original)? {
         let entry = entry?;
         let source = entry.path();
         let target = new.join(entry.file_name());
