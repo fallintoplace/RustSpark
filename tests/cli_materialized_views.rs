@@ -57,12 +57,7 @@ fn rejects_bad_materialized_sql_view_declarations() -> TestResult {
         "empty=   ",
         "bad=SELECT * FROM unknown_table",
     ] {
-        let output = run(&[
-            "--materialized-sql-view",
-            definition,
-            "--sql",
-            "SELECT 1",
-        ])?;
+        let output = run(&["--materialized-sql-view", definition, "--sql", "SELECT 1"])?;
         assert!(!output.status.success(), "{definition}");
     }
     Ok(())
