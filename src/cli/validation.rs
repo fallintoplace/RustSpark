@@ -1,5 +1,26 @@
 use super::{Args, StdoutFormat, parse_named_table};
 
+use std::path::{Path, PathBuf};
+
+fn canonical_output_path(destination: &Path) -> Option<PathBuf> {
+    if let Ok(existing) = destination.canonicalize() {
+        return Some(existing);
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Some(parent.canonicalize().ok()?.join(destination.file_name()?))
+}
+
+fn overlaps_input_path(source: &Path, destination: &Path) -> bool {
+    source.canonicalize().is_ok_and(|source| {
+        destination == source
+            || (source.is_dir() && destination.starts_with(&source))
+            || (destination.is_dir() && source.starts_with(destination))
+    })
+}
+
 fn has_csv_input(args: &Args) -> bool {
     args.csv.is_some() || !args.csv_tables.is_empty()
 }
@@ -24,20 +45,8 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     .next() else {
         return Ok(());
     };
-    let destination = if let Ok(existing) = destination.canonicalize() {
-        existing
-    } else {
-        let parent = destination
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let Ok(parent) = parent.canonicalize() else {
-            return Ok(());
-        };
-        let Some(file_name) = destination.file_name() else {
-            return Ok(());
-        };
-        parent.join(file_name)
+    let Some(destination) = canonical_output_path(destination) else {
+        return Ok(());
     };
     let mut sources: Vec<&std::path::Path> = Vec::new();
     for path in [
@@ -62,13 +71,10 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
         let (_, path) = parse_named_table(mapping)?;
         sources.push(std::path::Path::new(path));
     }
-    if sources.iter().any(|source| {
-        source.canonicalize().is_ok_and(|source| {
-            destination == source
-                || (source.is_dir() && destination.starts_with(&source))
-                || (destination.is_dir() && source.starts_with(&destination))
-        })
-    }) {
+    if sources
+        .iter()
+        .any(|source| overlaps_input_path(source, &destination))
+    {
         return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
     }
     Ok(())
