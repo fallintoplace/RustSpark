@@ -716,7 +716,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.interactive {
         return run_interactive(&session, &args).await;
     }
-    with_query_timeout(args.query_timeout, execute_registered_query(&session, &args)).await
+    with_query_timeout(
+        args.query_timeout,
+        execute_registered_query(&session, &args),
+    )
+    .await
 }
 
 async fn execute_registered_query(
