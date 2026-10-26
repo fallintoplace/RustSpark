@@ -91,40 +91,39 @@ impl RustSparkSession {
         Ok(())
     }
 
-    /// List registered tables with fully qualified catalog.schema.table names.
-    ///
-    /// Results are sorted for stable inspection and CLI integration.
-    pub fn list_tables(&self) -> Vec<String> {
-        let mut tables = Vec::new();
+    fn sorted_catalog_entries(&self, include_tables: bool) -> Vec<String> {
+        let mut entries = Vec::new();
         for catalog_name in self.context.catalog_names() {
             if let Some(catalog) = self.context.catalog(&catalog_name) {
                 for schema_name in catalog.schema_names() {
-                    if let Some(schema) = catalog.schema(&schema_name) {
-                        for table_name in schema.table_names() {
-                            tables.push(format!("{catalog_name}.{schema_name}.{table_name}"));
+                    if include_tables {
+                        if let Some(schema) = catalog.schema(&schema_name) {
+                            for table_name in schema.table_names() {
+                                entries.push(format!("{catalog_name}.{schema_name}.{table_name}"));
+                            }
                         }
+                    } else {
+                        entries.push(format!("{catalog_name}.{schema_name}"));
                     }
                 }
             }
         }
-        tables.sort();
-        tables
+        entries.sort();
+        entries
+    }
+
+    /// List registered tables with fully qualified catalog.schema.table names.
+    ///
+    /// Results are sorted for stable inspection and CLI integration.
+    pub fn list_tables(&self) -> Vec<String> {
+        self.sorted_catalog_entries(true)
     }
 
     /// List fully qualified catalog.schema names in sorted order.
     ///
     /// Empty schemas are included even when they contain no tables.
     pub fn list_schemas(&self) -> Vec<String> {
-        let mut schemas = Vec::new();
-        for catalog_name in self.context.catalog_names() {
-            if let Some(catalog) = self.context.catalog(&catalog_name) {
-                for schema_name in catalog.schema_names() {
-                    schemas.push(format!("{catalog_name}.{schema_name}"));
-                }
-            }
-        }
-        schemas.sort();
-        schemas
+        self.sorted_catalog_entries(false)
     }
 
     /// Create a lazy DataFrame from in-memory Arrow record batches.
