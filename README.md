@@ -43,6 +43,8 @@ cargo run -- --csv tests/fixtures/sales.csv --interactive
 Enter SQL statements ending with `;`. Multi-line statements are supported.
 Use `\\q` or `.quit` to exit; SQL errors do not close the shell.
 The `--query-timeout` applies to each executed statement.
+Run `.tables` to list registered tables or `.schema data` to inspect a table's
+column types without scanning its rows. These commands work between SQL statements.
 
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
