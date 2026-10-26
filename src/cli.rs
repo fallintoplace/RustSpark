@@ -1001,11 +1001,17 @@ async fn write_arrow_ipc(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
-    let file = std::fs::File::create(path)?;
-    let mut writer = FileWriter::try_new_buffered(file, &schema)?;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let mut writer = FileWriter::try_new_buffered(temporary.reopen()?, &schema)?;
     while let Some(batch) = stream.next().await {
         writer.write(&batch?)?;
     }
     writer.finish()?;
+    drop(writer);
+    temporary.persist(path)?;
     Ok(())
 }
