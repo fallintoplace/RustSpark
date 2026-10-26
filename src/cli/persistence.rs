@@ -8,6 +8,9 @@ use rustspark::RustSparkSession;
 
 use super::valid_identifier;
 
+mod insert;
+pub(super) use insert::StagedInsert;
+
 /**
  * Hold an OS-owned lock for the entire lifetime of a local database session.
  *
@@ -41,6 +44,7 @@ pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
 /// Remove reserved staging and drop tombstone directories after an interrupted
 /// session. The caller holds the exclusive database lock.
 fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
+    insert::recover_interrupted_inserts(root)?;
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let filename = entry.file_name();

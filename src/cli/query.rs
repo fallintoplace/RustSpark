@@ -4,12 +4,14 @@ use datafusion::{
     config::TableParquetOptions,
     dataframe::DataFrameWriteOptions,
     logical_expr::sqlparser::ast::{
-        AlterTableOperation, ObjectType, RenameTableNameKind, Statement as SqlStatement,
+        AlterTableOperation, Ident, ObjectName, ObjectType, RenameTableNameKind,
+        Statement as SqlStatement, TableObject,
     },
     prelude::DataFrame,
     sql::parser::{DFParser, Statement as DFStatement},
 };
 use rustspark::RustSparkSession;
+use futures::StreamExt;
 
 use super::output::is_broken_pipe;
 use super::{Args, write_arrow_ipc, write_stdout};
@@ -36,6 +38,10 @@ pub(super) async fn execute_script(
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
     for statement in statements {
+        if let Some(table) = persistent_insert_target(&statement, args)? {
+            execute_persistent_insert(session, &statement, args, &table, false).await?;
+            continue;
+        }
         if let Some((source, destination)) = persistent_rename_table(&statement, args)? {
             let root = args
                 .database_dir
@@ -53,6 +59,9 @@ pub(super) async fn execute_script(
         persist_created_table(session, &statement, args).await?;
         persist_dropped_table(dropped, args)?;
     }
+    if let Some(table) = persistent_insert_target(&last, args)? {
+        return execute_persistent_insert(session, &last, args, &table, true).await;
+    }
     if let Some((source, destination)) = persistent_rename_table(&last, args)? {
         let root = args
             .database_dir
@@ -65,6 +74,107 @@ pub(super) async fn execute_script(
     execute_query(session, &last.to_string(), args).await?;
     persist_created_table(session, &last, args).await?;
     persist_dropped_table(dropped, args)
+}
+
+/// Persistent INSERT is executed against a private copy of the table. The
+/// original remains queryable until the complete new directory is published.
+fn persistent_insert_target(
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(None);
+    };
+    let DFStatement::Statement(statement) = statement else {
+        return Ok(None);
+    };
+    let SqlStatement::Insert(insert) = statement.as_ref() else {
+        return Ok(None);
+    };
+    let TableObject::TableName(name) = &insert.table else {
+        return Err("Persistent INSERT requires a simple local table name".into());
+    };
+    let table = name.to_string().to_ascii_lowercase();
+    if !super::valid_identifier(&table) {
+        return Err("Persistent INSERT requires a simple unquoted table name".into());
+    }
+    if root.join(&table).is_dir() {
+        Ok(Some(table))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Remove the temporary DataFusion table and incomplete staging files if a
+/// query fails or its future is cancelled (for example by --query-timeout).
+struct InsertStageGuard<'a> {
+    session: &'a RustSparkSession,
+    table: String,
+    insert: &'a StagedInsert,
+}
+
+impl Drop for InsertStageGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.session.deregister_table(&self.table);
+        self.insert.discard_uncommitted();
+    }
+}
+
+async fn execute_persistent_insert(
+    session: &RustSparkSession,
+    statement: &DFStatement,
+    args: &Args,
+    table: &str,
+    display_result: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+    let temporary_table = format!("__rustspark_insert_stage_{table}");
+    if session.table_exists(&temporary_table)? {
+        return Err(format!("Reserved SQL staging table already exists: {temporary_table}").into());
+    }
+    let staging = StagedInsert::begin(root, table)?;
+    let guard = InsertStageGuard {
+        session,
+        table: temporary_table.clone(),
+        insert: &staging,
+    };
+    super::persistence::register_saved_table(session, &temporary_table, staging.next_dir()).await?;
+
+    // Change the parsed INSERT target rather than manipulating SQL strings.
+    // Source SELECTs still read the original snapshot, including self-inserts.
+    let mut staged_statement = statement.clone();
+    if let DFStatement::Statement(sql) = &mut staged_statement {
+        if let SqlStatement::Insert(insert) = sql.as_mut() {
+            insert.table = TableObject::TableName(ObjectName::from(Ident::new(&temporary_table)));
+        }
+    }
+    let mut batches = plan_query(session, &staged_statement.to_string(), args)
+        .await?
+        .execute_stream()
+        .await?;
+    // DataFusion INSERT produces a count result. Bound the result even if this
+    // changes upstream so write metadata never becomes an unbounded collect.
+    let mut counts = Vec::new();
+    let mut result_rows = 0_usize;
+    while let Some(batch) = batches.next().await {
+        let batch = batch?;
+        result_rows += batch.num_rows();
+        if result_rows > 1024 {
+            return Err("Persistent INSERT returned unexpectedly many rows".into());
+        }
+        counts.push(batch);
+    }
+    drop(batches);
+    // Do not retain an open table registration while renaming its directory.
+    session.deregister_table(&temporary_table)?;
+    staging.publish()?;
+    drop(guard);
+    session.deregister_table(table)?;
+    super::persistence::register_saved_table(session, table, &root.join(table)).await?;
+    if display_result {
+        execute_dataframe(session.read_batches(counts)?, args).await?;
+    }
+    Ok(())
 }
 
 fn persistent_create_table<'a>(
@@ -233,7 +343,13 @@ async fn execute_query(
     query: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = plan_query(session, query, args).await?;
+    execute_dataframe(plan_query(session, query, args).await?, args).await
+}
+
+async fn execute_dataframe(
+    dataframe: DataFrame,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = args.save_table.as_deref() {
         let directory = args
             .database_dir
