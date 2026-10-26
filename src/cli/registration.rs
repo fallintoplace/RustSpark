@@ -92,10 +92,10 @@ async fn register_named_input(
     }
 }
 
-pub(super) async fn register_inputs(
-    session: &Arc<RustSparkSession>,
-    args: &Arc<Args>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn register_unnamed_input(
+    session: &RustSparkSession,
+    args: &Args,
+) -> datafusion::error::Result<bool> {
     if let Some(csv) = args.csv.as_ref() {
         register_csv_input(session, args, &args.table, csv.as_path()).await?;
     } else if let Some(parquet) = args.parquet.as_ref() {
@@ -109,28 +109,39 @@ pub(super) async fn register_inputs(
             .register_json_with_options(&args.table, json, options)
             .await?;
     } else {
-        let mut names = HashSet::new();
-        let mut registration_jobs = tokio::task::JoinSet::new();
-        for (mappings, kind) in [
-            (&args.csv_tables, NamedInputKind::Csv),
-            (&args.parquet_tables, NamedInputKind::Parquet),
-            (&args.json_tables, NamedInputKind::Json),
-        ] {
-            for mapping in mappings {
-                let (name, path) = parse_unique_named_table(mapping, &mut names)?;
-                let session = Arc::clone(session);
-                let args = Arc::clone(args);
-                let name = name.to_owned();
-                let path = path.to_owned();
-                registration_jobs.spawn(async move {
-                    register_named_input(&session, &args, &name, &path, kind).await
-                });
-                finish_registration_when_full(&mut registration_jobs).await?;
-            }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub(super) async fn register_inputs(
+    session: &Arc<RustSparkSession>,
+    args: &Arc<Args>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if register_unnamed_input(session, args).await? {
+        return Ok(());
+    }
+    let mut names = HashSet::new();
+    let mut registration_jobs = tokio::task::JoinSet::new();
+    for (mappings, kind) in [
+        (&args.csv_tables, NamedInputKind::Csv),
+        (&args.parquet_tables, NamedInputKind::Parquet),
+        (&args.json_tables, NamedInputKind::Json),
+    ] {
+        for mapping in mappings {
+            let (name, path) = parse_unique_named_table(mapping, &mut names)?;
+            let session = Arc::clone(session);
+            let args = Arc::clone(args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            registration_jobs.spawn(async move {
+                register_named_input(&session, &args, &name, &path, kind).await
+            });
+            finish_registration_when_full(&mut registration_jobs).await?;
         }
-        while let Some(result) = registration_jobs.join_next().await {
-            result??;
-        }
+    }
+    while let Some(result) = registration_jobs.join_next().await {
+        result??;
     }
     Ok(())
 }
