@@ -196,14 +196,22 @@ fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Erro
             let jobs = paths
                 .chunks(chunk_size)
                 .map(|chunk| {
-                    scope.spawn(move || chunk.iter().try_for_each(|path| validate_parquet_part(path)))
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .try_for_each(|path| validate_parquet_part(path))
+                    })
                 })
                 .collect::<Vec<_>>();
-            jobs.into_iter()
-                .try_for_each(|job| job.join().expect("Parquet footer validation worker panicked"))
+            jobs.into_iter().try_for_each(|job| {
+                job.join()
+                    .expect("Parquet footer validation worker panicked")
+            })
         })
     } else {
-        paths.iter().try_for_each(|path| validate_parquet_part(path))
+        paths
+            .iter()
+            .try_for_each(|path| validate_parquet_part(path))
     };
     validation.map_err(|message| -> Box<dyn Error> { message.into() })
 }
