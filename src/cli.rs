@@ -115,6 +115,12 @@ struct Args {
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
+    #[arg(
+        long = "count-only",
+        conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    count_only: bool,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
@@ -603,6 +609,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         dataframe
             .write_json(path, DataFrameWriteOptions::new(), None)
             .await?;
+    } else if args.count_only {
+        println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
         dataframe.show_limit(max_rows).await?;
     } else {

@@ -70,6 +70,14 @@ cargo run -- --csv tests/fixtures/sales.csv --cache-table data --sql 'SELECT SUM
 
 The `--cache-table` flag can be repeated for distinct tables.
 
+Print only the number of rows returned by a query:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data WHERE amount >= 10' --count-only
+```
+
+This counts the query result rows, not the rows in its source tables.
+
 Standalone SQL without a file also works:
 
 ```sh
