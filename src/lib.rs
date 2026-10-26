@@ -920,38 +920,35 @@ impl RustSparkSession {
             .await
     }
 
+    async fn union_sql_internal(&self, queries: &[&str], by_name: bool) -> Result<DataFrame> {
+        let operation = if by_name { "union_sql_by_name" } else { "union_sql" };
+        let (first, rest) = queries.split_first().ok_or_else(|| {
+            DataFusionError::Plan(format!("{operation} requires at least one query"))
+        })?;
+        let mut dataframe = self.sql(first).await?;
+        for query in rest {
+            let next = self.sql(query).await?;
+            dataframe = if by_name {
+                dataframe.union_by_name(next)?
+            } else {
+                dataframe.union(next)?
+            };
+        }
+        Ok(dataframe)
+    }
+
     /// Union SQL query results by column position.
     ///
     /// Each query must return a compatible schema. Duplicate rows remain.
     pub async fn union_sql(&self, queries: &[&str]) -> Result<DataFrame> {
-        if queries.is_empty() {
-            return Err(DataFusionError::Plan(
-                "union_sql requires at least one query".into(),
-            ));
-        }
-        let mut frames = self.plan_union_sql_inputs(queries).await?.into_iter();
-        let mut dataframe = frames.next().expect("non-empty query list");
-        for frame in frames {
-            dataframe = dataframe.union(frame)?;
-        }
-        Ok(dataframe)
+        self.union_sql_internal(queries, false).await
     }
 
     /// Union lazy SQL query results by column name.
     ///
     /// Missing fields are filled with NULL and duplicate rows are preserved.
     pub async fn union_sql_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
-        if queries.is_empty() {
-            return Err(DataFusionError::Plan(
-                "union_sql_by_name requires at least one query".into(),
-            ));
-        }
-        let mut frames = self.plan_union_sql_inputs(queries).await?.into_iter();
-        let mut dataframe = frames.next().expect("non-empty query list");
-        for frame in frames {
-            dataframe = dataframe.union_by_name(frame)?;
-        }
-        Ok(dataframe)
+        self.union_sql_internal(queries, true).await
     }
 
     /// Union SQL query results by column name and remove duplicate rows.
