@@ -853,6 +853,20 @@ async fn execute_script(
     execute_query(session, &last.to_string(), args).await
 }
 
+fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
 async fn execute_query(
     session: &RustSparkSession,
     query: &str,
@@ -920,7 +934,11 @@ async fn execute_query(
         } else {
             dataframe
         };
-        write_stdout(dataframe, format).await?;
+        if let Err(error) = write_stdout(dataframe, format).await {
+            if !is_broken_pipe(error.as_ref()) {
+                return Err(error);
+            }
+        }
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
