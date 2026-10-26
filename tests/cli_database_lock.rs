@@ -27,7 +27,10 @@ fn database_lock_rejects_another_process_then_releases() -> TestResult {
     let blocked = run(&["--database-dir", root, "--sql", "SELECT 42 AS answer"]);
     assert!(!blocked.status.success());
     let stderr = String::from_utf8(blocked.stderr)?;
-    assert!(stderr.contains("Cannot lock database directory"), "{stderr}");
+    assert!(
+        stderr.contains("Cannot lock database directory"),
+        "{stderr}"
+    );
     drop(lock_file);
 
     let allowed = run(&["--database-dir", root, "--sql", "SELECT 42 AS answer"]);
