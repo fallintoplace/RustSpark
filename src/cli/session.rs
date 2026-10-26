@@ -7,18 +7,18 @@ use super::Args;
 
 fn build_session_config(args: &Args) -> SessionConfig {
     let mut config = SessionConfig::new();
-    config.options_mut().execution.parquet.pushdown_filters = args.parquet_pushdown_filters;
-    config.options_mut().execution.parquet.reorder_filters = args.parquet_reorder_filters;
-    let config = if let Some(batch_size) = args.batch_size {
-        config.with_batch_size(batch_size)
-    } else {
-        config
-    };
-    if let Some(partitions) = args.target_partitions {
-        config.with_target_partitions(partitions)
-    } else {
-        config
+    {
+        let parquet = &mut config.options_mut().execution.parquet;
+        parquet.pushdown_filters = args.parquet_pushdown_filters;
+        parquet.reorder_filters = args.parquet_reorder_filters;
     }
+    if let Some(batch_size) = args.batch_size {
+        config = config.with_batch_size(batch_size);
+    }
+    if let Some(partitions) = args.target_partitions {
+        config = config.with_target_partitions(partitions);
+    }
+    config
 }
 
 pub(super) fn new_session(
