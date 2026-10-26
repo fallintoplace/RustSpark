@@ -258,3 +258,37 @@ fn invalid_backup_between_swap_steps_is_not_promoted() -> TestResult {
     assert!(stage.join("old").is_dir());
     Ok(())
 }
+
+#[test]
+fn failed_insert_publication_emits_no_success_result() -> TestResult {
+    let db = tempfile::tempdir()?;
+    run_ok(db.path(), "CREATE TABLE items (id BIGINT)")?;
+    run_ok(db.path(), "INSERT INTO items VALUES (41)")?;
+
+    let failed = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .arg("--database-dir")
+        .arg(db.path())
+        .arg("--sql")
+        .arg("INSERT INTO items VALUES (99)")
+        .env("RUSTSPARK_TEST_INSERT_COMMIT_ERROR", "before_swap")
+        .output()?;
+    assert!(!failed.status.success());
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(error.contains("Injected pre-publication INSERT failure"), "{error}");
+    assert!(failed.stdout.is_empty(), "failed INSERT printed success output");
+    assert_eq!(total(db.path())?, 41);
+    assert!(!db.path().join(".rustspark-insert-items").exists());
+    Ok(())
+}
+
+#[test]
+fn successful_insert_outputs_single_result_after_commit() -> TestResult {
+    let db = tempfile::tempdir()?;
+    run_ok(db.path(), "CREATE TABLE items (id BIGINT)")?;
+    let committed = run(db.path(), "INSERT INTO items VALUES (1)", None);
+    assert!(committed.status.success());
+    let stdout = String::from_utf8(committed.stdout)?;
+    assert!(!stdout.is_empty(), "successful INSERT lost its result");
+    assert_eq!(total(db.path())?, 1);
+    Ok(())
+}
