@@ -3,7 +3,9 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::{cast, ident, lit, nullif, CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
+use datafusion::prelude::{
+    CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
+};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -463,7 +465,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(marker) = args.csv_null_value.as_deref() {
                     register_csv_with_null_value(&session, &name, &path, options, marker).await
                 } else {
-                    session.register_csv_with_options(&name, &path, options).await
+                    session
+                        .register_csv_with_options(&name, &path, options)
+                        .await
                 }
             });
             if csv_jobs.len() >= 4 {
