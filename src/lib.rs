@@ -62,10 +62,10 @@ impl RustSparkSession {
         let cached = self.table(name).await?.cache().await?;
         let previous = self.context.deregister_table(name)?;
         let result = self.register_dataframe(name, cached);
-        if result.is_err() {
-            if let Some(previous) = previous {
-                self.context.register_table(name, previous)?;
-            }
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            self.context.register_table(name, previous)?;
         }
         result
     }
