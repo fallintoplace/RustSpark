@@ -227,8 +227,8 @@ fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
             "float32" | "float" | "real" => DataType::Float32,
             "float64" | "double" => DataType::Float64,
             "bool" | "boolean" => DataType::Boolean,
-            _ => return Err(format!("Unsupported {source} type: {kind}")),
             "date32" | "date" => DataType::Date32,
+            _ => return Err(format!("Unsupported {source} type: {kind}")),
         };
         fields.push(Field::new(name, data_type, true));
     }
