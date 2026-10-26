@@ -15,10 +15,7 @@ fn streams_tsv_with_a_single_header() -> Result<(), Box<dyn std::error::Error>> 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8(output.stdout)?,
-        "city\tamount\na,b\t7\n"
-    );
+    assert_eq!(String::from_utf8(output.stdout)?, "city\tamount\na,b\t7\n");
     Ok(())
 }
 
