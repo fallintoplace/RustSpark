@@ -117,39 +117,35 @@ pub(super) async fn execute_script(
         return execute_query(session, &last.to_string(), args).await;
     }
     for statement in statements {
-        if let Some((source, destination)) = persistent_rename_table(&statement, args)? {
-            let root = args
-                .database_dir
-                .as_deref()
-                .ok_or("Missing database directory")?;
-            super::persistence::rename_saved_table(session, root, &source, &destination).await?;
-            continue;
-        }
-        validate_persistent_table_name(&statement, args)?;
-        let dropped = persistent_drop_table(&statement, args)?;
-        if let Some(target) = persistent_insert_table(&statement, args)? {
-            execute_staged_insert(session, &statement.to_string(), args, &target, false).await?;
-        } else {
-            drain_dataframe(plan_query(session, &statement.to_string(), args).await?).await?;
-        }
-        persist_created_table(session, &statement, args).await?;
-        persist_dropped_table(dropped, args)?;
+        execute_script_statement(session, &statement, args, false).await?;
     }
-    if let Some((source, destination)) = persistent_rename_table(&last, args)? {
+    execute_script_statement(session, &last, args, true).await
+}
+
+async fn execute_script_statement(
+    session: &RustSparkSession,
+    statement: &DFStatement,
+    args: &Args,
+    final_statement: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some((source, destination)) = persistent_rename_table(statement, args)? {
         let root = args
             .database_dir
             .as_deref()
             .ok_or("Missing database directory")?;
         return super::persistence::rename_saved_table(session, root, &source, &destination).await;
     }
-    validate_persistent_table_name(&last, args)?;
-    let dropped = persistent_drop_table(&last, args)?;
-    if let Some(target) = persistent_insert_table(&last, args)? {
-        execute_staged_insert(session, &last.to_string(), args, &target, true).await?;
+    validate_persistent_table_name(statement, args)?;
+    let dropped = persistent_drop_table(statement, args)?;
+    let sql = statement.to_string();
+    if let Some(target) = persistent_insert_table(statement, args)? {
+        execute_staged_insert(session, &sql, args, &target, final_statement).await?;
+    } else if final_statement {
+        execute_query(session, &sql, args).await?;
     } else {
-        execute_query(session, &last.to_string(), args).await?;
+        drain_dataframe(plan_query(session, &sql, args).await?).await?;
     }
-    persist_created_table(session, &last, args).await?;
+    persist_created_table(session, statement, args).await?;
     persist_dropped_table(dropped, args)
 }
 
