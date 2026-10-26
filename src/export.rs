@@ -2,8 +2,8 @@ use std::{fs, io::ErrorKind, path::Path};
 
 use datafusion::{
     dataframe::DataFrameWriteOptions,
-    prelude::DataFrame,
     error::{DataFusionError, Result},
+    prelude::DataFrame,
 };
 
 use crate::RustSparkSession;
@@ -69,9 +69,15 @@ async fn write_export_dataframe(
 ) -> Result<()> {
     let options = DataFrameWriteOptions::new();
     match format {
-        SqlExportFormat::Csv => frame.write_csv(path, options, None).await?,
-        SqlExportFormat::Json => frame.write_json(path, options, None).await?,
-        SqlExportFormat::Parquet => frame.write_parquet(path, options, None).await?,
+        SqlExportFormat::Csv => {
+            frame.write_csv(path, options, None).await?;
+        }
+        SqlExportFormat::Json => {
+            frame.write_json(path, options, None).await?;
+        }
+        SqlExportFormat::Parquet => {
+            frame.write_parquet(path, options, None).await?;
+        }
     }
     Ok(())
 }
