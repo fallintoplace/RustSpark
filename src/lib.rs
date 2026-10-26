@@ -74,6 +74,16 @@ impl RustSparkSession {
         self.context.read_batches(batches)
     }
 
+    /// Execute a SQL query as a stream of Arrow record batches.
+    ///
+    /// Clients can process batches incrementally without collecting all rows.
+    pub async fn sql_stream(
+        &self,
+        query: &str,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.sql(query).await?.execute_stream().await
+    }
+
     /// Register in-memory Arrow batches for SQL queries.
     pub fn register_batches(
         &self,
