@@ -146,6 +146,66 @@ impl RustSparkSession {
         self.register_dataframe(name, dataframe)
     }
 
+    /// Join two registered tables by their shared column names (SQL USING).
+    ///
+    /// Each join key appears once in the output, unlike an ON join. FULL OUTER
+    /// JOIN coalesces the key from whichever side supplies the row. Other
+    /// non-key columns are left unchanged, even when their names collide.
+    /// Use SQL with explicit aliases for self joins or unusual table names.
+    pub async fn join_tables_using(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        columns: &[&str],
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+        use std::collections::HashSet;
+
+        if columns.is_empty() || columns.iter().any(|column| column.trim().is_empty()) {
+            return Err(DataFusionError::Plan(
+                "join_tables_using requires one or more non-empty column names".into(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for column in columns {
+            if !seen.insert(column.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate join key: {column}"
+                )));
+            }
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            JoinType::Right => "RIGHT",
+            JoinType::Full => "FULL OUTER",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "join_tables_using supports inner and outer joins only".into(),
+                ));
+            }
+        };
+
+        // Quote every identifier instead of interpolating user-supplied SQL.
+        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let quote_table = |path: &str| -> Result<String> {
+            if path.split('.').any(|part| part.is_empty() || part.trim() != part) {
+                return Err(DataFusionError::Plan(
+                    "Join table name must be a non-empty catalog path".into(),
+                ));
+            }
+            Ok(path.split('.').map(&quote).collect::<Vec<_>>().join("."))
+        };
+        let keys = columns.iter().map(|name| quote(name)).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT * FROM {} {operator} JOIN {} USING ({keys})",
+            quote_table(left)?,
+            quote_table(right)?
+        );
+        self.sql(&sql).await
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
