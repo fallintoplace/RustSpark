@@ -2,6 +2,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::ipc::writer::FileWriter;
 use datafusion::common::ScalarValue;
 use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -10,6 +11,7 @@ use datafusion::prelude::{
     CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
 };
 use datafusion::sql::parser::DFParser;
+use futures::StreamExt;
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -115,19 +117,19 @@ struct Args {
 
     #[arg(
         long = "describe",
-        conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json"]
+        conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json", "output_arrow"]
     )]
     describe: bool,
 
     #[arg(
         long = "explain",
-        conflicts_with_all = ["describe", "max_rows", "output_parquet", "output_csv", "output_json"]
+        conflicts_with_all = ["describe", "max_rows", "output_parquet", "output_csv", "output_json", "output_arrow"]
     )]
     explain: bool,
 
     #[arg(
         long = "explain-analyze",
-        conflicts_with_all = ["describe", "explain", "max_rows", "output_parquet", "output_csv", "output_json"]
+        conflicts_with_all = ["describe", "explain", "max_rows", "output_parquet", "output_csv", "output_json", "output_arrow"]
     )]
     explain_analyze: bool,
 
@@ -139,7 +141,7 @@ struct Args {
 
     #[arg(
         long = "count-only",
-        conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json"]
+        conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json", "output_arrow"]
     )]
     count_only: bool,
 
@@ -175,6 +177,13 @@ struct Args {
         conflicts_with_all = ["max_rows", "output_parquet", "output_csv"]
     )]
     output_json: Option<PathBuf>,
+
+    #[arg(
+        long = "output-arrow",
+        value_name = "FILE",
+        conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    output_arrow: Option<PathBuf>,
 
     #[arg(long = "output-single-file")]
     output_single_file: bool,
@@ -522,6 +531,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         && args.output_parquet.is_none()
         && args.output_csv.is_none()
         && args.output_json.is_none()
+        && args.output_arrow.is_none()
     {
         return Err("--output-single-file requires an output format".into());
     }
@@ -805,6 +815,8 @@ async fn execute_query(
         dataframe
             .write_json(path, output_write_options(args.output_single_file), None)
             .await?;
+    } else if let Some(path) = args.output_arrow.as_ref() {
+        write_arrow_ipc(dataframe, path).await?;
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
@@ -822,5 +834,20 @@ async fn execute_query(
     } else {
         dataframe.show().await?;
     }
+    Ok(())
+}
+
+async fn write_arrow_ipc(
+    dataframe: datafusion::prelude::DataFrame,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = dataframe.execute_stream().await?;
+    let schema = stream.schema();
+    let file = std::fs::File::create(path)?;
+    let mut writer = FileWriter::try_new_buffered(file, &schema)?;
+    while let Some(batch) = stream.next().await {
+        writer.write(&batch?)?;
+    }
+    writer.finish()?;
     Ok(())
 }
