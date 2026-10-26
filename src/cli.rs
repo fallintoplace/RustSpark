@@ -602,8 +602,7 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     ]
     .into_iter()
     .flatten()
-    .next()
-    else {
+    .next() else {
         return Ok(());
     };
     let Ok(destination) = destination.canonicalize() else {
