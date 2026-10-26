@@ -322,15 +322,7 @@ fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
         let (name, kind) = entry
             .split_once(':')
             .ok_or_else(|| format!("{source} schema needs NAME:TYPE entries"))?;
-        let valid_first = name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
-        if !valid_first
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
+        if !valid_identifier(name) {
             return Err(format!(
                 "{source} schema column names must be SQL identifiers"
             ));
