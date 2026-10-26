@@ -3,10 +3,13 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::ScalarValue;
+use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::{
     CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
 };
+use datafusion::sql::parser::DFParser;
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -37,6 +40,15 @@ struct Args {
 
     #[arg(long = "parquet-extension", value_name = ".EXT", value_parser = parse_file_extension)]
     parquet_extension: Option<String>,
+
+    #[arg(long = "parquet-pushdown-filters")]
+    parquet_pushdown_filters: bool,
+
+    #[arg(
+        long = "parquet-reorder-filters",
+        requires = "parquet_pushdown_filters"
+    )]
+    parquet_reorder_filters: bool,
 
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
@@ -134,6 +146,9 @@ struct Args {
     #[arg(long = "query-timeout", value_name = "SECONDS", value_parser = parse_query_timeout)]
     query_timeout: Option<u64>,
 
+    #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
+    memory_limit_bytes: Option<usize>,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
@@ -163,6 +178,13 @@ struct Args {
 
     #[arg(long = "output-single-file")]
     output_single_file: bool,
+
+    #[arg(
+        long = "parquet-compression",
+        value_name = "CODEC",
+        requires = "output_parquet"
+    )]
+    parquet_compression: Option<String>,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -440,6 +462,15 @@ fn parse_query_timeout(value: &str) -> Result<u64, String> {
     Ok(seconds)
 }
 
+fn parse_memory_limit_mib(value: &str) -> Result<usize, String> {
+    let mib = value
+        .parse::<usize>()
+        .map_err(|_| "--memory-limit-mb requires a positive integer".to_owned())?;
+    mib.checked_mul(1024 * 1024)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| "--memory-limit-mb must fit in a positive number of bytes".to_owned())
+}
+
 fn parse_batch_size(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -497,7 +528,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
-    let config = SessionConfig::new();
+    if args.parquet_pushdown_filters && args.parquet.is_none() && args.parquet_tables.is_empty() {
+        return Err("--parquet-pushdown-filters requires a Parquet input".into());
+    }
+    let mut config = SessionConfig::new();
+    config.options_mut().execution.parquet.pushdown_filters = args.parquet_pushdown_filters;
+    config.options_mut().execution.parquet.reorder_filters = args.parquet_reorder_filters;
     let config = if let Some(batch_size) = args.batch_size {
         config.with_batch_size(batch_size)
     } else {
@@ -508,7 +544,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         config
     };
-    let session = Arc::new(RustSparkSession::with_config(config));
+    let session = if let Some(limit) = args.memory_limit_bytes {
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_limit(limit, 1.0)
+            .build_arc()?;
+        Arc::new(RustSparkSession::with_config_and_runtime(config, runtime))
+    } else {
+        Arc::new(RustSparkSession::with_config(config))
+    };
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
@@ -583,9 +626,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     } else {
         let mut names = HashSet::new();
-        // CSV schema inference performs file I/O, so overlap it across inputs.
-        // Cap the tasks to avoid opening an unbounded number of files at once.
-        let mut csv_jobs = tokio::task::JoinSet::new();
+        let mut registration_jobs = tokio::task::JoinSet::new();
         for mapping in &args.csv_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
@@ -595,7 +636,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let args = Arc::clone(&args);
             let name = name.to_owned();
             let path = path.to_owned();
-            csv_jobs.spawn(async move {
+            registration_jobs.spawn(async move {
                 let options = csv_read_options(&args);
                 if let Some(marker) = args.csv_null_value.as_deref() {
                     register_csv_with_null_value(&session, &name, &path, options, marker).await
@@ -605,33 +646,60 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .await
                 }
             });
-            if csv_jobs.len() >= 4 {
-                csv_jobs.join_next().await.expect("CSV task exists")??;
+            if registration_jobs.len() >= 4 {
+                registration_jobs
+                    .join_next()
+                    .await
+                    .expect("registration task exists")??;
             }
-        }
-        while let Some(result) = csv_jobs.join_next().await {
-            result??;
         }
         for mapping in &args.parquet_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = ParquetReadOptions::new()
-                .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
-            session
-                .register_parquet_with_options(name, path, options)
-                .await?;
+            let session = Arc::clone(&session);
+            let args = Arc::clone(&args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            registration_jobs.spawn(async move {
+                let options = ParquetReadOptions::new()
+                    .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
+                session
+                    .register_parquet_with_options(&name, &path, options)
+                    .await
+            });
+            if registration_jobs.len() >= 4 {
+                registration_jobs
+                    .join_next()
+                    .await
+                    .expect("registration task exists")??;
+            }
         }
         for mapping in &args.json_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = json_read_options(&args);
-            session
-                .register_json_with_options(name, path, options)
-                .await?;
+            let session = Arc::clone(&session);
+            let args = Arc::clone(&args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            registration_jobs.spawn(async move {
+                let options = json_read_options(&args);
+                session
+                    .register_json_with_options(&name, &path, options)
+                    .await
+            });
+            if registration_jobs.len() >= 4 {
+                registration_jobs
+                    .join_next()
+                    .await
+                    .expect("registration task exists")??;
+            }
+        }
+        while let Some(result) = registration_jobs.join_next().await {
+            result??;
         }
     }
     for definition in &args.sql_views {
@@ -658,7 +726,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         session.cache_table(name).await?;
     }
-    let execution = execute_query(&session, &query, &args);
+    let execution = execute_script(&session, &query, &args);
     if let Some(seconds) = args.query_timeout {
         tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
             .await
@@ -671,6 +739,23 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         execution.await
     }
+}
+
+// Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
+// or comments. Execute setup statements before presenting the final result.
+async fn execute_script(
+    session: &RustSparkSession,
+    script: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut statements = DFParser::parse_sql(script)?;
+    let last = statements
+        .pop_back()
+        .ok_or("SQL script must contain at least one statement")?;
+    for statement in statements {
+        session.sql(&statement.to_string()).await?.collect().await?;
+    }
+    execute_query(session, &last.to_string(), args).await
 }
 
 async fn execute_query(
@@ -698,8 +783,17 @@ async fn execute_query(
         dataframe.explain(true, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
+        let writer_options = args.parquet_compression.as_ref().map(|codec| {
+            let mut options = TableParquetOptions::default();
+            options.global.compression = Some(codec.clone());
+            options
+        });
         dataframe
-            .write_parquet(path, output_write_options(args.output_single_file), None)
+            .write_parquet(
+                path,
+                output_write_options(args.output_single_file),
+                writer_options,
+            )
             .await?;
     } else if let Some(path) = args.output_csv.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;

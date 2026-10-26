@@ -26,6 +26,18 @@ SQL statements can be read from a file:
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
 
+Run multiple SQL statements from `--sql` or `--sql-file`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'CREATE VIEW large AS SELECT * FROM data WHERE amount >= 10; SELECT COUNT(*) FROM large;'
+```
+
+Statements run in order in the same session. Earlier statements execute without
+printing their results; only the final statement uses the selected output mode.
+Semicolons inside SQL string literals and comments are handled by DataFusion's
+SQL parser. The query deadline covers all script statements.
+
 Treat a literal CSV token as NULL, including tokens with regex punctuation:
 
 ```sh
@@ -47,6 +59,19 @@ Join multiple CSV files in one query by naming each input:
 ```sh
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
+
+Enable Parquet late materialization for selective filters:
+
+```sh
+cargo run -- --parquet /path/to/events.parquet \
+  --parquet-pushdown-filters --parquet-reorder-filters \
+  --sql "SELECT COUNT(*) FROM data WHERE event_type = 'purchase'"
+```
+
+These options push predicates into Parquet decoding and can reorder them by
+estimated selectivity. They are opt-in because the benefit depends on file
+layout and filter cost. Row-group pruning and page-index reads remain on by
+default in DataFusion.
 
 Create lazy SQL views for reusable queries. Views can refer to earlier views:
 

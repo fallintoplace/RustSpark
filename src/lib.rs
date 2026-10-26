@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use datafusion::{
     arrow::record_batch::RecordBatch,
     error::{DataFusionError, Result},
+    execution::runtime_env::RuntimeEnv,
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 
@@ -18,6 +21,12 @@ impl RustSparkSession {
     pub fn with_config(config: SessionConfig) -> Self {
         Self {
             context: SessionContext::new_with_config(config),
+        }
+    }
+
+    pub fn with_config_and_runtime(config: SessionConfig, runtime: Arc<RuntimeEnv>) -> Self {
+        Self {
+            context: SessionContext::new_with_config_rt(config, runtime),
         }
     }
 
