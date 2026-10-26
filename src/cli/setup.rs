@@ -61,16 +61,24 @@ pub(super) async fn register_derived_tables(
         session.register_dataframe(name, union)?;
     }
     let mut view_names = HashSet::new();
-    for definition in &args.sql_views {
+    let definitions = args
+        .sql_views
+        .iter()
+        .map(|definition| (definition, false))
+        .chain(
+            args.materialized_sql_views
+                .iter()
+                .map(|definition| (definition, true)),
+        );
+    for (definition, materialized) in definitions {
         let (name, sql) = parse_named_view(definition)?;
         ensure_unique_name(&mut view_names, name, "SQL view")?;
         let dataframe = plan_view_query(session, sql, args).await?;
-        session.register_dataframe(name, dataframe)?;
-    }
-    for definition in &args.materialized_sql_views {
-        let (name, sql) = parse_named_view(definition)?;
-        ensure_unique_name(&mut view_names, name, "SQL view")?;
-        let dataframe = plan_view_query(session, sql, args).await?.cache().await?;
+        let dataframe = if materialized {
+            dataframe.cache().await?
+        } else {
+            dataframe
+        };
         session.register_dataframe(name, dataframe)?;
     }
     Ok(())
