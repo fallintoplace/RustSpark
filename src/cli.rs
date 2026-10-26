@@ -420,7 +420,10 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             .map_err(|_| "--param bool must be true or false".to_owned()),
         "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
-        _ => Err("--param supports int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8, or null:".into()),
+        _ => Err(
+            "--param supports int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8, or null:"
+                .into(),
+        ),
     }
 }
 
