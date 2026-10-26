@@ -464,6 +464,33 @@ impl RustSparkSession {
         Ok(None)
     }
 
+    /// Fetch the first result row from a parameterized SQL query.
+    ///
+    /// Returns None for an empty result and preserves typed NULL values.
+    pub async fn sql_first_row_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        use datafusion::common::ScalarValue;
+
+        let batches = self
+            .sql_with_params(query, params)
+            .await?
+            .limit(0, Some(1))?
+            .collect()
+            .await?;
+        for batch in batches {
+            if batch.num_rows() > 0 {
+                let values = (0..batch.num_columns())
+                    .map(|index| ScalarValue::try_from_array(batch.column(index).as_ref(), 0))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(Some(values));
+            }
+        }
+        Ok(None)
+    }
+
     /// Plan SQL with typed positional or named parameters.
     ///
     /// Values are bound by DataFusion rather than interpolated into SQL text.
