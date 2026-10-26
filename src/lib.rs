@@ -393,11 +393,7 @@ impl RustSparkSession {
     /// All names refer to the original schema, so swaps such as a -> b and
     /// b -> a work without intermediate collisions. This does not change the
     /// registered table or collect its rows.
-    pub async fn rename_columns(
-        &self,
-        table: &str,
-        renames: &[(&str, &str)],
-    ) -> Result<DataFrame> {
+    pub async fn rename_columns(&self, table: &str, renames: &[(&str, &str)]) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
 
@@ -420,7 +416,12 @@ impl RustSparkSession {
             }
         }
         for source in mappings.keys() {
-            if !dataframe.schema().fields().iter().any(|field| field.name() == *source) {
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == *source)
+            {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown column rename source: {source}"
                 )));
