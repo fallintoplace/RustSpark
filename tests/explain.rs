@@ -26,7 +26,13 @@ fn explains_sql_plans_instead_of_running_a_query() {
 #[test]
 fn explain_rejects_export_flags() {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args(["--sql", "SELECT 1", "--explain", "--output-parquet", "export"])
+        .args([
+            "--sql",
+            "SELECT 1",
+            "--explain",
+            "--output-parquet",
+            "export",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
