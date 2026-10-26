@@ -54,8 +54,9 @@ async fn register_csv_input(
 
 async fn finish_registration_when_full(
     jobs: &mut tokio::task::JoinSet<datafusion::error::Result<()>>,
+    max_parallel: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if jobs.len() >= 4 {
+    if jobs.len() >= max_parallel {
         jobs.join_next()
             .await
             .expect("registration task exists")??;
@@ -123,6 +124,10 @@ pub(super) async fn register_inputs(
     }
     let mut names = HashSet::new();
     let mut registration_jobs = tokio::task::JoinSet::new();
+    // Parallel metadata and CSV inference work scales with available cores,
+    // but bound outstanding jobs to avoid loading hundreds of schemas at once.
+    let max_parallel =
+        std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(4, 16));
     for (mappings, kind) in [
         (&args.csv_tables, NamedInputKind::Csv),
         (&args.parquet_tables, NamedInputKind::Parquet),
@@ -137,7 +142,7 @@ pub(super) async fn register_inputs(
             registration_jobs.spawn(async move {
                 register_named_input(&session, &args, &name, &path, kind).await
             });
-            finish_registration_when_full(&mut registration_jobs).await?;
+            finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
         }
     }
     while let Some(result) = registration_jobs.join_next().await {
