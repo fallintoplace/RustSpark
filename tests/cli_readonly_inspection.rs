@@ -26,6 +26,14 @@ fn describe_and_explain_cannot_drop_persistent_tables() -> Result<(), Box<dyn st
             "{flag} must not execute DROP TABLE"
         );
         assert!(root.join("protected").is_dir(), "{flag} deleted the table");
+
+        let script = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .arg("--database-dir")
+            .arg(root)
+            .args(["--sql", "DROP TABLE protected; SELECT 1 AS n", flag])
+            .output()?;
+        assert!(!script.status.success(), "{flag} must reject mutating setup SQL");
+        assert!(root.join("protected").is_dir(), "{flag} deleted the table");
     }
 
     let checked = Command::new(env!("CARGO_BIN_EXE_rustspark"))
