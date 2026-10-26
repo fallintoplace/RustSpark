@@ -162,6 +162,9 @@ Repeat `--param` in `$1`, `$2`, ... order. Supported types are
 String values may contain colons. Parameters use DataFusion binding, not
 SQL text substitution.
 
+Supported positional and named numeric parameter types also include `int8`, `int16`,
+`int32`, `uint8`, `uint16`, `uint32`, `uint64`, and `float32`.
+
 Use named parameters for queries where argument order may change:
 
 ```sh

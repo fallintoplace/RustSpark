@@ -39,6 +39,27 @@ impl RustSparkSession {
             .await
     }
 
+    /// Read several CSV files as one lazy DataFrame.
+    ///
+    /// All inputs must have compatible schemas.
+    pub async fn read_csv_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
+        if paths.is_empty() {
+            return Err(DataFusionError::Plan(
+                "CSV input needs at least one file".into(),
+            ));
+        }
+        let paths: Vec<&str> = paths
+            .iter()
+            .map(|path| file_path(path.as_ref()))
+            .collect::<Result<_>>()?;
+        self.context.read_csv(paths, CsvReadOptions::new()).await
+    }
+
+    /// Register several CSV files as a single SQL table.
+    pub async fn register_csv_files<P: AsRef<Path>>(&self, table: &str, paths: &[P]) -> Result<()> {
+        let dataframe = self.read_csv_files(paths).await?;
+        self.register_dataframe(table, dataframe)
+    }
     /// Registers newline-delimited JSON as a SQL table.
     pub async fn register_json(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
         self.register_json_with_options(table, path, JsonReadOptions::default())
@@ -72,6 +93,34 @@ impl RustSparkSession {
             .await
     }
 
+    /// Read several newline-delimited JSON files as one lazy DataFrame.
+    ///
+    /// All inputs must have compatible schemas.
+    pub async fn read_json_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
+        if paths.is_empty() {
+            return Err(DataFusionError::Plan(
+                "JSON input needs at least one file".into(),
+            ));
+        }
+        let paths: Vec<&str> = paths
+            .iter()
+            .map(|path| file_path(path.as_ref()))
+            .collect::<Result<_>>()?;
+        self.context
+            .read_json(paths, JsonReadOptions::default())
+            .await
+    }
+
+    /// Register several newline-delimited JSON files as one SQL table.
+    pub async fn register_json_files<P: AsRef<Path>>(
+        &self,
+        table: &str,
+        paths: &[P],
+    ) -> Result<()> {
+        let dataframe = self.read_json_files(paths).await?;
+        self.register_dataframe(table, dataframe)
+    }
+
     pub async fn register_parquet(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
         self.register_parquet_with_options(table, path, ParquetReadOptions::new())
             .await
@@ -86,6 +135,34 @@ impl RustSparkSession {
         self.context
             .register_parquet(table, file_path(path.as_ref())?, options)
             .await
+    }
+
+    /// Read several Parquet files as one lazy DataFrame.
+    ///
+    /// All inputs must have compatible schemas.
+    pub async fn read_parquet_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
+        if paths.is_empty() {
+            return Err(DataFusionError::Plan(
+                "Parquet input needs at least one file".into(),
+            ));
+        }
+        let paths: Vec<&str> = paths
+            .iter()
+            .map(|path| file_path(path.as_ref()))
+            .collect::<Result<_>>()?;
+        self.context
+            .read_parquet(paths, ParquetReadOptions::new())
+            .await
+    }
+
+    /// Register several Parquet files as one SQL table.
+    pub async fn register_parquet_files<P: AsRef<Path>>(
+        &self,
+        table: &str,
+        paths: &[P],
+    ) -> Result<()> {
+        let dataframe = self.read_parquet_files(paths).await?;
+        self.register_dataframe(table, dataframe)
     }
 
     pub async fn read_parquet(&self, path: impl AsRef<Path>) -> Result<DataFrame> {
