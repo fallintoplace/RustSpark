@@ -71,6 +71,26 @@ impl RustSparkSession {
         Ok(())
     }
 
+    /// Return column names, data types and nullability without scanning rows.
+    pub async fn describe_table(
+        &self,
+        name: &str,
+    ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
+        let dataframe = self.table(name).await?;
+        Ok(dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    field.name().to_owned(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect())
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
