@@ -151,7 +151,7 @@ impl RustSparkSession {
     /// Each join key appears once in the output, unlike an ON join. FULL OUTER
     /// JOIN coalesces the key from whichever side supplies the row. Other
     /// non-key columns are left unchanged, even when their names collide.
-    /// Use SQL with explicit aliases for self joins or unusual table names.
+    /// The join is lazy and its key columns appear first in the output.
     pub async fn join_tables_using(
         &self,
         left: &str,
@@ -187,7 +187,24 @@ impl RustSparkSession {
             }
         };
 
-        // Quote every identifier instead of interpolating user-supplied SQL.
+        let left_frame = self.table(left).await?;
+        let right_frame = self.table(right).await?;
+        for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
+            for column in columns {
+                if !frame
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().as_str() == *column)
+                {
+                    return Err(DataFusionError::Plan(format!(
+                        "Join column {column} does not exist in table {table}"
+                    )));
+                }
+            }
+        }
+
+        // Escape identifiers rather than interpolating arbitrary SQL text.
         let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
         let quote_table = |path: &str| -> Result<String> {
             if path
@@ -200,17 +217,39 @@ impl RustSparkSession {
             }
             Ok(path.split('.').map(&quote).collect::<Vec<_>>().join("."))
         };
-        let keys = columns
-            .iter()
-            .map(|name| quote(name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT * FROM {} {operator} JOIN {} USING ({keys})",
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+
+        // DataFusion 55's SELECT * FULL JOIN USING may return a NULL join key
+        // for a row preserved only on the left. An explicit projection avoids
+        // that behavior and gives all join types the same output column order.
+        let mut projection = Vec::new();
+        let mut predicates = Vec::new();
+        for column in columns {
+            let key = quote(column);
+            projection.push(format!(
+                "COALESCE({left_alias}.{key}, {right_alias}.{key}) AS {key}"
+            ));
+            predicates.push(format!(
+                "{left_alias}.{key} = {right_alias}.{key}"
+            ));
+        }
+        for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
+            for field in frame.schema().fields() {
+                if !seen.contains(&field.name().to_ascii_lowercase()) {
+                    let name = quote(field.name());
+                    projection.push(format!("{alias}.{name} AS {name}"));
+                }
+            }
+        }
+        let query = format!(
+            "SELECT {} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {}",
+            projection.join(", "),
             quote_table(left)?,
-            quote_table(right)?
+            quote_table(right)?,
+            predicates.join(" AND ")
         );
-        self.sql(&sql).await
+        self.sql(&query).await
     }
 
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
