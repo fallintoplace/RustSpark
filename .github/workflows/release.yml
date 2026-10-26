@@ -38,6 +38,14 @@ jobs:
             echo "::error::Release tags must point to a commit on main"
             exit 1
           fi
+      - name: Check redistribution license on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          if [ ! -f LICENSE ]; then
+            echo "::error::Add a repository LICENSE before distributing RustSpark binaries."
+            exit 1
+          fi
 
   build:
     needs: verify
@@ -51,6 +59,9 @@ jobs:
           - os: windows-latest
             id: windows
             binary: ./target/release/rustspark.exe
+          - os: macos-15
+            id: macos
+            binary: ./target/release/rustspark
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -59,6 +70,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Build locked release executable
         run: cargo build --release --locked --bin rustspark
       - name: Smoke-test the built executable
@@ -66,6 +80,8 @@ jobs:
         run: |
           result=$("${{ matrix.binary }}" --sql "SELECT 42 AS answer" --stdout-format json)
           test "$result" = '{"answer":42}'
+      - name: Cross-process SQL smoke test
+        run: python scripts/release_smoke.py --binary ${{ matrix.binary }}
       - name: Package Linux executable
         if: runner.os == 'Linux'
         shell: bash
@@ -78,6 +94,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path target/release/rustspark.exe, README.md -DestinationPath dist/rustspark-windows-x86_64.zip -CompressionLevel Optimal
+      - name: Package macOS arm64 executable
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p dist
+          tar -czf dist/rustspark-macos-arm64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.id }}
@@ -103,7 +126,7 @@ jobs:
         shell: bash
         run: |
           cd release-assets
-          sha256sum rustspark-linux-x86_64.tar.gz rustspark-windows-x86_64.zip > SHA256SUMS
+          sha256sum rustspark-linux-x86_64.tar.gz rustspark-windows-x86_64.zip rustspark-macos-arm64.tar.gz > SHA256SUMS
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
