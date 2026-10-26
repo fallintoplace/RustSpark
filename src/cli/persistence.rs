@@ -478,10 +478,7 @@ struct BackupInventory {
     copies: Vec<(PathBuf, PathBuf)>,
 }
 
-fn collect_backup_parts(
-    source: &Path,
-    snapshot: &Path,
-) -> Result<BackupInventory, Box<dyn Error>> {
+fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventory, Box<dyn Error>> {
     let mut tables = Vec::new();
     let mut copies = Vec::new();
     for entry in fs::read_dir(source)? {
