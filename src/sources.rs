@@ -43,15 +43,7 @@ impl RustSparkSession {
     ///
     /// All inputs must have compatible schemas.
     pub async fn read_csv_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
-        if paths.is_empty() {
-            return Err(DataFusionError::Plan(
-                "CSV input needs at least one file".into(),
-            ));
-        }
-        let paths: Vec<&str> = paths
-            .iter()
-            .map(|path| file_path(path.as_ref()))
-            .collect::<Result<_>>()?;
+        let paths = file_paths(paths, "CSV")?;
         self.context.read_csv(paths, CsvReadOptions::new()).await
     }
 
@@ -97,15 +89,7 @@ impl RustSparkSession {
     ///
     /// All inputs must have compatible schemas.
     pub async fn read_json_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
-        if paths.is_empty() {
-            return Err(DataFusionError::Plan(
-                "JSON input needs at least one file".into(),
-            ));
-        }
-        let paths: Vec<&str> = paths
-            .iter()
-            .map(|path| file_path(path.as_ref()))
-            .collect::<Result<_>>()?;
+        let paths = file_paths(paths, "JSON")?;
         self.context
             .read_json(paths, JsonReadOptions::default())
             .await
@@ -141,15 +125,7 @@ impl RustSparkSession {
     ///
     /// All inputs must have compatible schemas.
     pub async fn read_parquet_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
-        if paths.is_empty() {
-            return Err(DataFusionError::Plan(
-                "Parquet input needs at least one file".into(),
-            ));
-        }
-        let paths: Vec<&str> = paths
-            .iter()
-            .map(|path| file_path(path.as_ref()))
-            .collect::<Result<_>>()?;
+        let paths = file_paths(paths, "Parquet")?;
         self.context
             .read_parquet(paths, ParquetReadOptions::new())
             .await
@@ -179,6 +155,18 @@ impl RustSparkSession {
             .read_parquet(file_path(path.as_ref())?, options)
             .await
     }
+}
+
+fn file_paths<'a, P: AsRef<Path>>(paths: &'a [P], kind: &str) -> Result<Vec<&'a str>> {
+    if paths.is_empty() {
+        return Err(DataFusionError::Plan(format!(
+            "{kind} input needs at least one file"
+        )));
+    }
+    paths
+        .iter()
+        .map(|path| file_path(path.as_ref()))
+        .collect()
 }
 
 fn file_path(path: &Path) -> Result<&str> {
