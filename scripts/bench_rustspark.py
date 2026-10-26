@@ -65,6 +65,28 @@ def execute(binary: str, csv: pathlib.Path, sql: str, timeout: int):
     return elapsed, digest, rows
 
 
+def measure_workload(binary, csv, name, sql, rows, repeat, warmup, timeout):
+    measurements = []
+    digest = None
+    for run in range(warmup + repeat):
+        elapsed, current_digest, output = execute(binary, csv, sql, timeout)
+        if name == "scan_count" and (len(output) != 1 or output[0].get("n") != rows):
+            raise RuntimeError("Scan returned an incorrect row count")
+        if digest is not None and digest != current_digest:
+            raise RuntimeError(f"Nondeterministic results for {name}")
+        digest = current_digest
+        if run >= warmup:
+            measurements.append(round(elapsed, 3))
+    return {
+        "name": name,
+        "sql": sql,
+        "median_ms": round(statistics.median(measurements), 3),
+        "p95_ms": round(percentile(measurements, 0.95), 3),
+        "samples_ms": measurements,
+        "result_sha256": digest,
+    }
+
+
 def benchmark(binary: str, rows: int, repeat: int, warmup: int, timeout: int):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat, and timeout must be positive; warmup cannot be negative")
@@ -73,25 +95,9 @@ def benchmark(binary: str, rows: int, repeat: int, warmup: int, timeout: int):
         write_csv(csv, rows)
         workloads = []
         for name, sql in WORKLOADS.items():
-            measurements = []
-            digest = None
-            for run in range(warmup + repeat):
-                elapsed, current_digest, output = execute(binary, csv, sql, timeout)
-                if name == "scan_count" and (len(output) != 1 or output[0].get("n") != rows):
-                    raise RuntimeError("Scan returned an incorrect row count")
-                if digest is not None and digest != current_digest:
-                    raise RuntimeError(f"Nondeterministic results for {name}")
-                digest = current_digest
-                if run >= warmup:
-                    measurements.append(round(elapsed, 3))
-            workloads.append({
-                "name": name,
-                "sql": sql,
-                "median_ms": round(statistics.median(measurements), 3),
-                "p95_ms": round(percentile(measurements, 0.95), 3),
-                "samples_ms": measurements,
-                "result_sha256": digest,
-            })
+            workloads.append(
+                measure_workload(binary, csv, name, sql, rows, repeat, warmup, timeout)
+            )
         return {
             "binary": binary,
             "rows": rows,
