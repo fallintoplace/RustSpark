@@ -12,6 +12,19 @@ use super::super::valid_identifier;
 // The database lock guarantees there is at most one writer in this directory.
 const PREFIX: &str = ".rustspark-insert-";
 
+// Debug-only deterministic failpoints. Exit immediately without running Rust
+// destructors to simulate an interrupted process at publication boundaries.
+#[cfg(debug_assertions)]
+fn failpoint(point: &str) {
+    if std::env::var("RUSTSPARK_TEST_INSERT_EXIT").ok().as_deref() == Some(point) {
+        std::process::exit(86);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn failpoint(_point: &str) {}
+
+
 pub(crate) struct StagedInsert {
     root: PathBuf,
     name: String,
@@ -54,6 +67,7 @@ impl StagedInsert {
         sync_dir(&next)?;
         sync_dir(&transaction)?;
         sync_dir(root)?;
+        failpoint("after-stage");
         Ok(Self {
             root: root.to_path_buf(),
             name: name.to_owned(),
@@ -85,6 +99,7 @@ impl StagedInsert {
         fs::rename(&original, &previous)?;
         sync_dir(&self.root)?;
         sync_dir(&self.transaction)?;
+        failpoint("after-backup");
 
         // If interrupted here, startup restores 'previous' to its original
         // location. Once 'next' exists at that location, startup retains it.
@@ -95,6 +110,7 @@ impl StagedInsert {
         }
         sync_dir(&self.root)?;
         sync_dir(&self.transaction)?;
+        failpoint("after-publish");
 
         // The commit is already visible. Cleanup failure must not make a
         // successfully committed INSERT appear to have failed.
