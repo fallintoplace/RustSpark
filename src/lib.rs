@@ -378,6 +378,30 @@ impl RustSparkSession {
         self.union_sql_by_name(queries).await?.distinct()
     }
 
+    /// Join registered tables using arbitrary DataFusion expressions.
+    ///
+    /// Unlike equality-key joins, predicates may be comparisons or multiple
+    /// conditions. Every expression is combined with AND. The returned plan is
+    /// lazy and supports outer, semi, and anti join types. Use qualified column
+    /// references if the two inputs have names in common.
+    pub async fn join_tables_on(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        on: impl IntoIterator<Item = datafusion::logical_expr::Expr>,
+    ) -> Result<DataFrame> {
+        let predicates: Vec<_> = on.into_iter().collect();
+        if predicates.is_empty() {
+            return Err(DataFusionError::Plan(
+                "join_tables_on requires at least one predicate; use SQL CROSS JOIN for Cartesian products".into(),
+            ));
+        }
+        self.table(left)
+            .await?
+            .join_on(self.table(right).await?, join_type, predicates)
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
