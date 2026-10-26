@@ -12,9 +12,7 @@ use datafusion::common::ScalarValue;
 use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::prelude::{
-    CsvReadOptions, SessionConfig, cast, ident, lit, nullif,
-};
+use datafusion::prelude::{CsvReadOptions, SessionConfig, cast, ident, lit, nullif};
 use datafusion::sql::parser::DFParser;
 use futures::StreamExt;
 use rustspark::RustSparkSession;
@@ -411,6 +409,24 @@ fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
 mod read_options;
 use read_options::{csv_read_options, json_read_options, parquet_read_options};
 
+async fn reject_duplicate_csv_headers(
+    session: &RustSparkSession,
+    name: &str,
+) -> datafusion::error::Result<()> {
+    let dataframe = session.table(name).await?;
+    let mut names = HashSet::new();
+    for field in dataframe.schema().fields() {
+        if !names.insert(field.name().to_ascii_lowercase()) {
+            return Err(datafusion::error::DataFusionError::Plan(format!(
+                "Duplicate CSV column: {}",
+                field.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+
 // DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
 // Read as strings and normalize before casting to the inferred input types.
 async fn register_csv_with_null_value(
@@ -771,12 +787,12 @@ async fn execute_registered_query(
     }
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        let dataframe = plan_query(&session, sql, &args).await?;
+        let dataframe = plan_query(session, sql, args).await?;
         session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        let dataframe = plan_query(&session, sql, &args).await?.cache().await?;
+        let dataframe = plan_query(session, sql, args).await?.cache().await?;
         session.register_dataframe(name, dataframe)?;
     }
     let query = if let Some(sql) = args.sql.as_ref() {
