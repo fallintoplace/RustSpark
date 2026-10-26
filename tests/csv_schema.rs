@@ -63,7 +63,8 @@ fn explicit_schema_requires_csv_input() {
 }
 
 #[test]
-fn duplicate_headers_are_rejected_before_query_execution() -> Result<(), Box<dyn std::error::Error>> {
+fn duplicate_headers_are_rejected_before_query_execution() -> Result<(), Box<dyn std::error::Error>>
+{
     let dir = tempfile::tempdir()?;
     let csv = dir.path().join("duplicate.csv");
     std::fs::write(&csv, "amount,AMOUNT\n1,2\n")?;
