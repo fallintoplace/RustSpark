@@ -1,0 +1,48 @@
+name: Compare local SQL engines
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Rows in deterministic CSV input
+        required: true
+        default: '10000'
+      repeats:
+        description: Samples per engine and workload
+        required: true
+        default: '3'
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: cargo build --release --locked
+      - run: python3 -m pip install 'duckdb>=1,<2' 'pyspark>=4,<5'
+      - name: Compare output correctness and one-shot latency
+        run: |
+          python3 scripts/bench_compare.py --binary ./target/release/rustspark \
+            --engines rustspark duckdb spark \
+            --rows "${{ inputs.rows }}" --repeat "${{ inputs.repeats }}" \
+            --warmup 1 --json-out benchmarks/engine-comparison.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-comparison
+          path: benchmarks/engine-comparison.json
+          if-no-files-found: warn
