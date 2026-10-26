@@ -110,3 +110,17 @@ fn stdout_format_conflicts_with_other_output_modes() -> TestResult {
     assert!(!unknown.status.success());
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn closed_output_pipe_is_not_a_query_failure() -> TestResult {
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(["--sql", "SELECT 'hello' AS greeting", "--stdout-format", "csv"])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    drop(child.stdout.take());
+    assert!(child.wait()?.success());
+    Ok(())
+}
