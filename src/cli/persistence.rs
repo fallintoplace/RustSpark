@@ -76,9 +76,21 @@ pub(super) async fn save_table(
         .tempdir_in(root)?;
     let staged = temporary.path().join("data");
     let staged_path = staged.to_str().ok_or("Database path must be valid UTF-8")?;
+    let schema = dataframe.schema().inner().clone();
     dataframe
         .write_parquet(staged_path, DataFrameWriteOptions::new(), None)
         .await?;
+    if !staged.exists() || fs::read_dir(&staged)?.next().is_none() {
+        // DataFusion emits no Parquet part for a zero-row result. Preserve
+        // the schema so the empty table can still be queried after restart.
+        fs::create_dir_all(&staged)?;
+        let writer = datafusion::parquet::arrow::ArrowWriter::try_new(
+            fs::File::create(staged.join("part-0.parquet"))?,
+            schema,
+            None,
+        )?;
+        writer.close()?;
+    }
     fs::rename(&staged, &destination)?;
     Ok(())
 }

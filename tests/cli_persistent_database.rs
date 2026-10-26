@@ -107,3 +107,32 @@ fn skips_non_table_staging_directories_and_rejects_empty_table_directories() -> 
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("no Parquet files"));
     Ok(())
 }
+
+#[test]
+fn saves_an_empty_query_result_with_its_schema() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().to_str().expect("UTF-8 temp path");
+    let saved = run(&[
+        "--database-dir",
+        root,
+        "--save-table",
+        "empty_rows",
+        "--sql",
+        "SELECT CAST(1 AS BIGINT) AS n WHERE FALSE",
+    ]);
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert_row(
+        run(&[
+            "--database-dir",
+            root,
+            "--sql",
+            "SELECT COUNT(*) FROM empty_rows",
+        ]),
+        "0",
+    );
+    Ok(())
+}
