@@ -30,6 +30,15 @@ fn quote_join_table(path: &str) -> Result<String> {
         .join("."))
 }
 
+/// Null filtering policy for Spark-style dropna operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NullDropMode {
+    /// Drop a row if any selected value is NULL.
+    Any,
+    /// Drop a row only if every selected value is NULL.
+    All,
+}
+
 pub struct RustSparkSession {
     context: SessionContext,
 }
@@ -343,6 +352,65 @@ impl RustSparkSession {
     ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
         let dataframe = self.sql_read_only_with_params(query, params).await?;
         Ok(Self::describe_columns(&dataframe))
+    }
+
+    /// Drop rows containing NULL values, like Spark DataFrame.na.drop.
+    ///
+    /// An empty column list checks every column. Any drops rows with at
+    /// least one NULL; All drops only rows whose selected columns are all NULL.
+    /// The returned DataFrame is lazy and leaves the source table unchanged.
+    pub async fn drop_null_rows(
+        &self,
+        table: &str,
+        columns: &[&str],
+        mode: NullDropMode,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::HashSet;
+
+        let dataframe = self.table(table).await?;
+        let selected: Vec<&str> = if columns.is_empty() {
+            dataframe
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect()
+        } else {
+            columns.to_vec()
+        };
+        if selected.is_empty() {
+            return Ok(dataframe);
+        }
+
+        let mut seen = HashSet::new();
+        for name in &selected {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate dropna column: {name}"
+                )));
+            }
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == *name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown dropna column: {name}"
+                )));
+            }
+        }
+
+        let mut checks = selected
+            .iter()
+            .map(|name| Expr::Column(Column::from_name(*name)).is_not_null());
+        let first = checks.next().expect("non-empty selected columns");
+        let predicate = checks.fold(first, |acc, check| match mode {
+            NullDropMode::Any => acc.and(check),
+            NullDropMode::All => acc.or(check),
+        });
+        dataframe.filter(predicate)
     }
 
     /// Register a scalar user-defined function for SQL queries in this session.
