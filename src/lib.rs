@@ -367,6 +367,31 @@ impl RustSparkSession {
         self.sql(query).await?.limit(offset, Some(limit))
     }
 
+    /// Plan a parameterized SQL page with bounded row count.
+    ///
+    /// Use ORDER BY in SQL for stable page boundaries.
+    pub async fn sql_page_with_params(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        if limit == 0 {
+            return Err(DataFusionError::Plan(
+                "SQL page limit must be positive".into(),
+            ));
+        }
+        if offset.checked_add(limit).is_none() {
+            return Err(DataFusionError::Plan(
+                "SQL page offset plus limit overflows".into(),
+            ));
+        }
+        self.sql_with_params(query, params)
+            .await?
+            .limit(offset, Some(limit))
+    }
+
     /// Fetch the first SQL result row as typed Arrow scalar values.
     ///
     /// Returns None for an empty result without collecting the full query.
