@@ -80,6 +80,31 @@ impl RustSparkSession {
         self.register_dataframe(name, dataframe)
     }
 
+    /// Register a lazy SQL view with typed positional or named parameters.
+    ///
+    /// Parameter values are bound when the view is planned, not interpolated
+    /// into the SQL string.
+    pub async fn register_sql_view_with_params(
+        &self,
+        name: &str,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<()> {
+        let dataframe = self.sql_with_params(query, params).await?;
+        self.register_dataframe(name, dataframe)
+    }
+
+    /// Materialize a parameterized SQL query once and register its cached result.
+    pub async fn register_materialized_sql_view_with_params(
+        &self,
+        name: &str,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<()> {
+        let dataframe = self.sql_with_params(query, params).await?.cache().await?;
+        self.register_dataframe(name, dataframe)
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
