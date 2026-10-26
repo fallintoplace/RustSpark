@@ -85,7 +85,7 @@ fn failed_arrow_export_preserves_existing_destination() -> TestResult {
     let dir = tempfile::tempdir()?;
     let csv = dir.path().join("bad.csv");
     let destination = dir.path().join("report.arrow");
-    std::fs::write(&csv, "value\\nnot_a_number\\n")?;
+    std::fs::write(&csv, "value\nnot_a_number\n")?;
     std::fs::write(&destination, b"original report")?;
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--csv")
