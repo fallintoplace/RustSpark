@@ -58,7 +58,10 @@ fn v1_joins_named_input_files_and_groups_results() -> TestResult {
 #[test]
 fn v1_persistent_sql_lifecycle_survives_process_restarts() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let root = directory.path().to_str().ok_or("UTF-8 temp directory required")?;
+    let root = directory
+        .path()
+        .to_str()
+        .ok_or("UTF-8 temp directory required")?;
     let initial = csv(run(&[
         "--database-dir",
         root,
