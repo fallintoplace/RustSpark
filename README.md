@@ -143,6 +143,20 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data WHERE amou
 
 This counts the query result rows, not the rows in its source tables.
 
+Persist a query result as a Parquet-backed SQL table. Later processes automatically
+load the tables from the same directory:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --database-dir /tmp/rustspark-db \\
+  --save-table sales_summary --sql 'SELECT city, SUM(amount) AS total FROM data GROUP BY city'
+cargo run -- --database-dir /tmp/rustspark-db \\
+  --sql 'SELECT * FROM sales_summary ORDER BY city'
+```
+
+Saved tables are immutable in this initial version. Each table is written to a
+staging directory and published after the export succeeds. Existing table names
+are rejected, and unfinished staging directories are ignored at startup.
+
 Standalone SQL without a file also works:
 
 ```sh
