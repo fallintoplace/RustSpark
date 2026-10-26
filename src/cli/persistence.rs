@@ -1,6 +1,9 @@
 use std::{error::Error, fs, path::Path};
 
-use datafusion::{dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader, prelude::DataFrame};
+use datafusion::{
+    dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader,
+    prelude::DataFrame,
+};
 use rustspark::RustSparkSession;
 
 use super::valid_identifier;
@@ -15,10 +18,10 @@ use super::valid_identifier;
 pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     fs::create_dir_all(root)?;
     let lock_path = root.join(".rustspark.lock");
-    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
-        if !metadata.file_type().is_file() {
-            return Err("Database lock path must be a regular file".into());
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&lock_path)
+        && !metadata.file_type().is_file()
+    {
+        return Err("Database lock path must be a regular file".into());
     }
     let file = fs::OpenOptions::new()
         .read(true)
@@ -44,8 +47,8 @@ fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
         let Some(name) = filename.to_str() else {
             continue;
         };
-        let reserved = name.starts_with(".rustspark-stage-")
-            || name.starts_with(".rustspark-drop-");
+        let reserved =
+            name.starts_with(".rustspark-stage-") || name.starts_with(".rustspark-drop-");
         // Never follow symlinks or touch user-owned tables.
         if reserved && entry.file_type()?.is_dir() {
             fs::remove_dir_all(entry.path())?;
@@ -80,8 +83,7 @@ pub(super) async fn register_database_tables(
         for file in fs::read_dir(entry.path())? {
             let file = file?;
             let path = file.path();
-            if !file.file_type()?.is_file()
-                || !path.extension().is_some_and(|ext| ext == "parquet")
+            if !file.file_type()?.is_file() || !path.extension().is_some_and(|ext| ext == "parquet")
             {
                 return Err(format!(
                     "Persistent table '{name}' has an unexpected entry: {}",
@@ -91,7 +93,10 @@ pub(super) async fn register_database_tables(
             }
             // Validate Parquet footers before exposing damaged tables to SQL.
             SerializedFileReader::new(fs::File::open(&path)?).map_err(|error| {
-                format!("Cannot read persistent Parquet file '{}': {error}", path.display())
+                format!(
+                    "Cannot read persistent Parquet file '{}': {error}",
+                    path.display()
+                )
             })?;
             found_parquet = true;
         }
