@@ -20,10 +20,10 @@ fn auto_input_loads_csv_and_json() -> TestResult {
             "csv",
         ])?;
         assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(String::from_utf8(output.stdout)?, "total\n3\n");
     }
     Ok(())
