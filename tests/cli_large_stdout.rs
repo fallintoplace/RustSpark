@@ -11,11 +11,24 @@ fn streams_large_csv_results_without_missing_rows() -> Result<(), Box<dyn std::e
     }
     drop(file);
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .arg("--csv").arg(&path)
-        .args(["--csv-schema", "n:int64", "--sql", "SELECT n FROM data",
-            "--stdout-format", "csv", "--batch-size", "64"])
+        .arg("--csv")
+        .arg(&path)
+        .args([
+            "--csv-schema",
+            "n:int64",
+            "--sql",
+            "SELECT n FROM data",
+            "--stdout-format",
+            "csv",
+            "--batch-size",
+            "64",
+        ])
         .output()?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let body = String::from_utf8(output.stdout)?;
     let mut lines = body.lines();
     assert_eq!(lines.next(), Some("n"));
