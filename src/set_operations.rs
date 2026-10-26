@@ -1,7 +1,4 @@
-use datafusion::{
-    error::Result,
-    prelude::DataFrame,
-};
+use datafusion::{error::Result, prelude::DataFrame};
 
 use crate::RustSparkSession;
 
@@ -12,8 +9,10 @@ impl RustSparkSession {
         right: &str,
         operator: &'static str,
     ) -> Result<DataFrame> {
-        let left = super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
-        let right = super::quote_catalog_table(right, "Set operations require a non-empty table path")?;
+        let left =
+            super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
+        let right =
+            super::quote_catalog_table(right, "Set operations require a non-empty table path")?;
         self.sql_read_only(&format!(
             "SELECT * FROM {left} {operator} SELECT * FROM {right}"
         ))
