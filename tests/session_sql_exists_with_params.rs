@@ -2,7 +2,8 @@ use datafusion::common::ScalarValue;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn checks_for_bound_rows_without_executing_writes() -> Result<(), Box<dyn std::error::Error>> {
+async fn checks_for_bound_rows_without_executing_writes() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     let query = "SELECT 1 WHERE 1 = $1";
     assert!(
@@ -17,10 +18,7 @@ async fn checks_for_bound_rows_without_executing_writes() -> Result<(), Box<dyn 
     );
     assert!(
         session
-            .sql_exists_with_params(
-                "CREATE TABLE denied AS SELECT 1",
-                Vec::<ScalarValue>::new(),
-            )
+            .sql_exists_with_params("CREATE TABLE denied AS SELECT 1", Vec::<ScalarValue>::new(),)
             .await
             .is_err()
     );
