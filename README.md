@@ -135,6 +135,17 @@ Repeat `--param` in `$1`, `$2`, ... order. Supported types are
 String values may contain colons. Parameters use DataFusion binding, not
 SQL text substitution.
 
+Use named parameters for queries where argument order may change:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \\
+  --sql 'SELECT COUNT(*) FROM data WHERE amount > $minimum AND city = $city' \\
+  --named-param minimum=int64:10 --named-param city=utf8:Berlin
+```
+
+Names must be SQL identifiers. Use either `--named-param` or `--param`,
+not both. Values are bound safely without rewriting SQL text.
+
 Provide column types to avoid CSV schema inference:
 
 ```sh
@@ -170,3 +181,15 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data'
 ```
 
 Unlike `--explain`, this mode runs the query to collect execution metrics.
+
+Export a query result as a single Apache Arrow IPC file for downstream Arrow
+tools, without collecting all result batches in memory:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \\
+  --sql 'SELECT city, amount FROM data' --output-arrow /tmp/sales.arrow
+```
+
+The Arrow output is always one file. It preserves Arrow column types and
+supports empty results. Like other exports, a failed or timed-out query can
+leave a partial output file.
