@@ -75,11 +75,11 @@ async fn register_named_input(
     session: &RustSparkSession,
     args: &Args,
     name: &str,
-    path: &str,
+    path: &Path,
     kind: NamedInputKind,
 ) -> datafusion::error::Result<()> {
     match kind {
-        NamedInputKind::Csv => register_csv_input(session, args, name, Path::new(path)).await,
+        NamedInputKind::Csv => register_csv_input(session, args, name, path).await,
         NamedInputKind::Parquet => {
             session
                 .register_parquet_with_options(name, path, parquet_read_options(args))
@@ -97,21 +97,19 @@ async fn register_unnamed_input(
     session: &RustSparkSession,
     args: &Args,
 ) -> datafusion::error::Result<bool> {
-    if let Some(csv) = args.csv.as_ref() {
-        register_csv_input(session, args, &args.table, csv.as_path()).await?;
-    } else if let Some(parquet) = args.parquet.as_ref() {
-        let options = parquet_read_options(args);
-        session
-            .register_parquet_with_options(&args.table, parquet, options)
-            .await?;
-    } else if let Some(json) = args.json.as_ref() {
-        let options = json_read_options(args);
-        session
-            .register_json_with_options(&args.table, json, options)
-            .await?;
+    let input = if let Some(path) = args.csv.as_deref() {
+        Some((path, NamedInputKind::Csv))
+    } else if let Some(path) = args.parquet.as_deref() {
+        Some((path, NamedInputKind::Parquet))
     } else {
+        args.json
+            .as_deref()
+            .map(|path| (path, NamedInputKind::Json))
+    };
+    let Some((path, kind)) = input else {
         return Ok(false);
-    }
+    };
+    register_named_input(session, args, &args.table, path, kind).await?;
     Ok(true)
 }
 
@@ -140,7 +138,7 @@ pub(super) async fn register_inputs(
             let name = name.to_owned();
             let path = path.to_owned();
             registration_jobs.spawn(async move {
-                register_named_input(&session, &args, &name, &path, kind).await
+                register_named_input(&session, &args, &name, Path::new(&path), kind).await
             });
             finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
         }
