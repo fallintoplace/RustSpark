@@ -25,6 +25,8 @@ cargo run -- --csv tests/fixtures/sales.csv --csv-null-value NA --sql 'SELECT CO
 ```
 
 `--csv-null-value` matches the entire field literally (not as a regular expression).
+It normalizes missing values before casting to inferred column types. This mode
+may read more data than the regular CSV path, so use it only when needed.
 
 Use a custom CSV delimiter with `--csv-delimiter`:
 
