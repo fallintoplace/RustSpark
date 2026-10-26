@@ -30,6 +30,24 @@ impl RustSparkSession {
         }
     }
 
+    /// Return the underlying provider for cancellation-safe table replacement.
+    pub async fn table_provider(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn datafusion::datasource::TableProvider>> {
+        self.context.table_provider(name).await
+    }
+
+    /// Register an existing provider, preserving its physical table behavior.
+    pub fn register_table_provider(
+        &self,
+        name: &str,
+        provider: Arc<dyn datafusion::datasource::TableProvider>,
+    ) -> Result<()> {
+        self.context.register_table(name, provider)?;
+        Ok(())
+    }
+
     /// List registered tables with fully qualified catalog.schema.table names.
     ///
     /// Results are sorted for stable inspection and CLI integration.

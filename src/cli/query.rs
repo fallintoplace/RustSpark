@@ -108,6 +108,26 @@ fn persistent_insert_table(
     }
 }
 
+/// A dropped execution future (for example an interactive query timeout)
+/// must restore the original provider before another SQL statement starts.
+struct RestoreTableOnCancel<'a> {
+    session: &'a RustSparkSession,
+    table: &'a str,
+    original: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
+    active: bool,
+}
+
+impl Drop for RestoreTableOnCancel<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.session.deregister_table(self.table);
+            let _ = self
+                .session
+                .register_table_provider(self.table, self.original.clone());
+        }
+    }
+}
+
 async fn execute_staged_insert(
     session: &RustSparkSession,
     sql: &str,
@@ -115,8 +135,18 @@ async fn execute_staged_insert(
     table: &str,
     final_statement: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+    let root = args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?;
     let stage = super::persistence::StagedInsert::prepare(root, table)?;
+    let original = session.table_provider(table).await?;
+    let mut guard = RestoreTableOnCancel {
+        session,
+        table,
+        original,
+        active: true,
+    };
     if !session.deregister_table(table)? {
         stage.discard()?;
         return Err(format!("Persistent table disappeared: {table}").into());
@@ -124,13 +154,12 @@ async fn execute_staged_insert(
     if let Err(error) =
         super::persistence::register_saved_table(session, table, stage.data_path()).await
     {
-        let _ = super::persistence::register_saved_table(session, table, &root.join(table)).await;
         let _ = stage.discard();
         return Err(error);
     }
 
-    // Do not propagate SQL errors with ? here; that would skip restoration
-    // of the original table provider and the staged files.
+    // Keep the guard alive while awaiting SQL and re-registration. Cancellation
+    // cannot leave an interactive session pointed at an unpublished table.
     let execution: Result<(), Box<dyn std::error::Error>> = async {
         if final_statement {
             execute_query(session, sql, args).await
@@ -150,9 +179,10 @@ async fn execute_staged_insert(
             Err(error)
         }
     };
-    // A successful commit is already visible on disk at this point.
-    // Refresh the provider even if the SQL statement failed.
+    // The original provider is restored on cancellation or re-registration
+    // error. The disk path remains valid before and after commit.
     super::persistence::register_saved_table(session, table, &root.join(table)).await?;
+    guard.active = false;
     outcome
 }
 

@@ -110,7 +110,10 @@ fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Erro
             .into());
         }
         SerializedFileReader::new(fs::File::open(&path)?).map_err(|error| {
-            format!("Cannot read persistent Parquet file '{}': {error}", path.display())
+            format!(
+                "Cannot read persistent Parquet file '{}': {error}",
+                path.display()
+            )
         })?;
         found_parquet = true;
     }
@@ -119,7 +122,6 @@ fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Erro
     }
     Ok(())
 }
-
 
 /**
  * Hold an OS-owned lock for the entire lifetime of a local database session.
@@ -179,7 +181,9 @@ fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
                     }
                     fs::rename(&old, &live)?;
                 }
-                Ok(_) => return Err(format!("Invalid persistent table path: {}", live.display()).into()),
+                Ok(_) => {
+                    return Err(format!("Invalid persistent table path: {}", live.display()).into());
+                }
                 Err(error) => return Err(error.into()),
             }
             fs::remove_dir_all(entry.path())?;
