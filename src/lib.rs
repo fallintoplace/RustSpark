@@ -305,6 +305,17 @@ impl RustSparkSession {
         self.sql(query).await?.with_param_values(params)
     }
 
+    /// Plan read-only SQL with typed positional or named parameters.
+    ///
+    /// Disallowed statement kinds are rejected before binding values.
+    pub async fn sql_read_only_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        self.sql_read_only(query).await?.with_param_values(params)
+    }
+
     /// Plan only read-only SQL, rejecting DDL, DML and session statements.
     ///
     /// This is not a replacement for table-level authorization or process isolation.
