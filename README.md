@@ -41,3 +41,9 @@ Standalone SQL without a file also works:
 ```sh
 cargo run -- --sql 'SELECT 42 AS answer'
 ```
+
+Inspect the logical and physical query plans without executing the result query:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
+```
