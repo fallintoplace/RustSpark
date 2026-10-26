@@ -169,7 +169,11 @@ pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
 }
 
 /// Restore the old snapshot if a crash left no visible table.
-fn recover_interrupted_insert(root: &Path, table: &str, staging: &Path) -> Result<(), Box<dyn Error>> {
+fn recover_interrupted_insert(
+    root: &Path,
+    table: &str,
+    staging: &Path,
+) -> Result<(), Box<dyn Error>> {
     let live = root.join(table);
     let old = staging.join("old");
     match fs::symlink_metadata(&live) {
