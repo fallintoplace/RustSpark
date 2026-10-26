@@ -343,6 +343,21 @@ pub(super) async fn register_saved_table(
     Ok(())
 }
 
+// DataFusion may emit no part files for an empty result. Keep its schema on disk.
+fn write_empty_parquet_part(
+    staging: &Path,
+    schema: datafusion::arrow::datatypes::SchemaRef,
+) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(staging)?;
+    let writer = datafusion::parquet::arrow::ArrowWriter::try_new(
+        fs::File::create(staging.join("part-0.parquet"))?,
+        schema,
+        None,
+    )?;
+    writer.close()?;
+    Ok(())
+}
+
 /// Write a query to a staging directory and publish it only after the write
 /// succeeds. An existing table is never intentionally overwritten.
 pub(super) async fn save_table(
@@ -369,13 +384,7 @@ pub(super) async fn save_table(
     if !staged.exists() || fs::read_dir(&staged)?.next().is_none() {
         // DataFusion emits no Parquet part for a zero-row result. Preserve
         // the schema so the empty table can still be queried after restart.
-        fs::create_dir_all(&staged)?;
-        let writer = datafusion::parquet::arrow::ArrowWriter::try_new(
-            fs::File::create(staged.join("part-0.parquet"))?,
-            schema,
-            None,
-        )?;
-        writer.close()?;
+        write_empty_parquet_part(&staged, schema)?;
     }
     fs::rename(&staged, &destination)?;
     Ok(())
