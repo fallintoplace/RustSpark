@@ -168,3 +168,15 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data'
 ```
 
 Unlike `--explain`, this mode runs the query to collect execution metrics.
+
+Export a query result as a single Apache Arrow IPC file for downstream Arrow
+tools, without collecting all result batches in memory:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \\
+  --sql 'SELECT city, amount FROM data' --output-arrow /tmp/sales.arrow
+```
+
+The Arrow output is always one file. It preserves Arrow column types and
+supports empty results. Like other exports, a failed or timed-out query can
+leave a partial output file.
