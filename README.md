@@ -6,6 +6,14 @@ Experimental local SQL over CSV and Parquet files using Apache DataFusion. Not S
 cargo run -- --csv tests/fixtures/sales.csv --table sales --sql 'SELECT city, SUM(amount) FROM sales GROUP BY city'
 ```
 
+Automatically choose CSV, JSON (including .jsonl/.ndjson), or Parquet for a file:
+
+```sh
+cargo run -- --input tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM data'
+```
+
+Use the explicit --csv, --json, or --parquet option for directories.
+
 NDJSON files can also be queried directly:
 
 ```sh

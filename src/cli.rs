@@ -17,10 +17,20 @@ enum StdoutFormat {
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
+    group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables", "auto_input"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file", "interactive"]))
 )]
 struct Args {
+    /// Infer the input reader from a single file extension.
+    #[arg(
+        long = "input",
+        value_name = "FILE",
+        conflicts_with_all = [
+            "csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"
+        ]
+    )]
+    auto_input: Option<PathBuf>,
+
     #[arg(long, value_name = "PATH")]
     csv: Option<PathBuf>,
 
@@ -240,6 +250,31 @@ struct Args {
         requires = "output_parquet"
     )]
     parquet_compression: Option<String>,
+}
+
+fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = args.auto_input.as_ref() else {
+        return Ok(());
+    };
+    if path.is_dir() {
+        return Err("--input needs a file; use --csv, --json or --parquet for directories".into());
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or("--input needs a .csv, .json, .jsonl, .ndjson or .parquet extension")?;
+    match extension.as_str() {
+        "csv" => args.csv = Some(path.clone()),
+        "json" => args.json = Some(path.clone()),
+        "jsonl" | "ndjson" => {
+            args.json = Some(path.clone());
+            args.json_extension.get_or_insert(format!(".{extension}"));
+        }
+        "parquet" => args.parquet = Some(path.clone()),
+        _ => return Err(format!("Unsupported --input extension: .{extension}").into()),
+    }
+    Ok(())
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -570,7 +605,9 @@ fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::erro
 }
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Arc::new(Args::parse());
+    let mut parsed = Args::parse();
+    resolve_auto_input(&mut parsed)?;
+    let args = Arc::new(parsed);
     let mut parameter_names = HashSet::new();
     for (name, _) in &args.named_params {
         if !parameter_names.insert(name.as_str()) {
