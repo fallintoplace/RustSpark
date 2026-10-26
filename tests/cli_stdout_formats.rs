@@ -110,3 +110,23 @@ fn stdout_format_conflicts_with_other_output_modes() -> TestResult {
     assert!(!unknown.status.success());
     Ok(())
 }
+
+#[test]
+fn machine_readable_output_rejects_duplicate_column_names() -> TestResult {
+    for format in ["csv", "json"] {
+        let output = run(&[
+            "--sql",
+            "SELECT * FROM (SELECT 1 AS id) AS left_side CROSS JOIN (SELECT 2 AS id) AS right_side",
+            "--stdout-format",
+            format,
+        ])?;
+        assert!(!output.status.success(), "{format}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Duplicate output column"),
+            "{format}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+    }
+    Ok(())
+}
