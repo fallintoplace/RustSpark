@@ -107,6 +107,9 @@ struct Args {
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
+    #[arg(long, value_name = "ROWS", requires = "max_rows")]
+    offset: Option<usize>,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
@@ -494,7 +497,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .write_json(path, DataFrameWriteOptions::new(), None)
             .await?;
     } else if let Some(max_rows) = args.max_rows {
-        dataframe.show_limit(max_rows).await?;
+        if let Some(offset) = args.offset {
+            offset
+                .checked_add(max_rows)
+                .ok_or("--offset plus --max-rows exceeds the supported range")?;
+            dataframe.limit(offset, Some(max_rows))?.show_limit(max_rows).await?;
+        } else {
+            dataframe.show_limit(max_rows).await?;
+        }
     } else {
         dataframe.show().await?;
     }
