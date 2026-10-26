@@ -129,7 +129,15 @@ pub(super) async fn write_stdout(
             } else {
                 b','
             };
-            write_delimited(&mut stream, &mut tracked, schema, delimiter, include_header, &broken_pipe).await?;
+            write_delimited(
+                &mut stream,
+                &mut tracked,
+                schema,
+                delimiter,
+                include_header,
+                &broken_pipe,
+            )
+            .await?;
         }
         StdoutFormat::Json => {
             let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
