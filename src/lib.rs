@@ -790,12 +790,17 @@ impl RustSparkSession {
     /// Unlike positional unions, column order may differ and new columns
     /// can appear in later tables. Duplicate rows are preserved.
     pub async fn union_tables_by_name(&self, names: &[&str]) -> Result<DataFrame> {
-        let (first, rest) = names.split_first().ok_or_else(|| {
-            DataFusionError::Plan("union_tables_by_name requires at least one table".into())
-        })?;
-        let mut dataframe = self.table(first).await?;
-        for name in rest {
-            dataframe = dataframe.union_by_name(self.table(name).await?)?;
+        if names.is_empty() {
+            return Err(DataFusionError::Plan(
+                "union_tables_by_name requires at least one table".into(),
+            ));
+        }
+        let frames =
+            futures::future::try_join_all(names.iter().map(|name| self.table(name))).await?;
+        let mut frames = frames.into_iter();
+        let mut dataframe = frames.next().expect("non-empty table list");
+        for frame in frames {
+            dataframe = dataframe.union_by_name(frame)?;
         }
         Ok(dataframe)
     }
