@@ -70,6 +70,23 @@ Join multiple CSV files in one query by naming each input:
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
 
+The Rust API also supports typed, lazy joins over registered tables. It
+uses DataFusion's join planner rather than collecting the inputs:
+
+```rust
+use datafusion::logical_expr::JoinType;
+
+let joined = session
+    .join_tables("left", "right", JoinType::Inner, &[("city", "city")])
+    .await?;
+let row_count = joined.count().await?;
+```
+
+Use multiple key pairs for compound equality joins. Supported types include
+INNER, LEFT, RIGHT, FULL, SEMI, and ANTI. Unmatched outer rows contain NULLs;
+NULL join keys do not match other NULL keys by default. A Cartesian product
+must be requested explicitly using SQL `CROSS JOIN`.
+
 Union named inputs by column name, filling missing columns with NULL.
 The `--union-by-name` flag accepts existing tables and earlier unions.
 SQL views can query the combined result:
