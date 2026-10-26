@@ -169,10 +169,20 @@ impl RustSparkSession {
     ///
     /// All inputs must have compatible schemas.
     pub async fn read_parquet_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
-        let paths = file_paths(paths, "Parquet")?;
-        self.context
-            .read_parquet(paths, ParquetReadOptions::new())
+        self.read_parquet_files_with_options(paths, ParquetReadOptions::new())
             .await
+    }
+
+    /// Read several Parquet files with shared reader and partition options.
+    ///
+    /// All inputs must have compatible schemas.
+    pub async fn read_parquet_files_with_options<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        options: ParquetReadOptions<'_>,
+    ) -> Result<DataFrame> {
+        let paths = file_paths(paths, "Parquet")?;
+        self.context.read_parquet(paths, options).await
     }
 
     /// Register several Parquet files as one SQL table.
@@ -181,7 +191,18 @@ impl RustSparkSession {
         table: &str,
         paths: &[P],
     ) -> Result<()> {
-        let dataframe = self.read_parquet_files(paths).await?;
+        self.register_parquet_files_with_options(table, paths, ParquetReadOptions::new())
+            .await
+    }
+
+    /// Register multiple Parquet files using shared reader and partition options.
+    pub async fn register_parquet_files_with_options<P: AsRef<Path>>(
+        &self,
+        table: &str,
+        paths: &[P],
+        options: ParquetReadOptions<'_>,
+    ) -> Result<()> {
+        let dataframe = self.read_parquet_files_with_options(paths, options).await?;
         self.register_dataframe(table, dataframe)
     }
 
