@@ -44,6 +44,22 @@ def canonical_type(value: str) -> str:
     return value
 
 
+def parse_rustspark_description(stdout: str) -> tuple[list[str], list[str], list[bool]]:
+    fields = [line.split("\t") for line in stdout.splitlines() if line.strip()]
+    if any(len(parts) < 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
+        raise ValueError("Invalid RustSpark schema description")
+    return (
+        [parts[0] for parts in fields],
+        [canonical_type(parts[1]) for parts in fields],
+        [parts[2] == "NULL" for parts in fields],
+    )
+
+
+def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
+    objects = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    return QueryResult(columns, [[obj[column] for column in columns] for obj in objects])
+
+
 def rustspark_query(binary: str, sql: str) -> TypedResult:
     command = [binary]
     for name in TABLES:
@@ -53,22 +69,12 @@ def rustspark_query(binary: str, sql: str) -> TypedResult:
         command + ["--describe"], capture_output=True, text=True,
         check=True, timeout=120,
     )
-    fields = [line.split("\t") for line in described.stdout.splitlines() if line.strip()]
-    if any(len(parts) < 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
-        raise ValueError("Invalid RustSpark schema description")
-    columns = [parts[0] for parts in fields]
-    types = [canonical_type(parts[1]) for parts in fields]
-    nullables = [parts[2] == "NULL" for parts in fields]
+    columns, types, nullables = parse_rustspark_description(described.stdout)
     output = subprocess.run(
         command + ["--stdout-format", "json"], capture_output=True, text=True,
         check=True, timeout=120,
     )
-    objects = [json.loads(line) for line in output.stdout.splitlines() if line.strip()]
-    return TypedResult(
-        QueryResult(columns, [[obj[column] for column in columns] for obj in objects]),
-        types,
-        nullables,
-    )
+    return TypedResult(parse_rustspark_json(output.stdout, columns), types, nullables)
 
 
 def spark_query(session, sql: str) -> TypedResult:
