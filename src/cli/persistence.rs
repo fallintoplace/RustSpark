@@ -90,6 +90,35 @@ impl StagedInsert {
         })
     }
 
+    /// Stage a full replacement without linking existing Parquet parts.
+    ///
+    /// The caller writes complete new parts into data_path() before commit.
+    /// The existing table stays visible until the shared recovery-safe swap.
+    pub(super) fn prepare_replacement(root: &Path, table: &str) -> Result<Self, Box<dyn Error>> {
+        if !valid_identifier(table) {
+            return Err("Persistent compaction requires a simple table name".into());
+        }
+        let original = root.join(table);
+        if !fs::symlink_metadata(&original)?.file_type().is_dir() {
+            return Err("Persistent table must be a regular directory".into());
+        }
+        validate_table_files(&original, table)?;
+        let staging = root.join(format!(".rustspark-insert-{table}"));
+        fs::create_dir(&staging)?;
+        let data = staging.join("new");
+        if let Err(error) = fs::create_dir(&data) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.into());
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            table: table.to_owned(),
+            staging,
+            data,
+            cleanup_on_drop: true,
+        })
+    }
+
     pub(super) fn data_path(&self) -> &Path {
         // There is one staged data directory per persistent INSERT.
         // The directory exists until commit or discard.
@@ -454,6 +483,46 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
         return Err("Backup destination appeared during copy".into());
     }
     fs::rename(&snapshot, &normalized)?;
+    Ok(())
+}
+
+/// Rewrite a local Parquet table into one part without buffering the rows.
+///
+/// Query execution reads the original provider while the writer targets a
+/// private directory. Publication reuses the INSERT crash-recovery protocol.
+/// Call with the exclusive database lock held (as CLI.run does).
+pub(super) async fn compact_saved_table(
+    session: &RustSparkSession,
+    root: &Path,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let dataframe = session.table(name).await?;
+    let schema = dataframe.schema().inner().clone();
+    let stage = StagedInsert::prepare_replacement(root, name)?;
+    let part = stage.data_path().join("part-0.parquet");
+    let path = part.to_str().ok_or("Database path must be valid UTF-8")?;
+    dataframe
+        .write_parquet(
+            path,
+            DataFrameWriteOptions::new().with_single_file_output(true),
+            None,
+        )
+        .await?;
+    if !part.exists() {
+        // A zero-row DataFrame may not write a Parquet part. Persist its
+        // original schema so that it remains queryable after a restart.
+        let writer = datafusion::parquet::arrow::ArrowWriter::try_new(
+            fs::File::create(&part)?,
+            schema,
+            None,
+        )?;
+        writer.close()?;
+    }
+    stage.commit()?;
+    if !session.deregister_table(name)? {
+        return Err(format!("Compacted table disappeared: {name}").into());
+    }
+    register_saved_table(session, name, &root.join(name)).await?;
     Ok(())
 }
 
