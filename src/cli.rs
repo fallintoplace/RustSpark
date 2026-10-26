@@ -40,7 +40,10 @@ struct Args {
     #[arg(long = "parquet-pushdown-filters")]
     parquet_pushdown_filters: bool,
 
-    #[arg(long = "parquet-reorder-filters", requires = "parquet_pushdown_filters")]
+    #[arg(
+        long = "parquet-reorder-filters",
+        requires = "parquet_pushdown_filters"
+    )]
     parquet_reorder_filters: bool,
 
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
