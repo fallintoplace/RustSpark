@@ -98,6 +98,11 @@ impl RustSparkSession {
         result
     }
 
+    pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
+        let dataframe = self.table(source).await?;
+        self.register_dataframe(alias, dataframe)
+    }
+
     /// Access a registered SQL table as a lazy DataFrame.
     pub async fn table(&self, name: &str) -> Result<DataFrame> {
         self.context.table(name).await
