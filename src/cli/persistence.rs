@@ -391,17 +391,42 @@ pub(super) async fn register_database_tables(
         if !valid_identifier(name) {
             continue;
         }
-        validate_table_files(&entry.path(), name)?;
         if session.table_exists(name)? {
             return Err(format!("Database table '{name}' conflicts with an input table").into());
         }
         tables.push((name.to_owned(), entry.path()));
     }
 
-    // Each registration plans independent Parquet metadata. Keep the startup
-    // work bounded while overlapping filesystem I/O across saved tables.
+    // Verify all tables before exposing any of them. Each directory has
+    // independent Parquet footers, so overlap the I/O for larger catalogs.
     let parallelism =
         std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(2, 16));
+    if parallelism > 1 && tables.len() >= 4 {
+        let chunk_size = tables.len().div_ceil(parallelism);
+        let validation = std::thread::scope(|scope| {
+            let jobs = tables
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> Result<(), String> {
+                        for (name, path) in chunk {
+                            validate_table_files(path, name).map_err(|error| error.to_string())?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            jobs.into_iter().try_for_each(|job| {
+                job.join().expect("database validation worker panicked")
+            })
+        });
+        validation.map_err(|error| -> Box<dyn Error> { error.into() })?;
+    } else {
+        for (name, path) in &tables {
+            validate_table_files(path, name)?;
+        }
+    }
+
+    // Registration still stays bounded after every table has passed validation.
     let mut registrations = stream::iter(
         tables
             .iter()
