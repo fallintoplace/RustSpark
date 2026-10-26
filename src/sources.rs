@@ -44,7 +44,9 @@ impl RustSparkSession {
     /// All inputs must have compatible schemas.
     pub async fn read_csv_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
         if paths.is_empty() {
-            return Err(DataFusionError::Plan("CSV input needs at least one file".into()));
+            return Err(DataFusionError::Plan(
+                "CSV input needs at least one file".into(),
+            ));
         }
         let paths: Vec<&str> = paths
             .iter()
@@ -54,11 +56,7 @@ impl RustSparkSession {
     }
 
     /// Register several CSV files as a single SQL table.
-    pub async fn register_csv_files<P: AsRef<Path>>(
-        &self,
-        table: &str,
-        paths: &[P],
-    ) -> Result<()> {
+    pub async fn register_csv_files<P: AsRef<Path>>(&self, table: &str, paths: &[P]) -> Result<()> {
         let dataframe = self.read_csv_files(paths).await?;
         self.register_dataframe(table, dataframe)
     }
