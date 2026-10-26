@@ -159,7 +159,6 @@ impl RustSparkSession {
             .with_allow_statements(false);
         self.context.sql_with_options(query, options).await
     }
-
 }
 
 impl Default for RustSparkSession {
