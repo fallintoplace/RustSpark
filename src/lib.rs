@@ -870,10 +870,7 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
-    fn sort_expressions(
-        dataframe: &DataFrame,
-        order: &[(&str, bool)],
-    ) -> Result<Vec<datafusion::logical_expr::Expr>> {
+    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
@@ -897,7 +894,7 @@ impl RustSparkSession {
             }
             sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
         }
-        Ok(sort_exprs)
+        dataframe.sort(sort_exprs)
     }
 
     /// Sort rows by multiple named columns using Spark-like NULL ordering.
@@ -912,8 +909,19 @@ impl RustSparkSession {
             ));
         }
         let dataframe = self.table(table).await?;
-        let sort_exprs = Self::sort_expressions(&dataframe, order)?;
-        dataframe.sort(sort_exprs)
+        Self::sort_dataframe(dataframe, order)
+    }
+
+    // Plan independent SQL inputs concurrently, with bounded outstanding
+    // work. buffered() returns results in input order, so UNION semantics and
+    // the first reported planning error still follow query order.
+    async fn plan_union_sql_inputs(&self, queries: &[&str]) -> Result<Vec<DataFrame>> {
+        use futures::{StreamExt, TryStreamExt, stream};
+
+        stream::iter(queries.iter().map(|query| self.sql(query)))
+            .buffered(16)
+            .try_collect()
+            .await
     }
 
     /// Union SQL query results by column position.
