@@ -41,3 +41,9 @@ Standalone SQL without a file also works:
 ```sh
 cargo run -- --sql 'SELECT 42 AS answer'
 ```
+
+CSV missing-value markers can be matched by a regex:
+
+```sh
+cargo run -- --csv data.csv --csv-null-regex '^(NA|NULL)$' --sql 'SELECT COUNT(*) FROM data'
+```
