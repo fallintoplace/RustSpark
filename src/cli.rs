@@ -538,6 +538,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("--offset plus --max-rows exceeds the supported range")?;
     }
     validate_inputs(&args)?;
+    // Serialize local catalog reads and writes across RustSpark processes.
+    // Keep this file handle alive through interactive sessions and exports.
+    let _database_lock = if let Some(root) = args.database_dir.as_deref() {
+        Some(persistence::lock_database(root)?)
+    } else {
+        None
+    };
     let session = new_session(&args)?;
     validate_format_options(&args)?;
     register_inputs(&session, &args).await?;

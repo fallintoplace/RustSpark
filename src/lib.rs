@@ -24,10 +24,36 @@ impl RustSparkSession {
         }
     }
 
+    /// Wrap a preconfigured DataFusion context, including an externally
+    /// provided execution backend such as Apache DataFusion Ballista.
+    ///
+    /// RustSpark does not take ownership of any scheduler or executor process.
+    pub fn from_context(context: SessionContext) -> Self {
+        Self { context }
+    }
+
     pub fn with_config_and_runtime(config: SessionConfig, runtime: Arc<RuntimeEnv>) -> Self {
         Self {
             context: SessionContext::new_with_config_rt(config, runtime),
         }
+    }
+
+    /// Return the underlying provider for cancellation-safe table replacement.
+    pub async fn table_provider(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn datafusion::datasource::TableProvider>> {
+        self.context.table_provider(name).await
+    }
+
+    /// Register an existing provider, preserving its physical table behavior.
+    pub fn register_table_provider(
+        &self,
+        name: &str,
+        provider: Arc<dyn datafusion::datasource::TableProvider>,
+    ) -> Result<()> {
+        self.context.register_table(name, provider)?;
+        Ok(())
     }
 
     /// List registered tables with fully qualified catalog.schema.table names.

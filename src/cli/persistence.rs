@@ -1,9 +1,218 @@
-use std::{error::Error, fs, path::Path};
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
-use datafusion::{dataframe::DataFrameWriteOptions, prelude::DataFrame};
+use datafusion::{
+    dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader,
+    prelude::DataFrame,
+};
 use rustspark::RustSparkSession;
 
 use super::valid_identifier;
+
+// Debug builds support deterministic interruption at storage commit
+// boundaries. Release builds omit the injection entirely.
+#[cfg(debug_assertions)]
+fn crash_after(phase: &str) {
+    if std::env::var("RUSTSPARK_TEST_INSERT_EXIT").as_deref() == Ok(phase) {
+        std::process::exit(97);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn crash_after(_phase: &str) {}
+
+/// A full, private copy of a persisted table. DataFusion INSERTs run against
+/// this directory, so an execution failure cannot touch the visible table.
+pub(super) struct StagedInsert {
+    root: PathBuf,
+    table: String,
+    staging: PathBuf,
+    data: PathBuf,
+}
+
+impl StagedInsert {
+    pub(super) fn prepare(root: &Path, table: &str) -> Result<Self, Box<dyn Error>> {
+        if !valid_identifier(table) {
+            return Err("Persistent INSERT requires a simple table name".into());
+        }
+        let original = root.join(table);
+        if !fs::symlink_metadata(&original)?.file_type().is_dir() {
+            return Err("Persistent table must be a regular directory".into());
+        }
+        // Deterministic name makes crash recovery independent of ephemeral ids.
+        // The caller holds the exclusive database lock for this session.
+        let staging = root.join(format!(".rustspark-insert-{table}"));
+        fs::create_dir(&staging)?;
+        let prepared = (|| -> Result<(), Box<dyn Error>> {
+            let new = staging.join("new");
+            fs::create_dir(&new)?;
+            validate_table_files(&original, table)?;
+            for entry in fs::read_dir(&original)? {
+                let entry = entry?;
+                // Copy, never hard-link: a future writer using a fixed file
+                // name must not overwrite a live Parquet inode.
+                fs::copy(entry.path(), new.join(entry.file_name()))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            table: table.to_owned(),
+            data: staging.join("new"),
+            staging,
+        })
+    }
+
+    pub(super) fn data_path(&self) -> &Path {
+        // There is one staged data directory per persistent INSERT.
+        // The directory exists until commit or discard.
+        &self.data
+    }
+
+    pub(super) fn discard(self) -> Result<(), Box<dyn Error>> {
+        fs::remove_dir_all(self.staging)?;
+        Ok(())
+    }
+
+    pub(super) fn commit(self) -> Result<(), Box<dyn Error>> {
+        let new = self.staging.join("new");
+        validate_table_files(&new, &self.table)?;
+        crash_after("before_swap");
+        // The lock excludes other RustSpark processes. Between renames the
+        // visible table may be absent, so recovery restores "old" on restart.
+        let original = self.root.join(&self.table);
+        let old = self.staging.join("old");
+        fs::rename(&original, &old)?;
+        crash_after("after_old_moved");
+        if let Err(error) = fs::rename(&new, &original) {
+            if let Err(restore) = fs::rename(&old, &original) {
+                return Err(format!(
+                    "Cannot publish INSERT for {}: {error}; recovery required: {restore}",
+                    self.table
+                )
+                .into());
+            }
+            let _ = fs::remove_dir_all(&self.staging);
+            return Err(error.into());
+        }
+        crash_after("after_publish");
+        // The new table is already published. If deletion fails, startup
+        // recovery cleans up the old snapshot without rolling back the write.
+        let _ = fs::remove_dir_all(&self.staging);
+        Ok(())
+    }
+}
+
+/// Validate every file before exposing a table. A Parquet footer check
+/// catches truncated writes without scanning or materializing all rows.
+fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+    let mut found_parquet = false;
+    for file in fs::read_dir(directory)? {
+        let file = file?;
+        let path = file.path();
+        if !file.file_type()?.is_file() || !path.extension().is_some_and(|ext| ext == "parquet") {
+            return Err(format!(
+                "Persistent table '{name}' has an unexpected entry: {}",
+                path.display()
+            )
+            .into());
+        }
+        SerializedFileReader::new(fs::File::open(&path)?).map_err(|error| {
+            format!(
+                "Cannot read persistent Parquet file '{}': {error}",
+                path.display()
+            )
+        })?;
+        found_parquet = true;
+    }
+    if !found_parquet {
+        return Err(format!("Database table '{name}' contains no Parquet files").into());
+    }
+    Ok(())
+}
+
+/**
+ * Hold an OS-owned lock for the entire lifetime of a local database session.
+ *
+ * The lock file is intentionally persistent: removing it could let a second
+ * process lock a different inode while another process is still writing.
+ * The OS releases the lock on process exit, including abnormal termination.
+ */
+pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
+    fs::create_dir_all(root)?;
+    let lock_path = root.join(".rustspark.lock");
+    if let Ok(metadata) = fs::symlink_metadata(&lock_path)
+        && !metadata.file_type().is_file()
+    {
+        return Err("Database lock path must be a regular file".into());
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    file.try_lock().map_err(|error| {
+        format!(
+            "Cannot lock database directory '{}': {error}. Another RustSpark process may be using it",
+            root.display()
+        )
+    })?;
+    Ok(file)
+}
+
+/// Remove reserved staging and drop tombstone directories after an interrupted
+/// session. The caller holds the exclusive database lock.
+fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let filename = entry.file_name();
+        let Some(name) = filename.to_str() else {
+            continue;
+        };
+        if let Some(table) = name.strip_prefix(".rustspark-insert-") {
+            if !valid_identifier(table) || !entry.file_type()?.is_dir() {
+                return Err(format!("Invalid interrupted INSERT directory: {name}").into());
+            }
+            let live = root.join(table);
+            let old = entry.path().join("old");
+            match fs::symlink_metadata(&live) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    // The new data has been published, or the old table is
+                    // still live. Either way, the staging area is disposable.
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // A crash happened between moving out the old table and
+                    // publishing the new one. Restore the previous snapshot.
+                    if !fs::symlink_metadata(&old)?.file_type().is_dir() {
+                        return Err(format!("Missing INSERT backup for table '{table}'").into());
+                    }
+                    fs::rename(&old, &live)?;
+                }
+                Ok(_) => {
+                    return Err(format!("Invalid persistent table path: {}", live.display()).into());
+                }
+                Err(error) => return Err(error.into()),
+            }
+            fs::remove_dir_all(entry.path())?;
+            continue;
+        }
+        let reserved =
+            name.starts_with(".rustspark-stage-") || name.starts_with(".rustspark-drop-");
+        // Never follow symlinks or touch user-owned tables.
+        if reserved && entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
 
 /// Load only complete, valid table directories. Hidden staging directories and
 /// symlinks are not part of the on-disk catalog.
@@ -12,6 +221,7 @@ pub(super) async fn register_database_tables(
     root: &Path,
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(root)?;
+    recover_incomplete_operations(root)?;
     let mut entries = fs::read_dir(root)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -26,19 +236,7 @@ pub(super) async fn register_database_tables(
         if !valid_identifier(name) {
             continue;
         }
-        let mut found_parquet = false;
-        for file in fs::read_dir(entry.path())? {
-            let file = file?;
-            if file.file_type()?.is_file()
-                && file.path().extension().is_some_and(|ext| ext == "parquet")
-            {
-                found_parquet = true;
-                break;
-            }
-        }
-        if !found_parquet {
-            return Err(format!("Database table '{name}' contains no Parquet files").into());
-        }
+        validate_table_files(&entry.path(), name)?;
         if session.table_exists(name)? {
             return Err(format!("Database table '{name}' conflicts with an input table").into());
         }

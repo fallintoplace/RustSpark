@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
+};
 
 use datafusion::{
     config::TableParquetOptions,
@@ -24,6 +28,73 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     }
 }
 
+enum FileExport {
+    Parquet(Box<Option<TableParquetOptions>>),
+    Csv,
+    Json,
+}
+
+/// Keep the old destination untouched until the entire single-file export
+/// completes. The temporary directory is deleted on every error path.
+async fn write_file_export(
+    dataframe: DataFrame,
+    destination: &Path,
+    format: FileExport,
+    single_file: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = if single_file {
+        Some(
+            tempfile::Builder::new()
+                .prefix(".rustspark-export-")
+                .tempdir_in(parent)?,
+        )
+    } else {
+        None
+    };
+    let path = staging
+        .as_ref()
+        .map(|directory| directory.path().join("result"))
+        .unwrap_or_else(|| destination.to_path_buf());
+    let output = path.to_str().ok_or("Output path must be valid UTF-8")?;
+    let options = output_write_options(single_file);
+    match format {
+        FileExport::Parquet(parquet_options) => {
+            dataframe
+                .write_parquet(output, options, *parquet_options)
+                .await?;
+        }
+        FileExport::Csv => {
+            dataframe.write_csv(output, options, None).await?;
+        }
+        FileExport::Json => {
+            dataframe.write_json(output, options, None).await?;
+        }
+    }
+    if single_file {
+        // NamedTempFile::persist replaces an existing destination across
+        // platforms. Copying through it keeps the completed file on the same
+        // filesystem and avoids publishing a partial result on failure.
+        let mut completed = tempfile::NamedTempFile::new_in(parent)?;
+        io::copy(&mut fs::File::open(&path)?, completed.as_file_mut())?;
+        completed.as_file_mut().sync_all()?;
+        completed.persist(destination)?;
+    }
+    Ok(())
+}
+
+/// Fully execute intermediate SQL without buffering rows that the CLI discards.
+async fn drain_dataframe(dataframe: DataFrame) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = dataframe.execute_stream().await?;
+    while let Some(batch) = stream.next().await {
+        batch?;
+    }
+    Ok(())
+}
+
 // Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
 // or comments. Execute setup statements before presenting the final result.
 pub(super) async fn execute_script(
@@ -47,14 +118,10 @@ pub(super) async fn execute_script(
         }
         validate_persistent_table_name(&statement, args)?;
         let dropped = persistent_drop_table(&statement, args)?;
-        // Execute DML and evaluate intermediate SELECTs without retaining rows.
-        // Collecting an unused SELECT can exhaust memory before the final query.
-        let mut stream = plan_query(session, &statement.to_string(), args)
-            .await?
-            .execute_stream()
-            .await?;
-        while let Some(batch) = stream.next().await {
-            batch?;
+        if let Some(target) = persistent_insert_table(&statement, args)? {
+            execute_staged_insert(session, &statement.to_string(), args, &target, false).await?;
+        } else {
+            drain_dataframe(plan_query(session, &statement.to_string(), args).await?).await?;
         }
         persist_created_table(session, &statement, args).await?;
         persist_dropped_table(dropped, args)?;
@@ -68,9 +135,139 @@ pub(super) async fn execute_script(
     }
     validate_persistent_table_name(&last, args)?;
     let dropped = persistent_drop_table(&last, args)?;
-    execute_query(session, &last.to_string(), args).await?;
+    if let Some(target) = persistent_insert_table(&last, args)? {
+        execute_staged_insert(session, &last.to_string(), args, &target, true).await?;
+    } else {
+        execute_query(session, &last.to_string(), args).await?;
+    }
     persist_created_table(session, &last, args).await?;
     persist_dropped_table(dropped, args)
+}
+
+/// Route a persistent INSERT to a staged copy, never the visible table files.
+/// Unquoted, local table names only. External registrations keep DataFusion's
+/// normal INSERT behavior.
+fn persistent_insert_table(
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(None);
+    };
+    let DFStatement::Statement(statement) = statement else {
+        return Ok(None);
+    };
+    let SqlStatement::Insert(insert) = statement.as_ref() else {
+        return Ok(None);
+    };
+    let name = insert.table.to_string().to_ascii_lowercase();
+    if !super::valid_identifier(&name) {
+        return Err("Persistent INSERT requires a simple unquoted table name".into());
+    }
+    if insert.overwrite && root.join(&name).is_dir() {
+        return Err("Persistent INSERT OVERWRITE is unsupported".into());
+    }
+    if root.join(&name).is_dir() {
+        if args.save_table.is_some() {
+            return Err("--save-table cannot be used with persistent INSERT".into());
+        }
+        Ok(Some(name))
+    } else {
+        Ok(None)
+    }
+}
+
+// Deterministically exercise task cancellation while a private INSERT
+// provider is registered. Only debug builds support this test hook.
+#[cfg(debug_assertions)]
+async fn debug_pause_staged_insert() {
+    if let Ok(raw) = std::env::var("RUSTSPARK_TEST_INSERT_PAUSE_MS")
+        && let Ok(ms) = raw.parse::<u64>()
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
+
+#[cfg(not(debug_assertions))]
+async fn debug_pause_staged_insert() {}
+
+/// A dropped execution future (for example an interactive query timeout)
+/// must restore the original provider before another SQL statement starts.
+struct RestoreTableOnCancel<'a> {
+    session: &'a RustSparkSession,
+    table: &'a str,
+    original: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
+    active: bool,
+}
+
+impl Drop for RestoreTableOnCancel<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.session.deregister_table(self.table);
+            let _ = self
+                .session
+                .register_table_provider(self.table, self.original.clone());
+        }
+    }
+}
+
+async fn execute_staged_insert(
+    session: &RustSparkSession,
+    sql: &str,
+    args: &Args,
+    table: &str,
+    final_statement: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?;
+    let stage = super::persistence::StagedInsert::prepare(root, table)?;
+    let original = session.table_provider(table).await?;
+    let mut guard = RestoreTableOnCancel {
+        session,
+        table,
+        original,
+        active: true,
+    };
+    if !session.deregister_table(table)? {
+        stage.discard()?;
+        return Err(format!("Persistent table disappeared: {table}").into());
+    }
+    if let Err(error) =
+        super::persistence::register_saved_table(session, table, stage.data_path()).await
+    {
+        let _ = stage.discard();
+        return Err(error);
+    }
+
+    // Keep the guard alive while awaiting SQL and re-registration. Cancellation
+    // cannot leave an interactive session pointed at an unpublished table.
+    debug_pause_staged_insert().await;
+    let execution: Result<(), Box<dyn std::error::Error>> = async {
+        if final_statement {
+            execute_query(session, sql, args).await
+        } else {
+            drain_dataframe(plan_query(session, sql, args).await?).await?;
+            Ok(())
+        }
+    }
+    .await;
+    if !session.deregister_table(table)? {
+        return Err(format!("Staged table disappeared: {table}").into());
+    }
+    let outcome = match execution {
+        Ok(()) => stage.commit(),
+        Err(error) => {
+            let _ = stage.discard();
+            Err(error)
+        }
+    };
+    // The original provider is restored on cancellation or re-registration
+    // error. The disk path remains valid before and after commit.
+    super::persistence::register_saved_table(session, table, &root.join(table)).await?;
+    guard.active = false;
+    outcome
 }
 
 fn persistent_create_table<'a>(
@@ -265,29 +462,22 @@ async fn execute_query(
     } else if args.explain_analyze {
         dataframe.explain(true, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         let writer_options = args.parquet_compression.as_ref().map(|codec| {
             let mut options = TableParquetOptions::default();
             options.global.compression = Some(codec.clone());
             options
         });
-        dataframe
-            .write_parquet(
-                path,
-                output_write_options(args.output_single_file),
-                writer_options,
-            )
-            .await?;
+        write_file_export(
+            dataframe,
+            path,
+            FileExport::Parquet(Box::new(writer_options)),
+            args.output_single_file,
+        )
+        .await?;
     } else if let Some(path) = args.output_csv.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_csv(path, output_write_options(args.output_single_file), None)
-            .await?;
+        write_file_export(dataframe, path, FileExport::Csv, args.output_single_file).await?;
     } else if let Some(path) = args.output_json.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_json(path, output_write_options(args.output_single_file), None)
-            .await?;
+        write_file_export(dataframe, path, FileExport::Json, args.output_single_file).await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
         write_arrow_ipc(dataframe, path).await?;
     } else if let Some(format) = args.stdout_format {
