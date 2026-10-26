@@ -1,16 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::Read,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser, ValueEnum};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::ScalarValue;
-use datafusion::config::TableParquetOptions;
-use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::sql::parser::DFParser;
 use rustspark::RustSparkSession;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -439,15 +431,6 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--max-rows")
 }
 
-fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
-    let options = DataFrameWriteOptions::new();
-    if single_file {
-        options.with_single_file_output(true)
-    } else {
-        options
-    }
-}
-
 mod validation;
 use validation::{validate_format_options, validate_inputs};
 
@@ -456,6 +439,12 @@ use session::new_session;
 
 mod registration;
 use registration::register_inputs;
+
+mod query;
+use query::{execute_script, plan_query};
+
+mod setup;
+use setup::{cache_tables, read_query, register_derived_tables};
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
@@ -482,183 +471,10 @@ async fn execute_registered_query(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for declaration in &args.unions_by_name {
-        let (name, sources) = parse_union_by_name(declaration)?;
-        let union = session.union_tables_by_name(&sources).await?;
-        session.register_dataframe(name, union)?;
-    }
-    for definition in &args.sql_views {
-        let (name, sql) = parse_named_view(definition)?;
-        let dataframe = plan_query(session, sql, args).await?;
-        session.register_dataframe(name, dataframe)?;
-    }
-    for definition in &args.materialized_sql_views {
-        let (name, sql) = parse_named_view(definition)?;
-        let dataframe = plan_query(session, sql, args).await?.cache().await?;
-        session.register_dataframe(name, dataframe)?;
-    }
-    let query = if let Some(sql) = args.sql.as_ref() {
-        sql.clone()
-    } else if let Some(path) = args.sql_file.as_ref() {
-        if path.as_os_str() == "-" {
-            read_sql_stdin().await?
-        } else {
-            std::fs::read_to_string(path)?
-        }
-    } else {
-        unreachable!("clap requires either --sql or --sql-file")
-    };
-    let mut cached_names = HashSet::new();
-    for name in &args.cache_tables {
-        if !cached_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate cached table: {name}").into());
-        }
-        session.cache_table(name).await?;
-    }
+    register_derived_tables(session, args).await?;
+    let query = read_query(args).await?;
+    cache_tables(session, args).await?;
     execute_script(session, &query, args).await
-}
-
-// Use a detached reader thread so a blocked stdin read cannot stall the query timer.
-async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let mut query = String::new();
-        let result = std::io::stdin().read_to_string(&mut query).map(|_| query);
-        let _ = sender.send(result);
-    });
-    Ok(receiver.await??)
-}
-
-// Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
-// or comments. Execute setup statements before presenting the final result.
-async fn execute_script(
-    session: &RustSparkSession,
-    script: &str,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut statements = DFParser::parse_sql(script)?;
-    let last = statements
-        .pop_back()
-        .ok_or("SQL script must contain at least one statement")?;
-    for statement in statements {
-        plan_query(session, &statement.to_string(), args)
-            .await?
-            .collect()
-            .await?;
-    }
-    execute_query(session, &last.to_string(), args).await
-}
-
-async fn plan_query(
-    session: &RustSparkSession,
-    query: &str,
-    args: &Args,
-) -> Result<datafusion::prelude::DataFrame, Box<dyn std::error::Error>> {
-    let dataframe = if !args.named_params.is_empty() {
-        let mut params = HashMap::new();
-        for (name, value) in &args.named_params {
-            if params.insert(name.clone(), value.clone()).is_some() {
-                return Err(format!("Duplicate named parameter: {name}").into());
-            }
-        }
-        session.sql_with_params(query, params).await?
-    } else if !args.params.is_empty() {
-        session.sql_with_params(query, args.params.clone()).await?
-    } else {
-        session.sql(query).await?
-    };
-    Ok(dataframe)
-}
-
-fn reject_duplicate_output_fields(
-    dataframe: &datafusion::prelude::DataFrame,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut names = HashSet::new();
-    for field in dataframe.schema().fields() {
-        if !names.insert(field.name()) {
-            return Err(format!("Duplicate output column: {}", field.name()).into());
-        }
-    }
-    Ok(())
-}
-
-async fn execute_query(
-    session: &RustSparkSession,
-    query: &str,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = plan_query(session, query, args).await?;
-    if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
-        reject_duplicate_output_fields(&dataframe)?;
-    }
-    if args.describe {
-        for field in dataframe.schema().fields() {
-            let nullability = if field.is_nullable() {
-                "NULL"
-            } else {
-                "NOT NULL"
-            };
-            println!("{}\t{}\t{nullability}", field.name(), field.data_type());
-        }
-    } else if args.explain {
-        dataframe.explain(false, false)?.show().await?;
-    } else if args.explain_analyze {
-        dataframe.explain(true, false)?.show().await?;
-    } else if let Some(path) = args.output_parquet.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        let writer_options = args.parquet_compression.as_ref().map(|codec| {
-            let mut options = TableParquetOptions::default();
-            options.global.compression = Some(codec.clone());
-            options
-        });
-        dataframe
-            .write_parquet(
-                path,
-                output_write_options(args.output_single_file),
-                writer_options,
-            )
-            .await?;
-    } else if let Some(path) = args.output_csv.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_csv(path, output_write_options(args.output_single_file), None)
-            .await?;
-    } else if let Some(path) = args.output_json.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_json(path, output_write_options(args.output_single_file), None)
-            .await?;
-    } else if let Some(path) = args.output_arrow.as_ref() {
-        write_arrow_ipc(dataframe, path).await?;
-    } else if let Some(format) = args.stdout_format {
-        let dataframe = if let Some(max_rows) = args.max_rows {
-            let offset = args.offset.unwrap_or(0);
-            offset
-                .checked_add(max_rows)
-                .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe.limit(offset, Some(max_rows))?
-        } else {
-            dataframe
-        };
-        write_stdout(dataframe, format).await?;
-    } else if args.count_only {
-        println!("{}", dataframe.count().await?);
-    } else if let Some(max_rows) = args.max_rows {
-        if let Some(offset) = args.offset {
-            offset
-                .checked_add(max_rows)
-                .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe
-                .limit(offset, Some(max_rows))?
-                .show_limit(max_rows)
-                .await?;
-        } else {
-            dataframe.show_limit(max_rows).await?;
-        }
-    } else {
-        dataframe.show().await?;
-    }
-    Ok(())
 }
 
 mod output;
