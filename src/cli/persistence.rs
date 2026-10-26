@@ -12,6 +12,18 @@ use rustspark::RustSparkSession;
 
 use super::valid_identifier;
 
+// Debug builds support deterministic interruption at storage commit
+// boundaries. Release builds omit the injection entirely.
+#[cfg(debug_assertions)]
+fn crash_after(phase: &str) {
+    if std::env::var("RUSTSPARK_TEST_INSERT_EXIT").as_deref() == Ok(phase) {
+        std::process::exit(97);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn crash_after(_phase: &str) {}
+
 /// A full, private copy of a persisted table. DataFusion INSERTs run against
 /// this directory, so an execution failure cannot touch the visible table.
 pub(super) struct StagedInsert {
@@ -72,11 +84,13 @@ impl StagedInsert {
     pub(super) fn commit(self) -> Result<(), Box<dyn Error>> {
         let new = self.staging.join("new");
         validate_table_files(&new, &self.table)?;
+        crash_after("before_swap");
         // The lock excludes other RustSpark processes. Between renames the
         // visible table may be absent, so recovery restores "old" on restart.
         let original = self.root.join(&self.table);
         let old = self.staging.join("old");
         fs::rename(&original, &old)?;
+        crash_after("after_old_moved");
         if let Err(error) = fs::rename(&new, &original) {
             if let Err(restore) = fs::rename(&old, &original) {
                 return Err(format!(
@@ -88,6 +102,7 @@ impl StagedInsert {
             let _ = fs::remove_dir_all(&self.staging);
             return Err(error.into());
         }
+        crash_after("after_publish");
         // The new table is already published. If deletion fails, startup
         // recovery cleans up the old snapshot without rolling back the write.
         let _ = fs::remove_dir_all(&self.staging);
