@@ -32,7 +32,10 @@ fn describe_and_explain_cannot_drop_persistent_tables() -> Result<(), Box<dyn st
             .arg(root)
             .args(["--sql", "DROP TABLE protected; SELECT 1 AS n", flag])
             .output()?;
-        assert!(!script.status.success(), "{flag} must reject mutating setup SQL");
+        assert!(
+            !script.status.success(),
+            "{flag} must reject mutating setup SQL"
+        );
         assert!(root.join("protected").is_dir(), "{flag} deleted the table");
     }
 
