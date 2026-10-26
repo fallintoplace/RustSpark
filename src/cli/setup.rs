@@ -7,6 +7,17 @@ use rustspark::RustSparkSession;
 
 use super::{Args, parse_named_view, parse_union_by_name};
 
+fn ensure_unique_name(
+    names: &mut HashSet<String>,
+    name: &str,
+    kind: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !names.insert(name.to_ascii_lowercase()) {
+        return Err(format!("Duplicate {kind}: {name}").into());
+    }
+    Ok(())
+}
+
 // A view is a read-only query, not an opportunity to execute SQL mutations.
 async fn plan_view_query(
     session: &RustSparkSession,
@@ -33,9 +44,7 @@ pub(super) async fn register_derived_tables(
     let mut union_names = HashSet::new();
     for declaration in &args.unions_by_name {
         let (name, _) = parse_union_by_name(declaration)?;
-        if !union_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate union destination: {name}").into());
-        }
+        ensure_unique_name(&mut union_names, name, "union destination")?;
     }
     for declaration in &args.unions_by_name {
         let (name, sources) = parse_union_by_name(declaration)?;
@@ -45,17 +54,13 @@ pub(super) async fn register_derived_tables(
     let mut view_names = HashSet::new();
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        if !view_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate SQL view: {name}").into());
-        }
+        ensure_unique_name(&mut view_names, name, "SQL view")?;
         let dataframe = plan_view_query(session, sql, args).await?;
         session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        if !view_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate SQL view: {name}").into());
-        }
+        ensure_unique_name(&mut view_names, name, "SQL view")?;
         let dataframe = plan_view_query(session, sql, args).await?.cache().await?;
         session.register_dataframe(name, dataframe)?;
     }
@@ -83,9 +88,7 @@ pub(super) async fn cache_tables(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_names = HashSet::new();
     for name in &args.cache_tables {
-        if !cached_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate cached table: {name}").into());
-        }
+        ensure_unique_name(&mut cached_names, name, "cached table")?;
         session.cache_table(name).await?;
     }
     Ok(())
