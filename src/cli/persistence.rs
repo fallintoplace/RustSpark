@@ -42,8 +42,20 @@ pub(super) async fn register_database_tables(
         if session.table_exists(name)? {
             return Err(format!("Database table '{name}' conflicts with an input table").into());
         }
-        session.register_parquet(name, entry.path()).await?;
+        register_saved_table(session, name, &entry.path()).await?;
     }
+    Ok(())
+}
+
+/// Register a persistent table as a directory-backed ListingTable, not a single
+/// file. DataFusion can append to directory-backed tables with SQL INSERT.
+pub(super) async fn register_saved_table(
+    session: &RustSparkSession,
+    name: &str,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let path = path.to_str().ok_or("Database path must be valid UTF-8")?;
+    session.register_parquet(name, format!("{path}/")).await?;
     Ok(())
 }
 
