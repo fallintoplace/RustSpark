@@ -75,7 +75,7 @@ fn staged_insert_hard_links_immutable_parts() -> TestResult {
 
     // The stage is visible only under an exclusive database lock and before
     // publication. The debug pause makes that boundary deterministic.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--database-dir")
         .arg(db)
         .arg("--sql")
@@ -123,7 +123,7 @@ fn staged_insert_hard_links_immutable_parts() -> TestResult {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(
-        fs::read(&db.join("numbers").join(original.file_name().unwrap()))?,
+        fs::read(db.join("numbers").join(original.file_name().unwrap()))?,
         original_content
     );
     Ok(())
