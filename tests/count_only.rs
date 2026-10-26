@@ -59,6 +59,7 @@ fn count_only_rejects_other_output_modes() {
     for conflict in [
         vec!["--describe"],
         vec!["--explain"],
+        vec!["--explain-analyze"],
         vec!["--max-rows", "1"],
         vec!["--output-parquet", "ignored"],
         vec!["--output-csv", "ignored"],
