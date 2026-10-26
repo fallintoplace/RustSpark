@@ -101,6 +101,28 @@ async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str)
     }
 }
 
+// Handle the schema-specific shell command without changing pending SQL.
+async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
+    if command != ".schema" && !command.starts_with(".schema ") {
+        return false;
+    }
+    let name = command.strip_prefix(".schema").unwrap_or_default().trim();
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("Shell error: .schema requires exactly one table name");
+    } else {
+        match session.describe_table(name).await {
+            Ok(columns) => {
+                for (column, data_type, nullable) in columns {
+                    let nullability = if nullable { "NULL" } else { "NOT NULL" };
+                    println!("{column}\t{data_type}\t{nullability}");
+                }
+            }
+            Err(error) => eprintln!("Shell error: {error}"),
+        }
+    }
+    true
+}
+
 /// Run SQL statements in one session so views and DDL survive between prompts.
 pub(super) async fn run_interactive(
     session: &RustSparkSession,
@@ -149,25 +171,8 @@ pub(super) async fn run_interactive(
                 _ => {}
             }
         }
-        if pending.trim().is_empty() {
-            let command = line.trim();
-            if command == ".schema" || command.starts_with(".schema ") {
-                let name = command.strip_prefix(".schema").unwrap_or_default().trim();
-                if name.is_empty() || name.split_whitespace().count() != 1 {
-                    eprintln!("Shell error: .schema requires exactly one table name");
-                } else {
-                    match session.describe_table(name).await {
-                        Ok(columns) => {
-                            for (column, data_type, nullable) in columns {
-                                let nullability = if nullable { "NULL" } else { "NOT NULL" };
-                                println!("{column}\t{data_type}\t{nullability}");
-                            }
-                        }
-                        Err(error) => eprintln!("Shell error: {error}"),
-                    }
-                }
-                continue;
-            }
+        if pending.trim().is_empty() && handle_schema_command(session, line.trim()).await {
+            continue;
         }
         pending.push_str(&line);
         if !has_sql_terminator(&pending) {
