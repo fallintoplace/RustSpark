@@ -53,6 +53,9 @@ struct Args {
     #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
     csv_comment: Option<u8>,
 
+    #[arg(long = "csv-null-value", value_name = "TEXT", value_parser = parse_csv_null_value)]
+    csv_null_value: Option<String>,
+
     #[arg(long = "csv-schema", value_name = "NAME:TYPE,...", value_parser = parse_csv_schema)]
     csv_schema: Option<Schema>,
 
@@ -135,6 +138,26 @@ fn parse_csv_char(value: &str) -> Result<u8, String> {
         [byte] if *byte != b'\n' && *byte != b'\r' => Ok(*byte),
         _ => Err("CSV character must be one ASCII character other than newline".into()),
     }
+}
+
+fn parse_csv_null_value(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.contains('\n') || value.contains('\r') {
+        Err("CSV null marker cannot be empty or contain a newline".into())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn csv_null_regex(value: &str) -> String {
+    let mut pattern = String::from("^");
+    for character in value.chars() {
+        if r"\.^$|?*+()[]{}".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('$');
+    pattern
 }
 
 fn parse_file_extension(value: &str) -> Result<String, String> {
@@ -243,6 +266,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     } else {
         options
     };
+    let options = if let Some(value) = args.csv_null_value.as_deref() {
+        options.null_regex(Some(csv_null_regex(value)))
+    } else {
+        options
+    };
     if let Some(rows) = args.csv_schema_rows {
         options.schema_infer_max_records(rows)
     } else {
@@ -348,6 +376,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
+    }
+    if args.csv_null_value.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-null-value requires a CSV input".into());
     }
     if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema-rows requires a JSON input".into());

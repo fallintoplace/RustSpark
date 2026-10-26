@@ -18,6 +18,14 @@ SQL statements can be read from a file:
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
 
+Treat a literal CSV token as NULL, including tokens with regex punctuation:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --csv-null-value NA --sql 'SELECT COUNT(city) FROM data'
+```
+
+`--csv-null-value` matches the entire field literally (not as a regular expression).
+
 Use a custom CSV delimiter with `--csv-delimiter`:
 
 ```sh
