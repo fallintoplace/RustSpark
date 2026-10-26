@@ -60,7 +60,14 @@ impl RustSparkSession {
     /// Use only when the result fits comfortably within the available RAM.
     pub async fn cache_table(&self, name: &str) -> Result<()> {
         let cached = self.table(name).await?.cache().await?;
-        self.register_dataframe(name, cached)
+        let previous = self.context.deregister_table(name)?;
+        let result = self.register_dataframe(name, cached);
+        if result.is_err() {
+            if let Some(previous) = previous {
+                self.context.register_table(name, previous)?;
+            }
+        }
+        result
     }
 
     /// Access a registered SQL table as a lazy DataFrame.
