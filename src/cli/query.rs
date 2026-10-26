@@ -148,10 +148,10 @@ async fn execute_persistent_insert(
     // Change the parsed INSERT target rather than manipulating SQL strings.
     // Source SELECTs still read the original snapshot, including self-inserts.
     let mut staged_statement = statement.clone();
-    if let DFStatement::Statement(sql) = &mut staged_statement {
-        if let SqlStatement::Insert(insert) = sql.as_mut() {
-            insert.table = TableObject::TableName(ObjectName::from(Ident::new(&temporary_table)));
-        }
+    if let DFStatement::Statement(sql) = &mut staged_statement
+        && let SqlStatement::Insert(insert) = sql.as_mut()
+    {
+        insert.table = TableObject::TableName(ObjectName::from(Ident::new(&temporary_table)));
     }
     let mut batches = plan_query(session, &staged_statement.to_string(), args)
         .await?
