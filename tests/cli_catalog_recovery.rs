@@ -46,12 +46,18 @@ fn corrupted_persistent_parquet_rejected_at_startup() -> TestResult {
     let db = tempfile::tempdir()?;
     let root = db.path().to_str().ok_or("non UTF-8 temp path")?;
     run_ok(root, "CREATE TABLE items AS SELECT 1 AS id")?;
-    fs::write(db.path().join("items").join("invalid.parquet"), b"not parquet")?;
+    fs::write(
+        db.path().join("items").join("invalid.parquet"),
+        b"not parquet",
+    )?;
 
     let query = run(root, "SELECT 42 AS answer");
     assert!(!query.status.success());
     let stderr = String::from_utf8_lossy(&query.stderr);
-    assert!(stderr.contains("Cannot read persistent Parquet file"), "{stderr}");
+    assert!(
+        stderr.contains("Cannot read persistent Parquet file"),
+        "{stderr}"
+    );
     assert!(stderr.contains("invalid.parquet"), "{stderr}");
     Ok(())
 }
@@ -61,7 +67,10 @@ fn unknown_file_in_persistent_table_fails_closed() -> TestResult {
     let db = tempfile::tempdir()?;
     let root = db.path().to_str().ok_or("non UTF-8 temp path")?;
     run_ok(root, "CREATE TABLE items AS SELECT 1 AS id")?;
-    fs::write(db.path().join("items").join("part.tmp"), b"interrupted write")?;
+    fs::write(
+        db.path().join("items").join("part.tmp"),
+        b"interrupted write",
+    )?;
 
     let result = run(root, "SELECT 42");
     assert!(!result.status.success());
@@ -77,7 +86,11 @@ fn valid_persistent_table_remains_queryable() -> TestResult {
     run_ok(root, "INSERT INTO items VALUES (8)")?;
 
     let result = run(root, "SELECT SUM(id) AS total FROM items");
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert!(String::from_utf8(result.stdout)?.contains("15"));
     Ok(())
 }
