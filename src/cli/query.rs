@@ -28,7 +28,7 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
 }
 
 enum FileExport {
-    Parquet(Option<TableParquetOptions>),
+    Parquet(Box<Option<TableParquetOptions>>),
     Csv,
     Json,
 }
@@ -63,7 +63,7 @@ async fn write_file_export(
     match format {
         FileExport::Parquet(parquet_options) => {
             dataframe
-                .write_parquet(output, options, parquet_options)
+                .write_parquet(output, options, *parquet_options)
                 .await?;
         }
         FileExport::Csv => {
@@ -329,7 +329,7 @@ async fn execute_query(
         write_file_export(
             dataframe,
             path,
-            FileExport::Parquet(writer_options),
+            FileExport::Parquet(Box::new(writer_options)),
             args.output_single_file,
         )
         .await?;
