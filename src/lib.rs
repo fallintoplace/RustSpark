@@ -643,6 +643,23 @@ impl RustSparkSession {
         self.sql_read_only(query).await?.limit(offset, Some(limit))
     }
 
+    /// Plan a parameterized, read-only SQL page without collecting all rows.
+    ///
+    /// Use ORDER BY in the SQL query for deterministic pages.
+    /// Writes and DDL are rejected before binding the parameters.
+    pub async fn sql_read_only_page_with_params(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        Self::validate_page_window(offset, limit)?;
+        self.sql_read_only_with_params(query, params)
+            .await?
+            .limit(offset, Some(limit))
+    }
+
     /// Plan a parameterized SQL page with bounded row count.
     ///
     /// Use ORDER BY in SQL for stable page boundaries.
