@@ -94,3 +94,23 @@ pub(super) async fn save_table(
     fs::rename(&staged, &destination)?;
     Ok(())
 }
+
+/// Move a dropped table out of the visible catalog before deleting its files.
+/// The hidden directory is ignored after a crash; we never delete the input
+/// file registrations or arbitrary paths outside the local database root.
+pub(super) fn drop_saved_table(root: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+    if !valid_identifier(name) {
+        return Err("Persistent table name must be a SQL identifier".into());
+    }
+    let source = root.join(name);
+    if !fs::symlink_metadata(&source)?.file_type().is_dir() {
+        return Err("Persistent table path is not a regular directory".into());
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix(".rustspark-drop-")
+        .tempdir_in(root)?;
+    let tombstone = temporary.path().join("dropped");
+    fs::rename(&source, &tombstone)?;
+    fs::remove_dir_all(&tombstone)?;
+    Ok(())
+}

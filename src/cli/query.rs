@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use datafusion::{
     config::TableParquetOptions,
     dataframe::DataFrameWriteOptions,
-    logical_expr::sqlparser::ast::Statement as SqlStatement,
+    logical_expr::sqlparser::ast::{ObjectType, Statement as SqlStatement},
     prelude::DataFrame,
     sql::parser::{DFParser, Statement as DFStatement},
 };
@@ -35,15 +35,19 @@ pub(super) async fn execute_script(
         .ok_or("SQL script must contain at least one statement")?;
     for statement in statements {
         validate_persistent_table_name(&statement, args)?;
+        let dropped = persistent_drop_table(&statement, args)?;
         plan_query(session, &statement.to_string(), args)
             .await?
             .collect()
             .await?;
         persist_created_table(session, &statement, args).await?;
+        persist_dropped_table(dropped, args)?;
     }
     validate_persistent_table_name(&last, args)?;
+    let dropped = persistent_drop_table(&last, args)?;
     execute_query(session, &last.to_string(), args).await?;
-    persist_created_table(session, &last, args).await
+    persist_created_table(session, &last, args).await?;
+    persist_dropped_table(dropped, args)
 }
 
 fn persistent_create_table<'a>(
@@ -72,6 +76,54 @@ fn validate_persistent_table_name(
             )
             .into());
         }
+    }
+    Ok(())
+}
+
+/// Remember persistent DROP TABLE targets before DataFusion unregisters them.
+/// File deletion follows successful SQL execution, never SQL planning.
+fn persistent_drop_table(
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(None);
+    };
+    let DFStatement::Statement(statement) = statement else {
+        return Ok(None);
+    };
+    let SqlStatement::Drop {
+        object_type: ObjectType::Table,
+        names,
+        ..
+    } = statement.as_ref()
+    else {
+        return Ok(None);
+    };
+    if names.len() != 1 {
+        return Err("Persistent DROP TABLE requires exactly one table".into());
+    }
+    let name = names[0].to_string().to_ascii_lowercase();
+    if !super::valid_identifier(&name) {
+        return Err(format!("Persistent DROP TABLE requires a simple table name: {name}").into());
+    }
+    if root.join(&name).is_dir() {
+        Ok(Some(name))
+    } else {
+        Ok(None)
+    }
+}
+
+fn persist_dropped_table(
+    name: Option<String>,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(name) = name {
+        let root = args
+            .database_dir
+            .as_deref()
+            .ok_or("Missing database directory")?;
+        super::persistence::drop_saved_table(root, &name)?;
     }
     Ok(())
 }

@@ -169,3 +169,88 @@ fn create_empty_table_if_not_exists_preserves_previous_rows() -> TestResult {
     assert_row(run(root, "SELECT id FROM items"), "41");
     Ok(())
 }
+
+#[test]
+fn drop_table_removes_saved_files_and_allows_recreation() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    assert!(run(root, "CREATE TABLE items (id BIGINT)").status.success());
+    assert!(run(root, "INSERT INTO items VALUES (41)").status.success());
+    assert!(directory.path().join("items").is_dir());
+
+    let dropped = run(root, "DROP TABLE items");
+    assert!(
+        dropped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dropped.stderr)
+    );
+    assert!(!directory.path().join("items").exists());
+    assert!(!run(root, "SELECT * FROM items").status.success());
+
+    let recreated = run(root, "CREATE TABLE items AS SELECT 42 AS id");
+    assert!(
+        recreated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recreated.stderr)
+    );
+    assert_row(run(root, "SELECT id FROM items"), "42");
+    Ok(())
+}
+
+#[test]
+fn drop_if_exists_keeps_other_tables_and_unrelated_files() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(root, "CREATE TABLE keep_me AS SELECT 7 AS id");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let unrelated = directory.path().join("notes.txt");
+    std::fs::write(&unrelated, "untouched")?;
+
+    let dropped = run(root, "DROP TABLE IF EXISTS missing; SELECT 42 AS result");
+    assert!(
+        dropped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dropped.stderr)
+    );
+    assert_row(run(root, "SELECT id FROM keep_me"), "7");
+    assert_eq!(std::fs::read_to_string(unrelated)?, "untouched");
+    Ok(())
+}
+
+#[test]
+fn rejects_multi_table_drop_without_changing_saved_tables() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    assert!(
+        run(root, "CREATE TABLE first AS SELECT 1 AS id")
+            .status
+            .success()
+    );
+    assert!(
+        run(root, "CREATE TABLE second AS SELECT 2 AS id")
+            .status
+            .success()
+    );
+    let dropped = run(root, "DROP TABLE first, second");
+    assert!(!dropped.status.success());
+    assert_row(run(root, "SELECT id FROM first"), "1");
+    assert_row(run(root, "SELECT id FROM second"), "2");
+    Ok(())
+}
+
+#[test]
+fn drop_is_case_insensitive_for_unquoted_table_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(root, "CREATE TABLE MixedCase AS SELECT 7 AS id");
+    assert!(created.status.success());
+    let dropped = run(root, "DROP TABLE MIXEDCASE");
+    assert!(dropped.status.success());
+    assert!(!directory.path().join("mixedcase").exists());
+    assert!(!run(root, "SELECT id FROM mixedcase").status.success());
+    Ok(())
+}
