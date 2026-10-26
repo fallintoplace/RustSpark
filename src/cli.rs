@@ -391,7 +391,9 @@ fn parse_named_param(value: &str) -> Result<(String, ScalarValue), String> {
     let (name, raw) = value
         .split_once('=')
         .filter(|(name, _)| valid_identifier(name))
-        .ok_or_else(|| "--named-param requires NAME=TYPE:VALUE and a valid identifier".to_owned())?;
+        .ok_or_else(|| {
+            "--named-param requires NAME=TYPE:VALUE and a valid identifier".to_owned()
+        })?;
     let value = parse_sql_param(raw).map_err(|error| error.replace("--param", "--named-param"))?;
     Ok((name.to_owned(), value))
 }
