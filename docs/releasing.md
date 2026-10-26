@@ -1,7 +1,7 @@
 # Release RustSpark binaries
 
-The binary release workflow builds the local RustSpark CLI for 64-bit Linux and
-Windows from a Git tag. It does **not** publish a Cargo crate.
+The binary release workflow builds the local RustSpark CLI for 64-bit Linux,
+Windows and macOS arm64 from a Git tag. It does **not** publish a Cargo crate.
 
 ## Before tagging
 
@@ -28,11 +28,13 @@ git push origin v0.1.0
 
 Use the current `Cargo.toml` version rather than copying the example blindly.
 On a tag push, the workflow verifies the exact version and main ancestry,
-builds both executables with `--locked`, and smoke-tests each executable.
+builds each executable with `--locked`, and smoke-tests SQL, persistent
+INSERT and restart behavior with each executable.
 The final job uploads:
 
 - `rustspark-linux-x86_64.tar.gz`
 - `rustspark-windows-x86_64.zip`
+- `rustspark-macos-arm64.tar.gz`
 - `SHA256SUMS`
 
 A workflow failure does not publish a successful release. If a tag has been
