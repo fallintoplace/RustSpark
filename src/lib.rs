@@ -566,7 +566,7 @@ impl RustSparkSession {
             }
             Ok(path
                 .split('.')
-                .map(|part| format!("\\\"{}\\\"", part.replace('"', "\\\"\\\"")))
+                .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
                 .collect::<Vec<_>>()
                 .join("."))
         };
