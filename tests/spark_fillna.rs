@@ -69,3 +69,46 @@ async fn fillna_supports_typed_values_for_several_columns() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn fillna_reuses_a_projection_for_repeated_values() -> TestResult {
+    let session = RustSparkSession::new();
+    session
+        .register_sql_view(
+            "wide",
+            "SELECT CAST(NULL AS BIGINT) AS a, CAST(NULL AS BIGINT) AS b,
+                    CAST(NULL AS VARCHAR) AS c
+             UNION ALL SELECT 1, 2, 'kept'",
+        )
+        .await?;
+    let filled = session
+        .fill_nulls(
+            "wide",
+            &[
+                ("a", ScalarValue::from(0i64)),
+                ("c", ScalarValue::from("missing")),
+                ("b", ScalarValue::from(0i64)),
+            ],
+        )
+        .await?;
+    session.register_dataframe("wide_filled", filled)?;
+    assert_eq!(
+        session
+            .sql_scalar("SELECT COUNT(*) FROM wide_filled WHERE a = 0 AND b = 0 AND c = 'missing'")
+            .await?,
+        ScalarValue::Int64(Some(1))
+    );
+    assert_eq!(
+        session
+            .sql_scalar("SELECT COUNT(*) FROM wide_filled WHERE a = 1 AND b = 2 AND c = 'kept'")
+            .await?,
+        ScalarValue::Int64(Some(1))
+    );
+    assert_eq!(
+        session
+            .sql_scalar("SELECT COUNT(*) FROM wide WHERE a IS NULL AND b IS NULL")
+            .await?,
+        ScalarValue::Int64(Some(1))
+    );
+    Ok(())
+}
