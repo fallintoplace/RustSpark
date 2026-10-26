@@ -1,3 +1,5 @@
+import contextlib
+import io
 import importlib.util
 import json
 import pathlib
@@ -51,6 +53,29 @@ class SparkCompatibilityTests(unittest.TestCase):
             path.write_text(json.dumps([{"id": " ", "sql": "SELECT 1"}]))
             with self.assertRaisesRegex(ValueError, "id must not be empty"):
                 mod.load_cases(path)
+
+    def test_case_runner_reports_pass_diff_and_error(self):
+        cases = [
+            {"id": "ok", "sql": "SELECT 1"},
+            {"id": "diff", "sql": "SELECT 2"},
+            {"id": "error", "sql": "SELECT 3"},
+        ]
+
+        def ours(sql):
+            if sql == "SELECT 3":
+                raise ValueError("simulated failure")
+            return mod.QueryResult(["n"], [[1]])
+
+        def reference(sql):
+            return mod.QueryResult(["n"], [[2 if sql == "SELECT 2" else 1]])
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            failures = mod.run_cases(cases, ours, reference)
+        self.assertEqual(failures, 2)
+        self.assertIn("PASS ok", output.getvalue())
+        self.assertIn("DIFF diff", output.getvalue())
+        self.assertIn("ERROR error: simulated failure", output.getvalue())
 
     def test_corpus_is_valid(self):
         cases = mod.load_cases(mod.DEFAULT_CASES)
