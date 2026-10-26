@@ -904,16 +904,31 @@ impl RustSparkSession {
         dataframe.sort(sort_exprs)
     }
 
+    // Plan independent SQL inputs concurrently, with bounded outstanding
+    // work. buffered() returns results in input order, so UNION semantics and
+    // the first reported planning error still follow query order.
+    async fn plan_union_sql_inputs(&self, queries: &[&str]) -> Result<Vec<DataFrame>> {
+        use futures::{StreamExt, TryStreamExt, stream};
+
+        stream::iter(queries.iter().map(|query| self.sql(query)))
+            .buffered(16)
+            .try_collect()
+            .await
+    }
+
     /// Union SQL query results by column position.
     ///
     /// Each query must return a compatible schema. Duplicate rows remain.
     pub async fn union_sql(&self, queries: &[&str]) -> Result<DataFrame> {
-        let (first, rest) = queries
-            .split_first()
-            .ok_or_else(|| DataFusionError::Plan("union_sql requires at least one query".into()))?;
-        let mut dataframe = self.sql(first).await?;
-        for query in rest {
-            dataframe = dataframe.union(self.sql(query).await?)?;
+        if queries.is_empty() {
+            return Err(DataFusionError::Plan(
+                "union_sql requires at least one query".into(),
+            ));
+        }
+        let mut frames = self.plan_union_sql_inputs(queries).await?.into_iter();
+        let mut dataframe = frames.next().expect("non-empty query list");
+        for frame in frames {
+            dataframe = dataframe.union(frame)?;
         }
         Ok(dataframe)
     }
@@ -922,12 +937,15 @@ impl RustSparkSession {
     ///
     /// Missing fields are filled with NULL and duplicate rows are preserved.
     pub async fn union_sql_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
-        let (first, rest) = queries.split_first().ok_or_else(|| {
-            DataFusionError::Plan("union_sql_by_name requires at least one query".into())
-        })?;
-        let mut dataframe = self.sql(first).await?;
-        for query in rest {
-            dataframe = dataframe.union_by_name(self.sql(query).await?)?;
+        if queries.is_empty() {
+            return Err(DataFusionError::Plan(
+                "union_sql_by_name requires at least one query".into(),
+            ));
+        }
+        let mut frames = self.plan_union_sql_inputs(queries).await?.into_iter();
+        let mut dataframe = frames.next().expect("non-empty query list");
+        for frame in frames {
+            dataframe = dataframe.union_by_name(frame)?;
         }
         Ok(dataframe)
     }
