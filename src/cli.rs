@@ -186,7 +186,9 @@ fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
-            return Err(format!("{source} schema column names must be SQL identifiers"));
+            return Err(format!(
+                "{source} schema column names must be SQL identifiers"
+            ));
         }
         if !names.insert(name.to_ascii_lowercase()) {
             return Err(format!("Duplicate {source} schema column: {name}"));
