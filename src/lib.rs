@@ -91,6 +91,33 @@ impl RustSparkSession {
         Ok(self.context.deregister_table(name)?.is_some())
     }
 
+    /// Rename a registered table without copying its data.
+    ///
+    /// An existing destination is never overwritten. The new registration
+    /// is rolled back if removing the original fails.
+    pub async fn rename_table(&self, source: &str, destination: &str) -> Result<()> {
+        if source == destination || self.context.table_exist(destination)? {
+            return Err(DataFusionError::Plan(format!(
+                "Destination table already exists: {destination}"
+            )));
+        }
+        let provider = self.context.table_provider(source).await?;
+        self.context.register_table(destination, provider)?;
+        match self.context.deregister_table(source) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => {
+                let _ = self.context.deregister_table(destination);
+                Err(DataFusionError::Plan(format!(
+                    "Source table disappeared while renaming: {source}"
+                )))
+            }
+            Err(error) => {
+                let _ = self.context.deregister_table(destination);
+                Err(error)
+            }
+        }
+    }
+
     /// Materialize a registered table in memory for repeated queries.
     ///
     /// This executes the table's plan once and keeps its contents in memory.
