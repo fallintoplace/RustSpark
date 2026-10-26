@@ -87,13 +87,23 @@ async fn write_file_export(
         }
     }
     if single_file {
-        // NamedTempFile::persist replaces an existing destination across
-        // platforms. Copying through it keeps the completed file on the same
-        // filesystem and avoids publishing a partial result on failure.
-        let mut completed = tempfile::NamedTempFile::new_in(parent)?;
-        io::copy(&mut fs::File::open(&path)?, completed.as_file_mut())?;
-        completed.as_file_mut().sync_all()?;
-        completed.persist(destination)?;
+        // Both paths are on the same filesystem. Sync the finished part
+        // before renaming it into place to avoid another full-size copy.
+        {
+            let completed = fs::OpenOptions::new().write(true).open(&path)?;
+            completed.sync_all()?;
+        }
+        if let Err(rename_error) = fs::rename(&path, destination) {
+            // Some platforms cannot rename over an existing destination.
+            // Preserve the previous cross-platform atomic replacement path.
+            if !destination.exists() {
+                return Err(rename_error.into());
+            }
+            let mut completed = tempfile::NamedTempFile::new_in(parent)?;
+            io::copy(&mut fs::File::open(&path)?, completed.as_file_mut())?;
+            completed.as_file_mut().sync_all()?;
+            completed.persist(destination)?;
+        }
     }
     Ok(())
 }
