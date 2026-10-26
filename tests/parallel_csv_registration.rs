@@ -25,6 +25,31 @@ fn registers_many_named_csv_tables_before_querying() {
 }
 
 #[test]
+fn registers_many_named_tables_across_parallel_batches() {
+    let mut args = Vec::new();
+    for index in 0..24 {
+        args.push("--csv-table".to_owned());
+        args.push(format!("t{index}=tests/fixtures/sales.csv"));
+    }
+    args.extend([
+        "--sql".to_owned(),
+        "SELECT COUNT(*) AS rows FROM t0 CROSS JOIN t23".to_owned(),
+        "--stdout-format".to_owned(),
+        "json".to_owned(),
+    ]);
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), r#"{"rows":9}"#);
+}
+
+#[test]
 fn duplicate_table_names_still_fail() {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
