@@ -224,17 +224,17 @@ fn corrupt_published_snapshot_restores_valid_backup() -> TestResult {
 
     // Only the newly appended part is independent of the previous snapshot.
     // The older immutable parts may share an inode through hard links.
-    let previous: std::collections::HashSet<_> = fs::read_dir(
-        db.path().join(".rustspark-insert-items").join("old"),
-    )?
-    .filter_map(Result::ok)
-    .map(|entry| entry.file_name())
-    .collect();
+    let previous: std::collections::HashSet<_> =
+        fs::read_dir(db.path().join(".rustspark-insert-items").join("old"))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
     let fresh_part = fs::read_dir(db.path().join("items"))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .find(|path| {
-            path.extension().is_some_and(|extension| extension == "parquet")
+            path.extension()
+                .is_some_and(|extension| extension == "parquet")
                 && !previous.contains(&path.file_name().unwrap().to_os_string())
         })
         .ok_or("missing freshly published Parquet part")?;
