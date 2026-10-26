@@ -86,6 +86,18 @@ impl RustSparkSession {
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
+
+    /// Plan SQL with typed positional or named parameters.
+    ///
+    /// Values are bound by DataFusion rather than interpolated into SQL text.
+    /// The returned DataFrame remains lazy until executed.
+    pub async fn sql_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        self.sql(query).await?.with_param_values(params)
+    }
 }
 
 impl Default for RustSparkSession {
