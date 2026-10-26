@@ -111,7 +111,7 @@ struct Args {
     #[arg(long = "json-table", value_name = "NAME=PATH")]
     json_tables: Vec<String>,
 
-    #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
+    #[arg(long, default_value = "data", value_parser = parse_table_name, conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
     table: String,
 
     #[arg(long = "cache-table", value_name = "NAME")]
@@ -284,6 +284,14 @@ fn valid_identifier(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn parse_table_name(value: &str) -> Result<String, String> {
+    if valid_identifier(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("--table must be a SQL identifier".into())
+    }
 }
 
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
