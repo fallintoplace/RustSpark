@@ -896,12 +896,12 @@ async fn execute_registered_query(
     }
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        let dataframe = plan_query(&session, sql, &args).await?;
+        let dataframe = plan_query(session, sql, args).await?;
         session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        let dataframe = plan_query(&session, sql, &args).await?.cache().await?;
+        let dataframe = plan_query(session, sql, args).await?.cache().await?;
         session.register_dataframe(name, dataframe)?;
     }
     let query = if let Some(sql) = args.sql.as_ref() {
