@@ -19,7 +19,11 @@ fn auto_input_loads_csv_and_json() -> TestResult {
             "--stdout-format",
             "csv",
         ])?;
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
         assert_eq!(String::from_utf8(output.stdout)?, "total\n3\n");
     }
     Ok(())
@@ -34,14 +38,27 @@ fn auto_input_loads_generated_parquet() -> TestResult {
         .arg(&parquet)
         .arg("--output-single-file")
         .output()?;
-    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--input")
         .arg(&parquet)
-        .args(["--sql", "SELECT COUNT(*) AS total FROM data", "--stdout-format", "csv"])
+        .args([
+            "--sql",
+            "SELECT COUNT(*) AS total FROM data",
+            "--stdout-format",
+            "csv",
+        ])
         .output()?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8(output.stdout)?, "total\n1\n");
     Ok(())
 }
@@ -60,7 +77,9 @@ fn auto_input_rejects_ambiguous_or_unsupported_paths() -> TestResult {
 
     let unsupported = run(&["--input", "archive.zip", "--sql", "SELECT 1"])?;
     assert!(!unsupported.status.success());
-    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("Unsupported --input extension"));
+    assert!(
+        String::from_utf8_lossy(&unsupported.stderr).contains("Unsupported --input extension")
+    );
 
     let directory = run(&["--input", "tests/fixtures", "--sql", "SELECT 1"])?;
     assert!(!directory.status.success());
