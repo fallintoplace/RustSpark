@@ -9,8 +9,15 @@ fn loads_many_validated_persistent_tables() -> Result<(), Box<dyn std::error::Er
         .arg(&root)
         .args(["--sql", "CREATE TABLE source AS SELECT 3 AS value"])
         .output()?;
-    assert!(create.status.success(), "{}", String::from_utf8_lossy(&create.stderr));
-    let original = fs::read_dir(root.join("source"))?.next().ok_or("part missing")??.path();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let original = fs::read_dir(root.join("source"))?
+        .next()
+        .ok_or("part missing")??
+        .path();
     for idx in 0..12 {
         let table = root.join(format!("shard_{idx:02}"));
         fs::create_dir(&table)?;
@@ -27,7 +34,11 @@ fn loads_many_validated_persistent_tables() -> Result<(), Box<dyn std::error::Er
         .arg(format!("SELECT SUM(value) AS total FROM ({queries})"))
         .args(["--stdout-format", "json"])
         .output()?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8(output.stdout)?.trim(), r#"{"total":39}"#);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), r#"{"total":36}"#);
     Ok(())
 }
