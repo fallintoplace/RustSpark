@@ -156,6 +156,11 @@ impl RustSparkSession {
         Ok(self.context.deregister_table(name)?.is_some())
     }
 
+    /// Return whether a table or view is registered in this session.
+    pub fn table_exists(&self, name: &str) -> Result<bool> {
+        self.context.table_exist(name)
+    }
+
     /// Rename a registered table without copying its data.
     ///
     /// An existing destination is never overwritten. The new registration
