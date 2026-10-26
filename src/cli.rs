@@ -80,6 +80,9 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
 
+    #[arg(long = "sql-view", value_name = "NAME=SQL")]
+    sql_views: Vec<String>,
+
     #[arg(
         long = "describe",
         conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json"]
@@ -171,6 +174,15 @@ fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
         return Err("Named table needs a SQL identifier and non-empty path".into());
     }
     Ok((name, path))
+}
+
+fn parse_named_view(value: &str) -> Result<(&str, &str), String> {
+    let (name, sql) = parse_named_table(value)
+        .map_err(|_| "--sql-view must use NAME=SQL with a valid SQL identifier".to_owned())?;
+    if sql.trim().is_empty() {
+        return Err("--sql-view SQL query cannot be empty".into());
+    }
+    Ok((name, sql))
 }
 
 fn parse_csv_schema(value: &str) -> Result<Schema, String> {
@@ -424,6 +436,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .register_json_with_options(name, path, options)
                 .await?;
         }
+    }
+    for definition in &args.sql_views {
+        let (name, sql) = parse_named_view(definition)?;
+        session.register_sql_view(name, sql).await?;
     }
     let query = if let Some(sql) = args.sql.as_ref() {
         sql.clone()
