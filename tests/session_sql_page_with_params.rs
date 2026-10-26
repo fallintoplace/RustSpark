@@ -2,8 +2,8 @@ use datafusion::{arrow::array::Int64Array, common::ScalarValue};
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn pages_bound_queries_and_rejects_invalid_bounds()
--> Result<(), Box<dyn std::error::Error>> {
+async fn pages_bound_queries_and_rejects_invalid_bounds() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     session
         .register_csv(
@@ -19,7 +19,11 @@ async fn pages_bound_queries_and_rejects_invalid_bounds()
         .await?
         .collect()
         .await?;
-    let amount = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let amount = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert_eq!(amount.value(0), 20);
     assert!(
         session
