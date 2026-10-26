@@ -52,7 +52,9 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     }
     if sources.iter().any(|source| {
         source.canonicalize().is_ok_and(|source| {
-            destination == source || (source.is_dir() && destination.starts_with(&source))
+            destination == source
+                || (source.is_dir() && destination.starts_with(&source))
+                || (destination.is_dir() && source.starts_with(&destination))
         })
     }) {
         return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
