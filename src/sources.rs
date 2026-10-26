@@ -89,10 +89,20 @@ impl RustSparkSession {
     ///
     /// All inputs must have compatible schemas.
     pub async fn read_json_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
-        let paths = file_paths(paths, "JSON")?;
-        self.context
-            .read_json(paths, JsonReadOptions::default())
+        self.read_json_files_with_options(paths, JsonReadOptions::default())
             .await
+    }
+
+    /// Read several JSON files with one shared schema and input format.
+    ///
+    /// Supports newline-delimited or JSON array input through read options.
+    pub async fn read_json_files_with_options<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        options: JsonReadOptions<'_>,
+    ) -> Result<DataFrame> {
+        let paths = file_paths(paths, "JSON")?;
+        self.context.read_json(paths, options).await
     }
 
     /// Register several newline-delimited JSON files as one SQL table.
@@ -101,7 +111,18 @@ impl RustSparkSession {
         table: &str,
         paths: &[P],
     ) -> Result<()> {
-        let dataframe = self.read_json_files(paths).await?;
+        self.register_json_files_with_options(table, paths, JsonReadOptions::default())
+            .await
+    }
+
+    /// Register several JSON files with one shared schema and input format.
+    pub async fn register_json_files_with_options<P: AsRef<Path>>(
+        &self,
+        table: &str,
+        paths: &[P],
+        options: JsonReadOptions<'_>,
+    ) -> Result<()> {
+        let dataframe = self.read_json_files_with_options(paths, options).await?;
         self.register_dataframe(table, dataframe)
     }
 
