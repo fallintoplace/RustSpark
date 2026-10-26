@@ -504,6 +504,7 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     let snapshot = temporary.path().join("snapshot");
     fs::create_dir(&snapshot)?;
     let mut tables = Vec::new();
+    let mut copies = Vec::new();
     for entry in fs::read_dir(&source)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -524,10 +525,43 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
             if !part.file_type()?.is_file() {
                 return Err(format!("Unexpected database part: {}", part.path().display()).into());
             }
-            fs::copy(part.path(), target.join(part.file_name()))?;
+            copies.push((part.path(), target.join(part.file_name())));
         }
-        validate_table_files(&target, table)?;
         tables.push(table.to_owned());
+    }
+
+    // Large backups can copy immutable parts independently. Bound the number
+    // of workers so fragmented tables do not spawn a thread per Parquet file.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(8);
+    if copies.len() < 8 || workers == 1 {
+        for (source, target) in &copies {
+            fs::copy(source, target)?;
+        }
+    } else {
+        std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+            let chunk_size = copies.len().div_ceil(workers);
+            let jobs = copies
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> std::io::Result<()> {
+                        for (source, target) in chunk {
+                            fs::copy(source, target)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            for job in jobs {
+                job.join().map_err(|_| "Backup copy worker panicked")??;
+            }
+            Ok(())
+        })?;
+    }
+    // A backup is never published without validating every copied footer.
+    for table in &tables {
+        validate_table_files(&snapshot.join(table), table)?;
     }
     tables.sort();
     let manifest = format!("rustspark-backup-v1\n{}\n", tables.join("\n"));
