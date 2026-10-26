@@ -92,3 +92,29 @@ fn query_timeout_covers_the_entire_script() -> TestResult {
         .output()?;
     assert_row(output, "2")
 }
+
+#[test]
+fn binds_positional_parameters_in_earlier_script_statements() -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--sql",
+            "SELECT $1 AS before; SELECT $1 + 1 AS answer",
+            "--param",
+            "int64:41",
+        ])
+        .output()?;
+    assert_row(output, "42")
+}
+
+#[test]
+fn binds_named_parameters_in_earlier_script_statements() -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args([
+            "--sql",
+            "SELECT $value AS before; SELECT $value + 1 AS answer",
+            "--named-param",
+            "value=int64:41",
+        ])
+        .output()?;
+    assert_row(output, "42")
+}

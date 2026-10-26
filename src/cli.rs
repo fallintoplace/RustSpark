@@ -388,8 +388,12 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
 }
 
 fn parse_named_param(value: &str) -> Result<(String, ScalarValue), String> {
-    let (name, raw) = parse_named_table(value)
-        .map_err(|_| "--named-param requires NAME=TYPE:VALUE and a valid identifier".to_owned())?;
+    let (name, raw) = value
+        .split_once('=')
+        .filter(|(name, _)| valid_identifier(name))
+        .ok_or_else(|| {
+            "--named-param requires NAME=TYPE:VALUE and a valid identifier".to_owned()
+        })?;
     let value = parse_sql_param(raw).map_err(|error| error.replace("--param", "--named-param"))?;
     Ok((name.to_owned(), value))
 }
@@ -593,6 +597,53 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     }
 }
 
+fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(destination) = [
+        args.output_arrow.as_ref(),
+        args.output_parquet.as_ref(),
+        args.output_csv.as_ref(),
+        args.output_json.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next() else {
+        return Ok(());
+    };
+    let Ok(destination) = destination.canonicalize() else {
+        return Ok(());
+    };
+    let mut sources: Vec<&std::path::Path> = Vec::new();
+    for path in [
+        args.csv.as_ref(),
+        args.parquet.as_ref(),
+        args.json.as_ref(),
+        args.sql_file.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path.as_os_str() != "-" {
+            sources.push(path.as_path());
+        }
+    }
+    for mapping in args
+        .csv_tables
+        .iter()
+        .chain(&args.parquet_tables)
+        .chain(&args.json_tables)
+    {
+        let (_, path) = parse_named_table(mapping)?;
+        sources.push(std::path::Path::new(path));
+    }
+    if sources
+        .iter()
+        .any(|source| source.canonicalize().is_ok_and(|path| path == destination))
+    {
+        return Err("Output path must not overwrite an input file or SQL script".into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
     let single_inputs = u8::from(args.csv.is_some())
@@ -612,6 +663,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
+    reject_output_input_collision(&args)?;
     if args.parquet_pushdown_filters && args.parquet.is_none() && args.parquet_tables.is_empty() {
         return Err("--parquet-pushdown-filters requires a Parquet input".into());
     }
@@ -658,6 +710,17 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.csv_escape.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-escape requires a CSV input".into());
+    }
+    let delimiter = args.csv_delimiter.unwrap_or(b',');
+    let quote = args.csv_quote.unwrap_or(b'"');
+    if args
+        .csv_comment
+        .is_some_and(|comment| comment == delimiter || comment == quote)
+    {
+        return Err("--csv-comment must differ from the CSV delimiter and quote".into());
+    }
+    if args.csv_escape == Some(delimiter) {
+        return Err("--csv-escape must differ from the CSV delimiter".into());
     }
     if args.csv_multiline && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-multiline requires a CSV input".into());
@@ -848,9 +911,33 @@ async fn execute_script(
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
     for statement in statements {
-        session.sql(&statement.to_string()).await?.collect().await?;
+        plan_query(session, &statement.to_string(), args)
+            .await?
+            .collect()
+            .await?;
     }
     execute_query(session, &last.to_string(), args).await
+}
+
+async fn plan_query(
+    session: &RustSparkSession,
+    query: &str,
+    args: &Args,
+) -> Result<datafusion::prelude::DataFrame, Box<dyn std::error::Error>> {
+    let dataframe = if !args.named_params.is_empty() {
+        let mut params = HashMap::new();
+        for (name, value) in &args.named_params {
+            if params.insert(name.clone(), value.clone()).is_some() {
+                return Err(format!("Duplicate named parameter: {name}").into());
+            }
+        }
+        session.sql_with_params(query, params).await?
+    } else if !args.params.is_empty() {
+        session.sql_with_params(query, args.params.clone()).await?
+    } else {
+        session.sql(query).await?
+    };
+    Ok(dataframe)
 }
 
 fn reject_duplicate_output_fields(
@@ -870,19 +957,7 @@ async fn execute_query(
     query: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = if !args.named_params.is_empty() {
-        let mut params = HashMap::new();
-        for (name, value) in &args.named_params {
-            if params.insert(name.clone(), value.clone()).is_some() {
-                return Err(format!("Duplicate named parameter: {name}").into());
-            }
-        }
-        session.sql_with_params(query, params).await?
-    } else if !args.params.is_empty() {
-        session.sql_with_params(query, args.params.clone()).await?
-    } else {
-        session.sql(query).await?
-    };
+    let dataframe = plan_query(session, query, args).await?;
     if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
         reject_duplicate_output_fields(&dataframe)?;
     }
@@ -1000,11 +1075,17 @@ async fn write_arrow_ipc(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
-    let file = std::fs::File::create(path)?;
-    let mut writer = FileWriter::try_new_buffered(file, &schema)?;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let mut writer = FileWriter::try_new_buffered(temporary.reopen()?, &schema)?;
     while let Some(batch) = stream.next().await {
         writer.write(&batch?)?;
     }
     writer.finish()?;
+    drop(writer);
+    temporary.persist(path)?;
     Ok(())
 }
