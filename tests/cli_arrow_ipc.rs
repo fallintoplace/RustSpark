@@ -12,8 +12,12 @@ async fn writes_arrow_ipc_file_without_collecting_all_results() -> TestResult {
     let output_file = dir.path().join("sales.arrow");
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
-            "--csv", sales_csv(), "--batch-size", "1",
-            "--sql", "SELECT city, amount FROM data ORDER BY amount",
+            "--csv",
+            sales_csv(),
+            "--batch-size",
+            "1",
+            "--sql",
+            "SELECT city, amount FROM data ORDER BY amount",
         ])
         .arg("--output-arrow")
         .arg(&output_file)
