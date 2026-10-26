@@ -33,8 +33,7 @@ fn write_parquet(path: &Path, value: i64) -> Result<(), Box<dyn std::error::Erro
 
 #[tokio::test]
 async fn multi_file_parquet_supports_custom_file_extension()
-    -> Result<(), Box<dyn std::error::Error>>
-{
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let first = dir.path().join("first.pq");
     let second = dir.path().join("second.pq");
