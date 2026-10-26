@@ -109,13 +109,23 @@ async fn rejects_empty_keys_and_reports_missing_tables_and_columns() -> TestResu
     );
     assert!(
         session
-            .join_tables("missing", "right_rows", JoinType::Inner, &[("id", "other_id")])
+            .join_tables(
+                "missing",
+                "right_rows",
+                JoinType::Inner,
+                &[("id", "other_id")]
+            )
             .await
             .is_err()
     );
     assert!(
         session
-            .join_tables("left_rows", "right_rows", JoinType::Inner, &[("no_id", "other_id")])
+            .join_tables(
+                "left_rows",
+                "right_rows",
+                JoinType::Inner,
+                &[("no_id", "other_id")]
+            )
             .await
             .is_err()
     );
