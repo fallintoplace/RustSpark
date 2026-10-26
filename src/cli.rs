@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Read, path::PathBuf};
+use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser};
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -236,7 +236,7 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
 }
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let args = Arc::new(Args::parse());
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some());
@@ -257,7 +257,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         config
     };
-    let session = RustSparkSession::with_config(config);
+    let session = Arc::new(RustSparkSession::with_config(config));
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
@@ -316,15 +316,29 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     } else {
         let mut names = HashSet::new();
+        // CSV schema inference performs file I/O, so overlap it across inputs.
+        // Cap the tasks to avoid opening an unbounded number of files at once.
+        let mut csv_jobs = tokio::task::JoinSet::new();
         for mapping in &args.csv_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = csv_read_options(&args);
-            session
-                .register_csv_with_options(name, path, options)
-                .await?;
+            let session = Arc::clone(&session);
+            let args = Arc::clone(&args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            csv_jobs.spawn(async move {
+                session
+                    .register_csv_with_options(&name, &path, csv_read_options(&args))
+                    .await
+            });
+            if csv_jobs.len() >= 4 {
+                csv_jobs.join_next().await.expect("CSV task exists")??;
+            }
+        }
+        while let Some(result) = csv_jobs.join_next().await {
+            result??;
         }
         for mapping in &args.parquet_tables {
             let (name, path) = parse_named_table(mapping)?;
@@ -348,9 +362,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
         }
     }
-    let query = if let Some(sql) = args.sql {
-        sql
-    } else if let Some(path) = args.sql_file {
+    let query = if let Some(sql) = args.sql.as_ref() {
+        sql.clone()
+    } else if let Some(path) = args.sql_file.as_ref() {
         if path.as_os_str() == "-" {
             let mut query = String::new();
             std::io::stdin().read_to_string(&mut query)?;
@@ -362,17 +376,17 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("clap requires either --sql or --sql-file")
     };
     let dataframe = session.sql(&query).await?;
-    if let Some(path) = args.output_parquet {
+    if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_parquet(path, DataFrameWriteOptions::new(), None)
             .await?;
-    } else if let Some(path) = args.output_csv {
+    } else if let Some(path) = args.output_csv.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_csv(path, DataFrameWriteOptions::new(), None)
             .await?;
-    } else if let Some(path) = args.output_json {
+    } else if let Some(path) = args.output_json.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_json(path, DataFrameWriteOptions::new(), None)
