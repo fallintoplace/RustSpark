@@ -161,7 +161,11 @@ struct Args {
     #[arg(long = "output-single-file")]
     output_single_file: bool,
 
-    #[arg(long = "parquet-compression", value_name = "CODEC", requires = "output_parquet")]
+    #[arg(
+        long = "parquet-compression",
+        value_name = "CODEC",
+        requires = "output_parquet"
+    )]
     parquet_compression: Option<String>,
 }
 
