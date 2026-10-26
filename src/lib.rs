@@ -57,6 +57,21 @@ impl RustSparkSession {
         Ok(())
     }
 
+    /// Register a scalar user-defined function for SQL queries in this session.
+    pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
+        self.context.register_udf(udf);
+    }
+
+    /// Register an aggregate user-defined function for SQL queries.
+    pub fn register_udaf(&self, udf: datafusion::logical_expr::AggregateUDF) {
+        self.context.register_udaf(udf);
+    }
+
+    /// Register a window user-defined function for SQL queries.
+    pub fn register_udwf(&self, udf: datafusion::logical_expr::WindowUDF) {
+        self.context.register_udwf(udf);
+    }
+
     /// Unregister a table or view, returning whether it existed.
     pub fn deregister_table(&self, name: &str) -> Result<bool> {
         Ok(self.context.deregister_table(name)?.is_some())
