@@ -84,19 +84,22 @@ pub(super) async fn register_derived_tables(
     Ok(())
 }
 
-pub(super) async fn read_query(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
-    let query = if let Some(sql) = args.sql.as_ref() {
-        sql.clone()
-    } else if let Some(path) = args.sql_file.as_ref() {
-        if path.as_os_str() == "-" {
+pub(super) async fn read_query(
+    args: &Args,
+) -> Result<std::borrow::Cow<'_, str>, Box<dyn std::error::Error>> {
+    if let Some(sql) = args.sql.as_deref() {
+        // A potentially large --sql script already lives in Args.
+        return Ok(std::borrow::Cow::Borrowed(sql));
+    }
+    if let Some(path) = args.sql_file.as_ref() {
+        let sql = if path.as_os_str() == "-" {
             read_sql_stdin().await?
         } else {
             std::fs::read_to_string(path)?
-        }
-    } else {
-        unreachable!("clap requires either --sql or --sql-file")
-    };
-    Ok(query)
+        };
+        return Ok(std::borrow::Cow::Owned(sql));
+    }
+    unreachable!("clap requires either --sql or --sql-file")
 }
 
 pub(super) async fn cache_tables(
