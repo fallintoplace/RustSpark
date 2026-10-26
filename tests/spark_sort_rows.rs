@@ -22,8 +22,16 @@ async fn sort_rows_respects_multiple_keys_and_spark_null_defaults() -> TestResul
     let batches = sorted.collect().await?;
     let mut actual = Vec::new();
     for batch in &batches {
-        let ids = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        let scores = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let scores = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         for row in 0..batch.num_rows() {
             actual.push((
                 if ids.is_null(row) {
@@ -35,16 +43,28 @@ async fn sort_rows_respects_multiple_keys_and_spark_null_defaults() -> TestResul
             ));
         }
     }
-    assert_eq!(actual, [(None, 5), (Some(1), 3), (Some(1), 1), (Some(2), 2)]);
+    assert_eq!(
+        actual,
+        [(None, 5), (Some(1), 3), (Some(1), 1), (Some(2), 2)]
+    );
 
     let descending = session.sort_rows("items", &[("id", false)]).await?;
     let reversed = descending.collect().await?;
     let last = reversed.last().unwrap();
-    let ids = last.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let ids = last
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert!(ids.is_null(last.num_rows() - 1));
 
     assert!(session.sort_rows("items", &[]).await.is_err());
-    assert!(session.sort_rows("items", &[("missing", true)]).await.is_err());
+    assert!(
+        session
+            .sort_rows("items", &[("missing", true)])
+            .await
+            .is_err()
+    );
     assert!(
         session
             .sort_rows("items", &[("id", true), ("ID", false)])
