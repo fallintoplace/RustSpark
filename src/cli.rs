@@ -11,8 +11,6 @@ use datafusion::arrow::ipc::writer::FileWriter;
 use datafusion::common::ScalarValue;
 use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::prelude::SessionConfig;
 use datafusion::sql::parser::DFParser;
 use futures::StreamExt;
 use rustspark::RustSparkSession;
@@ -472,30 +470,13 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
 mod validation;
 use validation::{validate_format_options, validate_inputs};
 
+mod session;
+use session::new_session;
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
     validate_inputs(&args)?;
-    let mut config = SessionConfig::new();
-    config.options_mut().execution.parquet.pushdown_filters = args.parquet_pushdown_filters;
-    config.options_mut().execution.parquet.reorder_filters = args.parquet_reorder_filters;
-    let config = if let Some(batch_size) = args.batch_size {
-        config.with_batch_size(batch_size)
-    } else {
-        config
-    };
-    let config = if let Some(partitions) = args.target_partitions {
-        config.with_target_partitions(partitions)
-    } else {
-        config
-    };
-    let session = if let Some(limit) = args.memory_limit_bytes {
-        let runtime = RuntimeEnvBuilder::new()
-            .with_memory_limit(limit, 1.0)
-            .build_arc()?;
-        Arc::new(RustSparkSession::with_config_and_runtime(config, runtime))
-    } else {
-        Arc::new(RustSparkSession::with_config(config))
-    };
+    let session = new_session(&args)?;
     validate_format_options(&args)?;
     if let Some(csv) = args.csv.as_ref() {
         let options = csv_read_options(&args);
