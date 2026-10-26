@@ -750,13 +750,8 @@ impl RustSparkSession {
 
         let left_keys: Vec<_> = keys.iter().map(|(left, _)| *left).collect();
         let right_keys: Vec<_> = keys.iter().map(|(_, right)| *right).collect();
-        self.table(left).await?.join(
-            self.table(right).await?,
-            join_type,
-            &left_keys,
-            &right_keys,
-            None,
-        )
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        left_frame.join(right_frame, join_type, &left_keys, &right_keys, None)
     }
 
     /// Union registered tables with matching schemas by column position.
