@@ -30,6 +30,26 @@ impl RustSparkSession {
         }
     }
 
+    /// List registered tables with fully qualified catalog.schema.table names.
+    ///
+    /// Results are sorted for stable inspection and CLI integration.
+    pub fn list_tables(&self) -> Vec<String> {
+        let mut tables = Vec::new();
+        for catalog_name in self.context.catalog_names() {
+            if let Some(catalog) = self.context.catalog(&catalog_name) {
+                for schema_name in catalog.schema_names() {
+                    if let Some(schema) = catalog.schema(&schema_name) {
+                        for table_name in schema.table_names() {
+                            tables.push(format!("{catalog_name}.{schema_name}.{table_name}"));
+                        }
+                    }
+                }
+            }
+        }
+        tables.sort();
+        tables
+    }
+
     /// Create a lazy DataFrame from in-memory Arrow record batches.
     pub fn read_batches(
         &self,
