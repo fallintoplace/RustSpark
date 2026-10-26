@@ -2,7 +2,8 @@ use datafusion::common::ScalarValue;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn returns_first_bound_read_only_row_including_nulls() -> Result<(), Box<dyn std::error::Error>> {
+async fn returns_first_bound_read_only_row_including_nulls()
+-> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     let params = || vec![ScalarValue::Int64(Some(9))];
     let row = session
@@ -18,10 +19,7 @@ async fn returns_first_bound_read_only_row_including_nulls() -> Result<(), Box<d
 
     assert_eq!(
         session
-            .sql_read_only_first_row_with_params(
-                "SELECT CAST($1 AS BIGINT) WHERE FALSE",
-                params(),
-            )
+            .sql_read_only_first_row_with_params("SELECT CAST($1 AS BIGINT) WHERE FALSE", params(),)
             .await?,
         None
     );
