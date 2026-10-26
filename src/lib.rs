@@ -323,6 +323,14 @@ impl RustSparkSession {
         self.context.sql(query).await
     }
 
+    /// Return whether a read-only query produces at least one row.
+    ///
+    /// Limits the plan to one row to avoid collecting the full result.
+    pub async fn sql_exists(&self, query: &str) -> Result<bool> {
+        let batches = self.sql_read_only(query).await?.limit(0, Some(1))?.collect().await?;
+        Ok(batches.iter().any(|batch| batch.num_rows() > 0))
+    }
+
     /// Execute SQL that must produce exactly one column and one row.
     ///
     /// Reads at most two rows so invalid multi-row queries remain bounded.
