@@ -62,6 +62,22 @@ impl RustSparkSession {
         Ok(self.context.deregister_table(name)?.is_some())
     }
 
+    /// Materialize a registered table in memory for repeated queries.
+    ///
+    /// This executes the table's plan once and keeps its contents in memory.
+    /// Use only when the result fits comfortably within the available RAM.
+    pub async fn cache_table(&self, name: &str) -> Result<()> {
+        let cached = self.table(name).await?.cache().await?;
+        let previous = self.context.deregister_table(name)?;
+        let result = self.register_dataframe(name, cached);
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            self.context.register_table(name, previous)?;
+        }
+        result
+    }
+
     /// Access a registered SQL table as a lazy DataFrame.
     pub async fn table(&self, name: &str) -> Result<DataFrame> {
         self.context.table(name).await
