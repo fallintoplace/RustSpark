@@ -157,6 +157,20 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Union registered tables with matching schemas by column position.
+    ///
+    /// Duplicate rows are preserved. All sources must have compatible schemas.
+    pub async fn union_tables(&self, names: &[&str]) -> Result<DataFrame> {
+        let (first, rest) = names.split_first().ok_or_else(|| {
+            DataFusionError::Plan("union_tables requires at least one table".into())
+        })?;
+        let mut dataframe = self.table(first).await?;
+        for name in rest {
+            dataframe = dataframe.union(self.table(name).await?)?;
+        }
+        Ok(dataframe)
+    }
+
     /// Union registered tables by column name, filling missing columns with NULL.
     ///
     /// Unlike positional unions, column order may differ and new columns
