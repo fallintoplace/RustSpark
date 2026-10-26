@@ -32,6 +32,12 @@ class SparkCompatibilityTests(unittest.TestCase):
             mod.compare(mod.QueryResult(["a"], [[]]), mod.QueryResult(["b"], [[]]))
         )
 
+    def test_case_validator_rejects_malformed_cases(self):
+        with self.assertRaisesRegex(ValueError, "string id"):
+            mod.validate_case({"sql": "SELECT 1"}, set())
+        with self.assertRaisesRegex(ValueError, "requires nonempty sql"):
+            mod.validate_case({"id": "broken", "sql": ""}, set())
+
     def test_duplicate_case_ids_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "cases.json"
