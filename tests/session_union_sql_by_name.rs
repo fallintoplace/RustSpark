@@ -1,8 +1,7 @@
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn unions_sql_with_reordered_and_missing_columns()
--> Result<(), Box<dyn std::error::Error>> {
+async fn unions_sql_with_reordered_and_missing_columns() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     session
         .register_csv(
@@ -28,6 +27,11 @@ async fn unions_sql_with_reordered_and_missing_columns()
     assert_eq!(evolving.schema().fields().len(), 2);
     assert_eq!(evolving.count().await?, 3);
     assert!(session.union_sql_by_name(&[]).await.is_err());
-    assert!(session.union_sql_by_name(&["SELECT * FROM missing"]).await.is_err());
+    assert!(
+        session
+            .union_sql_by_name(&["SELECT * FROM missing"])
+            .await
+            .is_err()
+    );
     Ok(())
 }
