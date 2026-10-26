@@ -1,5 +1,9 @@
 use std::process::Command;
 
+fn rustspark_command() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_rustspark"))
+}
+
 fn sales_csv() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.csv")
 }
@@ -10,7 +14,7 @@ fn sales_json() -> &'static str {
 
 #[test]
 fn help_explains_options() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .arg("--help")
         .output()
         .unwrap();
@@ -25,7 +29,7 @@ fn help_explains_options() {
 
 #[test]
 fn runs_a_query_from_the_command_line() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -53,7 +57,7 @@ fn runs_a_query_from_the_command_line() {
 
 #[test]
 fn reports_missing_required_arguments() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .arg("--csv")
         .arg(sales_csv())
         .output()
@@ -65,7 +69,7 @@ fn reports_missing_required_arguments() {
 
 #[test]
 fn runs_query_with_default_table_name() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -91,7 +95,7 @@ fn runs_query_with_default_table_name() {
 
 #[test]
 fn reports_a_missing_csv_file() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             "tests/fixtures/this_file_does_not_exist.csv",
@@ -124,7 +128,7 @@ fn rejects_multiple_input_formats() {
 
 #[test]
 fn queries_json_from_the_command_line() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--json",
             sales_json(),
@@ -148,7 +152,7 @@ fn queries_json_from_the_command_line() {
 
 #[test]
 fn refuses_two_input_formats() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -164,7 +168,7 @@ fn refuses_two_input_formats() {
 
 #[test]
 fn runs_query_from_sql_file() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -191,7 +195,7 @@ fn runs_query_from_sql_file() {
 
 #[test]
 fn rejects_two_query_sources() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -210,7 +214,7 @@ fn rejects_two_query_sources() {
 
 #[test]
 fn reports_missing_sql_file() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args(["--csv", sales_csv(), "--sql-file", "missing.sql"])
         .output()
         .unwrap();
@@ -219,7 +223,7 @@ fn reports_missing_sql_file() {
 
 #[test]
 fn parses_semicolon_delimited_csv() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             concat!(
@@ -249,7 +253,7 @@ fn parses_semicolon_delimited_csv() {
 #[test]
 fn rejects_invalid_csv_delimiters() {
     for delimiter in ["::", "🔥"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        let output = rustspark_command()
             .args([
                 "--csv",
                 sales_csv(),
@@ -266,7 +270,7 @@ fn rejects_invalid_csv_delimiters() {
 
 #[test]
 fn rejects_csv_delimiter_for_parquet() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--parquet",
             sales_csv(),
@@ -285,7 +289,7 @@ fn rejects_csv_delimiter_for_parquet() {
 fn joins_multiple_named_csv_tables() {
     let left = format!("left_sales={}", sales_csv());
     let right = format!("right_sales={}", sales_csv());
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv-table",
             left.as_str(),
@@ -312,7 +316,7 @@ fn joins_multiple_named_csv_tables() {
 #[test]
 fn rejects_invalid_named_csv_inputs() {
     for mapping in ["missing_equals", "=file.csv", "123=path.csv", "sales="] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        let output = rustspark_command()
             .args(["--csv-table", mapping, "--sql", "SELECT 1"])
             .output()
             .unwrap();
@@ -323,7 +327,7 @@ fn rejects_invalid_named_csv_inputs() {
 #[test]
 fn rejects_named_and_unnamed_csv_together() {
     let mapping = format!("sales={}", sales_csv());
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -339,7 +343,7 @@ fn rejects_named_and_unnamed_csv_together() {
 
 #[test]
 fn limits_printed_query_results() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -364,7 +368,7 @@ fn limits_printed_query_results() {
 #[test]
 fn rejects_invalid_row_limits() {
     for rows in ["0", "-1", "not-a-number"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        let output = rustspark_command()
             .args([
                 "--csv",
                 sales_csv(),
@@ -386,7 +390,7 @@ fn joins_named_json_and_csv_tables() {
         env!("CARGO_MANIFEST_DIR")
     );
     let json = format!("events={}", sales_json());
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv-table",
             &csv,
@@ -407,7 +411,7 @@ fn joins_named_json_and_csv_tables() {
 
 #[test]
 fn rejects_invalid_named_json_tables() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args(["--json-table", "123=events.json", "--sql", "SELECT 1"])
         .output()
         .unwrap();
@@ -421,7 +425,7 @@ fn queries_headerless_csv_rows() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/sales_no_header.csv"
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             path,
@@ -441,7 +445,7 @@ fn queries_headerless_csv_rows() {
 
 #[test]
 fn rejects_csv_no_header_without_csv() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--json",
             sales_json(),
@@ -457,7 +461,7 @@ fn rejects_csv_no_header_without_csv() {
 
 #[test]
 fn configures_csv_schema_inference_rows() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -479,7 +483,7 @@ fn configures_csv_schema_inference_rows() {
 #[test]
 fn rejects_invalid_csv_schema_row_count() {
     for rows in ["0", "-1", "abc"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        let output = rustspark_command()
             .args([
                 "--csv",
                 sales_csv(),
@@ -500,7 +504,7 @@ fn skips_commented_csv_lines() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/sales_commented.csv"
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             path,
@@ -521,7 +525,7 @@ fn skips_commented_csv_lines() {
 
 #[test]
 fn rejects_csv_comment_for_json_inputs() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--json",
             sales_json(),
@@ -542,7 +546,7 @@ fn queries_json_array_files() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/sales_array.json"
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--json",
             file,
@@ -562,7 +566,7 @@ fn queries_json_array_files() {
 
 #[test]
 fn rejects_json_array_flag_for_csv_inputs() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args(["--csv", sales_csv(), "--json-array", "--sql", "SELECT 1"])
         .output()
         .unwrap();
@@ -572,7 +576,7 @@ fn rejects_json_array_flag_for_csv_inputs() {
 
 #[test]
 fn configures_query_execution_batch_size() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -594,7 +598,7 @@ fn configures_query_execution_batch_size() {
 #[test]
 fn rejects_invalid_batch_sizes() {
     for size in ["0", "-1", "nope"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        let output = rustspark_command()
             .args([
                 "--csv",
                 sales_csv(),
@@ -613,7 +617,7 @@ fn rejects_invalid_batch_sizes() {
 async fn exports_query_results_to_parquet() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let export = dir.path().join("parquet_results");
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -637,7 +641,7 @@ async fn exports_query_results_to_parquet() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn rejects_parquet_export_with_preview_limit() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -657,7 +661,7 @@ fn rejects_parquet_export_with_preview_limit() {
 fn exports_query_results_to_csv() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let export = dir.path().join("csv_results");
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -689,7 +693,7 @@ fn exports_query_results_to_csv() -> Result<(), Box<dyn std::error::Error>> {
 fn exports_query_results_to_json() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let export = dir.path().join("json_results");
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -722,7 +726,7 @@ fn exports_query_results_to_json() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn rejects_two_export_formats() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+    let output = rustspark_command()
         .args([
             "--csv",
             sales_csv(),
@@ -746,7 +750,7 @@ fn rejects_conflicting_csv_parser_characters() {
         ["--csv-comment", "\""],
         ["--csv-escape", ","],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        let output = rustspark_command()
             .args([
                 "--csv",
                 path,
