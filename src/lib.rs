@@ -10,6 +10,26 @@ use datafusion::{
 mod set_operations;
 mod sources;
 
+fn quote_join_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn quote_join_table(path: &str) -> Result<String> {
+    if path
+        .split('.')
+        .any(|part| part.is_empty() || part.trim() != part)
+    {
+        return Err(DataFusionError::Plan(
+            "Join table name must be a non-empty catalog path".into(),
+        ));
+    }
+    Ok(path
+        .split('.')
+        .map(quote_join_identifier)
+        .collect::<Vec<_>>()
+        .join("."))
+}
+
 pub struct RustSparkSession {
     context: SessionContext,
 }
@@ -232,18 +252,6 @@ impl RustSparkSession {
         }
 
         // Escape identifiers rather than interpolating arbitrary SQL text.
-        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-        let quote_table = |path: &str| -> Result<String> {
-            if path
-                .split('.')
-                .any(|part| part.is_empty() || part.trim() != part)
-            {
-                return Err(DataFusionError::Plan(
-                    "Join table name must be a non-empty catalog path".into(),
-                ));
-            }
-            Ok(path.split('.').map(&quote).collect::<Vec<_>>().join("."))
-        };
         let left_alias = "\"__rustspark_left\"";
         let right_alias = "\"__rustspark_right\"";
 
@@ -253,7 +261,7 @@ impl RustSparkSession {
         let mut projection = Vec::new();
         let mut predicates = Vec::new();
         for column in columns {
-            let key = quote(column);
+            let key = quote_join_identifier(column);
             projection.push(format!(
                 "COALESCE({left_alias}.{key}, {right_alias}.{key}) AS {key}"
             ));
@@ -262,7 +270,7 @@ impl RustSparkSession {
         for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
             for field in frame.schema().fields() {
                 if !seen.contains(&field.name().to_ascii_lowercase()) {
-                    let name = quote(field.name());
+                    let name = quote_join_identifier(field.name());
                     projection.push(format!("{alias}.{name} AS {name}"));
                 }
             }
@@ -270,8 +278,8 @@ impl RustSparkSession {
         let query = format!(
             "SELECT {} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {}",
             projection.join(", "),
-            quote_table(left)?,
-            quote_table(right)?,
+            quote_join_table(left)?,
+            quote_join_table(right)?,
             predicates.join(" AND ")
         );
         self.sql(&query).await
