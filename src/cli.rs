@@ -412,10 +412,15 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             }
             Ok(ScalarValue::Float64(Some(number)))
         }
-        "bool" | "boolean" => raw
-            .parse::<bool>()
-            .map(|value| ScalarValue::Boolean(Some(value)))
-            .map_err(|_| "--param bool must be true or false".to_owned()),
+        "bool" | "boolean" => {
+            if raw.eq_ignore_ascii_case("true") {
+                Ok(ScalarValue::Boolean(Some(true)))
+            } else if raw.eq_ignore_ascii_case("false") {
+                Ok(ScalarValue::Boolean(Some(false)))
+            } else {
+                Err("--param bool must be true or false".to_owned())
+            }
+        }
         "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
         _ => Err(
