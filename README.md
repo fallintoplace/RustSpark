@@ -220,8 +220,12 @@ This is an experimental, single-writer local store, not an ACID database.
 Persistent `INSERT INTO` copies existing Parquet files into a private stage,
 executes the insert there and publishes the new table directory only after
 success. On a process crash, the next session either restores the old table
-or retains the published new table. Each insert copies the whole table,
-so large tables incur substantial write amplification. Power-loss fsync
+or retains the published new table. Existing immutable Parquet parts are hard-linked into a private replacement
+snapshot when supported by the filesystem; otherwise they are copied.
+This avoids re-copying old table bytes on normal local filesystems, but
+publication still processes every part, is single-writer, and is not a full
+transaction. Do not mutate saved Parquet files in place or use tools that
+overwrite existing part names. Power-loss fsync
 durability and multi-statement transactions are not guaranteed. Dropped
 tables are moved out of the catalog before removal. SQL input files are
 never deleted.

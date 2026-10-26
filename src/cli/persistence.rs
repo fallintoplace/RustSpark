@@ -55,9 +55,20 @@ impl StagedInsert {
             validate_table_files(&original, table)?;
             for entry in fs::read_dir(&original)? {
                 let entry = entry?;
-                // Copy, never hard-link: a future writer using a fixed file
-                // name must not overwrite a live Parquet inode.
-                fs::copy(entry.path(), new.join(entry.file_name()))?;
+                let source = entry.path();
+                let target = new.join(entry.file_name());
+                // ListingTable INSERT is append-only and writes fresh Parquet
+                // parts. Existing parts are immutable, so they can be linked
+                // into the private replacement snapshot without copying all
+                // their bytes. On filesystems without hard links, copy them.
+                if let Err(link_error) = fs::hard_link(&source, &target) {
+                    fs::copy(&source, &target).map_err(|copy_error| {
+                        format!(
+                            "Cannot reuse Parquet part '{}': link: {link_error}; copy: {copy_error}",
+                            source.display()
+                        )
+                    })?;
+                }
             }
             Ok(())
         })();
