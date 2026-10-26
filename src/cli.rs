@@ -146,6 +146,16 @@ struct Args {
     )]
     save_table: Option<String>,
 
+    /// Compact one saved Parquet table into a single part before running SQL.
+    /// Uses a private replacement and the normal crash-recovery protocol.
+    #[arg(
+        long = "compact-table",
+        value_name = "NAME",
+        value_parser = parse_table_name,
+        requires = "database_dir"
+    )]
+    compact_table: Option<String>,
+
     /// Copy a consistent snapshot of all saved Parquet tables to a new directory.
     /// No SQL statement is required for this operation.
     #[arg(
@@ -704,6 +714,13 @@ async fn execute_registered_query(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(table) = args.compact_table.as_deref() {
+        let root = args
+            .database_dir
+            .as_deref()
+            .ok_or("Missing database directory")?;
+        persistence::compact_saved_table(session, root, &table.to_ascii_lowercase()).await?;
+    }
     register_derived_tables(session, args).await?;
     let query = read_query(args).await?;
     cache_tables(session, args).await?;
