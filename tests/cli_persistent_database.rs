@@ -90,7 +90,10 @@ fn loads_many_persisted_tables_on_startup() -> TestResult {
     for index in 0..16 {
         let directory = dir.path().join(format!("saved_{index}"));
         std::fs::create_dir(&directory)?;
-        std::fs::copy(&part, directory.join(part.file_name().ok_or("missing filename")?))?;
+        std::fs::copy(
+            &part,
+            directory.join(part.file_name().ok_or("missing filename")?),
+        )?;
     }
     assert_row(
         run(&[
