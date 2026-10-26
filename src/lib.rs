@@ -223,6 +223,13 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
+    /// Union registered tables by column position and remove duplicate rows.
+    ///
+    /// All tables must have compatible schemas.
+    pub async fn union_tables_distinct(&self, names: &[&str]) -> Result<DataFrame> {
+        self.union_tables(names).await?.distinct()
+    }
+
     /// Union registered tables by column name, filling missing columns with NULL.
     ///
     /// Unlike positional unions, column order may differ and new columns
