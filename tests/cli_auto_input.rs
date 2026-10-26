@@ -77,9 +77,7 @@ fn auto_input_rejects_ambiguous_or_unsupported_paths() -> TestResult {
 
     let unsupported = run(&["--input", "archive.zip", "--sql", "SELECT 1"])?;
     assert!(!unsupported.status.success());
-    assert!(
-        String::from_utf8_lossy(&unsupported.stderr).contains("Unsupported --input extension")
-    );
+    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("Unsupported --input extension"));
 
     let directory = run(&["--input", "tests/fixtures", "--sql", "SELECT 1"])?;
     assert!(!directory.status.success());
