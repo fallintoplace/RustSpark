@@ -62,7 +62,9 @@ async fn write_file_export(
     let options = output_write_options(single_file);
     match format {
         FileExport::Parquet(parquet_options) => {
-            dataframe.write_parquet(output, options, parquet_options).await?;
+            dataframe
+                .write_parquet(output, options, parquet_options)
+                .await?;
         }
         FileExport::Csv => {
             dataframe.write_csv(output, options, None).await?;

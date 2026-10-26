@@ -61,9 +61,7 @@ fn failed_single_file_exports_leave_no_partial_files() -> TestResult {
         ("--output-parquet", "parquet"),
     ] {
         for existing in [false, true] {
-            let destination = dir
-                .path()
-                .join(format!("failed-{existing}.{extension}"));
+            let destination = dir.path().join(format!("failed-{existing}.{extension}"));
             if existing {
                 fs::write(&destination, b"original results")?;
             }
