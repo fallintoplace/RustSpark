@@ -96,7 +96,8 @@ fn persistent_drop_table(
         object_type: ObjectType::Table,
         names,
         ..
-    } = statement.as_ref() else {
+    } = statement.as_ref()
+    else {
         return Ok(None);
     };
     if names.len() != 1 {
@@ -118,7 +119,10 @@ fn persist_dropped_table(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = name {
-        let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+        let root = args
+            .database_dir
+            .as_deref()
+            .ok_or("Missing database directory")?;
         super::persistence::drop_saved_table(root, &name)?;
     }
     Ok(())
