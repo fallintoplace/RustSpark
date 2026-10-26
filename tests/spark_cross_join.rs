@@ -22,12 +22,7 @@ async fn cross_join_produces_cartesian_product() -> TestResult {
     assert_eq!(rows.count().await?, 6);
     assert_eq!(session.table("order").await?.count().await?, 2);
     assert_eq!(session.table("lookup").await?.count().await?, 3);
-    assert!(
-        session
-            .cross_join_tables("order", "unknown")
-            .await
-            .is_err()
-    );
+    assert!(session.cross_join_tables("order", "unknown").await.is_err());
     assert!(
         session
             .cross_join_tables("order; DROP TABLE lookup", "lookup")
