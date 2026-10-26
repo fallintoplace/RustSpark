@@ -38,7 +38,10 @@ pub(super) fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool 
     false
 }
 
-fn track_broken_pipe<T>(result: std::io::Result<T>, broken_pipe: &AtomicBool) -> std::io::Result<T> {
+fn track_broken_pipe<T>(
+    result: std::io::Result<T>,
+    broken_pipe: &AtomicBool,
+) -> std::io::Result<T> {
     if result
         .as_ref()
         .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
