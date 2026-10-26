@@ -50,6 +50,22 @@ impl RustSparkSession {
         tables
     }
 
+    /// List fully qualified catalog.schema names in sorted order.
+    ///
+    /// Empty schemas are included even when they contain no tables.
+    pub fn list_schemas(&self) -> Vec<String> {
+        let mut schemas = Vec::new();
+        for catalog_name in self.context.catalog_names() {
+            if let Some(catalog) = self.context.catalog(&catalog_name) {
+                for schema_name in catalog.schema_names() {
+                    schemas.push(format!("{catalog_name}.{schema_name}"));
+                }
+            }
+        }
+        schemas.sort();
+        schemas
+    }
+
     /// Create a lazy DataFrame from in-memory Arrow record batches.
     pub fn read_batches(
         &self,
