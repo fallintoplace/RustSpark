@@ -554,17 +554,27 @@ impl RustSparkSession {
         self.context.sql(query).await
     }
 
+    async fn has_rows(dataframe: DataFrame) -> Result<bool> {
+        let batches = dataframe.limit(0, Some(1))?.collect().await?;
+        Ok(batches.iter().any(|batch| batch.num_rows() > 0))
+    }
+
     /// Return whether a read-only query produces at least one row.
     ///
     /// Limits the plan to one row to avoid collecting the full result.
     pub async fn sql_exists(&self, query: &str) -> Result<bool> {
-        let batches = self
-            .sql_read_only(query)
-            .await?
-            .limit(0, Some(1))?
-            .collect()
-            .await?;
-        Ok(batches.iter().any(|batch| batch.num_rows() > 0))
+        Self::has_rows(self.sql_read_only(query).await?).await
+    }
+
+    /// Check whether parameterized, read-only SQL produces any rows.
+    ///
+    /// Values are bound without string interpolation and only one row is read.
+    pub async fn sql_exists_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<bool> {
+        Self::has_rows(self.sql_read_only_with_params(query, params).await?).await
     }
 
     async fn extract_scalar(dataframe: DataFrame) -> Result<datafusion::common::ScalarValue> {
