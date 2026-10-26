@@ -83,6 +83,21 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Union registered tables by column name, filling missing columns with NULL.
+    ///
+    /// Unlike positional unions, column order may differ and new columns
+    /// can appear in later tables. Duplicate rows are preserved.
+    pub async fn union_tables_by_name(&self, names: &[&str]) -> Result<DataFrame> {
+        let (first, rest) = names.split_first().ok_or_else(|| {
+            DataFusionError::Plan("union_tables_by_name requires at least one table".into())
+        })?;
+        let mut dataframe = self.table(first).await?;
+        for name in rest {
+            dataframe = dataframe.union_by_name(self.table(name).await?)?;
+        }
+        Ok(dataframe)
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
