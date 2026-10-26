@@ -2,6 +2,7 @@ use std::{fs, io::ErrorKind, path::Path};
 
 use datafusion::{
     dataframe::DataFrameWriteOptions,
+    prelude::DataFrame,
     error::{DataFusionError, Result},
 };
 
@@ -53,23 +54,26 @@ impl RustSparkSession {
             .ok_or_else(|| DataFusionError::Plan("Output path must be valid UTF-8".into()))?;
 
         let frame = self.sql_read_only(query).await?;
-        let options = DataFrameWriteOptions::new();
-        match format {
-            SqlExportFormat::Csv => {
-                frame.write_csv(staged_path, options, None).await?;
-            }
-            SqlExportFormat::Json => {
-                frame.write_json(staged_path, options, None).await?;
-            }
-            SqlExportFormat::Parquet => {
-                frame.write_parquet(staged_path, options, None).await?;
-            }
-        }
+        write_export_dataframe(frame, staged_path, format).await?;
         // A concurrent creator should not be overwritten after our query finishes.
         reject_existing_export(destination)?;
         fs::rename(&staged, destination).map_err(external_io)?;
         Ok(())
     }
+}
+
+async fn write_export_dataframe(
+    frame: DataFrame,
+    path: &str,
+    format: SqlExportFormat,
+) -> Result<()> {
+    let options = DataFrameWriteOptions::new();
+    match format {
+        SqlExportFormat::Csv => frame.write_csv(path, options, None).await?,
+        SqlExportFormat::Json => frame.write_json(path, options, None).await?,
+        SqlExportFormat::Parquet => frame.write_parquet(path, options, None).await?,
+    }
+    Ok(())
 }
 
 fn external_io(error: std::io::Error) -> DataFusionError {
