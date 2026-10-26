@@ -227,12 +227,8 @@ impl RustSparkSession {
         let mut predicates = Vec::new();
         for column in columns {
             let key = quote(column);
-            projection.push(format!(
-                "COALESCE({left_alias}.{key}, {right_alias}.{key}) AS {key}"
-            ));
-            predicates.push(format!(
-                "{left_alias}.{key} = {right_alias}.{key}"
-            ));
+            projection.push(format!("COALESCE({left_alias}.{key}, {right_alias}.{key}) AS {key}"));
+            predicates.push(format!("{left_alias}.{key} = {right_alias}.{key}"));
         }
         for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
             for field in frame.schema().fields() {
