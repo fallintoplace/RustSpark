@@ -74,6 +74,17 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+fn reject_missing_format_inputs(
+    options: impl IntoIterator<Item = (bool, bool, &'static str)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (enabled, has_input, message) in options {
+        if enabled && !has_input {
+            return Err(message.into());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
@@ -108,25 +119,41 @@ pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::er
     {
         return Err("--stdout-no-header requires CSV or TSV stdout output".into());
     }
-    if args.csv_delimiter.is_some() && !has_csv_input(args) {
-        return Err("--csv-delimiter requires --csv".into());
-    }
-    if args.csv_extension.is_some() && !has_csv_input(args) {
-        return Err("--csv-extension requires a CSV input".into());
-    }
-    if args.parquet_extension.is_some() && !has_parquet_input(args) {
-        return Err("--parquet-extension requires a Parquet input".into());
-    }
-    if args.parquet_partitions.is_some() && !has_parquet_input(args) {
-        return Err("--parquet-partitions requires a Parquet input".into());
-    }
-    if args.csv_quote.is_some() && !has_csv_input(args) {
-        return Err("--csv-quote requires a CSV input".into());
-    }
+    let csv = has_csv_input(args);
+    let parquet = has_parquet_input(args);
+    let json = has_json_input(args);
+
+    reject_missing_format_inputs([
+        (
+            args.csv_delimiter.is_some(),
+            csv,
+            "--csv-delimiter requires --csv",
+        ),
+        (
+            args.csv_extension.is_some(),
+            csv,
+            "--csv-extension requires a CSV input",
+        ),
+        (
+            args.parquet_extension.is_some(),
+            parquet,
+            "--parquet-extension requires a Parquet input",
+        ),
+        (
+            args.parquet_partitions.is_some(),
+            parquet,
+            "--parquet-partitions requires a Parquet input",
+        ),
+        (
+            args.csv_quote.is_some(),
+            csv,
+            "--csv-quote requires a CSV input",
+        ),
+    ])?;
     if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
         return Err("--csv-quote must differ from the CSV delimiter".into());
     }
-    if args.csv_escape.is_some() && !has_csv_input(args) {
+    if args.csv_escape.is_some() && !csv {
         return Err("--csv-escape requires a CSV input".into());
     }
     let delimiter = args.csv_delimiter.unwrap_or(b',');
@@ -140,38 +167,58 @@ pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::er
     if args.csv_escape == Some(delimiter) {
         return Err("--csv-escape must differ from the CSV delimiter".into());
     }
-    if args.csv_multiline && !has_csv_input(args) {
-        return Err("--csv-multiline requires a CSV input".into());
-    }
-    if args.csv_allow_short_rows && !has_csv_input(args) {
-        return Err("--csv-allow-short-rows requires a CSV input".into());
-    }
-    if args.csv_no_header && !has_csv_input(args) {
-        return Err("--csv-no-header requires a CSV input".into());
-    }
-    if args.csv_schema.is_some() && !has_csv_input(args) {
-        return Err("--csv-schema requires a CSV input".into());
-    }
-    if args.csv_schema_rows.is_some() && !has_csv_input(args) {
-        return Err("--csv-schema-rows requires a CSV input".into());
-    }
-    if args.csv_comment.is_some() && !has_csv_input(args) {
-        return Err("--csv-comment requires a CSV input".into());
-    }
-    if args.json_schema.is_some() && !has_json_input(args) {
-        return Err("--json-schema requires a JSON input".into());
-    }
-    if args.csv_null_value.is_some() && !has_csv_input(args) {
-        return Err("--csv-null-value requires a CSV input".into());
-    }
-    if args.json_schema_rows.is_some() && !has_json_input(args) {
-        return Err("--json-schema-rows requires a JSON input".into());
-    }
-    if args.json_extension.is_some() && !has_json_input(args) {
-        return Err("--json-extension requires a JSON input".into());
-    }
-    if args.json_array && !has_json_input(args) {
-        return Err("--json-array requires a JSON input".into());
-    }
+    reject_missing_format_inputs([
+        (
+            args.csv_multiline,
+            csv,
+            "--csv-multiline requires a CSV input",
+        ),
+        (
+            args.csv_allow_short_rows,
+            csv,
+            "--csv-allow-short-rows requires a CSV input",
+        ),
+        (
+            args.csv_no_header,
+            csv,
+            "--csv-no-header requires a CSV input",
+        ),
+        (
+            args.csv_schema.is_some(),
+            csv,
+            "--csv-schema requires a CSV input",
+        ),
+        (
+            args.csv_schema_rows.is_some(),
+            csv,
+            "--csv-schema-rows requires a CSV input",
+        ),
+        (
+            args.csv_comment.is_some(),
+            csv,
+            "--csv-comment requires a CSV input",
+        ),
+        (
+            args.json_schema.is_some(),
+            json,
+            "--json-schema requires a JSON input",
+        ),
+        (
+            args.csv_null_value.is_some(),
+            csv,
+            "--csv-null-value requires a CSV input",
+        ),
+        (
+            args.json_schema_rows.is_some(),
+            json,
+            "--json-schema-rows requires a JSON input",
+        ),
+        (
+            args.json_extension.is_some(),
+            json,
+            "--json-extension requires a JSON input",
+        ),
+        (args.json_array, json, "--json-array requires a JSON input"),
+    ])?;
     Ok(())
 }
