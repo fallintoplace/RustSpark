@@ -61,11 +61,8 @@ impl StagedInsert {
         })
     }
 
-    pub(super) fn next_dir(&self) -> &Path {
-        // Return a path inside the transaction, never the live catalog path.
-        // We intentionally avoid exposing partially written data files.
-        // The path is stable until the atomic publication step.
-        self.transaction.join("next").as_path()
+    pub(super) fn next_dir(&self) -> PathBuf {
+        self.transaction.join("next")
     }
 
     pub(super) fn discard_uncommitted(&self) {
