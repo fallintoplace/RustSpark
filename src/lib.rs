@@ -586,6 +586,57 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
+    /// Add or replace several columns atomically, like Spark withColumns.
+    ///
+    /// Every expression refers to the original input schema. Existing columns
+    /// keep their positions, and new columns are appended in the requested order.
+    /// The operation is lazy and leaves the registered table unchanged.
+    pub async fn with_columns(
+        &self,
+        table: &str,
+        columns: &[(&str, datafusion::logical_expr::Expr)],
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::{HashMap, HashSet};
+
+        let dataframe = self.table(table).await?;
+        if columns.is_empty() {
+            return Ok(dataframe);
+        }
+
+        let mut updates = HashMap::new();
+        let mut seen = HashSet::new();
+        for (name, expr) in columns {
+            if name.trim().is_empty() || name.trim() != *name {
+                return Err(DataFusionError::Plan(
+                    "with_columns requires non-empty, unpadded names".into(),
+                ));
+            }
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate withColumns name: {name}"
+                )));
+            }
+            updates.insert(*name, (*expr).clone());
+        }
+
+        let mut projection = Vec::new();
+        for field in dataframe.schema().fields() {
+            let name = field.name().as_str();
+            let expression = match updates.remove(name) {
+                Some(expr) => expr.alias(name),
+                None => Expr::Column(Column::from_name(name)),
+            };
+            projection.push(expression);
+        }
+        for (name, _) in columns {
+            if let Some(expr) = updates.remove(*name) {
+                projection.push(expr.alias(*name));
+            }
+        }
+        dataframe.select(projection)
+    }
+
     pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
         let dataframe = self.table(source).await?;
         self.register_dataframe(alias, dataframe)
