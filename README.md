@@ -172,9 +172,16 @@ cargo run -- --database-dir /tmp/rustspark-db \\
   --sql 'CREATE TABLE people (id BIGINT, name VARCHAR); INSERT INTO people VALUES (1, \'Ada\');'
 ```
 
+Drop a saved table, including its on-disk Parquet files, or use `DROP TABLE IF EXISTS`
+when it may not exist:
+
+```sh
+cargo run -- --database-dir /tmp/rustspark-db --sql 'DROP TABLE numbers'
+```
+
 This is an experimental, local append-only store. `INSERT INTO` writes Parquet
-files; it is not a transactional database. `DROP TABLE` only removes the table
-from the running session, not from the on-disk database directory.
+files; it is not a transactional database. Dropped table files are moved out of
+the catalog before removal. SQL data in input files is never deleted.
 
 Standalone SQL without a file also works:
 
