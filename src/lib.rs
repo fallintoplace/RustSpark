@@ -57,6 +57,21 @@ impl RustSparkSession {
         Ok(())
     }
 
+    /// Register a scalar user-defined function for SQL queries in this session.
+    pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
+        self.context.register_udf(udf);
+    }
+
+    /// Register an aggregate user-defined function for SQL queries.
+    pub fn register_udaf(&self, udf: datafusion::logical_expr::AggregateUDF) {
+        self.context.register_udaf(udf);
+    }
+
+    /// Register a window user-defined function for SQL queries.
+    pub fn register_udwf(&self, udf: datafusion::logical_expr::WindowUDF) {
+        self.context.register_udwf(udf);
+    }
+
     /// Unregister a table or view, returning whether it existed.
     pub fn deregister_table(&self, name: &str) -> Result<bool> {
         Ok(self.context.deregister_table(name)?.is_some())
@@ -83,8 +98,35 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Union registered tables by column name, filling missing columns with NULL.
+    ///
+    /// Unlike positional unions, column order may differ and new columns
+    /// can appear in later tables. Duplicate rows are preserved.
+    pub async fn union_tables_by_name(&self, names: &[&str]) -> Result<DataFrame> {
+        let (first, rest) = names.split_first().ok_or_else(|| {
+            DataFusionError::Plan("union_tables_by_name requires at least one table".into())
+        })?;
+        let mut dataframe = self.table(first).await?;
+        for name in rest {
+            dataframe = dataframe.union_by_name(self.table(name).await?)?;
+        }
+        Ok(dataframe)
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
+    }
+
+    /// Plan SQL with typed positional or named parameters.
+    ///
+    /// Values are bound by DataFusion rather than interpolated into SQL text.
+    /// The returned DataFrame remains lazy until executed.
+    pub async fn sql_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        self.sql(query).await?.with_param_values(params)
     }
 }
 
