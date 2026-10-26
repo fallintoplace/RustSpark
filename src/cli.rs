@@ -2,6 +2,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::{
@@ -163,6 +164,13 @@ struct Args {
 
     #[arg(long = "output-single-file")]
     output_single_file: bool,
+
+    #[arg(
+        long = "parquet-compression",
+        value_name = "CODEC",
+        requires = "output_parquet"
+    )]
+    parquet_compression: Option<String>,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -682,8 +690,17 @@ async fn execute_query(
         dataframe.explain(true, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
+        let writer_options = args.parquet_compression.as_ref().map(|codec| {
+            let mut options = TableParquetOptions::default();
+            options.global.compression = Some(codec.clone());
+            options
+        });
         dataframe
-            .write_parquet(path, output_write_options(args.output_single_file), None)
+            .write_parquet(
+                path,
+                output_write_options(args.output_single_file),
+                writer_options,
+            )
             .await?;
     } else if let Some(path) = args.output_csv.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
