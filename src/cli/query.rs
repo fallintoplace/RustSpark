@@ -107,6 +107,17 @@ pub(super) async fn execute_script(
     let last = statements
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
+    if args.describe || args.explain || args.explain_analyze {
+        // Every statement in an inspection script must be read-only, not
+        // just the final statement whose schema or plan is printed.
+        for statement in statements {
+            drain_dataframe(
+                plan_read_only_query(session, &statement.to_string(), args).await?,
+            )
+            .await?;
+        }
+        return execute_query(session, &last.to_string(), args).await;
+    }
     for statement in statements {
         if let Some((source, destination)) = persistent_rename_table(&statement, args)? {
             let root = args
