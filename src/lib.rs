@@ -487,6 +487,16 @@ impl RustSparkSession {
         self.sql_read_only(query).await?.with_param_values(params)
     }
 
+    /// Stream read-only SQL results without collecting all rows.
+    ///
+    /// DDL, DML and session statements are rejected during planning.
+    pub async fn sql_read_only_stream(
+        &self,
+        query: &str,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.sql_read_only(query).await?.execute_stream().await
+    }
+
     /// Plan only read-only SQL, rejecting DDL, DML and session statements.
     ///
     /// This is not a replacement for table-level authorization or process isolation.
