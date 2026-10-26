@@ -46,10 +46,14 @@ pub(super) async fn execute_script(
         }
         validate_persistent_table_name(&statement, args)?;
         let dropped = persistent_drop_table(&statement, args)?;
-        plan_query(session, &statement.to_string(), args)
-            .await?
-            .collect()
-            .await?;
+        if let Some(target) = persistent_insert_table(&statement, args)? {
+            execute_staged_insert(session, &statement.to_string(), args, &target, false).await?;
+        } else {
+            plan_query(session, &statement.to_string(), args)
+                .await?
+                .collect()
+                .await?;
+        }
         persist_created_table(session, &statement, args).await?;
         persist_dropped_table(dropped, args)?;
     }
@@ -62,9 +66,94 @@ pub(super) async fn execute_script(
     }
     validate_persistent_table_name(&last, args)?;
     let dropped = persistent_drop_table(&last, args)?;
-    execute_query(session, &last.to_string(), args).await?;
+    if let Some(target) = persistent_insert_table(&last, args)? {
+        execute_staged_insert(session, &last.to_string(), args, &target, true).await?;
+    } else {
+        execute_query(session, &last.to_string(), args).await?;
+    }
     persist_created_table(session, &last, args).await?;
     persist_dropped_table(dropped, args)
+}
+
+/// Route a persistent INSERT to a staged copy, never the visible table files.
+/// Unquoted, local table names only. External registrations keep DataFusion's
+/// normal INSERT behavior.
+fn persistent_insert_table(
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(None);
+    };
+    let DFStatement::Statement(statement) = statement else {
+        return Ok(None);
+    };
+    let SqlStatement::Insert(insert) = statement.as_ref() else {
+        return Ok(None);
+    };
+    let name = insert.table.to_string().to_ascii_lowercase();
+    if !super::valid_identifier(&name) {
+        return Err("Persistent INSERT requires a simple unquoted table name".into());
+    }
+    if insert.overwrite && root.join(&name).is_dir() {
+        return Err("Persistent INSERT OVERWRITE is unsupported".into());
+    }
+    if root.join(&name).is_dir() {
+        if args.save_table.is_some() {
+            return Err("--save-table cannot be used with persistent INSERT".into());
+        }
+        Ok(Some(name))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn execute_staged_insert(
+    session: &RustSparkSession,
+    sql: &str,
+    args: &Args,
+    table: &str,
+    final_statement: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+    let stage = super::persistence::StagedInsert::prepare(root, table)?;
+    if !session.deregister_table(table)? {
+        stage.discard()?;
+        return Err(format!("Persistent table disappeared: {table}").into());
+    }
+    if let Err(error) =
+        super::persistence::register_saved_table(session, table, stage.data_path()).await
+    {
+        let _ = super::persistence::register_saved_table(session, table, &root.join(table)).await;
+        let _ = stage.discard();
+        return Err(error);
+    }
+
+    // Do not propagate SQL errors with ? here; that would skip restoration
+    // of the original table provider and the staged files.
+    let execution: Result<(), Box<dyn std::error::Error>> = async {
+        if final_statement {
+            execute_query(session, sql, args).await
+        } else {
+            plan_query(session, sql, args).await?.collect().await?;
+            Ok(())
+        }
+    }
+    .await;
+    if !session.deregister_table(table)? {
+        return Err(format!("Staged table disappeared: {table}").into());
+    }
+    let outcome = match execution {
+        Ok(()) => stage.commit(),
+        Err(error) => {
+            let _ = stage.discard();
+            Err(error)
+        }
+    };
+    // A successful commit is already visible on disk at this point.
+    // Refresh the provider even if the SQL statement failed.
+    super::persistence::register_saved_table(session, table, &root.join(table)).await?;
+    outcome
 }
 
 fn persistent_create_table<'a>(

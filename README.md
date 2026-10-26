@@ -199,9 +199,15 @@ cargo run -- --database-dir /tmp/rustspark-db \\
 Only simple, unquoted table names in the local database are supported for
 persistent rename. Existing table names cannot be overwritten.
 
-This is an experimental, local append-only store. `INSERT INTO` writes Parquet
-files; it is not a transactional database. Dropped table files are moved out of
-the catalog before removal. SQL data in input files is never deleted.
+This is an experimental, single-writer local store, not an ACID database.
+Persistent `INSERT INTO` copies existing Parquet files into a private stage,
+executes the insert there and publishes the new table directory only after
+success. On a process crash, the next session either restores the old table
+or retains the published new table. Each insert copies the whole table,
+so large tables incur substantial write amplification. Power-loss fsync
+durability and multi-statement transactions are not guaranteed. Dropped
+tables are moved out of the catalog before removal. SQL input files are
+never deleted.
 
 Standalone SQL without a file also works:
 
