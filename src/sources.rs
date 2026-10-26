@@ -43,13 +43,36 @@ impl RustSparkSession {
     ///
     /// All inputs must have compatible schemas.
     pub async fn read_csv_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
+        self.read_csv_files_with_options(paths, CsvReadOptions::new())
+            .await
+    }
+
+    /// Read multiple CSV files with shared delimiter, schema and reader options.
+    ///
+    /// All inputs must have compatible schemas; no rows are collected here.
+    pub async fn read_csv_files_with_options<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        options: CsvReadOptions<'_>,
+    ) -> Result<DataFrame> {
         let paths = file_paths(paths, "CSV")?;
-        self.context.read_csv(paths, CsvReadOptions::new()).await
+        self.context.read_csv(paths, options).await
     }
 
     /// Register several CSV files as a single SQL table.
     pub async fn register_csv_files<P: AsRef<Path>>(&self, table: &str, paths: &[P]) -> Result<()> {
-        let dataframe = self.read_csv_files(paths).await?;
+        self.register_csv_files_with_options(table, paths, CsvReadOptions::new())
+            .await
+    }
+
+    /// Register CSV files as one table with a shared explicit reader configuration.
+    pub async fn register_csv_files_with_options<P: AsRef<Path>>(
+        &self,
+        table: &str,
+        paths: &[P],
+        options: CsvReadOptions<'_>,
+    ) -> Result<()> {
+        let dataframe = self.read_csv_files_with_options(paths, options).await?;
         self.register_dataframe(table, dataframe)
     }
     /// Registers newline-delimited JSON as a SQL table.
