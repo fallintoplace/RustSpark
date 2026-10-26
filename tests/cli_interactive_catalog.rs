@@ -16,7 +16,9 @@ fn shell_lists_tables_and_describes_schema_without_exiting()
         .stdin
         .take()
         .ok_or("missing input pipe")?
-        .write_all(b".tables\n.schema data\n.schema missing\n.schema\nSELECT 9 AS after_error;\n\\q\n")?;
+        .write_all(
+            b".tables\n.schema data\n.schema missing\n.schema\nSELECT 9 AS after_error;\n\\q\n",
+        )?;
     let result = process.wait_with_output()?;
     assert!(
         result.status.success(),
@@ -26,9 +28,18 @@ fn shell_lists_tables_and_describes_schema_without_exiting()
 
     let stdout = String::from_utf8(result.stdout)?;
     assert!(stdout.contains(".data"), "missing table listing: {stdout}");
-    assert!(stdout.contains("city\t"), "missing column metadata: {stdout}");
-    assert!(stdout.contains("amount\t"), "missing column metadata: {stdout}");
-    assert!(stdout.contains('9'), "shell stopped after invalid .schema: {stdout}");
+    assert!(
+        stdout.contains("city\t"),
+        "missing column metadata: {stdout}"
+    );
+    assert!(
+        stdout.contains("amount\t"),
+        "missing column metadata: {stdout}"
+    );
+    assert!(
+        stdout.contains('9'),
+        "shell stopped after invalid .schema: {stdout}"
+    );
 
     let stderr = String::from_utf8(result.stderr)?;
     assert!(stderr.contains("Shell error:"), "{stderr}");
