@@ -550,6 +550,34 @@ impl RustSparkSession {
             .join_on(self.table(right).await?, join_type, predicates)
     }
 
+    /// Cross join two registered tables, like Spark DataFrame.crossJoin.
+    ///
+    /// The result has left_rows * right_rows entries. This operation can
+    /// produce very large results and should be used deliberately.
+    pub async fn cross_join_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let quote_table = |path: &str| -> Result<String> {
+            if path
+                .split('.')
+                .any(|part| part.is_empty() || part.trim() != part)
+            {
+                return Err(DataFusionError::Plan(
+                    "Cross join table name must be a non-empty catalog path".into(),
+                ));
+            }
+            Ok(path
+                .split('.')
+                .map(|part| format!("\\\"{}\\\"", part.replace('"', "\\\"\\\"")))
+                .collect::<Vec<_>>()
+                .join("."))
+        };
+        let query = format!(
+            "SELECT * FROM {} AS \"__rustspark_left\" CROSS JOIN {} AS \"__rustspark_right\"",
+            quote_table(left)?,
+            quote_table(right)?
+        );
+        self.sql(&query).await
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
