@@ -47,6 +47,28 @@ def output_signature(stdout: str):
     return digest, rows
 
 
+def expected_results(rows: int):
+    """Compute workload answers from the deterministic benchmark input."""
+    counts = {}
+    totals = {}
+    filtered_total = 0
+    filtered_rows = 0
+    for index in range(rows):
+        city = f"city_{index % 16}"
+        amount = (index * 37) % 100
+        counts[city] = counts.get(city, 0) + 1
+        totals[city] = totals.get(city, 0) + amount
+        if amount >= 70:
+            filtered_total += amount
+            filtered_rows += 1
+    return {
+        "scan_count": [{"n": rows}],
+        "filter_sum": [{"total": filtered_total if filtered_rows else None}],
+        "group_by": [{"city": city, "total": total} for city, total in totals.items()],
+        "aggregate_join": [{"pairs": sum(count * count for count in counts.values())}],
+    }
+
+
 def execute(binary: str, csv: pathlib.Path, sql: str, timeout: int):
     started = time.perf_counter()
     output = subprocess.run(
@@ -65,15 +87,16 @@ def execute(binary: str, csv: pathlib.Path, sql: str, timeout: int):
     return elapsed, digest, rows
 
 
-def measure_workload(binary, csv, name, sql, rows, repeat, warmup, timeout):
+
+def measure_workload(binary, csv, name, sql, expected_digest, repeat, warmup, timeout):
     measurements = []
     digest = None
     for run in range(warmup + repeat):
         elapsed, current_digest, output = execute(binary, csv, sql, timeout)
-        if name == "scan_count" and (len(output) != 1 or output[0].get("n") != rows):
-            raise RuntimeError("Scan returned an incorrect row count")
         if digest is not None and digest != current_digest:
             raise RuntimeError(f"Nondeterministic results for {name}")
+        if current_digest != expected_digest:
+            raise RuntimeError(f"Incorrect benchmark results for {name}: {output!r}")
         digest = current_digest
         if run >= warmup:
             measurements.append(round(elapsed, 3))
@@ -93,10 +116,14 @@ def benchmark(binary: str, rows: int, repeat: int, warmup: int, timeout: int):
     with tempfile.TemporaryDirectory(prefix="rustspark-benchmark-") as tmp:
         csv = pathlib.Path(tmp) / "input.csv"
         write_csv(csv, rows)
+        expected = {
+            name: output_signature("\n".join(json.dumps(row) for row in result))[0]
+            for name, result in expected_results(rows).items()
+        }
         workloads = []
         for name, sql in WORKLOADS.items():
             workloads.append(
-                measure_workload(binary, csv, name, sql, rows, repeat, warmup, timeout)
+                measure_workload(binary, csv, name, sql, expected[name], repeat, warmup, timeout)
             )
         return {
             "binary": binary,
