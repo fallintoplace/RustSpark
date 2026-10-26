@@ -42,6 +42,14 @@ Standalone SQL without a file also works:
 cargo run -- --sql 'SELECT 42 AS answer'
 ```
 
+Provide column types to avoid CSV schema inference:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --csv-schema 'city:utf8,amount:int64' --sql 'SELECT SUM(amount) FROM data'
+```
+
+Supported types: `utf8`, `int64`, `float64`, `bool` (and `string`, `bigint`, `double`, `boolean` aliases). Named CSV inputs share this schema.
+
 Inspect query output columns without executing the query:
 
 ```sh
