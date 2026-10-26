@@ -89,7 +89,7 @@ async fn persist_created_table(
         .database_dir
         .as_deref()
         .ok_or("Missing database directory")?;
-    let name = create.name.to_string();
+    let name = create.name.to_string().to_ascii_lowercase();
     if create.if_not_exists && directory.join(&name).exists() {
         return Ok(());
     }

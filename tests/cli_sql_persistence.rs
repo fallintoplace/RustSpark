@@ -74,3 +74,35 @@ fn create_table_does_not_overwrite_an_existing_persistent_table() -> TestResult 
     assert_row(run(root, "SELECT n FROM counts"), "1");
     Ok(())
 }
+
+#[test]
+fn unquoted_sql_table_names_are_case_insensitive() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(root, "CREATE TABLE MIXEDCASE AS SELECT 9 AS n");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(directory.path().join("mixedcase").is_dir());
+    assert_row(run(root, "SELECT n FROM mixedcase"), "9");
+    Ok(())
+}
+
+#[test]
+fn empty_created_table_is_queryable_after_restart() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(
+        root,
+        "CREATE TABLE empty_rows AS SELECT CAST(1 AS BIGINT) AS n WHERE FALSE",
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_row(run(root, "SELECT COUNT(*) FROM empty_rows"), "0");
+    Ok(())
+}
