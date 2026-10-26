@@ -6,7 +6,11 @@ fn completes_query_with_timeout() {
         .args(["--sql", "SELECT 42 AS answer", "--query-timeout", "30"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("42"));
 }
 
