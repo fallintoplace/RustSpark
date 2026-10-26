@@ -762,12 +762,17 @@ impl RustSparkSession {
     ///
     /// Duplicate rows are preserved. All sources must have compatible schemas.
     pub async fn union_tables(&self, names: &[&str]) -> Result<DataFrame> {
-        let (first, rest) = names.split_first().ok_or_else(|| {
-            DataFusionError::Plan("union_tables requires at least one table".into())
-        })?;
-        let mut dataframe = self.table(first).await?;
-        for name in rest {
-            dataframe = dataframe.union(self.table(name).await?)?;
+        if names.is_empty() {
+            return Err(DataFusionError::Plan(
+                "union_tables requires at least one table".into(),
+            ));
+        }
+        let frames =
+            futures::future::try_join_all(names.iter().map(|name| self.table(name))).await?;
+        let mut frames = frames.into_iter();
+        let mut dataframe = frames.next().expect("non-empty table list");
+        for frame in frames {
+            dataframe = dataframe.union(frame)?;
         }
         Ok(dataframe)
     }
