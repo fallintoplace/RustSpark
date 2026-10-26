@@ -169,17 +169,31 @@ impl RustSparkSession {
         self.register_dataframe(table, self.read_batches(batches)?)
     }
 
+    async fn register_view_dataframe(
+        &self,
+        name: &str,
+        dataframe: DataFrame,
+        materialized: bool,
+    ) -> Result<()> {
+        let dataframe = if materialized {
+            dataframe.cache().await?
+        } else {
+            dataframe
+        };
+        self.register_dataframe(name, dataframe)
+    }
+
     /// Register a SQL query as a lazy view in this session.
     ///
     /// The query is planned now but its rows are read when the view is queried.
     pub async fn register_sql_view(&self, name: &str, query: &str) -> Result<()> {
-        let dataframe = self.sql(query).await?;
-        self.register_dataframe(name, dataframe)
+        self.register_view_dataframe(name, self.sql(query).await?, false)
+            .await
     }
 
     pub async fn register_materialized_sql_view(&self, name: &str, query: &str) -> Result<()> {
-        let dataframe = self.sql(query).await?.cache().await?;
-        self.register_dataframe(name, dataframe)
+        self.register_view_dataframe(name, self.sql(query).await?, true)
+            .await
     }
 
     /// Register a lazy SQL view with typed positional or named parameters.
@@ -192,8 +206,8 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        let dataframe = self.sql_with_params(query, params).await?;
-        self.register_dataframe(name, dataframe)
+        self.register_view_dataframe(name, self.sql_with_params(query, params).await?, false)
+            .await
     }
 
     /// Materialize a parameterized SQL query once and register its cached result.
@@ -203,8 +217,8 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        let dataframe = self.sql_with_params(query, params).await?.cache().await?;
-        self.register_dataframe(name, dataframe)
+        self.register_view_dataframe(name, self.sql_with_params(query, params).await?, true)
+            .await
     }
 
     /// Join two registered tables by their shared column names (SQL USING).
