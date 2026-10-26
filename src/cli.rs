@@ -136,6 +136,9 @@ struct Args {
         conflicts_with_all = ["max_rows", "output_parquet", "output_csv"]
     )]
     output_json: Option<PathBuf>,
+
+    #[arg(long = "output-single-file")]
+    output_single_file: bool,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -328,6 +331,15 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
+    let options = DataFrameWriteOptions::new();
+    if single_file {
+        options.with_single_file_output(true)
+    } else {
+        options
+    }
+}
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
     let single_inputs = u8::from(args.csv.is_some())
@@ -336,6 +348,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let has_named = !args.csv_tables.is_empty()
         || !args.parquet_tables.is_empty()
         || !args.json_tables.is_empty();
+    if args.output_single_file
+        && args.output_parquet.is_none()
+        && args.output_csv.is_none()
+        && args.output_json.is_none()
+    {
+        return Err("--output-single-file requires an output format".into());
+    }
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
@@ -502,17 +521,17 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
-            .write_parquet(path, DataFrameWriteOptions::new(), None)
+            .write_parquet(path, output_write_options(args.output_single_file), None)
             .await?;
     } else if let Some(path) = args.output_csv.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
-            .write_csv(path, DataFrameWriteOptions::new(), None)
+            .write_csv(path, output_write_options(args.output_single_file), None)
             .await?;
     } else if let Some(path) = args.output_json.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
-            .write_json(path, DataFrameWriteOptions::new(), None)
+            .write_json(path, output_write_options(args.output_single_file), None)
             .await?;
     } else if let Some(max_rows) = args.max_rows {
         dataframe.show_limit(max_rows).await?;
