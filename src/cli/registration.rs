@@ -24,6 +24,17 @@ async fn reject_duplicate_csv_headers(
     Ok(())
 }
 
+fn parse_unique_named_table<'a>(
+    mapping: &'a str,
+    names: &mut HashSet<String>,
+) -> Result<(&'a str, &'a str), Box<dyn std::error::Error>> {
+    let (name, path) = parse_named_table(mapping)?;
+    if !names.insert(name.to_ascii_lowercase()) {
+        return Err(format!("Duplicate table name: {name}").into());
+    }
+    Ok((name, path))
+}
+
 async fn register_csv_input(
     session: &RustSparkSession,
     args: &Args,
@@ -72,10 +83,7 @@ pub(super) async fn register_inputs(
         let mut names = HashSet::new();
         let mut registration_jobs = tokio::task::JoinSet::new();
         for mapping in &args.csv_tables {
-            let (name, path) = parse_named_table(mapping)?;
-            if !names.insert(name.to_ascii_lowercase()) {
-                return Err(format!("Duplicate table name: {name}").into());
-            }
+            let (name, path) = parse_unique_named_table(mapping, &mut names)?;
             let session = Arc::clone(session);
             let args = Arc::clone(args);
             let name = name.to_owned();
@@ -86,10 +94,7 @@ pub(super) async fn register_inputs(
             finish_registration_when_full(&mut registration_jobs).await?;
         }
         for mapping in &args.parquet_tables {
-            let (name, path) = parse_named_table(mapping)?;
-            if !names.insert(name.to_ascii_lowercase()) {
-                return Err(format!("Duplicate table name: {name}").into());
-            }
+            let (name, path) = parse_unique_named_table(mapping, &mut names)?;
             let session = Arc::clone(session);
             let args = Arc::clone(args);
             let name = name.to_owned();
@@ -103,10 +108,7 @@ pub(super) async fn register_inputs(
             finish_registration_when_full(&mut registration_jobs).await?;
         }
         for mapping in &args.json_tables {
-            let (name, path) = parse_named_table(mapping)?;
-            if !names.insert(name.to_ascii_lowercase()) {
-                return Err(format!("Duplicate table name: {name}").into());
-            }
+            let (name, path) = parse_unique_named_table(mapping, &mut names)?;
             let session = Arc::clone(session);
             let args = Arc::clone(args);
             let name = name.to_owned();
