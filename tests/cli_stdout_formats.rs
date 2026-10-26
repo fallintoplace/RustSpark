@@ -117,7 +117,12 @@ fn closed_output_pipe_is_not_a_query_failure() -> TestResult {
     use std::process::Stdio;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args(["--sql", "SELECT 'hello' AS greeting", "--stdout-format", "csv"])
+        .args([
+            "--sql",
+            "SELECT 'hello' AS greeting",
+            "--stdout-format",
+            "csv",
+        ])
         .stdout(Stdio::piped())
         .spawn()?;
     drop(child.stdout.take());
