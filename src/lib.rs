@@ -183,13 +183,10 @@ impl RustSparkSession {
         Ok(())
     }
 
-    /// Return column names, data types and nullability without scanning rows.
-    pub async fn describe_table(
-        &self,
-        name: &str,
-    ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
-        let dataframe = self.table(name).await?;
-        Ok(dataframe
+    fn describe_columns(
+        dataframe: &DataFrame,
+    ) -> Vec<(String, datafusion::arrow::datatypes::DataType, bool)> {
+        dataframe
             .schema()
             .fields()
             .iter()
@@ -200,7 +197,16 @@ impl RustSparkSession {
                     field.is_nullable(),
                 )
             })
-            .collect())
+            .collect()
+    }
+
+    /// Return column names, data types and nullability without scanning rows.
+    pub async fn describe_table(
+        &self,
+        name: &str,
+    ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
+        let dataframe = self.table(name).await?;
+        Ok(Self::describe_columns(&dataframe))
     }
 
     /// Inspect the names, types and nullability of a read-only SQL query.
@@ -211,18 +217,7 @@ impl RustSparkSession {
         query: &str,
     ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
         let dataframe = self.sql_read_only(query).await?;
-        Ok(dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| {
-                (
-                    field.name().to_owned(),
-                    field.data_type().clone(),
-                    field.is_nullable(),
-                )
-            })
-            .collect())
+        Ok(Self::describe_columns(&dataframe))
     }
 
     /// Inspect output columns from a parameterized, read-only SQL query.
@@ -234,18 +229,7 @@ impl RustSparkSession {
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
         let dataframe = self.sql_read_only_with_params(query, params).await?;
-        Ok(dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| {
-                (
-                    field.name().to_owned(),
-                    field.data_type().clone(),
-                    field.is_nullable(),
-                )
-            })
-            .collect())
+        Ok(Self::describe_columns(&dataframe))
     }
 
     /// Register a scalar user-defined function for SQL queries in this session.
