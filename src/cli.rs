@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Write},
@@ -109,7 +110,7 @@ struct Args {
     #[arg(long = "json-table", value_name = "NAME=PATH")]
     json_tables: Vec<String>,
 
-    #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
+    #[arg(long, default_value = "data", value_parser = parse_table_name, conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
     table: String,
 
     #[arg(long = "cache-table", value_name = "NAME")]
@@ -272,6 +273,14 @@ fn valid_identifier(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn parse_table_name(value: &str) -> Result<String, String> {
+    if valid_identifier(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("--table must be a SQL identifier".into())
+    }
+}
+
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
@@ -342,10 +351,47 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
         .split_once(':')
         .ok_or_else(|| "--param must use TYPE:VALUE".to_owned())?;
     match kind.to_ascii_lowercase().as_str() {
+        "int8" | "tinyint" => raw
+            .parse::<i8>()
+            .map(|number| ScalarValue::Int8(Some(number)))
+            .map_err(|_| "--param int8 needs a signed 8-bit integer".to_owned()),
+        "int16" | "smallint" => raw
+            .parse::<i16>()
+            .map(|number| ScalarValue::Int16(Some(number)))
+            .map_err(|_| "--param int16 needs a signed 16-bit integer".to_owned()),
+        "int32" | "int" | "integer" => raw
+            .parse::<i32>()
+            .map(|number| ScalarValue::Int32(Some(number)))
+            .map_err(|_| "--param int32 needs a signed 32-bit integer".to_owned()),
         "int64" | "bigint" => raw
             .parse::<i64>()
             .map(|number| ScalarValue::Int64(Some(number)))
             .map_err(|_| "--param int64 needs a signed 64-bit integer".to_owned()),
+        "uint8" => raw
+            .parse::<u8>()
+            .map(|number| ScalarValue::UInt8(Some(number)))
+            .map_err(|_| "--param uint8 needs an unsigned 8-bit integer".to_owned()),
+        "uint16" => raw
+            .parse::<u16>()
+            .map(|number| ScalarValue::UInt16(Some(number)))
+            .map_err(|_| "--param uint16 needs an unsigned 16-bit integer".to_owned()),
+        "uint32" => raw
+            .parse::<u32>()
+            .map(|number| ScalarValue::UInt32(Some(number)))
+            .map_err(|_| "--param uint32 needs an unsigned 32-bit integer".to_owned()),
+        "uint64" => raw
+            .parse::<u64>()
+            .map(|number| ScalarValue::UInt64(Some(number)))
+            .map_err(|_| "--param uint64 needs an unsigned 64-bit integer".to_owned()),
+        "float32" | "real" => {
+            let number = raw
+                .parse::<f32>()
+                .map_err(|_| "--param float32 needs a number".to_owned())?;
+            if !number.is_finite() {
+                return Err("--param float32 must be finite".into());
+            }
+            Ok(ScalarValue::Float32(Some(number)))
+        }
         "float64" | "double" => {
             let number = raw
                 .parse::<f64>()
@@ -361,7 +407,10 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             .map_err(|_| "--param bool must be true or false".to_owned()),
         "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
-        _ => Err("--param supports int64, float64, bool, utf8, or null:".into()),
+        _ => Err(
+            "--param supports int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8, or null:"
+                .into(),
+        ),
     }
 }
 
@@ -426,6 +475,8 @@ async fn reject_duplicate_csv_headers(
     Ok(())
 }
 
+// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
+// Read as strings and normalize before casting to the inferred input types.
 mod csv_input;
 use csv_input::register_csv_with_null_value;
 
@@ -481,8 +532,20 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     .next() else {
         return Ok(());
     };
-    let Ok(destination) = destination.canonicalize() else {
-        return Ok(());
+    let destination = if let Ok(existing) = destination.canonicalize() {
+        existing
+    } else {
+        let parent = destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let Ok(parent) = parent.canonicalize() else {
+            return Ok(());
+        };
+        let Some(file_name) = destination.file_name() else {
+            return Ok(());
+        };
+        parent.join(file_name)
     };
     let mut sources: Vec<&std::path::Path> = Vec::new();
     for path in [
@@ -507,17 +570,23 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
         let (_, path) = parse_named_table(mapping)?;
         sources.push(std::path::Path::new(path));
     }
-    if sources
-        .iter()
-        .any(|source| source.canonicalize().is_ok_and(|path| path == destination))
-    {
-        return Err("Output path must not overwrite an input file or SQL script".into());
+    if sources.iter().any(|source| {
+        source.canonicalize().is_ok_and(|source| {
+            destination == source || (source.is_dir() && destination.starts_with(&source))
+        })
+    }) {
+        return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
     }
     Ok(())
 }
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
+    if let (Some(offset), Some(max_rows)) = (args.offset, args.max_rows) {
+        offset
+            .checked_add(max_rows)
+            .ok_or("--offset plus --max-rows exceeds the supported range")?;
+    }
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some());
@@ -744,18 +813,32 @@ async fn execute_registered_query(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut union_names = HashSet::new();
+    for declaration in &args.unions_by_name {
+        let (name, _) = parse_union_by_name(declaration)?;
+        if !union_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate union destination: {name}").into());
+        }
+    }
     for declaration in &args.unions_by_name {
         let (name, sources) = parse_union_by_name(declaration)?;
         let union = session.union_tables_by_name(&sources).await?;
         session.register_dataframe(name, union)?;
     }
+    let mut view_names = HashSet::new();
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
+        if !view_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate SQL view: {name}").into());
+        }
         let dataframe = plan_query(session, sql, args).await?;
         session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
+        if !view_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate SQL view: {name}").into());
+        }
         let dataframe = plan_query(session, sql, args).await?.cache().await?;
         session.register_dataframe(name, dataframe)?;
     }
@@ -798,6 +881,7 @@ async fn execute_script(
     script: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let script = script.strip_prefix('\u{feff}').unwrap_or(script);
     let mut statements = DFParser::parse_sql(script)?;
     let last = statements
         .pop_back()
@@ -842,6 +926,32 @@ fn reject_duplicate_output_fields(
         }
     }
     Ok(())
+}
+
+fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        // Arrow CSV/JSON writers may flatten I/O errors to string-only ArrowError values.
+        if current
+            .downcast_ref::<datafusion::arrow::error::ArrowError>()
+            .is_some_and(|arrow| {
+                let message = arrow.to_string().to_ascii_lowercase();
+                message.contains("broken pipe")
+                    || message.contains("pipe is being closed")
+                    || message.contains("pipe has been ended")
+            })
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
 }
 
 async fn execute_query(
@@ -902,7 +1012,11 @@ async fn execute_query(
         } else {
             dataframe
         };
-        write_stdout(dataframe, format).await?;
+        if let Err(error) = write_stdout(dataframe, format).await
+            && !is_broken_pipe(error.as_ref())
+        {
+            return Err(error);
+        }
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
@@ -923,6 +1037,48 @@ async fn execute_query(
     Ok(())
 }
 
+// Arrow's CSV writer converts I/O errors into strings. Track the original
+// BrokenPipe kind before Arrow discards it so shell pipelines exit cleanly.
+struct PipeTrackingWriter<W> {
+    inner: W,
+    broken_pipe: Arc<AtomicBool>,
+}
+
+impl<W: Write> Write for PipeTrackingWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let result = self.inner.write(bytes);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            self.broken_pipe.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let result = self.inner.flush();
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            self.broken_pipe.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+fn preserve_writer_pipe_error(
+    error: datafusion::arrow::error::ArrowError,
+    broken_pipe: &AtomicBool,
+) -> Box<dyn std::error::Error> {
+    if broken_pipe.load(Ordering::Relaxed) {
+        Box::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    } else {
+        Box::new(error)
+    }
+}
+
 // Write one record batch at a time so stdout never requires collecting all results.
 async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
@@ -932,31 +1088,45 @@ async fn write_stdout(
     let schema = stream.schema();
     let stdout = std::io::stdout();
     let mut output = std::io::BufWriter::new(stdout.lock());
+    let broken_pipe = Arc::new(AtomicBool::new(false));
+    let mut tracked = PipeTrackingWriter {
+        inner: &mut output,
+        broken_pipe: Arc::clone(&broken_pipe),
+    };
     match format {
         StdoutFormat::Csv => {
-            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut output);
+            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut tracked);
             let mut wrote_batch = false;
             while let Some(batch) = stream.next().await {
-                writer.write(&batch?)?;
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
                 wrote_batch = true;
             }
             if !wrote_batch {
                 // Include column headers even when the query returns no rows.
-                writer.write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
-                    schema,
-                ))?;
+                writer
+                    .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
+                        schema,
+                    ))
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             }
         }
         StdoutFormat::Json => {
             let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
                 .with_explicit_nulls(true)
-                .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut output);
+                .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut tracked);
             while let Some(batch) = stream.next().await {
-                writer.write(&batch?)?;
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             }
-            writer.finish()?;
+            writer
+                .finish()
+                .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
         }
     }
+    drop(tracked);
     output.flush()?;
     Ok(())
 }
