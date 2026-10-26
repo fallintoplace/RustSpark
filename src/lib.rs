@@ -313,7 +313,11 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         keys: &[(&str, &str)],
     ) -> Result<DataFrame> {
-        if keys.is_empty() || keys.iter().any(|(l, r)| l.trim().is_empty() || r.trim().is_empty()) {
+        if keys.is_empty()
+            || keys
+                .iter()
+                .any(|(l, r)| l.trim().is_empty() || r.trim().is_empty())
+        {
             return Err(DataFusionError::Plan(
                 "join_tables requires at least one pair of non-empty join keys".into(),
             ));
@@ -321,9 +325,13 @@ impl RustSparkSession {
 
         let left_keys: Vec<_> = keys.iter().map(|(left, _)| *left).collect();
         let right_keys: Vec<_> = keys.iter().map(|(_, right)| *right).collect();
-        self.table(left)
-            .await?
-            .join(self.table(right).await?, join_type, &left_keys, &right_keys, None)
+        self.table(left).await?.join(
+            self.table(right).await?,
+            join_type,
+            &left_keys,
+            &right_keys,
+            None,
+        )
     }
 
     /// Union registered tables with matching schemas by column position.
