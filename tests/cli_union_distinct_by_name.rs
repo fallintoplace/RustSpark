@@ -1,4 +1,7 @@
-use std::{fs, process::{Command, Output}};
+use std::{
+    fs,
+    process::{Command, Output},
+};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -27,11 +30,16 @@ fn cli_union_distinct_aligns_columns_and_removes_duplicates() -> TestResult {
     let second_arg = format!("second={}", second.display());
 
     let output = run(&[
-        "--csv-table", &first_arg,
-        "--csv-table", &second_arg,
-        "--union-distinct-by-name", "deduped=first,second",
-        "--sql", "SELECT city, amount FROM deduped ORDER BY city",
-        "--stdout-format", "csv",
+        "--csv-table",
+        &first_arg,
+        "--csv-table",
+        &second_arg,
+        "--union-distinct-by-name",
+        "deduped=first,second",
+        "--sql",
+        "SELECT city, amount FROM deduped ORDER BY city",
+        "--stdout-format",
+        "csv",
     ])?;
     assert_success(&output);
     assert_eq!(
@@ -40,15 +48,18 @@ fn cli_union_distinct_aligns_columns_and_removes_duplicates() -> TestResult {
     );
 
     let duplicate = run(&[
-        "--csv-table", &first_arg,
-        "--csv-table", &second_arg,
-        "--union-by-name", "combined=first,second",
-        "--union-distinct-by-name", "combined=first,second",
-        "--sql", "SELECT COUNT(*) FROM combined",
+        "--csv-table",
+        &first_arg,
+        "--csv-table",
+        &second_arg,
+        "--union-by-name",
+        "combined=first,second",
+        "--union-distinct-by-name",
+        "combined=first,second",
+        "--sql",
+        "SELECT COUNT(*) FROM combined",
     ])?;
     assert!(!duplicate.status.success());
-    assert!(
-        String::from_utf8_lossy(&duplicate.stderr).contains("Duplicate union destination")
-    );
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("Duplicate union destination"));
     Ok(())
 }
