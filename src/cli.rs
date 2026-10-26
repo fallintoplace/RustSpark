@@ -824,9 +824,7 @@ async fn execute_registered_query(
         sql.clone()
     } else if let Some(path) = args.sql_file.as_ref() {
         if path.as_os_str() == "-" {
-            let mut query = String::new();
-            std::io::stdin().read_to_string(&mut query)?;
-            query
+            read_sql_stdin().await?
         } else {
             std::fs::read_to_string(path)?
         }
@@ -841,6 +839,17 @@ async fn execute_registered_query(
         session.cache_table(name).await?;
     }
     execute_script(session, &query, args).await
+}
+
+// Use a detached reader thread so a blocked stdin read cannot stall the query timer.
+async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut query = String::new();
+        let result = std::io::stdin().read_to_string(&mut query).map(|_| query);
+        let _ = sender.send(result);
+    });
+    Ok(receiver.await??)
 }
 
 // Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
