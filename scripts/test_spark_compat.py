@@ -38,6 +38,20 @@ class SparkCompatibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 mod.load_cases(path)
 
+    def test_rejects_string_ordered_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cases.json"
+            path.write_text(json.dumps([{"id": "unordered", "sql": "SELECT 1", "ordered": "false"}]))
+            with self.assertRaisesRegex(ValueError, "ordered must be a boolean"):
+                mod.load_cases(path)
+
+    def test_rejects_blank_case_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cases.json"
+            path.write_text(json.dumps([{"id": " ", "sql": "SELECT 1"}]))
+            with self.assertRaisesRegex(ValueError, "id must not be empty"):
+                mod.load_cases(path)
+
     def test_corpus_is_valid(self):
         cases = mod.load_cases(mod.DEFAULT_CASES)
         self.assertGreaterEqual(len(cases), 25)
