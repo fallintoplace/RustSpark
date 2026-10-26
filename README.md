@@ -41,3 +41,9 @@ Standalone SQL without a file also works:
 ```sh
 cargo run -- --sql 'SELECT 42 AS answer'
 ```
+
+Inspect query output columns without executing the query:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --describe
+```
