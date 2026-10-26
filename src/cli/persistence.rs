@@ -391,13 +391,19 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .canonicalize()?;
-    let name = destination.file_name().ok_or("Backup destination must name a directory")?;
+    let name = destination
+        .file_name()
+        .ok_or("Backup destination must name a directory")?;
     let normalized = parent.join(name);
     if normalized.starts_with(&source) {
         return Err("Backup destination must be outside --database-dir".into());
     }
     if fs::symlink_metadata(&normalized).is_ok() {
-        return Err(format!("Backup destination already exists: {}", normalized.display()).into());
+        return Err(format!(
+            "Backup destination already exists: {}",
+            normalized.display()
+        )
+        .into());
     }
 
     let temporary = tempfile::Builder::new()

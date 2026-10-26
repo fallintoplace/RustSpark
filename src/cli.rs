@@ -658,7 +658,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         register_database_tables(&session, directory).await?;
     }
     if let Some(destination) = args.backup_database.as_deref() {
-        let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+        let root = args
+            .database_dir
+            .as_deref()
+            .ok_or("Missing database directory")?;
         return persistence::backup_database(root, destination);
     }
     if args.interactive {
