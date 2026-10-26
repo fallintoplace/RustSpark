@@ -6,8 +6,8 @@ use datafusion::{
 };
 use rustspark::RustSparkSession;
 
-use super::{Args, write_arrow_ipc, write_stdout};
 use super::output::is_broken_pipe;
+use super::{Args, write_arrow_ipc, write_stdout};
 
 fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     let options = DataFrameWriteOptions::new();
