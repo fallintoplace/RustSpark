@@ -2,8 +2,8 @@ use futures::StreamExt;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn streams_sql_batches_without_collecting_results()
--> Result<(), Box<dyn std::error::Error>> {
+async fn streams_sql_batches_without_collecting_results() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     session
         .register_csv(
