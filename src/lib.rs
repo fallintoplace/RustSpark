@@ -503,6 +503,52 @@ impl RustSparkSession {
         self.union_tables_by_name(names).await?.distinct()
     }
 
+    /// Remove duplicate rows from a registered table, like Spark dropDuplicates.
+    ///
+    /// An empty subset compares all columns. A non-empty subset groups rows by
+    /// the selected columns and keeps an arbitrary row from each group. Use a
+    /// stable sort first if a particular representative row is required.
+    pub async fn drop_duplicates(&self, table: &str, subset: &[&str]) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::HashSet;
+
+        let dataframe = self.table(table).await?;
+        if subset.is_empty() {
+            return dataframe.distinct();
+        }
+
+        let mut seen = HashSet::new();
+        for name in subset {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate dropDuplicates column: {name}"
+                )));
+            }
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == *name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown dropDuplicates column: {name}"
+                )));
+            }
+        }
+
+        let keys = subset
+            .iter()
+            .map(|name| Expr::Column(Column::from_name(*name)))
+            .collect();
+        let projection = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| Expr::Column(Column::from_name(field.name())))
+            .collect();
+        dataframe.distinct_on(keys, projection, None)
+    }
+
     /// Union SQL query results by column position.
     ///
     /// Each query must return a compatible schema. Duplicate rows remain.
