@@ -77,6 +77,36 @@ fn preserve_writer_pipe_error(
     }
 }
 
+async fn write_delimited<W: Write>(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+    output: &mut W,
+    schema: datafusion::arrow::datatypes::SchemaRef,
+    delimiter: u8,
+    include_header: bool,
+    broken_pipe: &AtomicBool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = datafusion::arrow::csv::WriterBuilder::new()
+        .with_delimiter(delimiter)
+        .with_header(include_header)
+        .build(output);
+    let mut wrote_batch = false;
+    while let Some(batch) = stream.next().await {
+        writer
+            .write(&batch?)
+            .map_err(|error| preserve_writer_pipe_error(error, broken_pipe))?;
+        wrote_batch = true;
+    }
+    if !wrote_batch && include_header {
+        // Include column headers even when the query returns no rows.
+        writer
+            .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
+                schema,
+            ))
+            .map_err(|error| preserve_writer_pipe_error(error, broken_pipe))?;
+    }
+    Ok(())
+}
+
 // Write one record batch at a time so stdout never requires collecting all results.
 pub(super) async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
@@ -99,25 +129,15 @@ pub(super) async fn write_stdout(
             } else {
                 b','
             };
-            let mut writer = datafusion::arrow::csv::WriterBuilder::new()
-                .with_delimiter(delimiter)
-                .with_header(include_header)
-                .build(&mut tracked);
-            let mut wrote_batch = false;
-            while let Some(batch) = stream.next().await {
-                writer
-                    .write(&batch?)
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-                wrote_batch = true;
-            }
-            if !wrote_batch && include_header {
-                // Include column headers even when the query returns no rows.
-                writer
-                    .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
-                        schema,
-                    ))
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-            }
+            write_delimited(
+                &mut stream,
+                &mut tracked,
+                schema,
+                delimiter,
+                include_header,
+                &broken_pipe,
+            )
+            .await?;
         }
         StdoutFormat::Json => {
             let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
