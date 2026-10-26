@@ -56,13 +56,17 @@ def expected_results(rows: int):
     totals = {}
     filtered_total = 0
     filtered_rows = 0
-    for index in range(rows):
+    # City and amount repeat every lcm(16, 100) = 400 rows.
+    # Count full cycles rather than iterating over every benchmark row.
+    cycles, remainder = divmod(rows, 400)
+    for index in range(min(rows, 400)):
+        occurrences = cycles + (index < remainder)
         city, amount = benchmark_row(index)
-        counts[city] = counts.get(city, 0) + 1
-        totals[city] = totals.get(city, 0) + amount
+        counts[city] = counts.get(city, 0) + occurrences
+        totals[city] = totals.get(city, 0) + amount * occurrences
         if amount >= 70:
-            filtered_total += amount
-            filtered_rows += 1
+            filtered_total += amount * occurrences
+            filtered_rows += occurrences
     return {
         "scan_count": [{"n": rows}],
         "filter_sum": [{"total": filtered_total if filtered_rows else None}],

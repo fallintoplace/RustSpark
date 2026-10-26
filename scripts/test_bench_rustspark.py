@@ -66,6 +66,25 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(expected["filter_sum"], [{"total": 74}])
         self.assertEqual(expected["aggregate_join"], [{"pairs": 4}])
 
+    def test_cycle_aggregation_matches_per_row_reference(self):
+        for rows in (1, 16, 99, 100, 399, 400, 401, 800, 1001, 10001):
+            counts = {}
+            totals = {}
+            filtered = []
+            for index in range(rows):
+                city, amount = bench.benchmark_row(index)
+                counts[city] = counts.get(city, 0) + 1
+                totals[city] = totals.get(city, 0) + amount
+                if amount >= 70:
+                    filtered.append(amount)
+            expected = {
+                "scan_count": [{"n": rows}],
+                "filter_sum": [{"total": sum(filtered) if filtered else None}],
+                "group_by": [{"city": name, "total": total} for name, total in totals.items()],
+                "aggregate_join": [{"pairs": sum(n * n for n in counts.values())}],
+            }
+            self.assertEqual(bench.expected_results(rows), expected)
+
     def test_rejects_incorrect_benchmark_results(self):
         with mock.patch.object(bench, "execute", return_value=(1.0, "wrong", [])):
             with self.assertRaisesRegex(RuntimeError, "Incorrect benchmark results"):
