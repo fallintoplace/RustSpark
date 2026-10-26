@@ -220,6 +220,16 @@ cargo run -- --csv tests/fixtures/sales.csv \
   --stdout-format json --max-rows 2
 ```
 
+Pipe typed query results to another Arrow-aware process with the IPC stream
+format. This writes binary output and keeps row batches bounded in memory:
+
+```sh
+cargo run -- --sql 'SELECT 42 AS answer' --stdout-format arrow > /tmp/query.stream
+```
+
+This is the Arrow IPC **stream** format, not the seekable IPC file format
+written by `--output-arrow`.
+
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
 

@@ -24,6 +24,7 @@ use rustspark::RustSparkSession;
 enum StdoutFormat {
     Csv,
     Json,
+    Arrow,
 }
 
 #[derive(Parser)]
@@ -1159,6 +1160,19 @@ async fn write_stdout(
             let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
                 .with_explicit_nulls(true)
                 .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut tracked);
+            while let Some(batch) = stream.next().await {
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
+            }
+            writer
+                .finish()
+                .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
+        }
+        StdoutFormat::Arrow => {
+            let mut writer =
+                datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut tracked, &schema)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             while let Some(batch) = stream.next().await {
                 writer
                     .write(&batch?)
