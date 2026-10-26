@@ -111,6 +111,9 @@ struct Args {
     #[arg(long = "cache-table", value_name = "NAME")]
     cache_tables: Vec<String>,
 
+    #[arg(long = "union-by-name", value_name = "NAME=TABLE1,TABLE2,...")]
+    unions_by_name: Vec<String>,
+
     #[arg(long, value_name = "QUERY")]
     sql: Option<String>,
 
@@ -257,23 +260,33 @@ fn parse_file_extension(value: &str) -> Result<String, String> {
     }
 }
 
+fn valid_identifier(name: &str) -> bool {
+    name.bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
         .ok_or_else(|| "Named table must use NAME=PATH".to_owned())?;
-    let valid_first = name
-        .bytes()
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
-    if !valid_first
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        || path.is_empty()
-    {
+    if !valid_identifier(name) || path.is_empty() {
         return Err("Named table needs a SQL identifier and non-empty path".into());
     }
     Ok((name, path))
+}
+
+fn parse_union_by_name(value: &str) -> Result<(&str, Vec<&str>), String> {
+    let (name, source_names) = parse_named_table(value)
+        .map_err(|_| "--union-by-name requires NAME=TABLE1,TABLE2,...".to_owned())?;
+    let sources: Vec<_> = source_names.split(',').collect();
+    if sources.len() < 2 || sources.iter().any(|source| !valid_identifier(source)) {
+        return Err("--union-by-name requires at least two valid table names".into());
+    }
+    Ok((name, sources))
 }
 
 fn parse_named_view(value: &str) -> Result<(&str, &str), String> {
@@ -757,6 +770,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(result) = registration_jobs.join_next().await {
             result??;
         }
+    }
+    for declaration in &args.unions_by_name {
+        let (name, sources) = parse_union_by_name(declaration)?;
+        let union = session.union_tables_by_name(&sources).await?;
+        session.register_dataframe(name, union)?;
     }
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
