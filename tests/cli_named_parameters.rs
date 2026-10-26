@@ -118,3 +118,25 @@ fn rejects_invalid_or_conflicting_parameters() -> TestResult {
     assert!(!mixed.status.success());
     Ok(())
 }
+
+#[test]
+fn binds_empty_strings_and_typed_nulls() -> TestResult {
+    assert_cell(
+        invoke(&[
+            "--sql",
+            "SELECT LENGTH($empty) AS size",
+            "--named-param",
+            "empty=utf8:",
+        ])?,
+        "0",
+    )?;
+    assert_cell(
+        invoke(&[
+            "--sql",
+            "SELECT CASE WHEN $missing IS NULL THEN 1 ELSE 0 END",
+            "--named-param",
+            "missing=null:",
+        ])?,
+        "1",
+    )
+}
