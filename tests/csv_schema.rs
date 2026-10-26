@@ -61,3 +61,22 @@ fn explicit_schema_requires_csv_input() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires a CSV input"));
 }
+
+#[test]
+fn duplicate_headers_are_rejected_before_query_execution() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let csv = dir.path().join("duplicate.csv");
+    std::fs::write(&csv, "amount,AMOUNT\n1,2\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .arg("--csv")
+        .arg(&csv)
+        .args(["--sql", "SELECT COUNT(*) FROM data"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Duplicate CSV column"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
