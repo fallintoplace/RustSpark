@@ -17,7 +17,9 @@ async fn aliases_share_table_data_without_requiring_source_registration() -> Tes
     assert_eq!(session.table("sales_copy").await?.count().await?, 3);
     assert!(session.table("sales").await.is_err());
 
-    session.register_table_alias("other_copy", "sales_copy").await?;
+    session
+        .register_table_alias("other_copy", "sales_copy")
+        .await?;
     assert_eq!(session.table("other_copy").await?.count().await?, 3);
     Ok(())
 }
