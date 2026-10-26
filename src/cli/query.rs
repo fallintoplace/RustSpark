@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use datafusion::{
-    config::TableParquetOptions, dataframe::DataFrameWriteOptions, prelude::DataFrame,
-    sql::parser::DFParser,
+    config::TableParquetOptions,
+    dataframe::DataFrameWriteOptions,
+    logical_expr::sqlparser::ast::Statement as SqlStatement,
+    prelude::DataFrame,
+    sql::parser::{DFParser, Statement as DFStatement},
 };
 use rustspark::RustSparkSession;
 
@@ -31,12 +34,71 @@ pub(super) async fn execute_script(
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
     for statement in statements {
+        validate_persistent_table_name(&statement, args)?;
         plan_query(session, &statement.to_string(), args)
             .await?
             .collect()
             .await?;
+        persist_created_table(session, &statement, args).await?;
     }
-    execute_query(session, &last.to_string(), args).await
+    validate_persistent_table_name(&last, args)?;
+    execute_query(session, &last.to_string(), args).await?;
+    persist_created_table(session, &last, args).await
+}
+
+fn persistent_create_table<'a>(
+    statement: &'a DFStatement,
+    args: &Args,
+) -> Option<&'a datafusion::logical_expr::sqlparser::ast::CreateTable> {
+    args.database_dir.as_ref()?;
+    let DFStatement::Statement(statement) = statement else {
+        return None;
+    };
+    let SqlStatement::CreateTable(create) = statement.as_ref() else {
+        return None;
+    };
+    create.query.as_ref()?;
+    Some(create)
+}
+
+fn validate_persistent_table_name(
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(create) = persistent_create_table(statement, args) {
+        let name = create.name.to_string();
+        if !super::valid_identifier(&name) {
+            return Err(format!(
+                "Persistent CREATE TABLE requires a single unquoted SQL identifier: {name}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+async fn persist_created_table(
+    session: &RustSparkSession,
+    statement: &DFStatement,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(create) = persistent_create_table(statement, args) else {
+        return Ok(());
+    };
+    let directory = args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?;
+    let name = create.name.to_string().to_ascii_lowercase();
+    if create.if_not_exists && directory.join(&name).exists() {
+        return Ok(());
+    }
+    super::persistence::save_table(session.table(&name).await?, directory, &name).await?;
+    if !session.deregister_table(&name)? {
+        return Err(format!("Created table '{name}' disappeared before registration").into());
+    }
+    super::persistence::register_saved_table(session, &name, &directory.join(&name)).await?;
+    Ok(())
 }
 
 pub(super) async fn plan_query(

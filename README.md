@@ -163,9 +163,21 @@ cargo run -- --database-dir /tmp/rustspark-db \\
   --sql 'SELECT * FROM sales_summary ORDER BY city'
 ```
 
-Saved tables are immutable in this initial version. Each table is written to a
-staging directory and published after the export succeeds. Existing table names
-are rejected, and unfinished staging directories are ignored at startup.
+Saved tables are written to a staging directory and published after the export
+succeeds. Existing table names are rejected, and unfinished staging directories
+are ignored at startup. With `--database-dir`, SQL `CREATE TABLE AS SELECT`
+creates a persistent table. SQL `INSERT INTO` can append rows to it:
+
+```sh
+cargo run -- --database-dir /tmp/rustspark-db \\
+  --sql 'CREATE TABLE numbers AS SELECT 1 AS n; INSERT INTO numbers VALUES (2);'
+cargo run -- --database-dir /tmp/rustspark-db \\
+  --sql 'SELECT SUM(n) FROM numbers'
+```
+
+This is an experimental, local append-only store. `INSERT INTO` writes Parquet
+files; it is not a transactional database. `DROP TABLE` only removes the table
+from the running session, not from the on-disk database directory.
 
 Standalone SQL without a file also works:
 
