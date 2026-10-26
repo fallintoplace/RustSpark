@@ -46,6 +46,11 @@ impl RustSparkSession {
         self.register_dataframe(name, dataframe)
     }
 
+    pub async fn register_materialized_sql_view(&self, name: &str, query: &str) -> Result<()> {
+        let dataframe = self.sql(query).await?.cache().await?;
+        self.register_dataframe(name, dataframe)
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
