@@ -132,6 +132,13 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
+    /// Union registered tables by column name, removing duplicate rows.
+    ///
+    /// Different column orders and missing columns are supported.
+    pub async fn union_tables_distinct_by_name(&self, names: &[&str]) -> Result<DataFrame> {
+        self.union_tables_by_name(names).await?.distinct()
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
