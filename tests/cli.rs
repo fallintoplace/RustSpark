@@ -14,10 +14,7 @@ fn sales_json() -> &'static str {
 
 #[test]
 fn help_explains_options() {
-    let output = rustspark_command()
-        .arg("--help")
-        .output()
-        .unwrap();
+    let output = rustspark_command().arg("--help").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
