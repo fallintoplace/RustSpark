@@ -424,7 +424,12 @@ impl RustSparkSession {
                     "Duplicate fillna column: {name}"
                 )));
             }
-            if !dataframe.schema().fields().iter().any(|field| field.name() == *name) {
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == *name)
+            {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown fillna column: {name}"
                 )));
