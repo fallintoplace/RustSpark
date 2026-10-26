@@ -116,7 +116,7 @@ fn machine_readable_output_rejects_duplicate_column_names() -> TestResult {
     for format in ["csv", "json"] {
         let output = run(&[
             "--sql",
-            "SELECT 1 AS repeated, 2 AS repeated",
+            "SELECT * FROM (SELECT 1 AS id) AS left_side CROSS JOIN (SELECT 2 AS id) AS right_side",
             "--stdout-format",
             format,
         ])?;
