@@ -32,10 +32,24 @@ fn shell_runs_multiple_sql_statements_in_one_session() -> TestResult {
          SELECT * FROM missing_table;\n\
          SELECT 7 AS answer;\n\\q\n",
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(stdout.lines().any(|line| line.trim().trim_matches('|').trim() == "30"), "{stdout}");
-    assert!(stdout.lines().any(|line| line.trim().trim_matches('|').trim() == "7"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "30"),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim().trim_matches('|').trim() == "7"),
+        "{stdout}"
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("SQL error"));
     Ok(())
 }
@@ -43,7 +57,11 @@ fn shell_runs_multiple_sql_statements_in_one_session() -> TestResult {
 #[test]
 fn shell_preserves_multiline_sql_and_semicolons_in_literals() -> TestResult {
     let output = shell("SELECT 'hello;world' AS word\n;\n\\q\n");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("hello;world"));
     Ok(())
 }

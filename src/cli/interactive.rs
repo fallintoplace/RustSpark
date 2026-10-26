@@ -25,7 +25,11 @@ pub(super) async fn run_interactive(
 
     loop {
         if show_prompt {
-            let prompt = if pending.is_empty() { "rustspark> " } else { "       -> " };
+            let prompt = if pending.is_empty() {
+                "rustspark> "
+            } else {
+                "       -> "
+            };
             eprint!("{prompt}");
             io::stderr().flush()?;
         }
