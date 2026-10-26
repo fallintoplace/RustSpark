@@ -737,3 +737,24 @@ fn rejects_two_export_formats() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn rejects_conflicting_csv_parser_characters() {
+    let path = sales_csv();
+    for flags in [
+        ["--csv-comment", ","],
+        ["--csv-comment", "\""],
+        ["--csv-escape", ","],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .args(["--csv", path, flags[0], flags[1], "--sql", "SELECT COUNT(*) FROM data"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{flags:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("must differ"),
+            "{flags:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
