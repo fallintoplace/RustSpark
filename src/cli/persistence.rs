@@ -15,10 +15,10 @@ use super::valid_identifier;
 pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     fs::create_dir_all(root)?;
     let lock_path = root.join(".rustspark.lock");
-    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
-        if !metadata.file_type().is_file() {
-            return Err("Database lock path must be a regular file".into());
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&lock_path)
+        && !metadata.file_type().is_file()
+    {
+        return Err("Database lock path must be a regular file".into());
     }
     let file = fs::OpenOptions::new()
         .read(true)
