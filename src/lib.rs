@@ -479,20 +479,16 @@ impl RustSparkSession {
         result.ok_or_else(|| DataFusionError::Plan("Scalar query returned no rows".into()))
     }
 
+    fn validate_page_window(offset: usize, limit: usize) -> Result<()> {
+        Self::validate_page_window(offset, limit)?;
+        Ok(())
+    }
+
     /// Plan a paginated query without collecting all its rows.
     ///
     /// Use ORDER BY in the SQL query for deterministic pages.
     pub async fn sql_page(&self, query: &str, offset: usize, limit: usize) -> Result<DataFrame> {
-        if limit == 0 {
-            return Err(DataFusionError::Plan(
-                "SQL page limit must be positive".into(),
-            ));
-        }
-        if offset.checked_add(limit).is_none() {
-            return Err(DataFusionError::Plan(
-                "SQL page offset plus limit overflows".into(),
-            ));
-        }
+        Self::validate_page_window(offset, limit)?;
         self.sql(query).await?.limit(offset, Some(limit))
     }
 
@@ -505,16 +501,7 @@ impl RustSparkSession {
         offset: usize,
         limit: usize,
     ) -> Result<DataFrame> {
-        if limit == 0 {
-            return Err(DataFusionError::Plan(
-                "SQL page limit must be positive".into(),
-            ));
-        }
-        if offset.checked_add(limit).is_none() {
-            return Err(DataFusionError::Plan(
-                "SQL page offset plus limit overflows".into(),
-            ));
-        }
+        Self::validate_page_window(offset, limit)?;
         self.sql_read_only(query).await?.limit(offset, Some(limit))
     }
 
@@ -528,16 +515,7 @@ impl RustSparkSession {
         limit: usize,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<DataFrame> {
-        if limit == 0 {
-            return Err(DataFusionError::Plan(
-                "SQL page limit must be positive".into(),
-            ));
-        }
-        if offset.checked_add(limit).is_none() {
-            return Err(DataFusionError::Plan(
-                "SQL page offset plus limit overflows".into(),
-            ));
-        }
+        Self::validate_page_window(offset, limit)?;
         self.sql_with_params(query, params)
             .await?
             .limit(offset, Some(limit))
