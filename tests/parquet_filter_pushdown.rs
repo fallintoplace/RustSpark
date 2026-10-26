@@ -25,13 +25,10 @@ fn selective_parquet_filters_return_the_same_rows() -> TestResult {
 
     for (pushdown, reorder) in [(false, false), (true, false), (true, true)] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustspark"));
-        command
-            .arg("--parquet")
-            .arg(&file)
-            .args([
-                "--sql",
-                "SELECT SUM(amount) FROM data WHERE city = 'Berlin' AND amount > 10",
-            ]);
+        command.arg("--parquet").arg(&file).args([
+            "--sql",
+            "SELECT SUM(amount) FROM data WHERE city = 'Berlin' AND amount > 10",
+        ]);
         if pushdown {
             command.arg("--parquet-pushdown-filters");
         }
@@ -61,9 +58,7 @@ fn rejects_reordering_without_pushdown() -> TestResult {
         .args(["--sql", "SELECT 1", "--parquet-reorder-filters"])
         .output()?;
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--parquet-pushdown-filters")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--parquet-pushdown-filters"));
     Ok(())
 }
 
@@ -79,8 +74,6 @@ fn rejects_parquet_tuning_without_parquet_input() -> TestResult {
         ])
         .output()?;
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("requires a Parquet input")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a Parquet input"));
     Ok(())
 }
