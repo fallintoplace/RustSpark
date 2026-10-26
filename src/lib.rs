@@ -418,6 +418,19 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    /// Filter a registered table with a typed DataFusion expression.
+    ///
+    /// SQL NULL predicates do not keep rows. The operation is lazy, and the
+    /// source table is not modified. Use expressions instead of SQL string
+    /// concatenation when filtering on programmatic values.
+    pub async fn filter_rows(
+        &self,
+        table: &str,
+        predicate: datafusion::logical_expr::Expr,
+    ) -> Result<DataFrame> {
+        self.table(table).await?.filter(predicate)
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
