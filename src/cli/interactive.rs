@@ -64,6 +64,26 @@ fn has_sql_terminator(sql: &str) -> bool {
     quote.is_none() && block_depth == 0 && last_significant == Some(';')
 }
 
+async fn execute_interactive_statement(
+    session: &RustSparkSession,
+    args: &Args,
+    query: &str,
+) -> Result<(), Box<dyn Error>> {
+    let execution = execute_script(session, query, args);
+    if let Some(seconds) = args.query_timeout {
+        match tokio::time::timeout(Duration::from_secs(seconds), execution).await {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("SQL query timed out after {seconds} seconds"),
+            )
+            .into()),
+        }
+    } else {
+        execution.await
+    }
+}
+
 /// Run SQL statements in one session so views and DDL survive between prompts.
 pub(super) async fn run_interactive(
     session: &RustSparkSession,
@@ -120,19 +140,7 @@ pub(super) async fn run_interactive(
         pending.clear();
         for statement in statements {
             let query = statement.to_string();
-            let execution = execute_script(session, &query, args);
-            let result = if let Some(seconds) = args.query_timeout {
-                match tokio::time::timeout(Duration::from_secs(seconds), execution).await {
-                    Ok(result) => result,
-                    Err(_) => Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("SQL query timed out after {seconds} seconds"),
-                    )
-                    .into()),
-                }
-            } else {
-                execution.await
-            };
+            let result = execute_interactive_statement(session, args, &query).await;
             if let Err(error) = result {
                 eprintln!("SQL error: {error}");
             }
