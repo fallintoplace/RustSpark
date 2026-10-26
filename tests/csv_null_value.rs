@@ -1,10 +1,11 @@
 use std::process::Command;
 
 #[test]
-fn treats_custom_marker_as_null_and_escapes_regex_characters() -> Result<(), Box<dyn std::error::Error>> {
+fn treats_custom_marker_as_null_and_escapes_regex_characters()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.csv");
-    std::fs::write(&path, "city,amount\nBerlin,10\nNA.,20\nNAx,5\n")?;
+    std::fs::write(&path, "city,amount\nBerlin,10\nNA.,NA.\nNAx,5\n")?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
@@ -13,7 +14,7 @@ fn treats_custom_marker_as_null_and_escapes_regex_characters() -> Result<(), Box
             "--csv-null-value",
             "NA.",
             "--sql",
-            "SELECT COUNT(city) FROM data",
+            "SELECT COUNT(city), COUNT(amount), SUM(amount) FROM data",
         ])
         .output()?;
     assert!(
@@ -22,10 +23,7 @@ fn treats_custom_marker_as_null_and_escapes_regex_characters() -> Result<(), Box
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.lines().any(|line| line.trim().trim_matches('|').trim() == "2"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("| 2") && stdout.contains("15"), "{stdout}");
     Ok(())
 }
 
