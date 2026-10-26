@@ -1160,16 +1160,18 @@ async fn write_stdout(
             let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut tracked);
             let mut wrote_batch = false;
             while let Some(batch) = stream.next().await {
-                writer.write(&batch?).map_err(|error| {
-                    preserve_writer_pipe_error(error, &broken_pipe)
-                })?;
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
                 wrote_batch = true;
             }
             if !wrote_batch {
                 // Include column headers even when the query returns no rows.
-                writer.write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
-                    schema,
-                )).map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
+                writer
+                    .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
+                        schema,
+                    ))
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             }
         }
         StdoutFormat::Json => {
@@ -1177,11 +1179,13 @@ async fn write_stdout(
                 .with_explicit_nulls(true)
                 .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut tracked);
             while let Some(batch) = stream.next().await {
-                writer.write(&batch?).map_err(|error| {
-                    preserve_writer_pipe_error(error, &broken_pipe)
-                })?;
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             }
-            writer.finish().map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
+            writer
+                .finish()
+                .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
         }
     }
     drop(tracked);
