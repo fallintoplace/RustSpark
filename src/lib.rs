@@ -7,8 +7,11 @@ use datafusion::{
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 
+mod export;
 mod set_operations;
 mod sources;
+
+pub use export::SqlExportFormat;
 
 fn quote_join_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
