@@ -119,3 +119,15 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data'
 ```
 
 Unlike `--explain`, this mode runs the query to collect execution metrics.
+
+Run multiple SQL statements from `--sql` or `--sql-file`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'CREATE VIEW large AS SELECT * FROM data WHERE amount >= 10; SELECT COUNT(*) FROM large;'
+```
+
+Statements run in order in the same session. Earlier statements execute without
+printing their results; only the final statement uses the selected output mode.
+Semicolons inside SQL string literals and comments are handled by DataFusion's
+SQL parser. The query deadline covers all script statements.
