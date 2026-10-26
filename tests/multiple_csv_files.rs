@@ -17,6 +17,11 @@ async fn reads_and_registers_multiple_csv_files() -> Result<(), Box<dyn std::err
     session.register_csv_files("all_sales", &files).await?;
     assert_eq!(session.table("all_sales").await?.count().await?, 6);
     assert!(session.read_csv_files::<PathBuf>(&[]).await.is_err());
-    assert!(session.register_csv_files::<PathBuf>("empty", &[]).await.is_err());
+    assert!(
+        session
+            .register_csv_files::<PathBuf>("empty", &[])
+            .await
+            .is_err()
+    );
     Ok(())
 }
