@@ -52,3 +52,33 @@ async fn rejects_empty_and_unknown_input_tables() -> TestResult {
     assert!(session.union_tables_by_name(&["missing"]).await.is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn concurrent_name_union_preserves_late_columns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = RustSparkSession::new();
+    let names: Vec<_> = (0..12).map(|index| format!("source_{index}")).collect();
+    for (index, name) in names.iter().enumerate() {
+        let query = if index == 11 {
+            "SELECT 11 AS id, 'late' AS extra".to_owned()
+        } else {
+            format!("SELECT {index} AS id")
+        };
+        session.register_sql_view(name, &query).await?;
+    }
+    let refs: Vec<_> = names.iter().map(String::as_str).collect();
+    let union = session.union_tables_by_name(&refs).await?;
+    assert_eq!(union.schema().fields().len(), 2);
+    session.register_dataframe("combined_many", union)?;
+    let rows = session
+        .sql("SELECT COUNT(*) AS n, COUNT(extra) AS tagged FROM combined_many")
+        .await?
+        .collect()
+        .await?;
+    let batch = &rows[0];
+    let counts = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let tagged = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(counts.value(0), 12);
+    assert_eq!(tagged.value(0), 1);
+    Ok(())
+}
