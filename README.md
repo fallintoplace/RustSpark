@@ -48,6 +48,19 @@ Join multiple CSV files in one query by naming each input:
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
 
+Enable Parquet late materialization for selective filters:
+
+```sh
+cargo run -- --parquet /path/to/events.parquet \
+  --parquet-pushdown-filters --parquet-reorder-filters \
+  --sql "SELECT COUNT(*) FROM data WHERE event_type = 'purchase'"
+```
+
+These options push predicates into Parquet decoding and can reorder them by
+estimated selectivity. They are opt-in because the benefit depends on file
+layout and filter cost. Row-group pruning and page-index reads remain on by
+default in DataFusion.
+
 Create lazy SQL views for reusable queries. Views can refer to earlier views:
 
 ```sh
@@ -119,16 +132,3 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data'
 ```
 
 Unlike `--explain`, this mode runs the query to collect execution metrics.
-
-Enable Parquet late materialization for selective filters:
-
-```sh
-cargo run -- --parquet /path/to/events.parquet \
-  --parquet-pushdown-filters --parquet-reorder-filters \
-  --sql "SELECT COUNT(*) FROM data WHERE event_type = 'purchase'"
-```
-
-These options push predicates into Parquet decoding and can reorder them by
-estimated selectivity. They are opt-in because the benefit depends on file
-layout and filter cost. Row-group pruning and page-index reads remain on by
-default in DataFusion.
