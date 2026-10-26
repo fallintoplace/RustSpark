@@ -1,0 +1,48 @@
+import importlib.util
+import json
+import pathlib
+import tempfile
+import unittest
+
+SOURCE = pathlib.Path(__file__).with_name("spark_compat.py")
+spec = importlib.util.spec_from_file_location("spark_compat", SOURCE)
+mod = importlib.util.module_from_spec(spec)
+import sys
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+
+class SparkCompatibilityTests(unittest.TestCase):
+    def test_unordered_results_are_multiset_compared(self):
+        first = mod.QueryResult(["id"], [[2], [1], [1]])
+        second = mod.QueryResult(["id"], [[1], [2], [1]])
+        self.assertIsNone(mod.compare(first, second))
+        self.assertIsNotNone(mod.compare(first, second, ordered=True))
+
+    def test_nulls_and_types_are_not_lost(self):
+        self.assertIsNone(
+            mod.compare(mod.QueryResult(["v"], [[None]]), mod.QueryResult(["v"], [[None]]))
+        )
+        self.assertIsNotNone(
+            mod.compare(mod.QueryResult(["v"], [[1]]), mod.QueryResult(["v"], [["1"]]))
+        )
+        self.assertIsNotNone(
+            mod.compare(mod.QueryResult(["a"], [[]]), mod.QueryResult(["b"], [[]]))
+        )
+
+    def test_duplicate_case_ids_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cases.json"
+            path.write_text(json.dumps([{"id": "x", "sql": "SELECT 1"},
+                                         {"id": "x", "sql": "SELECT 2"}]))
+            with self.assertRaisesRegex(ValueError, "Duplicate"):
+                mod.load_cases(path)
+
+    def test_corpus_is_valid(self):
+        cases = mod.load_cases(mod.DEFAULT_CASES)
+        self.assertGreaterEqual(len(cases), 25)
+        self.assertTrue(all("sql" in case for case in cases))
+
+
+if __name__ == "__main__":
+    unittest.main()
