@@ -32,12 +32,11 @@ fn csv_base_read_options(args: &Args) -> CsvReadOptions<'_> {
     } else {
         options
     };
-    let options = if let Some(comment) = args.csv_comment {
+    if let Some(comment) = args.csv_comment {
         options.comment(comment)
     } else {
         options
-    };
-    options
+    }
 }
 
 pub(super) fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
