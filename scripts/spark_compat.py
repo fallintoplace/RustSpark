@@ -97,6 +97,28 @@ def load_cases(path: pathlib.Path):
     return cases
 
 
+def compare_case(case, rustspark_runner, spark_runner):
+    ours = rustspark_runner(case["sql"])
+    reference = spark_runner(case["sql"])
+    return compare(ours, reference, bool(case.get("ordered", False)))
+
+
+def run_cases(cases, rustspark_runner, spark_runner):
+    failed = 0
+    for case in cases:
+        try:
+            problem = compare_case(case, rustspark_runner, spark_runner)
+            if problem is None:
+                print(f"PASS {case['id']}")
+            else:
+                failed += 1
+                print(f"DIFF {case['id']}: {problem}")
+        except Exception as error:
+            failed += 1
+            print(f"ERROR {case['id']}: {error}")
+    return failed
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rustspark", default="./target/debug/rustspark")
@@ -118,21 +140,12 @@ def main(argv=None):
         parser.error("Install PySpark 4.x before differential comparison: pip install pyspark")
 
     session = SparkSession.builder.master(args.spark_master).appName("RustSpark SQL compatibility").getOrCreate()
-    failed = 0
     try:
-        for case in cases:
-            try:
-                ours = rustspark_query(args.rustspark, case["sql"])
-                reference = spark_query(session, case["sql"])
-                problem = compare(ours, reference, bool(case.get("ordered", False)))
-                if problem is None:
-                    print(f"PASS {case['id']}")
-                else:
-                    failed += 1
-                    print(f"DIFF {case['id']}: {problem}")
-            except Exception as error:
-                failed += 1
-                print(f"ERROR {case['id']}: {error}")
+        failed = run_cases(
+            cases,
+            lambda sql: rustspark_query(args.rustspark, sql),
+            lambda sql: spark_query(session, sql),
+        )
     finally:
         session.stop()
     print(f"{len(cases) - failed}/{len(cases)} matched; {failed} differed or errored")
