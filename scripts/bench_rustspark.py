@@ -23,12 +23,15 @@ WORKLOADS = {
 }
 
 
+def benchmark_row(index: int) -> tuple[str, int]:
+    return f"city_{index % 16}", (index * 37) % 100
+
+
 def write_csv(path: pathlib.Path, rows: int):
     with path.open("w", encoding="utf-8", newline="") as file:
         file.write("id,city,amount\n")
         for index in range(rows):
-            city = f"city_{index % 16}"
-            amount = (index * 37) % 100
+            city, amount = benchmark_row(index)
             file.write(f"{index},{city},{amount}\n")
 
 
@@ -54,8 +57,7 @@ def expected_results(rows: int):
     filtered_total = 0
     filtered_rows = 0
     for index in range(rows):
-        city = f"city_{index % 16}"
-        amount = (index * 37) % 100
+        city, amount = benchmark_row(index)
         counts[city] = counts.get(city, 0) + 1
         totals[city] = totals.get(city, 0) + amount
         if amount >= 70:

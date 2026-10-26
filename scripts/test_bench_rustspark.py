@@ -11,6 +11,11 @@ spec.loader.exec_module(bench)
 
 
 class BenchmarkHarnessTests(unittest.TestCase):
+    def test_benchmark_row_is_repeatable(self):
+        self.assertEqual(bench.benchmark_row(0), ("city_0", 0))
+        self.assertEqual(bench.benchmark_row(16), ("city_0", 92))
+        self.assertEqual(bench.benchmark_row(33), ("city_1", 21))
+
     def test_rows_and_deterministic_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             first = pathlib.Path(directory) / "first.csv"
