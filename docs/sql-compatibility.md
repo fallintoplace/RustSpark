@@ -38,3 +38,23 @@ python3 -m unittest discover -s scripts -p 'test_spark_compat.py'
   silently from the corpus.
 
 The Python harness is optional; default Rust CI does not install Spark.
+
+## Table-backed typed differential checks
+
+The additional optional harness `scripts/spark_typed_compat.py` compares
+the same two CSV fixtures in RustSpark and actual local Spark, using explicit
+int64 and UTF-8 schemas. It covers joins, aggregation, decimals, timestamps,
+NULLs and window functions. Both result values and normalized logical type
+names are compared; discrepancies and execution errors are reported.
+
+```sh
+cargo build --locked
+python3 -m pip install 'pyspark>=4,<5'
+python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark \
+  --json-out reports/spark-typed.json
+```
+
+The manually triggered and weekly GitHub workflow runs real PySpark and
+publishes the JSON report even when differences occur. Regular PR CI runs only
+the Python unit tests to avoid a large Spark download on every change.
+This is a differential measurement tool, not a compatibility guarantee.
