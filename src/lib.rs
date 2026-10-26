@@ -870,21 +870,13 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
-    /// Sort rows by multiple named columns using Spark-like NULL ordering.
-    ///
-    /// A true direction means ascending with NULLs first; false means
-    /// descending with NULLs last. Sorts are lazy and do not mutate the table.
-    /// Add a unique tie-breaker for deterministic order among equal keys.
-    pub async fn sort_rows(&self, table: &str, order: &[(&str, bool)]) -> Result<DataFrame> {
+    fn sort_expressions(
+        dataframe: &DataFrame,
+        order: &[(&str, bool)],
+    ) -> Result<Vec<datafusion::logical_expr::Expr>> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
-        if order.is_empty() {
-            return Err(DataFusionError::Plan(
-                "sort_rows requires at least one key".into(),
-            ));
-        }
-        let dataframe = self.table(table).await?;
         let mut seen = HashSet::new();
         let mut sort_exprs = Vec::new();
         for &(name, ascending) in order {
@@ -905,19 +897,23 @@ impl RustSparkSession {
             }
             sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
         }
-        dataframe.sort(sort_exprs)
+        Ok(sort_exprs)
     }
 
-    // Plan independent SQL inputs concurrently, with bounded outstanding
-    // work. buffered() returns results in input order, so UNION semantics and
-    // the first reported planning error still follow query order.
-    async fn plan_union_sql_inputs(&self, queries: &[&str]) -> Result<Vec<DataFrame>> {
-        use futures::{StreamExt, TryStreamExt, stream};
-
-        stream::iter(queries.iter().map(|query| self.sql(query)))
-            .buffered(16)
-            .try_collect()
-            .await
+    /// Sort rows by multiple named columns using Spark-like NULL ordering.
+    ///
+    /// A true direction means ascending with NULLs first; false means
+    /// descending with NULLs last. Sorts are lazy and do not mutate the table.
+    /// Add a unique tie-breaker for deterministic order among equal keys.
+    pub async fn sort_rows(&self, table: &str, order: &[(&str, bool)]) -> Result<DataFrame> {
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "sort_rows requires at least one key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        let sort_exprs = Self::sort_expressions(&dataframe, order)?;
+        dataframe.sort(sort_exprs)
     }
 
     /// Union SQL query results by column position.
