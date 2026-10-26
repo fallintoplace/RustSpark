@@ -13,6 +13,7 @@ use datafusion::{
     prelude::DataFrame,
     sql::parser::{DFParser, Statement as DFStatement},
 };
+use futures::StreamExt;
 use rustspark::RustSparkSession;
 
 use super::output::is_broken_pipe;
@@ -85,6 +86,15 @@ async fn write_file_export(
     Ok(())
 }
 
+/// Fully execute intermediate SQL without buffering rows that the CLI discards.
+async fn drain_dataframe(dataframe: DataFrame) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = dataframe.execute_stream().await?;
+    while let Some(batch) = stream.next().await {
+        batch?;
+    }
+    Ok(())
+}
+
 // Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
 // or comments. Execute setup statements before presenting the final result.
 pub(super) async fn execute_script(
@@ -111,10 +121,7 @@ pub(super) async fn execute_script(
         if let Some(target) = persistent_insert_table(&statement, args)? {
             execute_staged_insert(session, &statement.to_string(), args, &target, false).await?;
         } else {
-            plan_query(session, &statement.to_string(), args)
-                .await?
-                .collect()
-                .await?;
+            drain_dataframe(plan_query(session, &statement.to_string(), args).await?).await?;
         }
         persist_created_table(session, &statement, args).await?;
         persist_dropped_table(dropped, args)?;
@@ -241,7 +248,7 @@ async fn execute_staged_insert(
         if final_statement {
             execute_query(session, sql, args).await
         } else {
-            plan_query(session, sql, args).await?.collect().await?;
+            drain_dataframe(plan_query(session, sql, args).await?).await?;
             Ok(())
         }
     }
