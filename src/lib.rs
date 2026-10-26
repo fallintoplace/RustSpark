@@ -305,6 +305,20 @@ impl RustSparkSession {
         self.union_tables_by_name(names).await?.distinct()
     }
 
+    /// Union lazy SQL query results by column name.
+    ///
+    /// Missing fields are filled with NULL and duplicate rows are preserved.
+    pub async fn union_sql_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
+        let (first, rest) = queries.split_first().ok_or_else(|| {
+            DataFusionError::Plan("union_sql_by_name requires at least one query".into())
+        })?;
+        let mut dataframe = self.sql(first).await?;
+        for query in rest {
+            dataframe = dataframe.union_by_name(self.sql(query).await?)?;
+        }
+        Ok(dataframe)
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
     }
