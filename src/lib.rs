@@ -300,6 +300,32 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Join two registered tables on one or more pairs of equality keys.
+    ///
+    /// The result is a lazy DataFrame. Join types such as inner, left, right,
+    /// full, semi, and anti use DataFusion's planner and execution engine.
+    /// Both key lists must be non-empty; use SQL CROSS JOIN for a Cartesian
+    /// product. For self joins, use SQL aliases to disambiguate columns.
+    pub async fn join_tables(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        if keys.is_empty() || keys.iter().any(|(l, r)| l.trim().is_empty() || r.trim().is_empty()) {
+            return Err(DataFusionError::Plan(
+                "join_tables requires at least one pair of non-empty join keys".into(),
+            ));
+        }
+
+        let left_keys: Vec<_> = keys.iter().map(|(left, _)| *left).collect();
+        let right_keys: Vec<_> = keys.iter().map(|(_, right)| *right).collect();
+        self.table(left)
+            .await?
+            .join(self.table(right).await?, join_type, &left_keys, &right_keys, None)
+    }
+
     /// Union registered tables with matching schemas by column position.
     ///
     /// Duplicate rows are preserved. All sources must have compatible schemas.
