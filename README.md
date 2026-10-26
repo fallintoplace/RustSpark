@@ -244,3 +244,11 @@ cargo run -- --csv tests/fixtures/sales.csv \\
 The Arrow output is always one file. It preserves Arrow column types and
 supports empty results. Like other exports, a failed or timed-out query can
 leave a partial output file.
+
+Stream tab-separated output for spreadsheet and Unix tool pipelines.
+Like CSV, TSV writes one header row and escapes fields when needed:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'SELECT city, amount FROM data ORDER BY amount' --stdout-format tsv
+```
