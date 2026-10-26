@@ -480,7 +480,16 @@ impl RustSparkSession {
     }
 
     fn validate_page_window(offset: usize, limit: usize) -> Result<()> {
-        Self::validate_page_window(offset, limit)?;
+        if limit == 0 {
+            return Err(DataFusionError::Plan(
+                "SQL page limit must be positive".into(),
+            ));
+        }
+        if offset.checked_add(limit).is_none() {
+            return Err(DataFusionError::Plan(
+                "SQL page offset plus limit overflows".into(),
+            ));
+        }
         Ok(())
     }
 
