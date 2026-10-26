@@ -182,6 +182,17 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data'
 
 Unlike `--explain`, this mode runs the query to collect execution metrics.
 
+Stream query results to standard output for shell pipelines, without collecting
+the full result in memory. `--stdout-format csv` writes CSV with one header;
+`--stdout-format json` writes one JSON object per line (NDJSON), including
+explicit null fields. `--max-rows` and `--offset` work with both formats:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'SELECT city, amount FROM data ORDER BY amount' \
+  --stdout-format json --max-rows 2
+```
+
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
 
