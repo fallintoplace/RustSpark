@@ -66,9 +66,7 @@ impl SqlTerminatorScanner {
                 _ => {}
             }
         }
-        self.quote.is_none()
-            && self.block_depth == 0
-            && self.last_significant == Some(';')
+        self.quote.is_none() && self.block_depth == 0 && self.last_significant == Some(';')
     }
 }
 
