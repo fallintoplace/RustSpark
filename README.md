@@ -162,6 +162,9 @@ Repeat `--param` in `$1`, `$2`, ... order. Supported types are
 String values may contain colons. Parameters use DataFusion binding, not
 SQL text substitution.
 
+Supported positional and named numeric parameter types also include `int8`, `int16`,
+`int32`, `uint8`, `uint16`, `uint32`, `uint64`, and `float32`.
+
 Use named parameters for queries where argument order may change:
 
 ```sh
@@ -219,6 +222,16 @@ cargo run -- --csv tests/fixtures/sales.csv \
   --sql 'SELECT city, amount FROM data ORDER BY amount' \
   --stdout-format json --max-rows 2
 ```
+
+Pipe typed query results to another Arrow-aware process with the IPC stream
+format. This writes binary output and keeps row batches bounded in memory:
+
+```sh
+cargo run -- --sql 'SELECT 42 AS answer' --stdout-format arrow > /tmp/query.stream
+```
+
+This is the Arrow IPC **stream** format, not the seekable IPC file format
+written by `--output-arrow`.
 
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:

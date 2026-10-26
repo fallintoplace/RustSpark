@@ -7,6 +7,7 @@ use datafusion::{
 use rustspark::RustSparkSession;
 
 use super::{Args, write_arrow_ipc, write_stdout};
+use super::output::is_broken_pipe;
 
 fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     let options = DataFrameWriteOptions::new();
@@ -24,6 +25,7 @@ pub(super) async fn execute_script(
     script: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let script = script.strip_prefix('\u{feff}').unwrap_or(script);
     let mut statements = DFParser::parse_sql(script)?;
     let last = statements
         .pop_back()
@@ -43,12 +45,7 @@ pub(super) async fn plan_query(
     args: &Args,
 ) -> Result<DataFrame, Box<dyn std::error::Error>> {
     let dataframe = if !args.named_params.is_empty() {
-        let mut params = HashMap::new();
-        for (name, value) in &args.named_params {
-            if params.insert(name.clone(), value.clone()).is_some() {
-                return Err(format!("Duplicate named parameter: {name}").into());
-            }
-        }
+        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
         session.sql_with_params(query, params).await?
     } else if !args.params.is_empty() {
         session.sql_with_params(query, args.params.clone()).await?
@@ -126,7 +123,11 @@ async fn execute_query(
         } else {
             dataframe
         };
-        write_stdout(dataframe, format).await?;
+        if let Err(error) = write_stdout(dataframe, format).await
+            && !is_broken_pipe(error.as_ref())
+        {
+            return Err(error);
+        }
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {

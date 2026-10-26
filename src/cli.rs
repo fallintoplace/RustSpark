@@ -9,6 +9,7 @@ use rustspark::RustSparkSession;
 enum StdoutFormat {
     Csv,
     Json,
+    Arrow,
 }
 
 #[derive(Parser)]
@@ -97,7 +98,7 @@ struct Args {
     #[arg(long = "json-table", value_name = "NAME=PATH")]
     json_tables: Vec<String>,
 
-    #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
+    #[arg(long, default_value = "data", value_parser = parse_table_name, conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
     table: String,
 
     #[arg(long = "cache-table", value_name = "NAME")]
@@ -260,6 +261,14 @@ fn valid_identifier(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn parse_table_name(value: &str) -> Result<String, String> {
+    if valid_identifier(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("--table must be a SQL identifier".into())
+    }
+}
+
 fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     let (name, path) = value
         .split_once('=')
@@ -330,10 +339,47 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
         .split_once(':')
         .ok_or_else(|| "--param must use TYPE:VALUE".to_owned())?;
     match kind.to_ascii_lowercase().as_str() {
+        "int8" | "tinyint" => raw
+            .parse::<i8>()
+            .map(|number| ScalarValue::Int8(Some(number)))
+            .map_err(|_| "--param int8 needs a signed 8-bit integer".to_owned()),
+        "int16" | "smallint" => raw
+            .parse::<i16>()
+            .map(|number| ScalarValue::Int16(Some(number)))
+            .map_err(|_| "--param int16 needs a signed 16-bit integer".to_owned()),
+        "int32" | "int" | "integer" => raw
+            .parse::<i32>()
+            .map(|number| ScalarValue::Int32(Some(number)))
+            .map_err(|_| "--param int32 needs a signed 32-bit integer".to_owned()),
         "int64" | "bigint" => raw
             .parse::<i64>()
             .map(|number| ScalarValue::Int64(Some(number)))
             .map_err(|_| "--param int64 needs a signed 64-bit integer".to_owned()),
+        "uint8" => raw
+            .parse::<u8>()
+            .map(|number| ScalarValue::UInt8(Some(number)))
+            .map_err(|_| "--param uint8 needs an unsigned 8-bit integer".to_owned()),
+        "uint16" => raw
+            .parse::<u16>()
+            .map(|number| ScalarValue::UInt16(Some(number)))
+            .map_err(|_| "--param uint16 needs an unsigned 16-bit integer".to_owned()),
+        "uint32" => raw
+            .parse::<u32>()
+            .map(|number| ScalarValue::UInt32(Some(number)))
+            .map_err(|_| "--param uint32 needs an unsigned 32-bit integer".to_owned()),
+        "uint64" => raw
+            .parse::<u64>()
+            .map(|number| ScalarValue::UInt64(Some(number)))
+            .map_err(|_| "--param uint64 needs an unsigned 64-bit integer".to_owned()),
+        "float32" | "real" => {
+            let number = raw
+                .parse::<f32>()
+                .map_err(|_| "--param float32 needs a number".to_owned())?;
+            if !number.is_finite() {
+                return Err("--param float32 must be finite".into());
+            }
+            Ok(ScalarValue::Float32(Some(number)))
+        }
         "float64" | "double" => {
             let number = raw
                 .parse::<f64>()
@@ -349,7 +395,10 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             .map_err(|_| "--param bool must be true or false".to_owned()),
         "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
-        _ => Err("--param supports int64, float64, bool, utf8, or null:".into()),
+        _ => Err(
+            "--param supports int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8, or null:"
+                .into(),
+        ),
     }
 }
 
@@ -448,6 +497,17 @@ use setup::{cache_tables, read_query, register_derived_tables};
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
+    let mut parameter_names = HashSet::new();
+    for (name, _) in &args.named_params {
+        if !parameter_names.insert(name.as_str()) {
+            return Err(format!("Duplicate named parameter: {name}").into());
+        }
+    }
+    if let (Some(offset), Some(max_rows)) = (args.offset, args.max_rows) {
+        offset
+            .checked_add(max_rows)
+            .ok_or("--offset plus --max-rows exceeds the supported range")?;
+    }
     validate_inputs(&args)?;
     let session = new_session(&args)?;
     validate_format_options(&args)?;
