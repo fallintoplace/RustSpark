@@ -152,9 +152,18 @@ impl Drop for StagedInsert {
 
 /// Read the Parquet footer without materializing the table's rows.
 fn validate_parquet_part(path: &Path) -> Result<(), String> {
-    let message = |error| format!("Cannot read persistent Parquet file '{}': {error}", path.display());
-    let file = fs::File::open(path).map_err(message)?;
-    SerializedFileReader::new(file).map_err(message)?;
+    let file = fs::File::open(path).map_err(|error| {
+        format!(
+            "Cannot read persistent Parquet file '{}': {error}",
+            path.display()
+        )
+    })?;
+    SerializedFileReader::new(file).map_err(|error| {
+        format!(
+            "Cannot read persistent Parquet file '{}': {error}",
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
