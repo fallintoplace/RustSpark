@@ -266,8 +266,10 @@ pub(super) async fn save_table(
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(root)?;
     let destination = root.join(name);
-    if destination.exists() {
-        return Err(format!("Database table '{name}' already exists").into());
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return Err(format!("Database table '{name}' already exists").into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let temporary = tempfile::Builder::new()
         .prefix(".rustspark-stage-")

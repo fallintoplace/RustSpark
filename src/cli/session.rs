@@ -5,9 +5,7 @@ use rustspark::RustSparkSession;
 
 use super::Args;
 
-pub(super) fn new_session(
-    args: &Args,
-) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
+fn build_session_config(args: &Args) -> SessionConfig {
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = args.parquet_pushdown_filters;
     config.options_mut().execution.parquet.reorder_filters = args.parquet_reorder_filters;
@@ -16,11 +14,17 @@ pub(super) fn new_session(
     } else {
         config
     };
-    let config = if let Some(partitions) = args.target_partitions {
+    if let Some(partitions) = args.target_partitions {
         config.with_target_partitions(partitions)
     } else {
         config
-    };
+    }
+}
+
+pub(super) fn new_session(
+    args: &Args,
+) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
+    let config = build_session_config(args);
     let session = if let Some(limit) = args.memory_limit_bytes {
         let runtime = RuntimeEnvBuilder::new()
             .with_memory_limit(limit, 1.0)
