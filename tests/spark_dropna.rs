@@ -15,9 +15,13 @@ async fn dropna_filters_any_or_all_null_values() -> TestResult {
         )
         .await?;
 
-    let any = session.drop_null_rows("rows", &[], NullDropMode::Any).await?;
+    let any = session
+        .drop_null_rows("rows", &[], NullDropMode::Any)
+        .await?;
     assert_eq!(any.count().await?, 1);
-    let all = session.drop_null_rows("rows", &[], NullDropMode::All).await?;
+    let all = session
+        .drop_null_rows("rows", &[], NullDropMode::All)
+        .await?;
     assert_eq!(all.count().await?, 3);
     let subset = session
         .drop_null_rows("rows", &["a"], NullDropMode::Any)
