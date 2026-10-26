@@ -473,13 +473,18 @@ pub(super) async fn save_table(
     Ok(())
 }
 
+struct BackupInventory {
+    tables: Vec<String>,
+    copies: Vec<(PathBuf, PathBuf)>,
+}
+
 fn collect_backup_parts(
     source: &Path,
     snapshot: &Path,
-) -> Result<(Vec<String>, Vec<(PathBuf, PathBuf)>), Box<dyn Error>> {
+) -> Result<BackupInventory, Box<dyn Error>> {
     let mut tables = Vec::new();
     let mut copies = Vec::new();
-    for entry in fs::read_dir(&source)? {
+    for entry in fs::read_dir(source)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -504,7 +509,7 @@ fn collect_backup_parts(
         tables.push(table.to_owned());
     }
 
-    Ok((tables, copies))
+    Ok(BackupInventory { tables, copies })
 }
 
 /// Create an independent, consistent copy of a local database while its
@@ -537,7 +542,7 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
         .tempdir_in(&parent)?;
     let snapshot = temporary.path().join("snapshot");
     fs::create_dir(&snapshot)?;
-    let (mut tables, copies) = collect_backup_parts(&source, &snapshot)?;
+    let BackupInventory { mut tables, copies } = collect_backup_parts(&source, &snapshot)?;
 
     // Large backups can copy immutable parts independently. Bound the number
     // of workers so fragmented tables do not spawn a thread per Parquet file.
