@@ -501,7 +501,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             offset
                 .checked_add(max_rows)
                 .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe.limit(offset, Some(max_rows))?.show_limit(max_rows).await?;
+            dataframe
+                .limit(offset, Some(max_rows))?
+                .show_limit(max_rows)
+                .await?;
         } else {
             dataframe.show_limit(max_rows).await?;
         }
