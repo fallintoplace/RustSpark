@@ -24,7 +24,6 @@ fn failpoint(point: &str) {
 #[cfg(not(debug_assertions))]
 fn failpoint(_point: &str) {}
 
-
 pub(crate) struct StagedInsert {
     root: PathBuf,
     name: String,
