@@ -120,9 +120,36 @@ pub(super) async fn run_interactive(
                 "\\q" | ".quit" | ".exit" => break,
                 "\\h" | ".help" => {
                     eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
+                    eprintln!("Shell commands: .tables, .schema TABLE, .quit.");
+                    continue;
+                }
+                ".tables" => {
+                    for table in session.list_tables() {
+                        println!("{table}");
+                    }
                     continue;
                 }
                 _ => {}
+            }
+        }
+        if pending.trim().is_empty() {
+            let command = line.trim();
+            if command == ".schema" || command.starts_with(".schema ") {
+                let name = command.strip_prefix(".schema").unwrap_or_default().trim();
+                if name.is_empty() || name.split_whitespace().count() != 1 {
+                    eprintln!("Shell error: .schema requires exactly one table name");
+                } else {
+                    match session.describe_table(name).await {
+                        Ok(columns) => {
+                            for (column, data_type, nullable) in columns {
+                                let nullability = if nullable { "NULL" } else { "NOT NULL" };
+                                println!("{column}\t{data_type}\t{nullability}");
+                            }
+                        }
+                        Err(error) => eprintln!("Shell error: {error}"),
+                    }
+                }
+                continue;
             }
         }
         pending.push_str(&line);
