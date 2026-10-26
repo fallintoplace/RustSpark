@@ -12,7 +12,7 @@ async fn describes_query_columns_without_executing_mutations()
     assert_eq!(columns[0].0, "id");
     assert_eq!(columns[0].1, DataType::Int64);
     assert_eq!(columns[1].0, "label");
-    assert_eq!(columns[1].1, DataType::Utf8);
+    assert_eq!(columns[1].1, DataType::Utf8View);
     assert!(
         session
             .describe_sql("CREATE TABLE unsafe (value INT)")
