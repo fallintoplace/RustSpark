@@ -680,23 +680,12 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
-    /// Add or replace several columns atomically, like Spark withColumns.
-    ///
-    /// Every expression refers to the original input schema. Existing columns
-    /// keep their positions, and new columns are appended in the requested order.
-    /// The operation is lazy and leaves the registered table unchanged.
-    pub async fn with_columns(
-        &self,
-        table: &str,
+    fn computed_column_projection(
+        dataframe: &DataFrame,
         columns: &[(&str, datafusion::logical_expr::Expr)],
-    ) -> Result<DataFrame> {
+    ) -> Result<Vec<datafusion::logical_expr::Expr>> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
-
-        let dataframe = self.table(table).await?;
-        if columns.is_empty() {
-            return Ok(dataframe);
-        }
 
         let mut updates = HashMap::new();
         let mut seen = HashSet::new();
@@ -728,6 +717,25 @@ impl RustSparkSession {
                 projection.push(expr.alias(*name));
             }
         }
+        Ok(projection)
+    }
+
+    /// Add or replace several columns atomically, like Spark withColumns.
+    ///
+    /// Every expression refers to the original input schema. Existing columns
+    /// keep their positions, and new columns are appended in the requested order.
+    /// The operation is lazy and leaves the registered table unchanged.
+    pub async fn with_columns(
+        &self,
+        table: &str,
+        columns: &[(&str, datafusion::logical_expr::Expr)],
+    ) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        if columns.is_empty() {
+            return Ok(dataframe);
+        }
+
+        let projection = Self::computed_column_projection(&dataframe, columns)?;
         dataframe.select(projection)
     }
 
