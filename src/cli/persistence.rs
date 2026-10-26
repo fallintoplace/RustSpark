@@ -24,6 +24,34 @@ fn crash_after(phase: &str) {
 #[cfg(not(debug_assertions))]
 fn crash_after(_phase: &str) {}
 
+fn prepare_staged_insert_files(
+    original: &Path,
+    staging: &Path,
+    table: &str,
+) -> Result<(), Box<dyn Error>> {
+    let new = staging.join("new");
+    fs::create_dir(&new)?;
+    validate_table_files(original, table)?;
+    for entry in fs::read_dir(original)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = new.join(entry.file_name());
+        // ListingTable INSERT is append-only and writes fresh Parquet
+        // parts. Existing parts are immutable, so they can be linked
+        // into the private replacement snapshot without copying all
+        // their bytes. On filesystems without hard links, copy them.
+        if let Err(link_error) = fs::hard_link(&source, &target) {
+            fs::copy(&source, &target).map_err(|copy_error| {
+                format!(
+                    "Cannot reuse Parquet part '{}': link: {link_error}; copy: {copy_error}",
+                    source.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// A full, private copy of a persisted table. DataFusion INSERTs run against
 /// this directory, so an execution failure cannot touch the visible table.
 pub(super) struct StagedInsert {
@@ -49,30 +77,7 @@ impl StagedInsert {
         // The caller holds the exclusive database lock for this session.
         let staging = root.join(format!(".rustspark-insert-{table}"));
         fs::create_dir(&staging)?;
-        let prepared = (|| -> Result<(), Box<dyn Error>> {
-            let new = staging.join("new");
-            fs::create_dir(&new)?;
-            validate_table_files(&original, table)?;
-            for entry in fs::read_dir(&original)? {
-                let entry = entry?;
-                let source = entry.path();
-                let target = new.join(entry.file_name());
-                // ListingTable INSERT is append-only and writes fresh Parquet
-                // parts. Existing parts are immutable, so they can be linked
-                // into the private replacement snapshot without copying all
-                // their bytes. On filesystems without hard links, copy them.
-                if let Err(link_error) = fs::hard_link(&source, &target) {
-                    fs::copy(&source, &target).map_err(|copy_error| {
-                        format!(
-                            "Cannot reuse Parquet part '{}': link: {link_error}; copy: {copy_error}",
-                            source.display()
-                        )
-                    })?;
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = prepared {
+        if let Err(error) = prepare_staged_insert_files(&original, &staging, table) {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
