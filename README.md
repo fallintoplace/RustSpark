@@ -189,6 +189,16 @@ when it may not exist:
 cargo run -- --database-dir /tmp/rustspark-db --sql 'DROP TABLE numbers'
 ```
 
+Rename a saved table without copying its rows:
+
+```sh
+cargo run -- --database-dir /tmp/rustspark-db \\
+  --sql 'ALTER TABLE people RENAME TO customers'
+```
+
+Only simple, unquoted table names in the local database are supported for
+persistent rename. Existing table names cannot be overwritten.
+
 This is an experimental, local append-only store. `INSERT INTO` writes Parquet
 files; it is not a transactional database. Dropped table files are moved out of
 the catalog before removal. SQL data in input files is never deleted.

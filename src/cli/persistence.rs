@@ -114,3 +114,48 @@ pub(super) fn drop_saved_table(root: &Path, name: &str) -> Result<(), Box<dyn Er
     fs::remove_dir_all(&tombstone)?;
     Ok(())
 }
+
+/// Move a saved table's Parquet directory and refresh the session registration.
+/// A failed refresh moves the directory back and restores the original table.
+pub(super) async fn rename_saved_table(
+    session: &RustSparkSession,
+    root: &Path,
+    source_name: &str,
+    destination_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    if !valid_identifier(source_name) || !valid_identifier(destination_name) {
+        return Err("Persistent table names must be SQL identifiers".into());
+    }
+    if source_name == destination_name || session.table_exists(destination_name)? {
+        return Err(format!("Destination table already exists: {destination_name}").into());
+    }
+    if !session.table_exists(source_name)? {
+        return Err(format!("Source table does not exist: {source_name}").into());
+    }
+    let source = root.join(source_name);
+    let destination = root.join(destination_name);
+    if !fs::symlink_metadata(&source)?.file_type().is_dir() {
+        return Err("Persistent source table must be a regular directory".into());
+    }
+    if fs::symlink_metadata(&destination).is_ok() {
+        return Err(format!("Destination table already exists: {destination_name}").into());
+    }
+
+    fs::rename(&source, &destination)?;
+    let registration = async {
+        if !session.deregister_table(source_name)? {
+            return Err(format!("Source table disappeared: {source_name}").into());
+        }
+        register_saved_table(session, destination_name, &destination).await
+    }
+    .await;
+    if let Err(error) = registration {
+        let _ = session.deregister_table(destination_name);
+        fs::rename(&destination, &source)?;
+        if !session.table_exists(source_name)? {
+            register_saved_table(session, source_name, &source).await?;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
