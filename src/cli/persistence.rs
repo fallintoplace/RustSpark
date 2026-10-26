@@ -31,6 +31,9 @@ pub(super) struct StagedInsert {
     table: String,
     staging: PathBuf,
     data: PathBuf,
+    // Remove a private stage when its asynchronous writer is cancelled.
+    // Once publication starts, keep the backup for crash recovery instead.
+    cleanup_on_drop: bool,
 }
 
 impl StagedInsert {
@@ -67,6 +70,7 @@ impl StagedInsert {
             table: table.to_owned(),
             data: staging.join("new"),
             staging,
+            cleanup_on_drop: true,
         })
     }
 
@@ -81,7 +85,7 @@ impl StagedInsert {
         Ok(())
     }
 
-    pub(super) fn commit(self) -> Result<(), Box<dyn Error>> {
+    pub(super) fn commit(mut self) -> Result<(), Box<dyn Error>> {
         let new = self.staging.join("new");
         validate_table_files(&new, &self.table)?;
         crash_after("before_swap");
@@ -90,6 +94,9 @@ impl StagedInsert {
         let original = self.root.join(&self.table);
         let old = self.staging.join("old");
         fs::rename(&original, &old)?;
+        // The old data is now only present inside the stage. Never delete
+        // that backup on an error while publishing the replacement.
+        self.cleanup_on_drop = false;
         crash_after("after_old_moved");
         if let Err(error) = fs::rename(&new, &original) {
             if let Err(restore) = fs::rename(&old, &original) {
@@ -107,6 +114,17 @@ impl StagedInsert {
         // recovery cleans up the old snapshot without rolling back the write.
         let _ = fs::remove_dir_all(&self.staging);
         Ok(())
+    }
+}
+
+impl Drop for StagedInsert {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            // A cancelled query may drop the future without calling discard.
+            // Cleaning only an unpublished stage makes the next INSERT into
+            // this table possible in the same interactive session.
+            let _ = fs::remove_dir_all(&self.staging);
+        }
     }
 }
 

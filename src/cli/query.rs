@@ -186,6 +186,16 @@ fn persistent_insert_table(
 // provider is registered. Only debug builds support this test hook.
 #[cfg(debug_assertions)]
 async fn debug_pause_staged_insert() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PAUSED_ONCE: AtomicBool = AtomicBool::new(false);
+    if let Ok(raw) = std::env::var("RUSTSPARK_TEST_INSERT_PAUSE_ONCE_MS") {
+        if !PAUSED_ONCE.swap(true, Ordering::SeqCst)
+            && let Ok(ms) = raw.parse::<u64>()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        return;
+    }
     if let Ok(raw) = std::env::var("RUSTSPARK_TEST_INSERT_PAUSE_MS")
         && let Ok(ms) = raw.parse::<u64>()
     {
