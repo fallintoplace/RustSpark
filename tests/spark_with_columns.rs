@@ -19,10 +19,7 @@ async fn with_columns_evaluates_updates_against_original_input() -> TestResult {
     let updated = session
         .with_columns(
             "numbers",
-            &[
-                ("a", col("a") + lit(10i64)),
-                ("total", col("a") + col("b")),
-            ],
+            &[("a", col("a") + lit(10i64)), ("total", col("a") + col("b"))],
         )
         .await?;
     let names: Vec<_> = updated
