@@ -93,8 +93,15 @@ pub(super) async fn write_stdout(
         broken_pipe: Arc::clone(&broken_pipe),
     };
     match format {
-        StdoutFormat::Csv => {
-            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut tracked);
+        StdoutFormat::Csv | StdoutFormat::Tsv => {
+            let delimiter = if matches!(format, StdoutFormat::Tsv) {
+                b'\t'
+            } else {
+                b','
+            };
+            let mut writer = datafusion::arrow::csv::WriterBuilder::new()
+                .with_delimiter(delimiter)
+                .build(&mut tracked);
             let mut wrote_batch = false;
             while let Some(batch) = stream.next().await {
                 writer
