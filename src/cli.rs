@@ -62,6 +62,9 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
+    #[arg(long = "json-schema", value_name = "NAME:TYPE,...", value_parser = parse_json_schema)]
+    json_schema: Option<Schema>,
+
     #[arg(long = "json-schema-rows", value_name = "ROWS", value_parser = parse_json_schema_rows)]
     json_schema_rows: Option<usize>,
 
@@ -167,13 +170,13 @@ fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     Ok((name, path))
 }
 
-fn parse_csv_schema(value: &str) -> Result<Schema, String> {
+fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
     let mut fields = Vec::new();
     let mut names = HashSet::new();
     for entry in value.split(',') {
         let (name, kind) = entry
             .split_once(':')
-            .ok_or_else(|| "CSV schema needs NAME:TYPE entries".to_owned())?;
+            .ok_or_else(|| format!("{source} schema needs NAME:TYPE entries"))?;
         let valid_first = name
             .bytes()
             .next()
@@ -183,21 +186,29 @@ fn parse_csv_schema(value: &str) -> Result<Schema, String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
-            return Err("CSV schema column names must be SQL identifiers".into());
+            return Err(format!("{source} schema column names must be SQL identifiers"));
         }
         if !names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate CSV schema column: {name}"));
+            return Err(format!("Duplicate {source} schema column: {name}"));
         }
         let data_type = match kind.to_ascii_lowercase().as_str() {
             "utf8" | "string" => DataType::Utf8,
             "int64" | "bigint" => DataType::Int64,
             "float64" | "double" => DataType::Float64,
             "bool" | "boolean" => DataType::Boolean,
-            _ => return Err(format!("Unsupported CSV type: {kind}")),
+            _ => return Err(format!("Unsupported {source} type: {kind}")),
         };
         fields.push(Field::new(name, data_type, true));
     }
     Ok(Schema::new(fields))
+}
+
+fn parse_csv_schema(value: &str) -> Result<Schema, String> {
+    parse_column_schema(value, "CSV")
+}
+
+fn parse_json_schema(value: &str) -> Result<Schema, String> {
+    parse_column_schema(value, "JSON")
 }
 
 fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
@@ -250,9 +261,14 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     }
 }
 
-fn json_read_options(array: bool, schema_rows: Option<usize>) -> JsonReadOptions<'static> {
-    let options = JsonReadOptions::default().newline_delimited(!array);
-    if let Some(rows) = schema_rows {
+fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
+    let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+    let options = if let Some(schema) = args.json_schema.as_ref() {
+        options.schema(schema)
+    } else {
+        options
+    };
+    if let Some(rows) = args.json_schema_rows {
         options.schema_infer_max_records(rows)
     } else {
         options
@@ -349,6 +365,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
     }
+    if args.json_schema.is_some() && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-schema requires a JSON input".into());
+    }
     if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema-rows requires a JSON input".into());
     }
@@ -367,7 +386,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .register_parquet_with_options(&args.table, parquet, options)
             .await?;
     } else if let Some(json) = args.json.as_ref() {
-        let options = json_read_options(args.json_array, args.json_schema_rows);
+        let options = json_read_options(&args);
         session
             .register_json_with_options(&args.table, json, options)
             .await?;
@@ -413,7 +432,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = json_read_options(args.json_array, args.json_schema_rows);
+            let options = json_read_options(&args);
             session
                 .register_json_with_options(name, path, options)
                 .await?;
