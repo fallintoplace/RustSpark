@@ -114,6 +114,24 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
 
+    /// Load saved Parquet tables from this directory on each run.
+    #[arg(long = "database-dir", value_name = "DIR")]
+    database_dir: Option<PathBuf>,
+
+    /// Save the final SQL query as a new Parquet table in --database-dir.
+    #[arg(
+        long = "save-table",
+        value_name = "NAME",
+        value_parser = parse_table_name,
+        requires = "database_dir",
+        conflicts_with_all = [
+            "describe", "explain", "explain_analyze", "count_only", "max_rows",
+            "stdout_format", "output_parquet", "output_csv", "output_json",
+            "output_arrow", "output_single_file"
+        ]
+    )]
+    save_table: Option<String>,
+
     /// Start a SQL shell that executes semicolon-terminated statements.
     #[arg(long)]
     interactive: bool,
@@ -494,6 +512,9 @@ use session::new_session;
 mod registration;
 use registration::register_inputs;
 
+mod persistence;
+use persistence::register_database_tables;
+
 mod query;
 use query::{execute_script, plan_query};
 
@@ -520,6 +541,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let session = new_session(&args)?;
     validate_format_options(&args)?;
     register_inputs(&session, &args).await?;
+    if let Some(directory) = args.database_dir.as_deref() {
+        register_database_tables(&session, directory).await?;
+    }
     if args.interactive {
         return run_interactive(&session, &args).await;
     }

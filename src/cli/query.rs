@@ -71,6 +71,14 @@ async fn execute_query(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dataframe = plan_query(session, query, args).await?;
+    if let Some(name) = args.save_table.as_deref() {
+        let directory = args
+            .database_dir
+            .as_deref()
+            .ok_or("--save-table requires --database-dir")?;
+        super::persistence::save_table(dataframe, directory, name).await?;
+        return Ok(());
+    }
     if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
         reject_duplicate_output_fields(&dataframe)?;
     }
