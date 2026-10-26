@@ -14,12 +14,11 @@ fn build_session_config(args: &Args) -> SessionConfig {
     } else {
         config
     };
-    let config = if let Some(partitions) = args.target_partitions {
+    if let Some(partitions) = args.target_partitions {
         config.with_target_partitions(partitions)
     } else {
         config
-    };
-    config
+    }
 }
 
 pub(super) fn new_session(
