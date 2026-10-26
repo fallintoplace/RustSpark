@@ -397,3 +397,21 @@ Copies are independent, **not hard links**. To inspect a backup, point
 This is a locally consistent, best-effort backup, not an online multi-writer
 snapshot or a guarantee against OS power loss. External processes changing the
 data directory are not coordinated. Keep multiple independent backups.
+
+### Compact persistent Parquet tables
+
+Repeated INSERT operations leave separate immutable Parquet parts. For
+read-heavy local workloads, merge an existing saved table into **one** part:
+
+```sh
+cargo run -- --database-dir /tmp/rustspark-db --compact-table events \
+  --sql 'SELECT COUNT(*) FROM events'
+```
+
+Compaction streams the old table into a private Parquet part and publishes it
+using the same crash-recovery swap as persistent INSERT. It preserves the table's
+rows and schema, including an empty table. It is opt-in because a single large
+part can reduce scan parallelism and requires enough free disk space for both
+versions. Keep other programs from mutating the table's files and use external
+backups for important data. The database lock prevents simultaneous RustSpark
+operations but does not protect against external writers.
