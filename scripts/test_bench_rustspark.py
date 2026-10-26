@@ -26,6 +26,20 @@ class BenchmarkHarnessTests(unittest.TestCase):
             self.assertEqual(len(first.read_text().splitlines()), 34)
             self.assertIn("32,city_0,", first.read_text())
 
+    def test_csv_generation_preserves_rows_across_cycle_and_buffer_boundaries(self):
+        for count in (0, 1, 399, 400, 401, 4096, 4097, 8001):
+            with tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "cycle.csv"
+                bench.write_csv(path, count)
+                with path.open(encoding="utf-8") as stream:
+                    self.assertEqual(next(stream), "id,city,amount\n")
+                    actual = stream.readlines()
+                self.assertEqual(len(actual), count)
+                for index in (0, 15, 399, 400, 4095, 4096, count - 1):
+                    if 0 <= index < count:
+                        city, amount = bench.benchmark_row(index)
+                        self.assertEqual(actual[index], f"{index},{city},{amount}\n")
+
     def test_percentile_small_sets(self):
         self.assertEqual(bench.percentile([2], 0.95), 2)
         self.assertEqual(bench.percentile([9, 1, 3, 7], 0.95), 9)

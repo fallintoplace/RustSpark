@@ -28,11 +28,20 @@ def benchmark_row(index: int) -> tuple[str, int]:
 
 
 def write_csv(path: pathlib.Path, rows: int):
+    # Reuse the repeating non-ID columns and amortize writes over 4096 rows.
+    suffixes = [
+        f"{city},{amount}\n" for city, amount in (benchmark_row(i) for i in range(400))
+    ]
     with path.open("w", encoding="utf-8", newline="") as file:
         file.write("id,city,amount\n")
+        pending = []
         for index in range(rows):
-            city, amount = benchmark_row(index)
-            file.write(f"{index},{city},{amount}\n")
+            pending.append(f"{index},{suffixes[index % 400]}")
+            if len(pending) == 4096:
+                file.write("".join(pending))
+                pending.clear()
+        if pending:
+            file.write("".join(pending))
 
 
 def percentile(samples, fraction):
