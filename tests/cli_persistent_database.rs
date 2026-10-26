@@ -28,12 +28,20 @@ fn saved_sql_table_is_queryable_from_a_new_process() -> TestResult {
     let dir = tempfile::tempdir()?;
     let root = dir.path().to_str().expect("UTF-8 temp path");
     let saved = run(&[
-        "--database-dir", root,
-        "--csv", "tests/fixtures/sales.csv",
-        "--save-table", "totals",
-        "--sql", "SELECT SUM(amount) AS total FROM data",
+        "--database-dir",
+        root,
+        "--csv",
+        "tests/fixtures/sales.csv",
+        "--save-table",
+        "totals",
+        "--sql",
+        "SELECT SUM(amount) AS total FROM data",
     ]);
-    assert!(saved.status.success(), "{}", String::from_utf8_lossy(&saved.stderr));
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
     assert!(dir.path().join("totals").is_dir());
 
     assert_row(
@@ -42,9 +50,12 @@ fn saved_sql_table_is_queryable_from_a_new_process() -> TestResult {
     );
 
     let overwrite = run(&[
-        "--database-dir", root,
-        "--save-table", "totals",
-        "--sql", "SELECT 900 AS total",
+        "--database-dir",
+        root,
+        "--save-table",
+        "totals",
+        "--sql",
+        "SELECT 900 AS total",
     ]);
     assert!(!overwrite.status.success());
     assert!(String::from_utf8_lossy(&overwrite.stderr).contains("already exists"));
@@ -59,13 +70,25 @@ fn saved_sql_table_is_queryable_from_a_new_process() -> TestResult {
 fn detects_name_collision_with_loaded_tables() -> TestResult {
     let dir = tempfile::tempdir()?;
     let root = dir.path().to_str().expect("UTF-8 temp path");
-    assert!(run(&[
-        "--database-dir", root, "--save-table", "data", "--sql", "SELECT 1 AS n",
-    ]).status.success());
+    assert!(
+        run(&[
+            "--database-dir",
+            root,
+            "--save-table",
+            "data",
+            "--sql",
+            "SELECT 1 AS n",
+        ])
+        .status
+        .success()
+    );
     let conflict = run(&[
-        "--database-dir", root,
-        "--csv", "tests/fixtures/sales.csv",
-        "--sql", "SELECT 1",
+        "--database-dir",
+        root,
+        "--csv",
+        "tests/fixtures/sales.csv",
+        "--sql",
+        "SELECT 1",
     ]);
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts with an input"));

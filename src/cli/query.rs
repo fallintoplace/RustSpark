@@ -72,7 +72,10 @@ async fn execute_query(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dataframe = plan_query(session, query, args).await?;
     if let Some(name) = args.save_table.as_deref() {
-        let directory = args.database_dir.as_deref().ok_or("--save-table requires --database-dir")?;
+        let directory = args
+            .database_dir
+            .as_deref()
+            .ok_or("--save-table requires --database-dir")?;
         super::persistence::save_table(dataframe, directory, name).await?;
         return Ok(());
     }

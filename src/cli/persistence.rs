@@ -29,7 +29,9 @@ pub(super) async fn register_database_tables(
         let mut found_parquet = false;
         for file in fs::read_dir(entry.path())? {
             let file = file?;
-            if file.file_type()?.is_file() && file.path().extension().is_some_and(|ext| ext == "parquet") {
+            if file.file_type()?.is_file()
+                && file.path().extension().is_some_and(|ext| ext == "parquet")
+            {
                 found_parquet = true;
                 break;
             }
