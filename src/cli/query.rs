@@ -111,10 +111,8 @@ pub(super) async fn execute_script(
         // Every statement in an inspection script must be read-only, not
         // just the final statement whose schema or plan is printed.
         for statement in statements {
-            drain_dataframe(
-                plan_read_only_query(session, &statement.to_string(), args).await?,
-            )
-            .await?;
+            drain_dataframe(plan_read_only_query(session, &statement.to_string(), args).await?)
+                .await?;
         }
         return execute_query(session, &last.to_string(), args).await;
     }
