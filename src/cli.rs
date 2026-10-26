@@ -923,6 +923,7 @@ async fn execute_script(
     script: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let script = script.strip_prefix('\u{feff}').unwrap_or(script);
     let mut statements = DFParser::parse_sql(script)?;
     let last = statements
         .pop_back()
