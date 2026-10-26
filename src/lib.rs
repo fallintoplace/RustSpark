@@ -225,6 +225,18 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         self.sql(query).await?.with_param_values(params)
     }
+
+    /// Plan only read-only SQL, rejecting DDL, DML and session statements.
+    ///
+    /// This is not a replacement for table-level authorization or process isolation.
+    pub async fn sql_read_only(&self, query: &str) -> Result<DataFrame> {
+        use datafusion::execution::context::SQLOptions;
+        let options = SQLOptions::new()
+            .with_allow_ddl(false)
+            .with_allow_dml(false)
+            .with_allow_statements(false);
+        self.context.sql_with_options(query, options).await
+    }
 }
 
 impl Default for RustSparkSession {
