@@ -5,6 +5,8 @@ This optional differential run discovers semantic differences. It does not
 change RustSpark behavior or claim Spark SQL compatibility.
 """
 import argparse
+import datetime
+import decimal
 import json
 import pathlib
 import re
@@ -26,6 +28,7 @@ SPARK_SCHEMA = "id LONG, amount LONG, label STRING, event_time STRING"
 class TypedResult:
     result: QueryResult
     types: list[str]
+    nullables: list[bool] | None = None
 
 
 def canonical_type(value: str) -> str:
@@ -51,10 +54,11 @@ def rustspark_query(binary: str, sql: str) -> TypedResult:
         check=True, timeout=120,
     )
     fields = [line.split("\t") for line in described.stdout.splitlines() if line.strip()]
-    if any(len(parts) < 2 for parts in fields):
+    if any(len(parts) < 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
         raise ValueError("Invalid RustSpark schema description")
     columns = [parts[0] for parts in fields]
     types = [canonical_type(parts[1]) for parts in fields]
+    nullables = [parts[2] == "NULL" for parts in fields]
     output = subprocess.run(
         command + ["--stdout-format", "json"], capture_output=True, text=True,
         check=True, timeout=120,
@@ -63,6 +67,7 @@ def rustspark_query(binary: str, sql: str) -> TypedResult:
     return TypedResult(
         QueryResult(columns, [[obj[column] for column in columns] for obj in objects]),
         types,
+        nullables,
     )
 
 
@@ -71,16 +76,62 @@ def spark_query(session, sql: str) -> TypedResult:
     return TypedResult(
         QueryResult(dataframe.columns, [list(row) for row in dataframe.collect()]),
         [canonical_type(field.dataType.simpleString()) for field in dataframe.schema.fields],
+        [field.nullable for field in dataframe.schema.fields],
     )
 
 
-def compare_typed(ours: TypedResult, reference: TypedResult, ordered: bool) -> str | None:
-    issue = compare(ours.result, reference.result, ordered=ordered)
-    if issue is not None:
-        return issue
+def normalized_typed_value(value, logical_type: str):
+    """Normalize physical encodings while preserving SQL logical types."""
+    if value is None:
+        return None
+    if logical_type == "timestamp":
+        if isinstance(value, datetime.datetime):
+            timestamp = value
+        else:
+            timestamp = datetime.datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return timestamp.isoformat(timespec="microseconds")
+    if logical_type == "date":
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            return value.date().isoformat() if isinstance(value, datetime.datetime) else value.isoformat()
+        return datetime.date.fromisoformat(str(value)).isoformat()
+    if logical_type.startswith("decimal("):
+        # The schema checks precision and scale. Values can be represented as
+        # JSON strings (RustSpark) or decimal.Decimal (PySpark).
+        return format(decimal.Decimal(str(value)).normalize(), "f")
+    return value
+
+
+def normalize_result(result: TypedResult) -> QueryResult:
+    if len(result.types) != len(result.result.columns):
+        raise ValueError("Type count differs from column count")
+    if any(len(row) != len(result.types) for row in result.result.rows):
+        raise ValueError("Row length differs from type count")
+    return QueryResult(
+        result.result.columns,
+        [[normalized_typed_value(value, field_type)
+          for value, field_type in zip(row, result.types)]
+         for row in result.result.rows],
+    )
+
+
+def compare_typed(
+    ours: TypedResult,
+    reference: TypedResult,
+    ordered: bool,
+    check_nullability: bool = False,
+) -> str | None:
     if ours.types != reference.types:
         return f"schema differs: RustSpark={ours.types!r}, Spark={reference.types!r}"
-    return None
+    if check_nullability:
+        if ours.nullables is None or reference.nullables is None:
+            return "schema comparison is missing nullability metadata"
+        if ours.nullables != reference.nullables:
+            return f"nullability differs: RustSpark={ours.nullables!r}, Spark={reference.nullables!r}"
+    return compare(normalize_result(ours), normalize_result(reference), ordered=ordered)
 
 
 def load_cases(path: pathlib.Path) -> list[dict]:
@@ -92,7 +143,7 @@ def load_cases(path: pathlib.Path) -> list[dict]:
     return cases
 
 
-def run_cases(cases, rustspark_runner, spark_runner) -> tuple[int, list[dict]]:
+def run_cases(cases, rustspark_runner, spark_runner, check_nullability=False) -> tuple[int, list[dict]]:
     results = []
     for case in cases:
         try:
@@ -100,6 +151,7 @@ def run_cases(cases, rustspark_runner, spark_runner) -> tuple[int, list[dict]]:
                 rustspark_runner(case["sql"]),
                 spark_runner(case["sql"]),
                 case.get("ordered", False),
+                check_nullability=check_nullability,
             )
             status = "PASS" if problem is None else "DIFF"
             results.append({"id": case["id"], "status": status, "detail": problem})
@@ -116,6 +168,10 @@ def main(argv=None) -> int:
     parser.add_argument("--cases", type=pathlib.Path, default=CASES)
     parser.add_argument("--spark-master", default="local[2]")
     parser.add_argument("--json-out", type=pathlib.Path)
+    parser.add_argument(
+        "--check-nullability", action="store_true",
+        help="Compare SQL schema nullable flags in addition to values and types",
+    )
     args = parser.parse_args(argv)
     cases = load_cases(args.cases)
 
@@ -138,6 +194,7 @@ def main(argv=None) -> int:
             cases,
             lambda sql: rustspark_query(args.rustspark, sql),
             lambda sql: spark_query(session, sql),
+            check_nullability=args.check_nullability,
         )
     finally:
         session.stop()
@@ -145,7 +202,11 @@ def main(argv=None) -> int:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps({
             "cases": len(cases), "passed": len(cases) - failed,
-            "differed_or_errored": failed, "results": results,
+            "differed_or_errored": failed,
+            "differed": sum(item["status"] == "DIFF" for item in results),
+            "errors": sum(item["status"] == "ERROR" for item in results),
+            "check_nullability": args.check_nullability,
+            "results": results,
         }, indent=2) + "\n", encoding="utf-8")
     print(f"{len(cases) - failed}/{len(cases)} matched; {failed} differed or errored")
     return 1 if failed else 0

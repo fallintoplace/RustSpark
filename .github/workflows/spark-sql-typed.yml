@@ -26,7 +26,7 @@ jobs:
       - run: cargo build --locked
       - run: python3 -m pip install 'pyspark>=4,<5'
       - name: Compare typed table-backed SQL with real Spark
-        run: python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark --json-out reports/spark-typed.json
+        run: python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark --json-out reports/spark-typed.json --check-nullability
       - uses: actions/upload-artifact@v4
         if: always()
         with:
