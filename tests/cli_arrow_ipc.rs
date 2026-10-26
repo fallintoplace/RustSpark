@@ -90,7 +90,12 @@ fn failed_arrow_export_preserves_existing_destination() -> TestResult {
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--csv")
         .arg(&csv)
-        .args(["--csv-schema", "value:int64", "--sql", "SELECT value FROM data"])
+        .args([
+            "--csv-schema",
+            "value:int64",
+            "--sql",
+            "SELECT value FROM data",
+        ])
         .arg("--output-arrow")
         .arg(&destination)
         .output()?;
