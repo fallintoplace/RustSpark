@@ -524,6 +524,39 @@ use interactive::run_interactive;
 mod setup;
 use setup::{cache_tables, read_query, register_derived_tables};
 
+// The database catalog treats subdirectories as stored tables. Exporting a
+// CSV/JSON/Parquet directory there can make the next startup fail to load it.
+fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(());
+    };
+    let root = root.canonicalize()?;
+    for destination in [
+        args.output_arrow.as_ref(),
+        args.output_parquet.as_ref(),
+        args.output_csv.as_ref(),
+        args.output_json.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let normalized = if destination.exists() {
+            destination.canonicalize()?
+        } else {
+            let parent = destination
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let name = destination.file_name().ok_or("Output path must name a file or directory")?;
+            parent.canonicalize()?.join(name)
+        };
+        if normalized.starts_with(&root) {
+            return Err("Output path must not be inside --database-dir".into());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
     let mut parameter_names = HashSet::new();
@@ -545,6 +578,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    reject_database_export_collision(&args)?;
     let session = new_session(&args)?;
     validate_format_options(&args)?;
     register_inputs(&session, &args).await?;
