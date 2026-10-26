@@ -107,6 +107,20 @@ cargo run -- --csv tests/fixtures/sales.csv \\
   --sql 'SELECT SUM(amount) FROM large'
 ```
 
+Materialize expensive SQL once for repeated reads. Materialized views are
+registered after ordinary `--sql-view` declarations and can refer to them:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql-view 'large=SELECT * FROM data WHERE amount >= 10' \
+  --materialized-sql-view 'totals=SELECT city, SUM(amount) AS total FROM large GROUP BY city' \
+  --sql 'SELECT * FROM totals ORDER BY city'
+```
+
+Materialized views cache their results in memory at registration, so they may
+use significant RAM. Unlike ordinary views, later queries do not rescan the
+source files.
+
 Bound the number of result rows printed with `--max-rows`:
 
 ```sh

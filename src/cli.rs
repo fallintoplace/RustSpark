@@ -123,6 +123,9 @@ struct Args {
     #[arg(long = "sql-view", value_name = "NAME=SQL")]
     sql_views: Vec<String>,
 
+    #[arg(long = "materialized-sql-view", value_name = "NAME=SQL")]
+    materialized_sql_views: Vec<String>,
+
     #[arg(long = "param", value_name = "TYPE:VALUE", value_parser = parse_sql_param)]
     params: Vec<ScalarValue>,
 
@@ -779,6 +782,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
         session.register_sql_view(name, sql).await?;
+    }
+    for definition in &args.materialized_sql_views {
+        let (name, sql) = parse_named_view(definition)?;
+        session.register_materialized_sql_view(name, sql).await?;
     }
     let query = if let Some(sql) = args.sql.as_ref() {
         sql.clone()
