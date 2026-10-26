@@ -547,7 +547,9 @@ fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::erro
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| std::path::Path::new("."));
-            let name = destination.file_name().ok_or("Output path must name a file or directory")?;
+            let name = destination
+                .file_name()
+                .ok_or("Output path must name a file or directory")?;
             parent.canonicalize()?.join(name)
         };
         if normalized.starts_with(&root) {
