@@ -108,6 +108,20 @@ fn persistent_insert_table(
     }
 }
 
+// Deterministically exercise task cancellation while a private INSERT
+// provider is registered. Only debug builds support this test hook.
+#[cfg(debug_assertions)]
+async fn debug_pause_staged_insert() {
+    if let Ok(raw) = std::env::var("RUSTSPARK_TEST_INSERT_PAUSE_MS")
+        && let Ok(ms) = raw.parse::<u64>()
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
+
+#[cfg(not(debug_assertions))]
+async fn debug_pause_staged_insert() {}
+
 /// A dropped execution future (for example an interactive query timeout)
 /// must restore the original provider before another SQL statement starts.
 struct RestoreTableOnCancel<'a> {
@@ -160,6 +174,7 @@ async fn execute_staged_insert(
 
     // Keep the guard alive while awaiting SQL and re-registration. Cancellation
     // cannot leave an interactive session pointed at an unpublished table.
+    debug_pause_staged_insert().await;
     let execution: Result<(), Box<dyn std::error::Error>> = async {
         if final_statement {
             execute_query(session, sql, args).await
