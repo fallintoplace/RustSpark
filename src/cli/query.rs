@@ -410,20 +410,33 @@ async fn persist_created_table(
     Ok(())
 }
 
+async fn plan_with_args(
+    session: &RustSparkSession,
+    query: &str,
+    args: &Args,
+    read_only: bool,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    let dataframe = if read_only {
+        session.sql_read_only(query).await?
+    } else {
+        session.sql(query).await?
+    };
+    if !args.named_params.is_empty() {
+        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
+        Ok(dataframe.with_param_values(params)?)
+    } else if !args.params.is_empty() {
+        Ok(dataframe.with_param_values(args.params.clone())?)
+    } else {
+        Ok(dataframe)
+    }
+}
+
 pub(super) async fn plan_query(
     session: &RustSparkSession,
     query: &str,
     args: &Args,
 ) -> Result<DataFrame, Box<dyn std::error::Error>> {
-    let dataframe = if !args.named_params.is_empty() {
-        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
-        session.sql_with_params(query, params).await?
-    } else if !args.params.is_empty() {
-        session.sql_with_params(query, args.params.clone()).await?
-    } else {
-        session.sql(query).await?
-    };
-    Ok(dataframe)
+    plan_with_args(session, query, args, false).await
 }
 
 async fn plan_read_only_query(
@@ -431,17 +444,7 @@ async fn plan_read_only_query(
     query: &str,
     args: &Args,
 ) -> Result<DataFrame, Box<dyn std::error::Error>> {
-    let dataframe = if !args.named_params.is_empty() {
-        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
-        session.sql_read_only_with_params(query, params).await?
-    } else if !args.params.is_empty() {
-        session
-            .sql_read_only_with_params(query, args.params.clone())
-            .await?
-    } else {
-        session.sql_read_only(query).await?
-    };
-    Ok(dataframe)
+    plan_with_args(session, query, args, true).await
 }
 
 fn reject_duplicate_output_fields(dataframe: &DataFrame) -> Result<(), Box<dyn std::error::Error>> {
