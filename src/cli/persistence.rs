@@ -81,7 +81,7 @@ impl StagedInsert {
     }
 
     pub(super) fn discard(self) -> Result<(), Box<dyn Error>> {
-        fs::remove_dir_all(self.staging)?;
+        fs::remove_dir_all(&self.staging)?;
         Ok(())
     }
 
