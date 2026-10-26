@@ -935,7 +935,9 @@ async fn write_stdout(
             }
             if !wrote_batch {
                 // Include column headers even when the query returns no rows.
-                writer.write(&datafusion::arrow::record_batch::RecordBatch::new_empty(schema))?;
+                writer.write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
+                    schema,
+                ))?;
             }
         }
         StdoutFormat::Json => {
