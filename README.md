@@ -44,6 +44,14 @@ Bound the number of result rows printed with `--max-rows`:
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --max-rows 10
 ```
 
+Cache a table in memory before running SQL (use only when it fits in RAM):
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --cache-table data --sql 'SELECT SUM(amount) FROM data'
+```
+
+The `--cache-table` flag can be repeated for distinct tables.
+
 Standalone SQL without a file also works:
 
 ```sh

@@ -74,6 +74,9 @@ struct Args {
     #[arg(long, default_value = "data", conflicts_with_all = ["csv_tables", "parquet_tables", "json_tables"])]
     table: String,
 
+    #[arg(long = "cache-table", value_name = "NAME")]
+    cache_tables: Vec<String>,
+
     #[arg(long, value_name = "QUERY")]
     sql: Option<String>,
 
@@ -454,6 +457,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         unreachable!("clap requires either --sql or --sql-file")
     };
+    let mut cached_names = HashSet::new();
+    for name in &args.cache_tables {
+        if !cached_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate cached table: {name}").into());
+        }
+        session.cache_table(name).await?;
+    }
     let dataframe = session.sql(&query).await?;
     if args.describe {
         for field in dataframe.schema().fields() {
