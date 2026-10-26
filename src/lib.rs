@@ -926,16 +926,18 @@ impl RustSparkSession {
         } else {
             "union_sql"
         };
-        let (first, rest) = queries.split_first().ok_or_else(|| {
-            DataFusionError::Plan(format!("{operation} requires at least one query"))
-        })?;
-        let mut dataframe = self.sql(first).await?;
-        for query in rest {
-            let next = self.sql(query).await?;
+        if queries.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "{operation} requires at least one query"
+            )));
+        }
+        let mut frames = self.plan_union_sql_inputs(queries).await?.into_iter();
+        let mut dataframe = frames.next().expect("non-empty query list");
+        for frame in frames {
             dataframe = if by_name {
-                dataframe.union_by_name(next)?
+                dataframe.union_by_name(frame)?
             } else {
-                dataframe.union(next)?
+                dataframe.union(frame)?
             };
         }
         Ok(dataframe)
