@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use datafusion::{
-    config::TableParquetOptions, dataframe::DataFrameWriteOptions, prelude::DataFrame,
-    sql::parser::{DFParser, Statement as DFStatement},
+    config::TableParquetOptions,
+    dataframe::DataFrameWriteOptions,
     logical_expr::sqlparser::ast::Statement as SqlStatement,
+    prelude::DataFrame,
+    sql::parser::{DFParser, Statement as DFStatement},
 };
 use rustspark::RustSparkSession;
 
@@ -83,7 +85,10 @@ async fn persist_created_table(
     let Some(create) = persistent_create_table(statement, args) else {
         return Ok(());
     };
-    let directory = args.database_dir.as_deref().ok_or("Missing database directory")?;
+    let directory = args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?;
     let name = create.name.to_string();
     if create.if_not_exists && directory.join(&name).exists() {
         return Ok(());
