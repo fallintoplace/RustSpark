@@ -216,9 +216,18 @@ fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
         }
         let data_type = match kind.to_ascii_lowercase().as_str() {
             "utf8" | "string" => DataType::Utf8,
+            "int8" | "tinyint" => DataType::Int8,
+            "int16" | "smallint" => DataType::Int16,
+            "int32" | "int" | "integer" => DataType::Int32,
             "int64" | "bigint" => DataType::Int64,
+            "uint8" => DataType::UInt8,
+            "uint16" => DataType::UInt16,
+            "uint32" => DataType::UInt32,
+            "uint64" => DataType::UInt64,
+            "float32" | "float" | "real" => DataType::Float32,
             "float64" | "double" => DataType::Float64,
             "bool" | "boolean" => DataType::Boolean,
+            "date32" | "date" => DataType::Date32,
             _ => return Err(format!("Unsupported {source} type: {kind}")),
         };
         fields.push(Field::new(name, data_type, true));
