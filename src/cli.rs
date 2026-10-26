@@ -788,6 +788,25 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             result??;
         }
     }
+    let execution = execute_registered_query(&session, &args);
+    if let Some(seconds) = args.query_timeout {
+        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("SQL query timed out after {seconds} seconds"),
+                )
+            })?
+    } else {
+        execution.await
+    }
+}
+
+async fn execute_registered_query(
+    session: &RustSparkSession,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     for declaration in &args.unions_by_name {
         let (name, sources) = parse_union_by_name(declaration)?;
         let union = session.union_tables_by_name(&sources).await?;
@@ -821,19 +840,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         session.cache_table(name).await?;
     }
-    let execution = execute_script(&session, &query, &args);
-    if let Some(seconds) = args.query_timeout {
-        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("SQL query timed out after {seconds} seconds"),
-                )
-            })?
-    } else {
-        execution.await
-    }
+    execute_script(session, &query, args).await
 }
 
 // Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
