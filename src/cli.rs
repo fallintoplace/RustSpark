@@ -705,6 +705,12 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
+    let mut parameter_names = HashSet::new();
+    for (name, _) in &args.named_params {
+        if !parameter_names.insert(name.as_str()) {
+            return Err(format!("Duplicate named parameter: {name}").into());
+        }
+    }
     if let (Some(offset), Some(max_rows)) = (args.offset, args.max_rows) {
         offset
             .checked_add(max_rows)
@@ -1024,12 +1030,7 @@ async fn plan_query(
     args: &Args,
 ) -> Result<datafusion::prelude::DataFrame, Box<dyn std::error::Error>> {
     let dataframe = if !args.named_params.is_empty() {
-        let mut params = HashMap::new();
-        for (name, value) in &args.named_params {
-            if params.insert(name.clone(), value.clone()).is_some() {
-                return Err(format!("Duplicate named parameter: {name}").into());
-            }
-        }
+        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
         session.sql_with_params(query, params).await?
     } else if !args.params.is_empty() {
         session.sql_with_params(query, args.params.clone()).await?
