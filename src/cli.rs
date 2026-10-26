@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Write},
@@ -969,6 +970,32 @@ fn reject_duplicate_output_fields(
     Ok(())
 }
 
+fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        // Arrow CSV/JSON writers may flatten I/O errors to string-only ArrowError values.
+        if current
+            .downcast_ref::<datafusion::arrow::error::ArrowError>()
+            .is_some_and(|arrow| {
+                let message = arrow.to_string().to_ascii_lowercase();
+                message.contains("broken pipe")
+                    || message.contains("pipe is being closed")
+                    || message.contains("pipe has been ended")
+            })
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
 async fn execute_query(
     session: &RustSparkSession,
     query: &str,
@@ -1027,7 +1054,11 @@ async fn execute_query(
         } else {
             dataframe
         };
-        write_stdout(dataframe, format).await?;
+        if let Err(error) = write_stdout(dataframe, format).await
+            && !is_broken_pipe(error.as_ref())
+        {
+            return Err(error);
+        }
     } else if args.count_only {
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
@@ -1048,6 +1079,48 @@ async fn execute_query(
     Ok(())
 }
 
+// Arrow's CSV writer converts I/O errors into strings. Track the original
+// BrokenPipe kind before Arrow discards it so shell pipelines exit cleanly.
+struct PipeTrackingWriter<W> {
+    inner: W,
+    broken_pipe: Arc<AtomicBool>,
+}
+
+impl<W: Write> Write for PipeTrackingWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let result = self.inner.write(bytes);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            self.broken_pipe.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let result = self.inner.flush();
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            self.broken_pipe.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+fn preserve_writer_pipe_error(
+    error: datafusion::arrow::error::ArrowError,
+    broken_pipe: &AtomicBool,
+) -> Box<dyn std::error::Error> {
+    if broken_pipe.load(Ordering::Relaxed) {
+        Box::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    } else {
+        Box::new(error)
+    }
+}
+
 // Write one record batch at a time so stdout never requires collecting all results.
 async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
@@ -1057,31 +1130,45 @@ async fn write_stdout(
     let schema = stream.schema();
     let stdout = std::io::stdout();
     let mut output = std::io::BufWriter::new(stdout.lock());
+    let broken_pipe = Arc::new(AtomicBool::new(false));
+    let mut tracked = PipeTrackingWriter {
+        inner: &mut output,
+        broken_pipe: Arc::clone(&broken_pipe),
+    };
     match format {
         StdoutFormat::Csv => {
-            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut output);
+            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut tracked);
             let mut wrote_batch = false;
             while let Some(batch) = stream.next().await {
-                writer.write(&batch?)?;
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
                 wrote_batch = true;
             }
             if !wrote_batch {
                 // Include column headers even when the query returns no rows.
-                writer.write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
-                    schema,
-                ))?;
+                writer
+                    .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
+                        schema,
+                    ))
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             }
         }
         StdoutFormat::Json => {
             let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
                 .with_explicit_nulls(true)
-                .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut output);
+                .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut tracked);
             while let Some(batch) = stream.next().await {
-                writer.write(&batch?)?;
+                writer
+                    .write(&batch?)
+                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
             }
-            writer.finish()?;
+            writer
+                .finish()
+                .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
         }
     }
+    drop(tracked);
     output.flush()?;
     Ok(())
 }

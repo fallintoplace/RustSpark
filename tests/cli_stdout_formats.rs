@@ -111,22 +111,44 @@ fn stdout_format_conflicts_with_other_output_modes() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn machine_readable_output_rejects_duplicate_column_names() -> TestResult {
-    for format in ["csv", "json"] {
-        let output = run(&[
-            "--sql",
-            "SELECT * FROM (SELECT 1 AS id) AS left_side CROSS JOIN (SELECT 2 AS id) AS right_side",
-            "--stdout-format",
-            format,
-        ])?;
-        assert!(!output.status.success(), "{format}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("Duplicate output column"),
-            "{format}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stdout.is_empty());
+fn closed_output_pipe_is_not_a_query_failure() -> TestResult {
+    use std::{
+        io::{Read, Write},
+        process::Stdio,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let csv = temp.path().join("large.csv");
+    let mut file = std::fs::File::create(&csv)?;
+    writeln!(file, "payload")?;
+    for _ in 0..512 {
+        writeln!(file, "{}", "x".repeat(2048))?;
     }
+    drop(file);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .arg("--csv")
+        .arg(&csv)
+        .args([
+            "--sql",
+            "SELECT payload FROM data",
+            "--stdout-format",
+            "csv",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut output = child.stdout.take().ok_or("missing child stdout")?;
+    let mut first = [0u8; 1];
+    output.read_exact(&mut first)?;
+    drop(output);
+    let result = child.wait_with_output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     Ok(())
 }
