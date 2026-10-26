@@ -24,3 +24,24 @@ fn rejects_invalid_timeout() {
         assert!(!output.status.success(), "{seconds}");
     }
 }
+
+#[test]
+fn query_timeout_includes_waiting_for_sql_stdin() -> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(["--sql-file", "-", "--query-timeout", "1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Keep the input stream open to prove the deadline covers loading SQL.
+    let _held_stdin = child.stdin.take();
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("timed out"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
