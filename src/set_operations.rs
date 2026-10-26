@@ -8,7 +8,10 @@ use crate::RustSparkSession;
 // Quote every component. Table names are identifiers, never executable SQL.
 fn quote_table_path(name: &str) -> Result<String> {
     let parts: Vec<_> = name.split('.').collect();
-    if parts.iter().any(|part| part.is_empty() || part.trim() != *part) {
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || part.trim() != *part)
+    {
         return Err(DataFusionError::Plan(
             "Set operations require a non-empty table path".into(),
         ));
@@ -43,18 +46,8 @@ impl RustSparkSession {
         self.set_operation(left, right, "INTERSECT").await
     }
 
-    /// Keep rows common to both tables, preserving minimum duplicate counts.
-    pub async fn intersect_tables_all(&self, left: &str, right: &str) -> Result<DataFrame> {
-        self.set_operation(left, right, "INTERSECT ALL").await
-    }
-
     /// Keep distinct rows in the left table but not the right table.
     pub async fn except_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
         self.set_operation(left, right, "EXCEPT").await
-    }
-
-    /// Subtract right-hand row multiplicities from the left-hand table.
-    pub async fn except_tables_all(&self, left: &str, right: &str) -> Result<DataFrame> {
-        self.set_operation(left, right, "EXCEPT ALL").await
     }
 }
