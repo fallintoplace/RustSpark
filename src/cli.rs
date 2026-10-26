@@ -40,6 +40,15 @@ struct Args {
     #[arg(long = "parquet-extension", value_name = ".EXT", value_parser = parse_file_extension)]
     parquet_extension: Option<String>,
 
+    #[arg(long = "parquet-pushdown-filters")]
+    parquet_pushdown_filters: bool,
+
+    #[arg(
+        long = "parquet-reorder-filters",
+        requires = "parquet_pushdown_filters"
+    )]
+    parquet_reorder_filters: bool,
+
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
 
@@ -487,7 +496,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
-    let config = SessionConfig::new();
+    if args.parquet_pushdown_filters && args.parquet.is_none() && args.parquet_tables.is_empty() {
+        return Err("--parquet-pushdown-filters requires a Parquet input".into());
+    }
+    let mut config = SessionConfig::new();
+    config.options_mut().execution.parquet.pushdown_filters = args.parquet_pushdown_filters;
+    config.options_mut().execution.parquet.reorder_filters = args.parquet_reorder_filters;
     let config = if let Some(batch_size) = args.batch_size {
         config.with_batch_size(batch_size)
     } else {
