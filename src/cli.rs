@@ -3,7 +3,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
+use datafusion::prelude::{cast, ident, lit, nullif, CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -278,6 +278,44 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     }
 }
 
+// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
+// Read as strings and normalize before casting to the inferred input types.
+async fn register_csv_with_null_value(
+    session: &RustSparkSession,
+    name: &str,
+    path: impl AsRef<std::path::Path>,
+    options: CsvReadOptions<'_>,
+    marker: &str,
+) -> datafusion::error::Result<()> {
+    let inferred = session
+        .read_csv_with_options(&path, options.clone())
+        .await?;
+    let fields = inferred.schema().fields();
+    let string_schema = Schema::new(
+        fields
+            .iter()
+            .map(|field| Field::new(field.name(), DataType::Utf8, true))
+            .collect::<Vec<_>>(),
+    );
+    let raw = session
+        .read_csv_with_options(path, options.schema(&string_schema).null_regex(None))
+        .await?;
+    let expressions = fields
+        .iter()
+        .map(|field| {
+            let value = nullif(ident(field.name()), lit(marker));
+            let typed = if field.data_type() == &DataType::Utf8 {
+                value
+            } else {
+                cast(value, field.data_type().clone())
+            };
+            typed.alias(field.name())
+        })
+        .collect::<Vec<_>>();
+    session.register_dataframe(name, raw.select(expressions)?)?;
+    Ok(())
+}
+
 fn json_read_options(array: bool, schema_rows: Option<usize>) -> JsonReadOptions<'static> {
     let options = JsonReadOptions::default().newline_delimited(!array);
     if let Some(rows) = schema_rows {
@@ -388,9 +426,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(csv) = args.csv.as_ref() {
         let options = csv_read_options(&args);
-        session
-            .register_csv_with_options(&args.table, csv, options)
-            .await?;
+        if let Some(marker) = args.csv_null_value.as_deref() {
+            register_csv_with_null_value(&session, &args.table, csv, options, marker).await?;
+        } else {
+            session
+                .register_csv_with_options(&args.table, csv, options)
+                .await?;
+        }
     } else if let Some(parquet) = args.parquet.as_ref() {
         let options = ParquetReadOptions::new()
             .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
@@ -417,9 +459,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let name = name.to_owned();
             let path = path.to_owned();
             csv_jobs.spawn(async move {
-                session
-                    .register_csv_with_options(&name, &path, csv_read_options(&args))
-                    .await
+                let options = csv_read_options(&args);
+                if let Some(marker) = args.csv_null_value.as_deref() {
+                    register_csv_with_null_value(&session, &name, &path, options, marker).await
+                } else {
+                    session.register_csv_with_options(&name, &path, options).await
+                }
             });
             if csv_jobs.len() >= 4 {
                 csv_jobs.join_next().await.expect("CSV task exists")??;
