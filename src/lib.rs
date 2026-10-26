@@ -7,6 +7,7 @@ use datafusion::{
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 
+mod set_operations;
 mod sources;
 
 pub struct RustSparkSession {
