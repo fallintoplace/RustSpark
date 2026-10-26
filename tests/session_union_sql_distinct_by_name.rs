@@ -10,8 +10,8 @@ async fn deduplicates_union_of_reordered_sql_columns() -> Result<(), Box<dyn std
             "SELECT 3 AS id, 4 AS amount",
         ])
         .await?;
-    assert_eq!(combined.count().await?, 2);
     assert_eq!(combined.schema().fields().len(), 2);
+    assert_eq!(combined.count().await?, 2);
     assert!(session.union_sql_distinct_by_name(&[]).await.is_err());
     Ok(())
 }
