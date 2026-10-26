@@ -30,6 +30,14 @@ Join multiple CSV files in one query by naming each input:
 cargo run -- --csv-table left=tests/fixtures/sales.csv --csv-table right=tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM left JOIN right USING (city)'
 ```
 
+Create lazy SQL views for reusable queries. Views can refer to earlier views:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \\
+  --sql-view 'large=SELECT * FROM data WHERE amount >= 10' \\
+  --sql 'SELECT SUM(amount) FROM large'
+```
+
 Bound the number of result rows printed with `--max-rows`:
 
 ```sh
