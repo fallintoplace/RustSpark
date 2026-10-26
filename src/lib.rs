@@ -659,16 +659,12 @@ impl RustSparkSession {
             .limit(offset, Some(limit))
     }
 
-    /// Fetch the first SQL result row as typed Arrow scalar values.
-    ///
-    /// Returns None for an empty result without collecting the full query.
-    pub async fn sql_first_row(
-        &self,
-        query: &str,
+    async fn extract_first_row(
+        dataframe: DataFrame,
     ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
         use datafusion::common::ScalarValue;
 
-        let batches = self.sql(query).await?.limit(0, Some(1))?.collect().await?;
+        let batches = dataframe.limit(0, Some(1))?.collect().await?;
         for batch in batches {
             if batch.num_rows() > 0 {
                 let values = (0..batch.num_columns())
@@ -680,6 +676,16 @@ impl RustSparkSession {
         Ok(None)
     }
 
+    /// Fetch the first SQL result row as typed Arrow scalar values.
+    ///
+    /// Returns None for an empty result without collecting the full query.
+    pub async fn sql_first_row(
+        &self,
+        query: &str,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        Self::extract_first_row(self.sql(query).await?).await
+    }
+
     /// Fetch the first result row from a parameterized SQL query.
     ///
     /// Returns None for an empty result and preserves typed NULL values.
@@ -688,23 +694,19 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
-        use datafusion::common::ScalarValue;
+        Self::extract_first_row(self.sql_with_params(query, params).await?).await
+    }
 
-        let batches = self
-            .sql_with_params(query, params)
-            .await?
-            .limit(0, Some(1))?
-            .collect()
-            .await?;
-        for batch in batches {
-            if batch.num_rows() > 0 {
-                let values = (0..batch.num_columns())
-                    .map(|index| ScalarValue::try_from_array(batch.column(index).as_ref(), 0))
-                    .collect::<Result<Vec<_>>>()?;
-                return Ok(Some(values));
-            }
-        }
-        Ok(None)
+    /// Fetch the first row from parameterized, read-only SQL.
+    ///
+    /// Returns None for an empty result, preserves typed NULLs, and rejects
+    /// DDL or DML without executing the query.
+    pub async fn sql_read_only_first_row_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        Self::extract_first_row(self.sql_read_only_with_params(query, params).await?).await
     }
 
     /// Plan SQL with typed positional or named parameters.
