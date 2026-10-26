@@ -620,6 +620,22 @@ use interactive::run_interactive;
 mod setup;
 use setup::{cache_tables, read_query, register_derived_tables};
 
+fn normalized_export_path(
+    destination: &std::path::Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if destination.exists() {
+        return Ok(destination.canonicalize()?);
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = destination
+        .file_name()
+        .ok_or("Output path must name a file or directory")?;
+    Ok(parent.canonicalize()?.join(name))
+}
+
 // The database catalog treats subdirectories as stored tables. Exporting a
 // CSV/JSON/Parquet directory there can make the next startup fail to load it.
 fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -636,18 +652,7 @@ fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::erro
     .into_iter()
     .flatten()
     {
-        let normalized = if destination.exists() {
-            destination.canonicalize()?
-        } else {
-            let parent = destination
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| std::path::Path::new("."));
-            let name = destination
-                .file_name()
-                .ok_or("Output path must name a file or directory")?;
-            parent.canonicalize()?.join(name)
-        };
+        let normalized = normalized_export_path(destination)?;
         if normalized.starts_with(&root) {
             return Err("Output path must not be inside --database-dir".into());
         }
