@@ -367,6 +367,28 @@ impl RustSparkSession {
         self.sql(query).await?.limit(offset, Some(limit))
     }
 
+    /// Plan a page of read-only SQL without loading the full result.
+    ///
+    /// Add ORDER BY to the query for deterministic pages.
+    pub async fn sql_read_only_page(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<DataFrame> {
+        if limit == 0 {
+            return Err(DataFusionError::Plan(
+                "SQL page limit must be positive".into(),
+            ));
+        }
+        if offset.checked_add(limit).is_none() {
+            return Err(DataFusionError::Plan(
+                "SQL page offset plus limit overflows".into(),
+            ));
+        }
+        self.sql_read_only(query).await?.limit(offset, Some(limit))
+    }
+
     /// Plan a parameterized SQL page with bounded row count.
     ///
     /// Use ORDER BY in SQL for stable page boundaries.
