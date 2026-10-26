@@ -395,6 +395,31 @@ impl RustSparkSession {
         dataframe.select_columns(columns)
     }
 
+    fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
+        use std::collections::HashSet;
+
+        let available: HashSet<&str> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        let mut seen = HashSet::new();
+        for name in selected {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate dropna column: {name}"
+                )));
+            }
+            if !available.contains(*name) {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown dropna column: {name}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Drop rows containing NULL values, like Spark DataFrame.na.drop.
     ///
     /// An empty column list checks every column. Any drops rows with at
@@ -407,7 +432,6 @@ impl RustSparkSession {
         mode: NullDropMode,
     ) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
-        use std::collections::HashSet;
 
         let dataframe = self.table(table).await?;
         let selected: Vec<&str> = if columns.is_empty() {
@@ -424,25 +448,7 @@ impl RustSparkSession {
             return Ok(dataframe);
         }
 
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in &selected {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropna column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropna column: {name}"
-                )));
-            }
-        }
+        Self::validate_dropna_columns(&dataframe, &selected)?;
 
         let mut checks = selected
             .iter()
