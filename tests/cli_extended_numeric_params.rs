@@ -14,9 +14,12 @@ fn accepts_narrow_and_unsigned_typed_parameters() {
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
             .args([
-                "--sql", "SELECT $1 AS value",
-                "--param", parameter,
-                "--stdout-format", "json",
+                "--sql",
+                "SELECT $1 AS value",
+                "--param",
+                parameter,
+                "--stdout-format",
+                "json",
             ])
             .output()
             .unwrap();
@@ -35,7 +38,13 @@ fn accepts_narrow_and_unsigned_typed_parameters() {
 
 #[test]
 fn rejects_out_of_range_and_nonfinite_numeric_parameters() {
-    for parameter in ["int8:128", "uint8:-1", "uint64:18446744073709551616", "float32:NaN", "float32:Infinity"] {
+    for parameter in [
+        "int8:128",
+        "uint8:-1",
+        "uint64:18446744073709551616",
+        "float32:NaN",
+        "float32:Infinity",
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
             .args(["--sql", "SELECT $1", "--param", parameter])
             .output()
