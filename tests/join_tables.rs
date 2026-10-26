@@ -131,3 +131,26 @@ async fn rejects_empty_keys_and_reports_missing_tables_and_columns() -> TestResu
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn joining_lazy_table_aliases_preserves_keys_and_rows() -> TestResult {
+    let session = joined_session().await?;
+    session
+        .register_table_alias("left_alias", "left_rows")
+        .await?;
+    session
+        .register_table_alias("right_alias", "right_rows")
+        .await?;
+    let rows = session
+        .join_tables(
+            "left_alias",
+            "right_alias",
+            JoinType::Inner,
+            &[("id", "other_id"), ("region", "area")],
+        )
+        .await?
+        .count()
+        .await?;
+    assert_eq!(rows, 3);
+    Ok(())
+}
