@@ -84,20 +84,3 @@ pub(super) fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
         options
     }
 }
-
-async fn reject_duplicate_csv_headers(
-    session: &RustSparkSession,
-    name: &str,
-) -> datafusion::error::Result<()> {
-    let dataframe = session.table(name).await?;
-    let mut names = HashSet::new();
-    for field in dataframe.schema().fields() {
-        if !names.insert(field.name().to_ascii_lowercase()) {
-            return Err(datafusion::error::DataFusionError::Plan(format!(
-                "Duplicate CSV column: {}",
-                field.name()
-            )));
-        }
-    }
-    Ok(())
-}
