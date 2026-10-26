@@ -998,6 +998,18 @@ fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
         {
             return true;
         }
+        // Arrow CSV/JSON writers may flatten I/O errors to string-only ArrowError values.
+        if current
+            .downcast_ref::<datafusion::arrow::error::ArrowError>()
+            .is_some_and(|arrow| {
+                let message = arrow.to_string().to_ascii_lowercase();
+                message.contains("broken pipe")
+                    || message.contains("pipe is being closed")
+                    || message.contains("pipe has been ended")
+            })
+        {
+            return true;
+        }
         source = current.source();
     }
     false
