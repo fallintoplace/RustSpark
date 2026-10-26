@@ -430,7 +430,9 @@ async fn plan_read_only_query(
         let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
         session.sql_read_only_with_params(query, params).await?
     } else if !args.params.is_empty() {
-        session.sql_read_only_with_params(query, args.params.clone()).await?
+        session
+            .sql_read_only_with_params(query, args.params.clone())
+            .await?
     } else {
         session.sql_read_only(query).await?
     };
