@@ -274,7 +274,8 @@ impl RustSparkSession {
         // for a row preserved only on the left. An explicit projection avoids
         // that behavior and gives all join types the same output column order.
         use std::fmt::Write as _;
-        let projected_fields = left_frame.schema().fields().len() + right_frame.schema().fields().len();
+        let projected_fields =
+            left_frame.schema().fields().len() + right_frame.schema().fields().len();
         let mut projection = String::with_capacity(projected_fields * 32);
         let mut predicates = String::with_capacity(columns.len() * 64);
         for column in columns {
