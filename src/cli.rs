@@ -86,6 +86,12 @@ struct Args {
     )]
     describe: bool,
 
+    #[arg(
+        long = "explain",
+        conflicts_with_all = ["describe", "max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    explain: bool,
+
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
@@ -436,6 +442,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("{}\t{}\t{nullability}", field.name(), field.data_type());
         }
+    } else if args.explain {
+        dataframe.explain(false, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
