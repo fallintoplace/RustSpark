@@ -71,7 +71,5 @@ fn rejects_repeated_cache_targets_case_insensitively() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Duplicate cached table")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Duplicate cached table"));
 }
