@@ -78,3 +78,46 @@ fn rejects_single_file_mode_without_export() -> TestResult {
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires an output format"));
     Ok(())
 }
+
+#[test]
+fn refuses_to_export_over_the_source_file() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let csv = dir.path().join("input.csv");
+    let contents = b"value\n1\n2\n";
+    std::fs::write(&csv, contents)?;
+    for format in ["--output-csv", "--output-arrow"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+            .arg("--csv")
+            .arg(&csv)
+            .args(["--sql", "SELECT * FROM data"])
+            .arg(format)
+            .arg(&csv)
+            .arg("--output-single-file")
+            .output()?;
+        assert!(!output.status.success(), "{format}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("must not overwrite"),
+            "{format}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&csv)?, contents);
+    }
+    Ok(())
+}
+
+#[test]
+fn refuses_to_export_over_the_sql_file() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let sql = dir.path().join("query.sql");
+    std::fs::write(&sql, "SELECT 42 AS value")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .arg("--sql-file")
+        .arg(&sql)
+        .arg("--output-json")
+        .arg(&sql)
+        .arg("--output-single-file")
+        .output()?;
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(&sql)?, "SELECT 42 AS value");
+    Ok(())
+}
