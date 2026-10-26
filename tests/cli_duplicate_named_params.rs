@@ -8,9 +8,12 @@ fn rejects_duplicate_parameters_before_registering_inputs() {
         .arg("--csv")
         .arg(&missing)
         .args([
-            "--named-param", "limit=int64:2",
-            "--named-param", "limit=int64:3",
-            "--sql", "SELECT 1",
+            "--named-param",
+            "limit=int64:2",
+            "--named-param",
+            "limit=int64:3",
+            "--sql",
+            "SELECT 1",
         ])
         .output()
         .unwrap();
