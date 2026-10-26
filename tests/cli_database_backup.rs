@@ -120,7 +120,10 @@ fn backup_copies_many_independent_parquet_parts() -> TestResult {
         .ok_or("missing Parquet part")??
         .path();
     for index in 1..=12 {
-        fs::copy(&original, directory.join(format!("extra-{index:02}.parquet")))?;
+        fs::copy(
+            &original,
+            directory.join(format!("extra-{index:02}.parquet")),
+        )?;
     }
     assert_ok(backup(&db, &snapshot))?;
     let output = sql(&snapshot, "SELECT COUNT(*) AS count FROM events");
