@@ -2,7 +2,8 @@ use datafusion::common::ScalarValue;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn extracts_only_one_bound_scalar_and_rejects_writes() -> Result<(), Box<dyn std::error::Error>> {
+async fn extracts_only_one_bound_scalar_and_rejects_writes()
+-> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     let params = || vec![ScalarValue::Int64(Some(23))];
     assert_eq!(
