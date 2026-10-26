@@ -30,6 +30,26 @@ impl RustSparkSession {
         }
     }
 
+    /// List registered tables with fully qualified catalog.schema.table names.
+    ///
+    /// Results are sorted for stable inspection and CLI integration.
+    pub fn list_tables(&self) -> Vec<String> {
+        let mut tables = Vec::new();
+        for catalog_name in self.context.catalog_names() {
+            if let Some(catalog) = self.context.catalog(&catalog_name) {
+                for schema_name in catalog.schema_names() {
+                    if let Some(schema) = catalog.schema(&schema_name) {
+                        for table_name in schema.table_names() {
+                            tables.push(format!("{catalog_name}.{schema_name}.{table_name}"));
+                        }
+                    }
+                }
+            }
+        }
+        tables.sort();
+        tables
+    }
+
     /// Create a lazy DataFrame from in-memory Arrow record batches.
     pub fn read_batches(
         &self,
@@ -60,6 +80,31 @@ impl RustSparkSession {
         self.register_dataframe(name, dataframe)
     }
 
+    /// Register a lazy SQL view with typed positional or named parameters.
+    ///
+    /// Parameter values are bound when the view is planned, not interpolated
+    /// into the SQL string.
+    pub async fn register_sql_view_with_params(
+        &self,
+        name: &str,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<()> {
+        let dataframe = self.sql_with_params(query, params).await?;
+        self.register_dataframe(name, dataframe)
+    }
+
+    /// Materialize a parameterized SQL query once and register its cached result.
+    pub async fn register_materialized_sql_view_with_params(
+        &self,
+        name: &str,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<()> {
+        let dataframe = self.sql_with_params(query, params).await?.cache().await?;
+        self.register_dataframe(name, dataframe)
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
@@ -69,6 +114,26 @@ impl RustSparkSession {
 
         self.context.register_table(table, dataframe.into_view())?;
         Ok(())
+    }
+
+    /// Return column names, data types and nullability without scanning rows.
+    pub async fn describe_table(
+        &self,
+        name: &str,
+    ) -> Result<Vec<(String, datafusion::arrow::datatypes::DataType, bool)>> {
+        let dataframe = self.table(name).await?;
+        Ok(dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    field.name().to_owned(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect())
     }
 
     /// Register a scalar user-defined function for SQL queries in this session.
@@ -89,6 +154,33 @@ impl RustSparkSession {
     /// Unregister a table or view, returning whether it existed.
     pub fn deregister_table(&self, name: &str) -> Result<bool> {
         Ok(self.context.deregister_table(name)?.is_some())
+    }
+
+    /// Rename a registered table without copying its data.
+    ///
+    /// An existing destination is never overwritten. The new registration
+    /// is rolled back if removing the original fails.
+    pub async fn rename_table(&self, source: &str, destination: &str) -> Result<()> {
+        if source == destination || self.context.table_exist(destination)? {
+            return Err(DataFusionError::Plan(format!(
+                "Destination table already exists: {destination}"
+            )));
+        }
+        let provider = self.context.table_provider(source).await?;
+        self.context.register_table(destination, provider)?;
+        match self.context.deregister_table(source) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => {
+                let _ = self.context.deregister_table(destination);
+                Err(DataFusionError::Plan(format!(
+                    "Source table disappeared while renaming: {source}"
+                )))
+            }
+            Err(error) => {
+                let _ = self.context.deregister_table(destination);
+                Err(error)
+            }
+        }
     }
 
     /// Materialize a registered table in memory for repeated queries.
@@ -117,6 +209,20 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Union registered tables with matching schemas by column position.
+    ///
+    /// Duplicate rows are preserved. All sources must have compatible schemas.
+    pub async fn union_tables(&self, names: &[&str]) -> Result<DataFrame> {
+        let (first, rest) = names.split_first().ok_or_else(|| {
+            DataFusionError::Plan("union_tables requires at least one table".into())
+        })?;
+        let mut dataframe = self.table(first).await?;
+        for name in rest {
+            dataframe = dataframe.union(self.table(name).await?)?;
+        }
+        Ok(dataframe)
+    }
+
     /// Union registered tables by column name, filling missing columns with NULL.
     ///
     /// Unlike positional unions, column order may differ and new columns
@@ -132,8 +238,32 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
+    /// Union registered tables by column name, removing duplicate rows.
+    ///
+    /// Different column orders and missing columns are supported.
+    pub async fn union_tables_distinct_by_name(&self, names: &[&str]) -> Result<DataFrame> {
+        self.union_tables_by_name(names).await?.distinct()
+    }
+
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         self.context.sql(query).await
+    }
+
+    /// Plan a paginated query without collecting all its rows.
+    ///
+    /// Use ORDER BY in the SQL query for deterministic pages.
+    pub async fn sql_page(&self, query: &str, offset: usize, limit: usize) -> Result<DataFrame> {
+        if limit == 0 {
+            return Err(DataFusionError::Plan(
+                "SQL page limit must be positive".into(),
+            ));
+        }
+        if offset.checked_add(limit).is_none() {
+            return Err(DataFusionError::Plan(
+                "SQL page offset plus limit overflows".into(),
+            ));
+        }
+        self.sql(query).await?.limit(offset, Some(limit))
     }
 
     /// Plan SQL with typed positional or named parameters.
@@ -146,6 +276,18 @@ impl RustSparkSession {
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<DataFrame> {
         self.sql(query).await?.with_param_values(params)
+    }
+
+    /// Plan only read-only SQL, rejecting DDL, DML and session statements.
+    ///
+    /// This is not a replacement for table-level authorization or process isolation.
+    pub async fn sql_read_only(&self, query: &str) -> Result<DataFrame> {
+        use datafusion::execution::context::SQLOptions;
+        let options = SQLOptions::new()
+            .with_allow_ddl(false)
+            .with_allow_dml(false)
+            .with_allow_statements(false);
+        self.context.sql_with_options(query, options).await
     }
 }
 
