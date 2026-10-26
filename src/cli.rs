@@ -1,6 +1,7 @@
 use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use clap::{ArgGroup, Parser};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
@@ -51,6 +52,9 @@ struct Args {
 
     #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
     csv_comment: Option<u8>,
+
+    #[arg(long = "csv-schema", value_name = "NAME:TYPE,...", value_parser = parse_csv_schema)]
+    csv_schema: Option<Schema>,
 
     #[arg(long = "csv-schema-rows", value_name = "ROWS", value_parser = parse_csv_schema_rows)]
     csv_schema_rows: Option<usize>,
@@ -151,6 +155,39 @@ fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     Ok((name, path))
 }
 
+fn parse_csv_schema(value: &str) -> Result<Schema, String> {
+    let mut fields = Vec::new();
+    let mut names = HashSet::new();
+    for entry in value.split(',') {
+        let (name, kind) = entry
+            .split_once(':')
+            .ok_or_else(|| "CSV schema needs NAME:TYPE entries".to_owned())?;
+        let valid_first = name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+        if !valid_first
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("CSV schema column names must be SQL identifiers".into());
+        }
+        if !names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate CSV schema column: {name}"));
+        }
+        let data_type = match kind.to_ascii_lowercase().as_str() {
+            "utf8" | "string" => DataType::Utf8,
+            "int64" | "bigint" => DataType::Int64,
+            "float64" | "double" => DataType::Float64,
+            "bool" | "boolean" => DataType::Boolean,
+            _ => return Err(format!("Unsupported CSV type: {kind}")),
+        };
+        fields.push(Field::new(name, data_type, true));
+    }
+    Ok(Schema::new(fields))
+}
+
 fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -179,6 +216,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
         .newlines_in_values(args.csv_multiline)
         .truncated_rows(args.csv_allow_short_rows)
         .file_extension(args.csv_extension.as_deref().unwrap_or(".csv"));
+    let options = if let Some(schema) = args.csv_schema.as_ref() {
+        options.schema(schema)
+    } else {
+        options
+    };
     let options = if let Some(escape) = args.csv_escape {
         options.escape(escape)
     } else {
@@ -285,6 +327,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
+    }
+    if args.csv_schema.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-schema requires a CSV input".into());
     }
     if args.csv_schema_rows.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-schema-rows requires a CSV input".into());
