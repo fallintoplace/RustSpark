@@ -1,7 +1,4 @@
-use datafusion::{
-    arrow::array::Int64Array,
-    common::ScalarValue,
-};
+use datafusion::{arrow::array::Int64Array, common::ScalarValue};
 use rustspark::RustSparkSession;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -24,7 +21,11 @@ async fn binds_positional_sql_parameters() -> TestResult {
         .await?
         .collect()
         .await?;
-    let counts = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let counts = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert_eq!(counts.value(0), 1);
 
     // A supplied value is treated as data, never as SQL syntax.
@@ -36,7 +37,11 @@ async fn binds_positional_sql_parameters() -> TestResult {
         .await?
         .collect()
         .await?;
-    let counts = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let counts = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert_eq!(counts.value(0), 0);
     Ok(())
 }
