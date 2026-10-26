@@ -37,3 +37,12 @@ fn explain_rejects_export_flags() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn explain_rejects_describe_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(["--sql", "SELECT 1", "--describe", "--explain"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

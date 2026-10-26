@@ -1,6 +1,7 @@
-use std::{collections::HashSet, io::Read, path::PathBuf};
+use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 use rustspark::RustSparkSession;
@@ -52,6 +53,9 @@ struct Args {
     #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
     csv_comment: Option<u8>,
 
+    #[arg(long = "csv-schema", value_name = "NAME:TYPE,...", value_parser = parse_csv_schema)]
+    csv_schema: Option<Schema>,
+
     #[arg(long = "csv-schema-rows", value_name = "ROWS", value_parser = parse_csv_schema_rows)]
     csv_schema_rows: Option<usize>,
 
@@ -77,8 +81,14 @@ struct Args {
     sql_file: Option<PathBuf>,
 
     #[arg(
-        long = "explain",
+        long = "describe",
         conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    describe: bool,
+
+    #[arg(
+        long = "explain",
+        conflicts_with_all = ["describe", "max_rows", "output_parquet", "output_csv", "output_json"]
     )]
     explain: bool,
 
@@ -157,6 +167,39 @@ fn parse_named_table(value: &str) -> Result<(&str, &str), String> {
     Ok((name, path))
 }
 
+fn parse_csv_schema(value: &str) -> Result<Schema, String> {
+    let mut fields = Vec::new();
+    let mut names = HashSet::new();
+    for entry in value.split(',') {
+        let (name, kind) = entry
+            .split_once(':')
+            .ok_or_else(|| "CSV schema needs NAME:TYPE entries".to_owned())?;
+        let valid_first = name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+        if !valid_first
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("CSV schema column names must be SQL identifiers".into());
+        }
+        if !names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate CSV schema column: {name}"));
+        }
+        let data_type = match kind.to_ascii_lowercase().as_str() {
+            "utf8" | "string" => DataType::Utf8,
+            "int64" | "bigint" => DataType::Int64,
+            "float64" | "double" => DataType::Float64,
+            "bool" | "boolean" => DataType::Boolean,
+            _ => return Err(format!("Unsupported CSV type: {kind}")),
+        };
+        fields.push(Field::new(name, data_type, true));
+    }
+    Ok(Schema::new(fields))
+}
+
 fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -185,6 +228,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
         .newlines_in_values(args.csv_multiline)
         .truncated_rows(args.csv_allow_short_rows)
         .file_extension(args.csv_extension.as_deref().unwrap_or(".csv"));
+    let options = if let Some(schema) = args.csv_schema.as_ref() {
+        options.schema(schema)
+    } else {
+        options
+    };
     let options = if let Some(escape) = args.csv_escape {
         options.escape(escape)
     } else {
@@ -242,7 +290,7 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
 }
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let args = Arc::new(Args::parse());
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some());
@@ -263,7 +311,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         config
     };
-    let session = RustSparkSession::with_config(config);
+    let session = Arc::new(RustSparkSession::with_config(config));
     if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-delimiter requires --csv".into());
     }
@@ -291,6 +339,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-no-header requires a CSV input".into());
+    }
+    if args.csv_schema.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-schema requires a CSV input".into());
     }
     if args.csv_schema_rows.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-schema-rows requires a CSV input".into());
@@ -322,15 +373,29 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     } else {
         let mut names = HashSet::new();
+        // CSV schema inference performs file I/O, so overlap it across inputs.
+        // Cap the tasks to avoid opening an unbounded number of files at once.
+        let mut csv_jobs = tokio::task::JoinSet::new();
         for mapping in &args.csv_tables {
             let (name, path) = parse_named_table(mapping)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = csv_read_options(&args);
-            session
-                .register_csv_with_options(name, path, options)
-                .await?;
+            let session = Arc::clone(&session);
+            let args = Arc::clone(&args);
+            let name = name.to_owned();
+            let path = path.to_owned();
+            csv_jobs.spawn(async move {
+                session
+                    .register_csv_with_options(&name, &path, csv_read_options(&args))
+                    .await
+            });
+            if csv_jobs.len() >= 4 {
+                csv_jobs.join_next().await.expect("CSV task exists")??;
+            }
+        }
+        while let Some(result) = csv_jobs.join_next().await {
+            result??;
         }
         for mapping in &args.parquet_tables {
             let (name, path) = parse_named_table(mapping)?;
@@ -354,9 +419,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
         }
     }
-    let query = if let Some(sql) = args.sql {
-        sql
-    } else if let Some(path) = args.sql_file {
+    let query = if let Some(sql) = args.sql.as_ref() {
+        sql.clone()
+    } else if let Some(path) = args.sql_file.as_ref() {
         if path.as_os_str() == "-" {
             let mut query = String::new();
             std::io::stdin().read_to_string(&mut query)?;
@@ -368,19 +433,28 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("clap requires either --sql or --sql-file")
     };
     let dataframe = session.sql(&query).await?;
-    if args.explain {
+    if args.describe {
+        for field in dataframe.schema().fields() {
+            let nullability = if field.is_nullable() {
+                "NULL"
+            } else {
+                "NOT NULL"
+            };
+            println!("{}\t{}\t{nullability}", field.name(), field.data_type());
+        }
+    } else if args.explain {
         dataframe.explain(false, false)?.show().await?;
-    } else if let Some(path) = args.output_parquet {
+    } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_parquet(path, DataFrameWriteOptions::new(), None)
             .await?;
-    } else if let Some(path) = args.output_csv {
+    } else if let Some(path) = args.output_csv.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_csv(path, DataFrameWriteOptions::new(), None)
             .await?;
-    } else if let Some(path) = args.output_json {
+    } else if let Some(path) = args.output_json.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_json(path, DataFrameWriteOptions::new(), None)

@@ -38,6 +38,14 @@ impl RustSparkSession {
         self.register_dataframe(table, self.read_batches(batches)?)
     }
 
+    /// Register a SQL query as a lazy view in this session.
+    ///
+    /// The query is planned now but its rows are read when the view is queried.
+    pub async fn register_sql_view(&self, name: &str, query: &str) -> Result<()> {
+        let dataframe = self.sql(query).await?;
+        self.register_dataframe(name, dataframe)
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
@@ -52,6 +60,22 @@ impl RustSparkSession {
     /// Unregister a table or view, returning whether it existed.
     pub fn deregister_table(&self, name: &str) -> Result<bool> {
         Ok(self.context.deregister_table(name)?.is_some())
+    }
+
+    /// Materialize a registered table in memory for repeated queries.
+    ///
+    /// This executes the table's plan once and keeps its contents in memory.
+    /// Use only when the result fits comfortably within the available RAM.
+    pub async fn cache_table(&self, name: &str) -> Result<()> {
+        let cached = self.table(name).await?.cache().await?;
+        let previous = self.context.deregister_table(name)?;
+        let result = self.register_dataframe(name, cached);
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            self.context.register_table(name, previous)?;
+        }
+        result
     }
 
     /// Access a registered SQL table as a lazy DataFrame.
