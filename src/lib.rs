@@ -639,10 +639,8 @@ impl RustSparkSession {
                 "union_tables requires at least one table".into(),
             ));
         }
-        let frames = futures::future::try_join_all(
-            names.iter().map(|name| self.table(name)),
-        )
-        .await?;
+        let frames =
+            futures::future::try_join_all(names.iter().map(|name| self.table(name))).await?;
         let mut frames = frames.into_iter();
         let mut dataframe = frames.next().expect("non-empty table list");
         for frame in frames {
