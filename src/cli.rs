@@ -501,6 +501,23 @@ fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
     }
 }
 
+async fn reject_duplicate_csv_headers(
+    session: &RustSparkSession,
+    name: &str,
+) -> datafusion::error::Result<()> {
+    let dataframe = session.table(name).await?;
+    let mut names = HashSet::new();
+    for field in dataframe.schema().fields() {
+        if !names.insert(field.name().to_ascii_lowercase()) {
+            return Err(datafusion::error::DataFusionError::Plan(format!(
+                "Duplicate CSV column: {}",
+                field.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
 // DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
 // Read as strings and normalize before casting to the inferred input types.
 async fn register_csv_with_null_value(
@@ -764,6 +781,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .register_csv_with_options(&args.table, csv, options)
                 .await?;
         }
+        reject_duplicate_csv_headers(&session, &args.table).await?;
     } else if let Some(parquet) = args.parquet.as_ref() {
         let options = parquet_read_options(&args);
         session
@@ -789,12 +807,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             registration_jobs.spawn(async move {
                 let options = csv_read_options(&args);
                 if let Some(marker) = args.csv_null_value.as_deref() {
-                    register_csv_with_null_value(&session, &name, &path, options, marker).await
+                    register_csv_with_null_value(&session, &name, &path, options, marker).await?;
                 } else {
                     session
                         .register_csv_with_options(&name, &path, options)
-                        .await
+                        .await?;
                 }
+                reject_duplicate_csv_headers(&session, &name).await
             });
             if registration_jobs.len() >= 4 {
                 registration_jobs
@@ -851,6 +870,25 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             result??;
         }
     }
+    let execution = execute_registered_query(&session, &args);
+    if let Some(seconds) = args.query_timeout {
+        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("SQL query timed out after {seconds} seconds"),
+                )
+            })?
+    } else {
+        execution.await
+    }
+}
+
+async fn execute_registered_query(
+    session: &RustSparkSession,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     for declaration in &args.unions_by_name {
         let (name, sources) = parse_union_by_name(declaration)?;
         let union = session.union_tables_by_name(&sources).await?;
@@ -858,19 +896,19 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     for definition in &args.sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        session.register_sql_view(name, sql).await?;
+        let dataframe = plan_query(&session, sql, &args).await?;
+        session.register_dataframe(name, dataframe)?;
     }
     for definition in &args.materialized_sql_views {
         let (name, sql) = parse_named_view(definition)?;
-        session.register_materialized_sql_view(name, sql).await?;
+        let dataframe = plan_query(&session, sql, &args).await?.cache().await?;
+        session.register_dataframe(name, dataframe)?;
     }
     let query = if let Some(sql) = args.sql.as_ref() {
         sql.clone()
     } else if let Some(path) = args.sql_file.as_ref() {
         if path.as_os_str() == "-" {
-            let mut query = String::new();
-            std::io::stdin().read_to_string(&mut query)?;
-            query
+            read_sql_stdin().await?
         } else {
             std::fs::read_to_string(path)?
         }
@@ -884,19 +922,18 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         session.cache_table(name).await?;
     }
-    let execution = execute_script(&session, &query, &args);
-    if let Some(seconds) = args.query_timeout {
-        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("SQL query timed out after {seconds} seconds"),
-                )
-            })?
-    } else {
-        execution.await
-    }
+    execute_script(session, &query, args).await
+}
+
+// Use a detached reader thread so a blocked stdin read cannot stall the query timer.
+async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut query = String::new();
+        let result = std::io::stdin().read_to_string(&mut query).map(|_| query);
+        let _ = sender.send(result);
+    });
+    Ok(receiver.await??)
 }
 
 // Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
@@ -940,6 +977,18 @@ async fn plan_query(
     Ok(dataframe)
 }
 
+fn reject_duplicate_output_fields(
+    dataframe: &datafusion::prelude::DataFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut names = HashSet::new();
+    for field in dataframe.schema().fields() {
+        if !names.insert(field.name()) {
+            return Err(format!("Duplicate output column: {}", field.name()).into());
+        }
+    }
+    Ok(())
+}
+
 fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(error);
     while let Some(current) = source {
@@ -960,6 +1009,9 @@ async fn execute_query(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dataframe = plan_query(session, query, args).await?;
+    if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
+        reject_duplicate_output_fields(&dataframe)?;
+    }
     if args.describe {
         for field in dataframe.schema().fields() {
             let nullability = if field.is_nullable() {
