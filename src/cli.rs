@@ -2,6 +2,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::common::ScalarValue;
 use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -108,6 +109,9 @@ struct Args {
 
     #[arg(long = "sql-view", value_name = "NAME=SQL")]
     sql_views: Vec<String>,
+
+    #[arg(long = "param", value_name = "TYPE:VALUE", value_parser = parse_sql_param)]
+    params: Vec<ScalarValue>,
 
     #[arg(
         long = "describe",
@@ -298,6 +302,34 @@ fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
         fields.push(Field::new(name, data_type, true));
     }
     Ok(Schema::new(fields))
+}
+
+fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
+    let (kind, raw) = value
+        .split_once(':')
+        .ok_or_else(|| "--param must use TYPE:VALUE".to_owned())?;
+    match kind.to_ascii_lowercase().as_str() {
+        "int64" | "bigint" => raw
+            .parse::<i64>()
+            .map(|number| ScalarValue::Int64(Some(number)))
+            .map_err(|_| "--param int64 needs a signed 64-bit integer".to_owned()),
+        "float64" | "double" => {
+            let number = raw
+                .parse::<f64>()
+                .map_err(|_| "--param float64 needs a number".to_owned())?;
+            if !number.is_finite() {
+                return Err("--param float64 must be finite".into());
+            }
+            Ok(ScalarValue::Float64(Some(number)))
+        }
+        "bool" | "boolean" => raw
+            .parse::<bool>()
+            .map(|value| ScalarValue::Boolean(Some(value)))
+            .map_err(|_| "--param bool must be true or false".to_owned()),
+        "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
+        "null" if raw.is_empty() => Ok(ScalarValue::Null),
+        _ => Err("--param supports int64, float64, bool, utf8, or null:".into()),
+    }
 }
 
 fn parse_csv_schema(value: &str) -> Result<Schema, String> {
@@ -731,7 +763,11 @@ async fn execute_query(
     query: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = session.sql(query).await?;
+    let dataframe = if args.params.is_empty() {
+        session.sql(query).await?
+    } else {
+        session.sql_with_params(query, args.params.clone()).await?
+    };
     if args.describe {
         for field in dataframe.schema().fields() {
             let nullability = if field.is_nullable() {
