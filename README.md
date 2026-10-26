@@ -26,6 +26,16 @@ SQL statements can be read from a file:
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
 
+Start an interactive SQL shell to run multiple statements in the same session:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --interactive
+```
+
+Enter SQL statements ending with `;`. Multi-line statements are supported.
+Use `\\q` or `.quit` to exit; SQL errors do not close the shell.
+The `--query-timeout` applies to each executed statement.
+
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
 ```sh
