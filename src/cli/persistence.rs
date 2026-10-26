@@ -8,6 +8,7 @@ use datafusion::{
     dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader,
     prelude::DataFrame,
 };
+use futures::{StreamExt, stream};
 use rustspark::RustSparkSession;
 
 use super::valid_identifier;
@@ -340,6 +341,7 @@ pub(super) async fn register_database_tables(
     let mut entries = fs::read_dir(root)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| entry.file_name());
 
+    let mut tables = Vec::new();
     for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
@@ -355,7 +357,21 @@ pub(super) async fn register_database_tables(
         if session.table_exists(name)? {
             return Err(format!("Database table '{name}' conflicts with an input table").into());
         }
-        register_saved_table(session, name, &entry.path()).await?;
+        tables.push((name.to_owned(), entry.path()));
+    }
+
+    // Each registration plans independent Parquet metadata. Keep the startup
+    // work bounded while overlapping filesystem I/O across saved tables.
+    let parallelism =
+        std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(2, 16));
+    let mut registrations = stream::iter(
+        tables
+            .iter()
+            .map(|(name, path)| register_saved_table(session, name, path)),
+    )
+    .buffer_unordered(parallelism);
+    while let Some(result) = registrations.next().await {
+        result?;
     }
     Ok(())
 }

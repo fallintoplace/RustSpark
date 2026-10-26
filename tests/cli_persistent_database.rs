@@ -67,6 +67,47 @@ fn saved_sql_table_is_queryable_from_a_new_process() -> TestResult {
 }
 
 #[test]
+fn loads_many_persisted_tables_on_startup() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().to_str().expect("UTF-8 temp path");
+    let saved = run(&[
+        "--database-dir",
+        root,
+        "--save-table",
+        "source",
+        "--sql",
+        "SELECT 17 AS value",
+    ]);
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    let part = std::fs::read_dir(dir.path().join("source"))?
+        .next()
+        .ok_or("missing Parquet part")??
+        .path();
+    for index in 0..16 {
+        let directory = dir.path().join(format!("saved_{index}"));
+        std::fs::create_dir(&directory)?;
+        std::fs::copy(
+            &part,
+            directory.join(part.file_name().ok_or("missing filename")?),
+        )?;
+    }
+    assert_row(
+        run(&[
+            "--database-dir",
+            root,
+            "--sql",
+            "SELECT (SELECT COUNT(*) FROM saved_0) + (SELECT COUNT(*) FROM saved_15)",
+        ]),
+        "2",
+    );
+    Ok(())
+}
+
+#[test]
 fn detects_name_collision_with_loaded_tables() -> TestResult {
     let dir = tempfile::tempdir()?;
     let root = dir.path().to_str().expect("UTF-8 temp path");
