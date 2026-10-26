@@ -92,6 +92,12 @@ struct Args {
     )]
     explain: bool,
 
+    #[arg(
+        long = "explain-analyze",
+        conflicts_with_all = ["describe", "explain", "max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    explain_analyze: bool,
+
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
@@ -444,6 +450,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if args.explain {
         dataframe.explain(false, false)?.show().await?;
+    } else if args.explain_analyze {
+        dataframe.explain(true, false)?.show().await?;
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe

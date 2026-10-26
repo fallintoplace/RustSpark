@@ -61,3 +61,11 @@ Inspect logical and physical query plans without running the query:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
 ```
+
+Execute a query with physical operator metrics using `--explain-analyze`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT SUM(amount) FROM data' --explain-analyze
+```
+
+Unlike `--explain`, this mode runs the query to collect execution metrics.
