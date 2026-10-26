@@ -38,7 +38,14 @@ fn invalid_schema_declarations_are_rejected() {
         "",
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-            .args(["--csv", "tests/fixtures/sales.csv", "--csv-schema", schema, "--sql", "SELECT 1"])
+            .args([
+                "--csv",
+                "tests/fixtures/sales.csv",
+                "--csv-schema",
+                schema,
+                "--sql",
+                "SELECT 1",
+            ])
             .output()
             .unwrap();
         assert!(!output.status.success(), "{schema}");
