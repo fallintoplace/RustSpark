@@ -61,3 +61,11 @@ Inspect logical and physical query plans without running the query:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
 ```
+
+Set an execution deadline (in seconds) for query planning, running, and exporting:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM data' --query-timeout 30
+```
+
+The timeout starts after input registration. Exports interrupted by the deadline may leave incomplete output files.

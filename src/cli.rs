@@ -95,6 +95,9 @@ struct Args {
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
+    #[arg(long = "query-timeout", value_name = "SECONDS", value_parser = parse_query_timeout)]
+    query_timeout: Option<u64>,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
@@ -257,6 +260,16 @@ fn json_read_options(array: bool, schema_rows: Option<usize>) -> JsonReadOptions
     } else {
         options
     }
+}
+
+fn parse_query_timeout(value: &str) -> Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "--query-timeout requires a positive integer in seconds".to_owned())?;
+    if seconds == 0 {
+        return Err("--query-timeout must be greater than zero".into());
+    }
+    Ok(seconds)
 }
 
 fn parse_batch_size(value: &str) -> Result<usize, String> {
@@ -432,7 +445,27 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         unreachable!("clap requires either --sql or --sql-file")
     };
-    let dataframe = session.sql(&query).await?;
+    let execution = execute_query(&session, &query, &args);
+    if let Some(seconds) = args.query_timeout {
+        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("SQL query timed out after {seconds} seconds"),
+                )
+            })?
+    } else {
+        execution.await
+    }
+}
+
+async fn execute_query(
+    session: &RustSparkSession,
+    query: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dataframe = session.sql(query).await?;
     if args.describe {
         for field in dataframe.schema().fields() {
             let nullability = if field.is_nullable() {
