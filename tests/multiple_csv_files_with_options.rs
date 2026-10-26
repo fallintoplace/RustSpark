@@ -8,7 +8,8 @@ use datafusion::prelude::CsvReadOptions;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn multi_file_csv_respects_shared_schema_and_delimiter() -> Result<(), Box<dyn std::error::Error>> {
+async fn multi_file_csv_respects_shared_schema_and_delimiter()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let first = dir.path().join("first.csv");
     let second = dir.path().join("second.csv");
@@ -43,7 +44,11 @@ async fn multi_file_csv_respects_shared_schema_and_delimiter() -> Result<(), Box
         .await?
         .collect()
         .await?;
-    let total = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    let total = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert_eq!(total.value(0), 30);
     assert!(
         session
