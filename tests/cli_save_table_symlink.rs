@@ -1,6 +1,7 @@
 #[cfg(unix)]
 #[test]
-fn save_table_rejects_dangling_symlink_without_replacing_it() -> Result<(), Box<dyn std::error::Error>> {
+fn save_table_rejects_dangling_symlink_without_replacing_it()
+-> Result<(), Box<dyn std::error::Error>> {
     use std::{fs, os::unix::fs::symlink, process::Command};
 
     let directory = tempfile::tempdir()?;
