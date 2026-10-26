@@ -359,6 +359,40 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
+    /// Select and reorder columns from a registered table without reading its rows.
+    ///
+    /// Names must exist and cannot repeat (case-insensitively). At least one
+    /// column must be selected. The source table remains unchanged.
+    pub async fn select_columns(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        use std::collections::HashSet;
+
+        if columns.is_empty() {
+            return Err(DataFusionError::Plan(
+                "select_columns requires at least one column".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        let mut seen = HashSet::new();
+        for &name in columns {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate selected column: {name}"
+                )));
+            }
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name().as_str() == name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown selected column: {name}"
+                )));
+            }
+        }
+        dataframe.select_columns(columns)
+    }
+
     /// Drop rows containing NULL values, like Spark DataFrame.na.drop.
     ///
     /// An empty column list checks every column. Any drops rows with at
