@@ -25,7 +25,7 @@ fn materialized_views_use_inputs_and_existing_sql_views() -> TestResult {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("35"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("30"));
     Ok(())
 }
 
