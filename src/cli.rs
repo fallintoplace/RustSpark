@@ -73,6 +73,9 @@ struct Args {
     #[arg(long = "json-schema-rows", value_name = "ROWS", value_parser = parse_json_schema_rows)]
     json_schema_rows: Option<usize>,
 
+    #[arg(long = "json-extension", value_name = ".EXT", value_parser = parse_file_extension)]
+    json_extension: Option<String>,
+
     #[arg(long = "json-array")]
     json_array: bool,
 
@@ -334,6 +337,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
 
 fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
     let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+    let options = if let Some(extension) = args.json_extension.as_deref() {
+        options.file_extension(extension)
+    } else {
+        options
+    };
     let options = if let Some(schema) = args.json_schema.as_ref() {
         options.schema(schema)
     } else {
@@ -492,6 +500,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema-rows requires a JSON input".into());
+    }
+    if args.json_extension.is_some() && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-extension requires a JSON input".into());
     }
     if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-array requires a JSON input".into());
