@@ -27,7 +27,10 @@ fn parquet_part(directory: &Path) -> Result<std::path::PathBuf, Box<dyn std::err
     Ok(fs::read_dir(directory)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "parquet"))
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "parquet")
+        })
         .ok_or("no parquet part")?)
 }
 
@@ -36,7 +39,10 @@ fn repeated_inserts_leave_old_rows_intact() -> TestResult {
     let directory = tempfile::tempdir()?;
     run_ok(directory.path(), "CREATE TABLE numbers (n BIGINT)")?;
     for n in 1..=5 {
-        run_ok(directory.path(), &format!("INSERT INTO numbers VALUES ({n})"))?;
+        run_ok(
+            directory.path(),
+            &format!("INSERT INTO numbers VALUES ({n})"),
+        )?;
     }
     run_ok(
         directory.path(),
@@ -104,10 +110,21 @@ fn staged_insert_hard_links_immutable_parts() -> TestResult {
     let _ = fs::remove_file(&probe);
     if supported {
         assert_eq!(source.dev(), linked.dev());
-        assert_eq!(source.ino(), linked.ino(), "expected metadata-only link reuse");
+        assert_eq!(
+            source.ino(),
+            linked.ino(),
+            "expected metadata-only link reuse"
+        );
     }
     let result = child.wait_with_output()?;
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(fs::read(&db.join("numbers").join(original.file_name().unwrap()))?, original_content);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read(&db.join("numbers").join(original.file_name().unwrap()))?,
+        original_content
+    );
     Ok(())
 }

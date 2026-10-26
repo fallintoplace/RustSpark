@@ -224,8 +224,10 @@ or retains the published new table. Existing immutable Parquet parts are hard-li
 snapshot when supported by the filesystem; otherwise they are copied.
 This avoids re-copying old table bytes on normal local filesystems, but
 publication still processes every part, is single-writer, and is not a full
-transaction. Do not mutate saved Parquet files in place or use tools that
-overwrite existing part names. Power-loss fsync
+transaction. Shared hard-linked parts are **not independent backups**:
+external corruption or mutation of a shared inode affects both snapshots.
+Use external backups for important data. Do not mutate saved Parquet files
+in place or use tools that overwrite existing part names. Power-loss fsync
 durability and multi-statement transactions are not guaranteed. Dropped
 tables are moved out of the catalog before removal. SQL input files are
 never deleted.
