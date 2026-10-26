@@ -5,9 +5,12 @@ fn rejects_duplicate_sql_view_names() {
     for second in ["--sql-view", "--materialized-sql-view"] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
             .args([
-                "--sql-view", "totals=SELECT 1 AS value",
-                second, "TOTALS=SELECT 2 AS value",
-                "--sql", "SELECT 1",
+                "--sql-view",
+                "totals=SELECT 1 AS value",
+                second,
+                "TOTALS=SELECT 2 AS value",
+                "--sql",
+                "SELECT 1",
             ])
             .output()
             .unwrap();
