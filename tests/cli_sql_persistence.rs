@@ -106,3 +106,66 @@ fn empty_created_table_is_queryable_after_restart() -> TestResult {
     assert_row(run(root, "SELECT COUNT(*) FROM empty_rows"), "0");
     Ok(())
 }
+
+#[test]
+fn empty_typed_table_survives_restart_and_accepts_inserts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(root, "CREATE TABLE items (id BIGINT, label VARCHAR)");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        directory
+            .path()
+            .join("items")
+            .join("part-0.parquet")
+            .is_file()
+    );
+    assert_row(run(root, "SELECT COUNT(*) FROM items"), "0");
+
+    let inserted = run(
+        root,
+        "INSERT INTO items (id, label) VALUES (1, 'first'), (2, 'second')",
+    );
+    assert!(
+        inserted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inserted.stderr)
+    );
+    assert_row(run(root, "SELECT SUM(id) FROM items"), "3");
+    Ok(())
+}
+
+#[test]
+fn create_empty_table_if_not_exists_preserves_previous_rows() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_str().expect("UTF-8 temp path");
+    let created = run(root, "CREATE TABLE items (id BIGINT)");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let inserted = run(root, "INSERT INTO items (id) VALUES (41)");
+    assert!(
+        inserted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inserted.stderr)
+    );
+
+    let existing = run(root, "CREATE TABLE IF NOT EXISTS items (other INT)");
+    assert!(
+        existing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&existing.stderr)
+    );
+    assert_row(run(root, "SELECT id FROM items"), "41");
+
+    let duplicate = run(root, "CREATE TABLE items (id BIGINT)");
+    assert!(!duplicate.status.success());
+    assert_row(run(root, "SELECT id FROM items"), "41");
+    Ok(())
+}

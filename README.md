@@ -175,6 +175,13 @@ cargo run -- --database-dir /tmp/rustspark-db \\
   --sql 'SELECT SUM(n) FROM numbers'
 ```
 
+An empty typed table can also be created and populated later:
+
+```sh
+cargo run -- --database-dir /tmp/rustspark-db \\
+  --sql 'CREATE TABLE people (id BIGINT, name VARCHAR); INSERT INTO people VALUES (1, \'Ada\');'
+```
+
 This is an experimental, local append-only store. `INSERT INTO` writes Parquet
 files; it is not a transactional database. `DROP TABLE` only removes the table
 from the running session, not from the on-disk database directory.

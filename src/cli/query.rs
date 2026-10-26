@@ -57,7 +57,6 @@ fn persistent_create_table<'a>(
     let SqlStatement::CreateTable(create) = statement.as_ref() else {
         return None;
     };
-    create.query.as_ref()?;
     Some(create)
 }
 
