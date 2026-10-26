@@ -138,11 +138,17 @@ fn closed_output_pipe_is_not_a_query_failure() -> TestResult {
             "csv",
         ])
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()?;
     let mut output = child.stdout.take().ok_or("missing child stdout")?;
     let mut first = [0u8; 1];
     output.read_exact(&mut first)?;
     drop(output);
-    assert!(child.wait()?.success());
+    let result = child.wait_with_output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     Ok(())
 }
