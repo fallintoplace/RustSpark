@@ -93,13 +93,17 @@ impl RustSparkSession {
     /// All inputs must have compatible schemas.
     pub async fn read_parquet_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
         if paths.is_empty() {
-            return Err(DataFusionError::Plan("Parquet input needs at least one file".into()));
+            return Err(DataFusionError::Plan(
+                "Parquet input needs at least one file".into(),
+            ));
         }
         let paths: Vec<&str> = paths
             .iter()
             .map(|path| file_path(path.as_ref()))
             .collect::<Result<_>>()?;
-        self.context.read_parquet(paths, ParquetReadOptions::new()).await
+        self.context
+            .read_parquet(paths, ParquetReadOptions::new())
+            .await
     }
 
     /// Register several Parquet files as one SQL table.
