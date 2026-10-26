@@ -285,18 +285,24 @@ fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn parse_delimiter(value: &str) -> Result<u8, String> {
+fn parse_ascii_csv_char(value: &str) -> Option<u8> {
     match value.as_bytes() {
-        [byte] if *byte != b'\n' && *byte != b'\r' && *byte != b'"' => Ok(*byte),
-        _ => Err("CSV delimiter must be one ASCII character other than a quote or newline".into()),
+        [byte] if *byte != b'\n' && *byte != b'\r' => Some(*byte),
+        _ => None,
     }
 }
 
+fn parse_delimiter(value: &str) -> Result<u8, String> {
+    parse_ascii_csv_char(value)
+        .filter(|byte| *byte != b'"')
+        .ok_or_else(|| {
+            "CSV delimiter must be one ASCII character other than a quote or newline".into()
+        })
+}
+
 fn parse_csv_char(value: &str) -> Result<u8, String> {
-    match value.as_bytes() {
-        [byte] if *byte != b'\n' && *byte != b'\r' => Ok(*byte),
-        _ => Err("CSV character must be one ASCII character other than newline".into()),
-    }
+    parse_ascii_csv_char(value)
+        .ok_or_else(|| "CSV character must be one ASCII character other than newline".into())
 }
 
 fn parse_csv_null_value(value: &str) -> Result<String, String> {
