@@ -12,14 +12,14 @@ use super::super::valid_identifier;
 // The database lock guarantees there is at most one writer in this directory.
 const PREFIX: &str = ".rustspark-insert-";
 
-pub(super) struct StagedInsert {
+pub(crate) struct StagedInsert {
     root: PathBuf,
     name: String,
     transaction: PathBuf,
 }
 
 impl StagedInsert {
-    pub(super) fn begin(root: &Path, name: &str) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn begin(root: &Path, name: &str) -> Result<Self, Box<dyn Error>> {
         if !valid_identifier(name) {
             return Err("Persistent INSERT requires an unquoted SQL table name".into());
         }
@@ -61,11 +61,11 @@ impl StagedInsert {
         })
     }
 
-    pub(super) fn next_dir(&self) -> PathBuf {
+    pub(crate) fn next_dir(&self) -> PathBuf {
         self.transaction.join("next")
     }
 
-    pub(super) fn discard_uncommitted(&self) {
+    pub(crate) fn discard_uncommitted(&self) {
         // After moving the old directory into 'previous', recovery must decide
         // which complete snapshot is visible. Never erase a backup here.
         if !self.transaction.join("previous").exists() && self.root.join(&self.name).is_dir() {
@@ -73,7 +73,7 @@ impl StagedInsert {
         }
     }
 
-    pub(super) fn publish(&self) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn publish(&self) -> Result<(), Box<dyn Error>> {
         let next = self.transaction.join("next");
         validate_parts(&next)?;
         sync_dir(&next)?;
@@ -109,14 +109,15 @@ fn validate_parts(root: &Path) -> Result<(), Box<dyn Error>> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if !entry.file_type()?.is_file()
-            || !path.extension().is_some_and(|ext| ext == "parquet")
-        {
+        if !entry.file_type()?.is_file() || !path.extension().is_some_and(|ext| ext == "parquet") {
             return Err(format!("Unexpected staged Parquet entry: {}", path.display()).into());
         }
         let file = fs::File::open(&path)?;
         SerializedFileReader::new(file).map_err(|error| {
-            format!("Cannot read staged Parquet file '{}': {error}", path.display())
+            format!(
+                "Cannot read staged Parquet file '{}': {error}",
+                path.display()
+            )
         })?;
         fs::File::open(&path)?.sync_all()?;
         count += 1;
@@ -128,7 +129,7 @@ fn validate_parts(root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Run before catalog registration, while the process-exclusive DB lock is held.
-pub(super) fn recover_interrupted_inserts(root: &Path) -> Result<(), Box<dyn Error>> {
+pub(crate) fn recover_interrupted_inserts(root: &Path) -> Result<(), Box<dyn Error>> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let filename = entry.file_name();
@@ -136,7 +137,11 @@ pub(super) fn recover_interrupted_inserts(root: &Path) -> Result<(), Box<dyn Err
             continue;
         };
         if !valid_identifier(name) || !entry.file_type()?.is_dir() {
-            return Err(format!("Invalid interrupted INSERT directory: {}", entry.path().display()).into());
+            return Err(format!(
+                "Invalid interrupted INSERT directory: {}",
+                entry.path().display()
+            )
+            .into());
         }
         let transaction = entry.path();
         let original = root.join(name);

@@ -10,10 +10,11 @@ use datafusion::{
     prelude::DataFrame,
     sql::parser::{DFParser, Statement as DFStatement},
 };
-use rustspark::RustSparkSession;
 use futures::StreamExt;
+use rustspark::RustSparkSession;
 
 use super::output::is_broken_pipe;
+use super::persistence::StagedInsert;
 use super::{Args, write_arrow_ipc, write_stdout};
 
 fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
@@ -127,7 +128,10 @@ async fn execute_persistent_insert(
     table: &str,
     display_result: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+    let root = args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?;
     let temporary_table = format!("__rustspark_insert_stage_{table}");
     if session.table_exists(&temporary_table)? {
         return Err(format!("Reserved SQL staging table already exists: {temporary_table}").into());
