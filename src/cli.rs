@@ -711,6 +711,17 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_escape.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-escape requires a CSV input".into());
     }
+    let delimiter = args.csv_delimiter.unwrap_or(b',');
+    let quote = args.csv_quote.unwrap_or(b'"');
+    if args
+        .csv_comment
+        .is_some_and(|comment| comment == delimiter || comment == quote)
+    {
+        return Err("--csv-comment must differ from the CSV delimiter and quote".into());
+    }
+    if args.csv_escape == Some(delimiter) {
+        return Err("--csv-escape must differ from the CSV delimiter".into());
+    }
     if args.csv_multiline && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-multiline requires a CSV input".into());
     }
