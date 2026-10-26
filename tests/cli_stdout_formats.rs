@@ -84,7 +84,10 @@ fn streaming_stdout_supports_preview_pagination() -> TestResult {
         "1",
     ])?;
     assert_success(&output);
-    assert_eq!(String::from_utf8(output.stdout)?, "city,amount\nBerlin,10\n");
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "city,amount\nBerlin,10\n"
+    );
     Ok(())
 }
 
