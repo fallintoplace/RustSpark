@@ -719,6 +719,44 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
+    /// Sort rows by multiple named columns using Spark-like NULL ordering.
+    ///
+    /// A true direction means ascending with NULLs first; false means
+    /// descending with NULLs last. Sorts are lazy and do not mutate the table.
+    /// Add a unique tie-breaker for deterministic order among equal keys.
+    pub async fn sort_rows(&self, table: &str, order: &[(&str, bool)]) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::HashSet;
+
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "sort_rows requires at least one key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        let mut seen = HashSet::new();
+        let mut sort_exprs = Vec::new();
+        for &(name, ascending) in order {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate sort column: {name}"
+                )));
+            }
+            if !dataframe
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name().as_str() == name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown sort column: {name}"
+                )));
+            }
+            sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
+        }
+        dataframe.sort(sort_exprs)
+    }
+
     /// Union SQL query results by column position.
     ///
     /// Each query must return a compatible schema. Duplicate rows remain.
