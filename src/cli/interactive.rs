@@ -84,6 +84,23 @@ async fn execute_interactive_statement(
     }
 }
 
+async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str) {
+    // Invalid SQL is reported without terminating the interactive session.
+    let statements = match DFParser::parse_sql(sql) {
+        Ok(statements) => statements,
+        Err(error) => {
+            eprintln!("SQL error: {error}");
+            return;
+        }
+    };
+    for statement in statements {
+        let query = statement.to_string();
+        if let Err(error) = execute_interactive_statement(session, args, &query).await {
+            eprintln!("SQL error: {error}");
+        }
+    }
+}
+
 /// Run SQL statements in one session so views and DDL survive between prompts.
 pub(super) async fn run_interactive(
     session: &RustSparkSession,
@@ -157,24 +174,8 @@ pub(super) async fn run_interactive(
             continue;
         }
 
-        // The DataFusion parser understands SQL quotes and comments. An invalid
-        // statement is reported without terminating the interactive process.
-        let statements = match DFParser::parse_sql(&pending) {
-            Ok(statements) => statements,
-            Err(error) => {
-                eprintln!("SQL error: {error}");
-                pending.clear();
-                continue;
-            }
-        };
-        pending.clear();
-        for statement in statements {
-            let query = statement.to_string();
-            let result = execute_interactive_statement(session, args, &query).await;
-            if let Err(error) = result {
-                eprintln!("SQL error: {error}");
-            }
-        }
+        let query = std::mem::take(&mut pending);
+        execute_pending_sql(session, args, &query).await;
     }
 
     if !pending.trim().is_empty() {
