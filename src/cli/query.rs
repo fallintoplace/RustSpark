@@ -10,6 +10,7 @@ use datafusion::{
     sql::parser::{DFParser, Statement as DFStatement},
 };
 use rustspark::RustSparkSession;
+use futures::StreamExt;
 
 use super::output::is_broken_pipe;
 use super::{Args, write_arrow_ipc, write_stdout};
@@ -46,10 +47,15 @@ pub(super) async fn execute_script(
         }
         validate_persistent_table_name(&statement, args)?;
         let dropped = persistent_drop_table(&statement, args)?;
-        plan_query(session, &statement.to_string(), args)
+        // Execute DML and evaluate intermediate SELECTs without retaining rows.
+        // Collecting an unused SELECT can exhaust memory before the final query.
+        let mut stream = plan_query(session, &statement.to_string(), args)
             .await?
-            .collect()
+            .execute_stream()
             .await?;
+        while let Some(batch) = stream.next().await {
+            batch?;
+        }
         persist_created_table(session, &statement, args).await?;
         persist_dropped_table(dropped, args)?;
     }
