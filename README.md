@@ -26,6 +26,16 @@ SQL statements can be read from a file:
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
 
+Treat a literal CSV token as NULL, including tokens with regex punctuation:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --csv-null-value NA --sql 'SELECT COUNT(city) FROM data'
+```
+
+`--csv-null-value` matches the entire field literally (not as a regular expression).
+It normalizes missing values before casting to inferred column types. This mode
+may read more data than the regular CSV path, so use it only when needed.
+
 Use a custom CSV delimiter with `--csv-delimiter`:
 
 ```sh
@@ -60,6 +70,14 @@ cargo run -- --csv tests/fixtures/sales.csv --cache-table data --sql 'SELECT SUM
 
 The `--cache-table` flag can be repeated for distinct tables.
 
+Print only the number of rows returned by a query:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data WHERE amount >= 10' --count-only
+```
+
+This counts the query result rows, not the rows in its source tables.
+
 Standalone SQL without a file also works:
 
 ```sh
@@ -72,7 +90,7 @@ Provide column types to avoid CSV schema inference:
 cargo run -- --csv tests/fixtures/sales.csv --csv-schema 'city:utf8,amount:int64' --sql 'SELECT SUM(amount) FROM data'
 ```
 
-Supported types: `utf8`, `int64`, `float64`, `bool` (and `string`, `bigint`, `double`, `boolean` aliases). Named CSV inputs share this schema.
+Supported types: `utf8`, signed integers `int8`/`int16`/`int32`/`int64`, unsigned integers `uint8`/`uint16`/`uint32`/`uint64`, `float32`/`float64`, `bool`, and `date32`. Aliases include `string`, `tinyint`, `smallint`, `int`, `bigint`, `float`, `double`, `boolean`, and `date`. Named CSV inputs share this schema.
 
 Inspect query output columns without executing the query:
 
@@ -85,6 +103,14 @@ Inspect logical and physical query plans without running the query:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
 ```
+
+Set an execution deadline (in seconds) for query planning, running, and exporting:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT COUNT(*) FROM data' --query-timeout 30
+```
+
+The timeout starts after input registration. Exports interrupted by the deadline may leave incomplete output files.
 
 Execute a query with physical operator metrics using `--explain-analyze`:
 
