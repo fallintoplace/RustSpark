@@ -76,3 +76,43 @@ fn rejects_materialized_view_name_collisions() -> TestResult {
     assert!(!output.status.success());
     Ok(())
 }
+
+#[test]
+fn view_declarations_bind_named_parameters() -> TestResult {
+    let output = run(&[
+        "--csv",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.csv"),
+        "--sql-view",
+        "filtered=SELECT amount FROM data WHERE amount > $minimum",
+        "--named-param",
+        "minimum=int64:10",
+        "--sql",
+        "SELECT COUNT(*) FROM filtered",
+    ])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1"));
+    Ok(())
+}
+
+#[test]
+fn materialized_views_bind_positional_parameters() -> TestResult {
+    let output = run(&[
+        "--materialized-sql-view",
+        "constant=SELECT $1 AS value",
+        "--param",
+        "int64:42",
+        "--sql",
+        "SELECT value FROM constant",
+    ])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("42"));
+    Ok(())
+}
