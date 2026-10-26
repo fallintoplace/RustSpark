@@ -10,11 +10,20 @@ fn inline_and_file_sql_produce_the_same_result() -> Result<(), Box<dyn std::erro
         .args(["--sql", query, "--stdout-format", "json"])
         .output()?;
     let file = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .arg("--sql-file").arg(&path)
+        .arg("--sql-file")
+        .arg(&path)
         .args(["--stdout-format", "json"])
         .output()?;
-    assert!(inline.status.success(), "{}", String::from_utf8_lossy(&inline.stderr));
-    assert!(file.status.success(), "{}", String::from_utf8_lossy(&file.stderr));
+    assert!(
+        inline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inline.stderr)
+    );
+    assert!(
+        file.status.success(),
+        "{}",
+        String::from_utf8_lossy(&file.stderr)
+    );
     assert_eq!(inline.stdout, file.stdout);
     assert_eq!(String::from_utf8(inline.stdout)?.trim(), r#"{"answer":42}"#);
     Ok(())
