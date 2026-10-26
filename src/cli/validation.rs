@@ -106,12 +106,10 @@ pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::er
     if args.csv_extension.is_some() && !has_csv_input(args) {
         return Err("--csv-extension requires a CSV input".into());
     }
-    if args.parquet_extension.is_some() && !has_parquet_input(args)
-    {
+    if args.parquet_extension.is_some() && !has_parquet_input(args) {
         return Err("--parquet-extension requires a Parquet input".into());
     }
-    if args.parquet_partitions.is_some() && !has_parquet_input(args)
-    {
+    if args.parquet_partitions.is_some() && !has_parquet_input(args) {
         return Err("--parquet-partitions requires a Parquet input".into());
     }
     if args.csv_quote.is_some() && !has_csv_input(args) {
