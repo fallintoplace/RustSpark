@@ -5,6 +5,36 @@ use rustspark::RustSparkSession;
 
 use super::valid_identifier;
 
+/**
+ * Hold an OS-owned lock for the entire lifetime of a local database session.
+ *
+ * The lock file is intentionally persistent: removing it could let a second
+ * process lock a different inode while another process is still writing.
+ * The OS releases the lock on process exit, including abnormal termination.
+ */
+pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
+    fs::create_dir_all(root)?;
+    let lock_path = root.join(".rustspark.lock");
+    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+        if !metadata.file_type().is_file() {
+            return Err("Database lock path must be a regular file".into());
+        }
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    file.try_lock().map_err(|error| {
+        format!(
+            "Cannot lock database directory '{}': {error}. Another RustSpark process may be using it",
+            root.display()
+        )
+    })?;
+    Ok(file)
+}
+
 /// Load only complete, valid table directories. Hidden staging directories and
 /// symlinks are not part of the on-disk catalog.
 pub(super) async fn register_database_tables(
