@@ -370,7 +370,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dataframe = session.sql(&query).await?;
     if args.describe {
         for field in dataframe.schema().fields() {
-            let nullability = if field.is_nullable() { "NULL" } else { "NOT NULL" };
+            let nullability = if field.is_nullable() {
+                "NULL"
+            } else {
+                "NOT NULL"
+            };
             println!("{}\t{}\t{nullability}", field.name(), field.data_type());
         }
     } else if let Some(path) = args.output_parquet {
