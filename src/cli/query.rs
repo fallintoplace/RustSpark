@@ -28,6 +28,18 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     }
 }
 
+// Keep pagination overflow checks identical for streamed and displayed results.
+fn limit_for_output(
+    dataframe: DataFrame,
+    offset: usize,
+    max_rows: usize,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    offset
+        .checked_add(max_rows)
+        .ok_or("--offset plus --max-rows exceeds the supported range")?;
+    Ok(dataframe.limit(offset, Some(max_rows))?)
+}
+
 enum FileExport {
     Parquet(Box<Option<TableParquetOptions>>),
     Csv,
@@ -544,11 +556,7 @@ async fn present_query_result(
         write_arrow_ipc(dataframe, path).await?;
     } else if let Some(format) = args.stdout_format {
         let dataframe = if let Some(max_rows) = args.max_rows {
-            let offset = args.offset.unwrap_or(0);
-            offset
-                .checked_add(max_rows)
-                .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe.limit(offset, Some(max_rows))?
+            limit_for_output(dataframe, args.offset.unwrap_or(0), max_rows)?
         } else {
             dataframe
         };
@@ -561,11 +569,7 @@ async fn present_query_result(
         println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
         if let Some(offset) = args.offset {
-            offset
-                .checked_add(max_rows)
-                .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe
-                .limit(offset, Some(max_rows))?
+            limit_for_output(dataframe, offset, max_rows)?
                 .show_limit(max_rows)
                 .await?;
         } else {
