@@ -3,7 +3,9 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
+use datafusion::prelude::{
+    CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
+};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -52,6 +54,9 @@ struct Args {
 
     #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
     csv_comment: Option<u8>,
+
+    #[arg(long = "csv-null-value", value_name = "TEXT", value_parser = parse_csv_null_value)]
+    csv_null_value: Option<String>,
 
     #[arg(long = "csv-schema", value_name = "NAME:TYPE,...", value_parser = parse_csv_schema)]
     csv_schema: Option<Schema>,
@@ -150,6 +155,26 @@ fn parse_csv_char(value: &str) -> Result<u8, String> {
         [byte] if *byte != b'\n' && *byte != b'\r' => Ok(*byte),
         _ => Err("CSV character must be one ASCII character other than newline".into()),
     }
+}
+
+fn parse_csv_null_value(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.contains('\n') || value.contains('\r') {
+        Err("CSV null marker cannot be empty or contain a newline".into())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn csv_null_regex(value: &str) -> String {
+    let mut pattern = String::from("^");
+    for character in value.chars() {
+        if r"\.^$|?*+()[]{}".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('$');
+    pattern
 }
 
 fn parse_file_extension(value: &str) -> Result<String, String> {
@@ -286,6 +311,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     } else {
         options
     };
+    let options = if let Some(value) = args.csv_null_value.as_deref() {
+        options.null_regex(Some(csv_null_regex(value)))
+    } else {
+        options
+    };
     if let Some(rows) = args.csv_schema_rows {
         options.schema_infer_max_records(rows)
     } else {
@@ -305,6 +335,44 @@ fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
     } else {
         options
     }
+}
+
+// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
+// Read as strings and normalize before casting to the inferred input types.
+async fn register_csv_with_null_value(
+    session: &RustSparkSession,
+    name: &str,
+    path: impl AsRef<std::path::Path>,
+    options: CsvReadOptions<'_>,
+    marker: &str,
+) -> datafusion::error::Result<()> {
+    let inferred = session
+        .read_csv_with_options(&path, options.clone())
+        .await?;
+    let fields = inferred.schema().fields();
+    let string_schema = Schema::new(
+        fields
+            .iter()
+            .map(|field| Field::new(field.name(), DataType::Utf8, true))
+            .collect::<Vec<_>>(),
+    );
+    let raw = session
+        .read_csv_with_options(path, options.schema(&string_schema).null_regex(None))
+        .await?;
+    let expressions = fields
+        .iter()
+        .map(|field| {
+            let value = nullif(ident(field.name()), lit(marker));
+            let typed = if field.data_type() == &DataType::Utf8 {
+                value
+            } else {
+                cast(value, field.data_type().clone())
+            };
+            typed.alias(field.name())
+        })
+        .collect::<Vec<_>>();
+    session.register_dataframe(name, raw.select(expressions)?)?;
+    Ok(())
 }
 
 fn parse_batch_size(value: &str) -> Result<usize, String> {
@@ -400,6 +468,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.json_schema.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema requires a JSON input".into());
     }
+    if args.csv_null_value.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-null-value requires a CSV input".into());
+    }
     if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema-rows requires a JSON input".into());
     }
@@ -408,9 +479,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(csv) = args.csv.as_ref() {
         let options = csv_read_options(&args);
-        session
-            .register_csv_with_options(&args.table, csv, options)
-            .await?;
+        if let Some(marker) = args.csv_null_value.as_deref() {
+            register_csv_with_null_value(&session, &args.table, csv, options, marker).await?;
+        } else {
+            session
+                .register_csv_with_options(&args.table, csv, options)
+                .await?;
+        }
     } else if let Some(parquet) = args.parquet.as_ref() {
         let options = ParquetReadOptions::new()
             .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
@@ -437,9 +512,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let name = name.to_owned();
             let path = path.to_owned();
             csv_jobs.spawn(async move {
-                session
-                    .register_csv_with_options(&name, &path, csv_read_options(&args))
-                    .await
+                let options = csv_read_options(&args);
+                if let Some(marker) = args.csv_null_value.as_deref() {
+                    register_csv_with_null_value(&session, &name, &path, options, marker).await
+                } else {
+                    session
+                        .register_csv_with_options(&name, &path, options)
+                        .await
+                }
             });
             if csv_jobs.len() >= 4 {
                 csv_jobs.join_next().await.expect("CSV task exists")??;
