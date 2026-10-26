@@ -1,4 +1,11 @@
-use std::{io::Write, path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{
+    io::Write,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use datafusion::{arrow::ipc::writer::FileWriter, prelude::DataFrame};
 use futures::StreamExt;
