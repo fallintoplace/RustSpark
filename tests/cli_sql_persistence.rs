@@ -241,7 +241,7 @@ fn rejects_multi_table_drop_without_changing_saved_tables() -> TestResult {
     assert_row(run(root, "SELECT id FROM second"), "2");
     Ok(())
 }
- 
+
 #[test]
 fn drop_is_case_insensitive_for_unquoted_table_names() -> TestResult {
     let directory = tempfile::tempdir()?;
