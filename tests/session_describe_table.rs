@@ -2,9 +2,15 @@ use datafusion::arrow::datatypes::DataType;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn describes_registered_table_without_running_a_query() -> Result<(), Box<dyn std::error::Error>> {
+async fn describes_registered_table_without_running_a_query()
+-> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
-    session.register_csv("sales", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.csv")).await?;
+    session
+        .register_csv(
+            "sales",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.csv"),
+        )
+        .await?;
     let columns = session.describe_table("sales").await?;
     assert_eq!(columns.len(), 2);
     assert_eq!(columns[0].0, "city");
