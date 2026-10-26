@@ -93,7 +93,10 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
-        self.sql_with_params(query, params).await?.execute_stream().await
+        self.sql_with_params(query, params)
+            .await?
+            .execute_stream()
+            .await
     }
 
     /// Register in-memory Arrow batches for SQL queries.
