@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     process::Command,
 };
 
@@ -61,9 +61,26 @@ fn database_lock_survives_process_exit_without_staying_locked() -> TestResult {
 
 #[test]
 fn local_queries_do_not_create_database_lock_files() -> TestResult {
-    let result = run(&["--sql", "SELECT 1"]);
+    let dir = tempfile::tempdir()?;
+    let result = Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .current_dir(dir.path())
+        .args(["--sql", "SELECT 1"])
+        .output()?;
     assert!(result.status.success());
-    // File is scoped to the optional --database-dir, never the working directory.
-    let _ = File::open("Cargo.toml")?;
+    assert!(!dir.path().join(".rustspark.lock").exists());
+    Ok(())
+}
+
+#[test]
+fn rejects_directory_at_database_lock_path() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join(".rustspark.lock"))?;
+    let root = dir.path().to_str().ok_or("non UTF-8 test path")?;
+    let result = run(&["--database-dir", root, "--sql", "SELECT 42"]);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("Database lock path must be a regular file")
+    );
     Ok(())
 }
