@@ -936,8 +936,15 @@ impl RustSparkSession {
     }
 
     async fn has_rows(dataframe: DataFrame) -> Result<bool> {
-        let batches = dataframe.limit(0, Some(1))?.collect().await?;
-        Ok(batches.iter().any(|batch| batch.num_rows() > 0))
+        use futures::StreamExt;
+
+        let mut batches = dataframe.limit(0, Some(1))?.execute_stream().await?;
+        while let Some(batch) = batches.next().await {
+            if batch?.num_rows() > 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Return whether a read-only query produces at least one row.
