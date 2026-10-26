@@ -3,12 +3,23 @@ use std::path::Path;
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
     error::Result,
+    logical_expr::Expr,
     prelude::{CsvReadOptions, cast, ident, lit, nullif},
 };
 use rustspark::RustSparkSession;
 
 // DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
 // Read as strings and normalize before casting to the inferred input types.
+fn null_normalizing_projection(field: &Field, marker: &str) -> Expr {
+    let value = nullif(ident(field.name()), lit(marker));
+    let typed = if field.data_type() == &DataType::Utf8 {
+        value
+    } else {
+        cast(value, field.data_type().clone())
+    };
+    typed.alias(field.name())
+}
+
 pub(super) async fn register_csv_with_null_value(
     session: &RustSparkSession,
     name: &str,
@@ -31,15 +42,7 @@ pub(super) async fn register_csv_with_null_value(
         .await?;
     let expressions = fields
         .iter()
-        .map(|field| {
-            let value = nullif(ident(field.name()), lit(marker));
-            let typed = if field.data_type() == &DataType::Utf8 {
-                value
-            } else {
-                cast(value, field.data_type().clone())
-            };
-            typed.alias(field.name())
-        })
+        .map(|field| null_normalizing_projection(field, marker))
         .collect::<Vec<_>>();
     session.register_dataframe(name, raw.select(expressions)?)?;
     Ok(())
