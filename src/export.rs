@@ -48,9 +48,9 @@ impl RustSparkSession {
             .tempdir_in(parent)
             .map_err(external_io)?;
         let staged = temporary.path().join("result");
-        let staged_path = staged.to_str().ok_or_else(|| {
-            DataFusionError::Plan("Output path must be valid UTF-8".into())
-        })?;
+        let staged_path = staged
+            .to_str()
+            .ok_or_else(|| DataFusionError::Plan("Output path must be valid UTF-8".into()))?;
 
         let frame = self.sql_read_only(query).await?;
         let options = DataFrameWriteOptions::new();
