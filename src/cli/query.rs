@@ -268,7 +268,9 @@ async fn execute_staged_insert(
             let schema = std::sync::Arc::new(dataframe.schema().as_arrow().clone());
             let mut batches = dataframe.collect().await?;
             if batches.is_empty() {
-                batches.push(datafusion::arrow::record_batch::RecordBatch::new_empty(schema));
+                batches.push(datafusion::arrow::record_batch::RecordBatch::new_empty(
+                    schema,
+                ));
             }
             Ok(Some(session.read_batches(batches)?))
         } else {
