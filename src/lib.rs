@@ -608,6 +608,18 @@ impl RustSparkSession {
         Self::extract_scalar(self.sql_with_params(query, params).await?).await
     }
 
+    /// Read one typed scalar from parameterized, read-only SQL.
+    ///
+    /// The query must return exactly one column and one row. The result is
+    /// bounded to two rows and DDL or DML is rejected during planning.
+    pub async fn sql_read_only_scalar_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<datafusion::common::ScalarValue> {
+        Self::extract_scalar(self.sql_read_only_with_params(query, params).await?).await
+    }
+
     fn validate_page_window(offset: usize, limit: usize) -> Result<()> {
         if limit == 0 {
             return Err(DataFusionError::Plan(
