@@ -8,6 +8,7 @@ use rustspark::RustSparkSession;
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum StdoutFormat {
     Csv,
+    Tsv,
     Json,
     Arrow,
 }
