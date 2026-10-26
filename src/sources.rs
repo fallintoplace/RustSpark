@@ -163,10 +163,7 @@ fn file_paths<'a, P: AsRef<Path>>(paths: &'a [P], kind: &str) -> Result<Vec<&'a 
             "{kind} input needs at least one file"
         )));
     }
-    paths
-        .iter()
-        .map(|path| file_path(path.as_ref()))
-        .collect()
+    paths.iter().map(|path| file_path(path.as_ref())).collect()
 }
 
 fn file_path(path: &Path) -> Result<&str> {
