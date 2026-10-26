@@ -94,17 +94,13 @@ async fn fillna_reuses_a_projection_for_repeated_values() -> TestResult {
     session.register_dataframe("wide_filled", filled)?;
     assert_eq!(
         session
-            .sql_scalar(
-                "SELECT COUNT(*) FROM wide_filled WHERE a = 0 AND b = 0 AND c = 'missing'"
-            )
+            .sql_scalar("SELECT COUNT(*) FROM wide_filled WHERE a = 0 AND b = 0 AND c = 'missing'")
             .await?,
         ScalarValue::Int64(Some(1))
     );
     assert_eq!(
         session
-            .sql_scalar(
-                "SELECT COUNT(*) FROM wide_filled WHERE a = 1 AND b = 2 AND c = 'kept'"
-            )
+            .sql_scalar("SELECT COUNT(*) FROM wide_filled WHERE a = 1 AND b = 2 AND c = 'kept'")
             .await?,
         ScalarValue::Int64(Some(1))
     );
