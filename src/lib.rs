@@ -361,19 +361,9 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
-    /// Select and reorder columns from a registered table without reading its rows.
-    ///
-    /// Names must exist and cannot repeat (case-insensitively). At least one
-    /// column must be selected. The source table remains unchanged.
-    pub async fn select_columns(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
         use std::collections::HashSet;
 
-        if columns.is_empty() {
-            return Err(DataFusionError::Plan(
-                "select_columns requires at least one column".into(),
-            ));
-        }
-        let dataframe = self.table(table).await?;
         let mut seen = HashSet::new();
         for &name in columns {
             if !seen.insert(name.to_ascii_lowercase()) {
@@ -392,6 +382,21 @@ impl RustSparkSession {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Select and reorder columns from a registered table without reading its rows.
+    ///
+    /// Names must exist and cannot repeat (case-insensitively). At least one
+    /// column must be selected. The source table remains unchanged.
+    pub async fn select_columns(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        if columns.is_empty() {
+            return Err(DataFusionError::Plan(
+                "select_columns requires at least one column".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, columns)?;
         dataframe.select_columns(columns)
     }
 
