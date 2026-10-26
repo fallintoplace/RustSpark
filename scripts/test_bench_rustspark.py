@@ -34,6 +34,26 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(rows, [{"id": 2}, {"id": 1}])
 
+    def test_measure_workload_keeps_only_measured_runs(self):
+        values = [(1.0, "same", []), (2.0, "same", []), (3.0, "same", [])]
+        with mock.patch.object(bench, "execute", side_effect=values) as execute:
+            result = bench.measure_workload(
+                "unused", pathlib.Path("unused"), "group_by", "SELECT 1", "same", 2, 1, 20
+            )
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(result["samples_ms"], [2.0, 3.0])
+        self.assertEqual(result["median_ms"], 2.5)
+        self.assertEqual(result["p95_ms"], 3.0)
+        self.assertEqual(result["result_sha256"], "same")
+
+    def test_measure_workload_rejects_mismatched_output(self):
+        values = [(1.0, "first", []), (2.0, "second", [])]
+        with mock.patch.object(bench, "execute", side_effect=values):
+            with self.assertRaisesRegex(RuntimeError, "Nondeterministic"):
+                bench.measure_workload(
+                    "unused", pathlib.Path("unused"), "group_by", "SELECT 1", "first", 2, 0, 20
+                )
+
     def test_expected_answers_include_zero_matches(self):
         self.assertEqual(bench.expected_results(1)["filter_sum"], [{"total": None}])
         expected = bench.expected_results(4)
