@@ -410,24 +410,22 @@ fn parse_json_schema(value: &str) -> Result<Schema, String> {
     parse_column_schema(value, "JSON")
 }
 
-fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
+fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
-        .map_err(|_| "--csv-schema-rows requires a positive integer".to_owned())?;
+        .map_err(|_| format!("{option} requires a positive integer"))?;
     if count == 0 {
-        return Err("--csv-schema-rows must be greater than zero".into());
+        return Err(format!("{option} must be greater than zero"));
     }
     Ok(count)
 }
 
+fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--csv-schema-rows")
+}
+
 fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
-    let count = value
-        .parse::<usize>()
-        .map_err(|_| "--json-schema-rows requires a positive integer".to_owned())?;
-    if count == 0 {
-        return Err("--json-schema-rows must be greater than zero".into());
-    }
-    Ok(count)
+    parse_positive_usize(value, "--json-schema-rows")
 }
 
 fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
@@ -576,33 +574,15 @@ fn parse_memory_limit_mib(value: &str) -> Result<usize, String> {
 }
 
 fn parse_batch_size(value: &str) -> Result<usize, String> {
-    let count = value
-        .parse::<usize>()
-        .map_err(|_| "--batch-size requires a positive integer".to_owned())?;
-    if count == 0 {
-        return Err("--batch-size must be greater than zero".into());
-    }
-    Ok(count)
+    parse_positive_usize(value, "--batch-size")
 }
 
 fn parse_target_partitions(value: &str) -> Result<usize, String> {
-    let count = value
-        .parse::<usize>()
-        .map_err(|_| "--target-partitions requires a positive integer".to_owned())?;
-    if count == 0 {
-        return Err("--target-partitions must be greater than zero".into());
-    }
-    Ok(count)
+    parse_positive_usize(value, "--target-partitions")
 }
 
 fn parse_positive_rows(value: &str) -> Result<usize, String> {
-    let count = value
-        .parse::<usize>()
-        .map_err(|_| "--max-rows requires a positive integer".to_owned())?;
-    if count == 0 {
-        return Err("--max-rows must be greater than zero".into());
-    }
-    Ok(count)
+    parse_positive_usize(value, "--max-rows")
 }
 
 fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
