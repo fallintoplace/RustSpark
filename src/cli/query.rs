@@ -259,30 +259,45 @@ async fn execute_staged_insert(
     // Keep the guard alive while awaiting SQL and re-registration. Cancellation
     // cannot leave an interactive session pointed at an unpublished table.
     debug_pause_staged_insert().await;
-    let execution: Result<(), Box<dyn std::error::Error>> = async {
+    // DataFusion INSERT produces a small DML result. Materialize that result
+    // before publishing, but do not display it until the storage commit has
+    // succeeded. This also avoids re-executing the write after publication.
+    let execution: Result<Option<DataFrame>, Box<dyn std::error::Error>> = async {
+        let dataframe = plan_query(session, sql, args).await?;
         if final_statement {
-            execute_query(session, sql, args).await
+            let schema = std::sync::Arc::new(dataframe.schema().as_arrow().clone());
+            let mut batches = dataframe.collect().await?;
+            if batches.is_empty() {
+                batches.push(datafusion::arrow::record_batch::RecordBatch::new_empty(
+                    schema,
+                ));
+            }
+            Ok(Some(session.read_batches(batches)?))
         } else {
-            drain_dataframe(plan_query(session, sql, args).await?).await?;
-            Ok(())
+            drain_dataframe(dataframe).await?;
+            Ok(None)
         }
     }
     .await;
     if !session.deregister_table(table)? {
         return Err(format!("Staged table disappeared: {table}").into());
     }
-    let outcome = match execution {
-        Ok(()) => stage.commit(),
+    let (outcome, result_to_present) = match execution {
+        Ok(result) => (stage.commit(), result),
         Err(error) => {
             let _ = stage.discard();
-            Err(error)
+            (Err(error), None)
         }
     };
     // The original provider is restored on cancellation or re-registration
     // error. The disk path remains valid before and after commit.
     super::persistence::register_saved_table(session, table, &root.join(table)).await?;
     guard.active = false;
-    outcome
+    outcome?;
+    if let Some(dataframe) = result_to_present {
+        present_query_result(dataframe, args).await?;
+    }
+    Ok(())
 }
 
 fn persistent_create_table<'a>(
@@ -477,6 +492,13 @@ async fn execute_query(
     } else {
         plan_query(session, query, args).await?
     };
+    present_query_result(dataframe, args).await
+}
+
+async fn present_query_result(
+    dataframe: DataFrame,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = args.save_table.as_deref() {
         let directory = args
             .database_dir

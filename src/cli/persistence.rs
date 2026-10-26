@@ -88,6 +88,12 @@ impl StagedInsert {
     pub(super) fn commit(mut self) -> Result<(), Box<dyn Error>> {
         let new = self.staging.join("new");
         validate_table_files(&new, &self.table)?;
+        // Non-crashing failure injection checks that an INSERT never reports
+        // success before a durable publication. Release builds omit the hook.
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTSPARK_TEST_INSERT_COMMIT_ERROR").as_deref() == Ok("before_swap") {
+            return Err("Injected pre-publication INSERT failure".into());
+        }
         crash_after("before_swap");
         // The lock excludes other RustSpark processes. Between renames the
         // visible table may be absent, so recovery restores "old" on restart.
