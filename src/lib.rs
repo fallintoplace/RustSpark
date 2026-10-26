@@ -772,7 +772,11 @@ impl RustSparkSession {
 
     async fn union_registered_tables(&self, names: &[&str], by_name: bool) -> Result<DataFrame> {
         if names.is_empty() {
-            let operation = if by_name { "union_tables_by_name" } else { "union_tables" };
+            let operation = if by_name {
+                "union_tables_by_name"
+            } else {
+                "union_tables"
+            };
             return Err(DataFusionError::Plan(format!(
                 "{operation} requires at least one table"
             )));
