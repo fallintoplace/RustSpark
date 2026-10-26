@@ -38,6 +38,19 @@ pub(super) fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool 
     false
 }
 
+fn track_broken_pipe<T>(
+    result: std::io::Result<T>,
+    broken_pipe: &AtomicBool,
+) -> std::io::Result<T> {
+    if result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+    {
+        broken_pipe.store(true, Ordering::Relaxed);
+    }
+    result
+}
+
 struct PipeTrackingWriter<W> {
     inner: W,
     broken_pipe: Arc<AtomicBool>,
@@ -45,25 +58,11 @@ struct PipeTrackingWriter<W> {
 
 impl<W: Write> Write for PipeTrackingWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let result = self.inner.write(bytes);
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
-        {
-            self.broken_pipe.store(true, Ordering::Relaxed);
-        }
-        result
+        track_broken_pipe(self.inner.write(bytes), &self.broken_pipe)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.inner.flush();
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
-        {
-            self.broken_pipe.store(true, Ordering::Relaxed);
-        }
-        result
+        track_broken_pipe(self.inner.flush(), &self.broken_pipe)
     }
 }
 

@@ -14,7 +14,7 @@ fn csv_null_regex(value: &str) -> String {
     pattern
 }
 
-pub(super) fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
+fn csv_base_read_options(args: &Args) -> CsvReadOptions<'_> {
     let options = CsvReadOptions::new()
         .delimiter(args.csv_delimiter.unwrap_or(b','))
         .quote(args.csv_quote.unwrap_or(b'"'))
@@ -32,11 +32,15 @@ pub(super) fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     } else {
         options
     };
-    let options = if let Some(comment) = args.csv_comment {
+    if let Some(comment) = args.csv_comment {
         options.comment(comment)
     } else {
         options
-    };
+    }
+}
+
+pub(super) fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
+    let options = csv_base_read_options(args);
     let options = if let Some(value) = args.csv_null_value.as_deref() {
         options.null_regex(Some(csv_null_regex(value)))
     } else {

@@ -172,6 +172,110 @@ impl RustSparkSession {
         self.register_dataframe(name, dataframe)
     }
 
+    /// Join two registered tables by their shared column names (SQL USING).
+    ///
+    /// Each join key appears once in the output, unlike an ON join. FULL OUTER
+    /// JOIN coalesces the key from whichever side supplies the row. Other
+    /// non-key columns are left unchanged, even when their names collide.
+    /// The join is lazy and its key columns appear first in the output.
+    pub async fn join_tables_using(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        columns: &[&str],
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+        use std::collections::HashSet;
+
+        if columns.is_empty() || columns.iter().any(|column| column.trim().is_empty()) {
+            return Err(DataFusionError::Plan(
+                "join_tables_using requires one or more non-empty column names".into(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for column in columns {
+            if !seen.insert(column.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate join key: {column}"
+                )));
+            }
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            JoinType::Right => "RIGHT",
+            JoinType::Full => "FULL OUTER",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "join_tables_using supports inner and outer joins only".into(),
+                ));
+            }
+        };
+
+        let left_frame = self.table(left).await?;
+        let right_frame = self.table(right).await?;
+        for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
+            for column in columns {
+                if !frame
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().as_str() == *column)
+                {
+                    return Err(DataFusionError::Plan(format!(
+                        "Join column {column} does not exist in table {table}"
+                    )));
+                }
+            }
+        }
+
+        // Escape identifiers rather than interpolating arbitrary SQL text.
+        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let quote_table = |path: &str| -> Result<String> {
+            if path
+                .split('.')
+                .any(|part| part.is_empty() || part.trim() != part)
+            {
+                return Err(DataFusionError::Plan(
+                    "Join table name must be a non-empty catalog path".into(),
+                ));
+            }
+            Ok(path.split('.').map(&quote).collect::<Vec<_>>().join("."))
+        };
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+
+        // DataFusion 55's SELECT * FULL JOIN USING may return a NULL join key
+        // for a row preserved only on the left. An explicit projection avoids
+        // that behavior and gives all join types the same output column order.
+        let mut projection = Vec::new();
+        let mut predicates = Vec::new();
+        for column in columns {
+            let key = quote(column);
+            projection.push(format!(
+                "COALESCE({left_alias}.{key}, {right_alias}.{key}) AS {key}"
+            ));
+            predicates.push(format!("{left_alias}.{key} = {right_alias}.{key}"));
+        }
+        for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
+            for field in frame.schema().fields() {
+                if !seen.contains(&field.name().to_ascii_lowercase()) {
+                    let name = quote(field.name());
+                    projection.push(format!("{alias}.{name} AS {name}"));
+                }
+            }
+        }
+        let query = format!(
+            "SELECT {} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {}",
+            projection.join(", "),
+            quote_table(left)?,
+            quote_table(right)?,
+            predicates.join(" AND ")
+        );
+        self.sql(&query).await
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
@@ -326,6 +430,40 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Join two registered tables on one or more pairs of equality keys.
+    ///
+    /// The result is a lazy DataFrame. Join types such as inner, left, right,
+    /// full, semi, and anti use DataFusion's planner and execution engine.
+    /// Both key lists must be non-empty; use SQL CROSS JOIN for a Cartesian
+    /// product. For self joins, use SQL aliases to disambiguate columns.
+    pub async fn join_tables(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        if keys.is_empty()
+            || keys
+                .iter()
+                .any(|(l, r)| l.trim().is_empty() || r.trim().is_empty())
+        {
+            return Err(DataFusionError::Plan(
+                "join_tables requires at least one pair of non-empty join keys".into(),
+            ));
+        }
+
+        let left_keys: Vec<_> = keys.iter().map(|(left, _)| *left).collect();
+        let right_keys: Vec<_> = keys.iter().map(|(_, right)| *right).collect();
+        self.table(left).await?.join(
+            self.table(right).await?,
+            join_type,
+            &left_keys,
+            &right_keys,
+            None,
+        )
+    }
+
     /// Union registered tables with matching schemas by column position.
     ///
     /// Duplicate rows are preserved. All sources must have compatible schemas.
@@ -402,6 +540,30 @@ impl RustSparkSession {
     /// Column order can differ, and missing columns are filled with NULL.
     pub async fn union_sql_distinct_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
         self.union_sql_by_name(queries).await?.distinct()
+    }
+
+    /// Join registered tables using arbitrary DataFusion expressions.
+    ///
+    /// Unlike equality-key joins, predicates may be comparisons or multiple
+    /// conditions. Every expression is combined with AND. The returned plan is
+    /// lazy and supports outer, semi, and anti join types. Use qualified column
+    /// references if the two inputs have names in common.
+    pub async fn join_tables_on(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        on: impl IntoIterator<Item = datafusion::logical_expr::Expr>,
+    ) -> Result<DataFrame> {
+        let predicates: Vec<_> = on.into_iter().collect();
+        if predicates.is_empty() {
+            return Err(DataFusionError::Plan(
+                "join_tables_on requires at least one predicate; use SQL CROSS JOIN for Cartesian products".into(),
+            ));
+        }
+        self.table(left)
+            .await?
+            .join_on(self.table(right).await?, join_type, predicates)
     }
 
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {

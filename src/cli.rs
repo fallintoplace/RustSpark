@@ -412,10 +412,15 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             }
             Ok(ScalarValue::Float64(Some(number)))
         }
-        "bool" | "boolean" => raw
-            .parse::<bool>()
-            .map(|value| ScalarValue::Boolean(Some(value)))
-            .map_err(|_| "--param bool must be true or false".to_owned()),
+        "bool" | "boolean" => {
+            if raw.eq_ignore_ascii_case("true") {
+                Ok(ScalarValue::Boolean(Some(true)))
+            } else if raw.eq_ignore_ascii_case("false") {
+                Ok(ScalarValue::Boolean(Some(false)))
+            } else {
+                Err("--param bool must be true or false".to_owned())
+            }
+        }
         "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
         _ => Err(
@@ -516,13 +521,48 @@ mod persistence;
 use persistence::register_database_tables;
 
 mod query;
-use query::{execute_script, plan_query};
+use query::execute_script;
 
 mod interactive;
 use interactive::run_interactive;
 
 mod setup;
 use setup::{cache_tables, read_query, register_derived_tables};
+
+// The database catalog treats subdirectories as stored tables. Exporting a
+// CSV/JSON/Parquet directory there can make the next startup fail to load it.
+fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(root) = args.database_dir.as_deref() else {
+        return Ok(());
+    };
+    let root = root.canonicalize()?;
+    for destination in [
+        args.output_arrow.as_ref(),
+        args.output_parquet.as_ref(),
+        args.output_csv.as_ref(),
+        args.output_json.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let normalized = if destination.exists() {
+            destination.canonicalize()?
+        } else {
+            let parent = destination
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let name = destination
+                .file_name()
+                .ok_or("Output path must name a file or directory")?;
+            parent.canonicalize()?.join(name)
+        };
+        if normalized.starts_with(&root) {
+            return Err("Output path must not be inside --database-dir".into());
+        }
+    }
+    Ok(())
+}
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
@@ -545,6 +585,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    reject_database_export_collision(&args)?;
     let session = new_session(&args)?;
     validate_format_options(&args)?;
     register_inputs(&session, &args).await?;
