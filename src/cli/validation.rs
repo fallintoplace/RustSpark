@@ -116,6 +116,30 @@ pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+fn validate_csv_character_options(
+    args: &Args,
+    has_csv: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
+        return Err("--csv-quote must differ from the CSV delimiter".into());
+    }
+    if args.csv_escape.is_some() && !has_csv {
+        return Err("--csv-escape requires a CSV input".into());
+    }
+    let delimiter = args.csv_delimiter.unwrap_or(b',');
+    let quote = args.csv_quote.unwrap_or(b'"');
+    if args
+        .csv_comment
+        .is_some_and(|comment| comment == delimiter || comment == quote)
+    {
+        return Err("--csv-comment must differ from the CSV delimiter and quote".into());
+    }
+    if args.csv_escape == Some(delimiter) {
+        return Err("--csv-escape must differ from the CSV delimiter".into());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.stdout_no_header
         && !matches!(
@@ -156,23 +180,7 @@ pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::er
             "--csv-quote requires a CSV input",
         ),
     ])?;
-    if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
-        return Err("--csv-quote must differ from the CSV delimiter".into());
-    }
-    if args.csv_escape.is_some() && !csv {
-        return Err("--csv-escape requires a CSV input".into());
-    }
-    let delimiter = args.csv_delimiter.unwrap_or(b',');
-    let quote = args.csv_quote.unwrap_or(b'"');
-    if args
-        .csv_comment
-        .is_some_and(|comment| comment == delimiter || comment == quote)
-    {
-        return Err("--csv-comment must differ from the CSV delimiter and quote".into());
-    }
-    if args.csv_escape == Some(delimiter) {
-        return Err("--csv-escape must differ from the CSV delimiter".into());
-    }
+    validate_csv_character_options(args, csv)?;
     reject_missing_format_inputs([
         (
             args.csv_multiline,
