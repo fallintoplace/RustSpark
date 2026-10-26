@@ -1,4 +1,9 @@
-use std::{collections::{HashMap, HashSet}, io::Read, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};

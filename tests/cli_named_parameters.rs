@@ -3,7 +3,9 @@ use std::process::Command;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn invoke(args: &[&str]) -> Result<std::process::Output, std::io::Error> {
-    Command::new(env!("CARGO_BIN_EXE_rustspark")).args(args).output()
+    Command::new(env!("CARGO_BIN_EXE_rustspark"))
+        .args(args)
+        .output()
 }
 
 fn assert_cell(output: std::process::Output, expected: &str) -> TestResult {
@@ -26,25 +28,34 @@ fn binds_named_values_repeatedly_without_sql_interpolation() -> TestResult {
     let csv = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sales.csv");
     assert_cell(
         invoke(&[
-            "--csv", csv,
-            "--sql", "SELECT COUNT(*) FROM data WHERE amount > $minimum AND city = $city",
-            "--named-param", "city=utf8:Berlin",
-            "--named-param", "minimum=int64:15",
+            "--csv",
+            csv,
+            "--sql",
+            "SELECT COUNT(*) FROM data WHERE amount > $minimum AND city = $city",
+            "--named-param",
+            "city=utf8:Berlin",
+            "--named-param",
+            "minimum=int64:15",
         ])?,
         "1",
     )?;
     assert_cell(
         invoke(&[
-            "--csv", csv,
-            "--sql", "SELECT COUNT(*) FROM data WHERE city = $city",
-            "--named-param", "city=utf8:Berlin' OR 1=1 --",
+            "--csv",
+            csv,
+            "--sql",
+            "SELECT COUNT(*) FROM data WHERE city = $city",
+            "--named-param",
+            "city=utf8:Berlin' OR 1=1 --",
         ])?,
         "0",
     )?;
     assert_cell(
         invoke(&[
-            "--sql", "SELECT $value || $value AS doubled",
-            "--named-param", "value=utf8:a:b",
+            "--sql",
+            "SELECT CAST($value AS VARCHAR) || CAST($value AS VARCHAR) AS doubled",
+            "--named-param",
+            "value=utf8:a:b",
         ])?,
         "a:ba:b",
     )
@@ -54,10 +65,14 @@ fn binds_named_values_repeatedly_without_sql_interpolation() -> TestResult {
 fn named_values_support_other_types() -> TestResult {
     assert_cell(
         invoke(&[
-            "--sql", "SELECT CASE WHEN $x > 1.0 AND $ok THEN $message ELSE 'no' END",
-            "--named-param", "x=float64:2.5",
-            "--named-param", "ok=bool:true",
-            "--named-param", "message=utf8:great",
+            "--sql",
+            "SELECT CASE WHEN $x > 1.0 AND $ok THEN $message ELSE 'no' END",
+            "--named-param",
+            "x=float64:2.5",
+            "--named-param",
+            "ok=bool:true",
+            "--named-param",
+            "message=utf8:great",
         ])?,
         "great",
     )
@@ -82,15 +97,23 @@ fn rejects_invalid_or_conflicting_parameters() -> TestResult {
     }
 
     let duplicate = invoke(&[
-        "--sql", "SELECT $v", "--named-param", "v=int64:1",
-        "--named-param", "v=int64:2",
+        "--sql",
+        "SELECT $v",
+        "--named-param",
+        "v=int64:1",
+        "--named-param",
+        "v=int64:2",
     ])?;
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("Duplicate named parameter"));
 
     let mixed = invoke(&[
-        "--sql", "SELECT 1", "--param", "int64:1",
-        "--named-param", "v=int64:1",
+        "--sql",
+        "SELECT 1",
+        "--param",
+        "int64:1",
+        "--named-param",
+        "v=int64:1",
     ])?;
     assert!(!mixed.status.success());
     Ok(())
