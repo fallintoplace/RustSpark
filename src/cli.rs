@@ -1,27 +1,15 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{
-    collections::{HashMap, HashSet},
-    io::{Read, Write},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use clap::{ArgGroup, Parser, ValueEnum};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::arrow::ipc::writer::FileWriter;
 use datafusion::common::ScalarValue;
-use datafusion::config::TableParquetOptions;
-use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::prelude::SessionConfig;
-use datafusion::sql::parser::DFParser;
-use futures::StreamExt;
 use rustspark::RustSparkSession;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum StdoutFormat {
     Csv,
     Json,
+    Arrow,
 }
 
 #[derive(Parser)]
@@ -458,25 +446,6 @@ fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
 mod read_options;
 use read_options::{csv_read_options, json_read_options, parquet_read_options};
 
-async fn reject_duplicate_csv_headers(
-    session: &RustSparkSession,
-    name: &str,
-) -> datafusion::error::Result<()> {
-    let dataframe = session.table(name).await?;
-    let mut names = HashSet::new();
-    for field in dataframe.schema().fields() {
-        if !names.insert(field.name().to_ascii_lowercase()) {
-            return Err(datafusion::error::DataFusionError::Plan(format!(
-                "Duplicate CSV column: {}",
-                field.name()
-            )));
-        }
-    }
-    Ok(())
-}
-
-// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
-// Read as strings and normalize before casting to the inferred input types.
 mod csv_input;
 use csv_input::register_csv_with_null_value;
 
@@ -511,289 +480,38 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--max-rows")
 }
 
-fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
-    let options = DataFrameWriteOptions::new();
-    if single_file {
-        options.with_single_file_output(true)
-    } else {
-        options
-    }
-}
+mod validation;
+use validation::{validate_format_options, validate_inputs};
 
-fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(destination) = [
-        args.output_arrow.as_ref(),
-        args.output_parquet.as_ref(),
-        args.output_csv.as_ref(),
-        args.output_json.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .next() else {
-        return Ok(());
-    };
-    let destination = if let Ok(existing) = destination.canonicalize() {
-        existing
-    } else {
-        let parent = destination
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let Ok(parent) = parent.canonicalize() else {
-            return Ok(());
-        };
-        let Some(file_name) = destination.file_name() else {
-            return Ok(());
-        };
-        parent.join(file_name)
-    };
-    let mut sources: Vec<&std::path::Path> = Vec::new();
-    for path in [
-        args.csv.as_ref(),
-        args.parquet.as_ref(),
-        args.json.as_ref(),
-        args.sql_file.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if path.as_os_str() != "-" {
-            sources.push(path.as_path());
-        }
-    }
-    for mapping in args
-        .csv_tables
-        .iter()
-        .chain(&args.parquet_tables)
-        .chain(&args.json_tables)
-    {
-        let (_, path) = parse_named_table(mapping)?;
-        sources.push(std::path::Path::new(path));
-    }
-    if sources.iter().any(|source| {
-        source.canonicalize().is_ok_and(|source| {
-            destination == source || (source.is_dir() && destination.starts_with(&source))
-        })
-    }) {
-        return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
-    }
-    Ok(())
-}
+mod session;
+use session::new_session;
+
+mod registration;
+use registration::register_inputs;
+
+mod query;
+use query::{execute_script, plan_query};
+
+mod setup;
+use setup::{cache_tables, read_query, register_derived_tables};
 
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
+    let mut parameter_names = HashSet::new();
+    for (name, _) in &args.named_params {
+        if !parameter_names.insert(name.as_str()) {
+            return Err(format!("Duplicate named parameter: {name}").into());
+        }
+    }
     if let (Some(offset), Some(max_rows)) = (args.offset, args.max_rows) {
         offset
             .checked_add(max_rows)
             .ok_or("--offset plus --max-rows exceeds the supported range")?;
     }
-    let single_inputs = u8::from(args.csv.is_some())
-        + u8::from(args.parquet.is_some())
-        + u8::from(args.json.is_some());
-    let has_named = !args.csv_tables.is_empty()
-        || !args.parquet_tables.is_empty()
-        || !args.json_tables.is_empty();
-    if args.output_single_file
-        && args.output_parquet.is_none()
-        && args.output_csv.is_none()
-        && args.output_json.is_none()
-        && args.output_arrow.is_none()
-    {
-        return Err("--output-single-file requires an output format".into());
-    }
-    if single_inputs > 1 || (single_inputs > 0 && has_named) {
-        return Err("Use one unnamed input or one or more named tables".into());
-    }
-    reject_output_input_collision(&args)?;
-    if args.parquet_pushdown_filters && args.parquet.is_none() && args.parquet_tables.is_empty() {
-        return Err("--parquet-pushdown-filters requires a Parquet input".into());
-    }
-    let mut config = SessionConfig::new();
-    config.options_mut().execution.parquet.pushdown_filters = args.parquet_pushdown_filters;
-    config.options_mut().execution.parquet.reorder_filters = args.parquet_reorder_filters;
-    let config = if let Some(batch_size) = args.batch_size {
-        config.with_batch_size(batch_size)
-    } else {
-        config
-    };
-    let config = if let Some(partitions) = args.target_partitions {
-        config.with_target_partitions(partitions)
-    } else {
-        config
-    };
-    let session = if let Some(limit) = args.memory_limit_bytes {
-        let runtime = RuntimeEnvBuilder::new()
-            .with_memory_limit(limit, 1.0)
-            .build_arc()?;
-        Arc::new(RustSparkSession::with_config_and_runtime(config, runtime))
-    } else {
-        Arc::new(RustSparkSession::with_config(config))
-    };
-    if args.csv_delimiter.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-delimiter requires --csv".into());
-    }
-    if args.csv_extension.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-extension requires a CSV input".into());
-    }
-    if args.parquet_extension.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty()
-    {
-        return Err("--parquet-extension requires a Parquet input".into());
-    }
-    if args.parquet_partitions.is_some() && args.parquet.is_none() && args.parquet_tables.is_empty()
-    {
-        return Err("--parquet-partitions requires a Parquet input".into());
-    }
-    if args.csv_quote.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-quote requires a CSV input".into());
-    }
-    if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
-        return Err("--csv-quote must differ from the CSV delimiter".into());
-    }
-    if args.csv_escape.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-escape requires a CSV input".into());
-    }
-    let delimiter = args.csv_delimiter.unwrap_or(b',');
-    let quote = args.csv_quote.unwrap_or(b'"');
-    if args
-        .csv_comment
-        .is_some_and(|comment| comment == delimiter || comment == quote)
-    {
-        return Err("--csv-comment must differ from the CSV delimiter and quote".into());
-    }
-    if args.csv_escape == Some(delimiter) {
-        return Err("--csv-escape must differ from the CSV delimiter".into());
-    }
-    if args.csv_multiline && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-multiline requires a CSV input".into());
-    }
-    if args.csv_allow_short_rows && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-allow-short-rows requires a CSV input".into());
-    }
-    if args.csv_no_header && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-no-header requires a CSV input".into());
-    }
-    if args.csv_schema.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-schema requires a CSV input".into());
-    }
-    if args.csv_schema_rows.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-schema-rows requires a CSV input".into());
-    }
-    if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-comment requires a CSV input".into());
-    }
-    if args.json_schema.is_some() && args.json.is_none() && args.json_tables.is_empty() {
-        return Err("--json-schema requires a JSON input".into());
-    }
-    if args.csv_null_value.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
-        return Err("--csv-null-value requires a CSV input".into());
-    }
-    if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
-        return Err("--json-schema-rows requires a JSON input".into());
-    }
-    if args.json_extension.is_some() && args.json.is_none() && args.json_tables.is_empty() {
-        return Err("--json-extension requires a JSON input".into());
-    }
-    if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
-        return Err("--json-array requires a JSON input".into());
-    }
-    if let Some(csv) = args.csv.as_ref() {
-        let options = csv_read_options(&args);
-        if let Some(marker) = args.csv_null_value.as_deref() {
-            register_csv_with_null_value(&session, &args.table, csv, options, marker).await?;
-        } else {
-            session
-                .register_csv_with_options(&args.table, csv, options)
-                .await?;
-        }
-        reject_duplicate_csv_headers(&session, &args.table).await?;
-    } else if let Some(parquet) = args.parquet.as_ref() {
-        let options = parquet_read_options(&args);
-        session
-            .register_parquet_with_options(&args.table, parquet, options)
-            .await?;
-    } else if let Some(json) = args.json.as_ref() {
-        let options = json_read_options(&args);
-        session
-            .register_json_with_options(&args.table, json, options)
-            .await?;
-    } else {
-        let mut names = HashSet::new();
-        let mut registration_jobs = tokio::task::JoinSet::new();
-        for mapping in &args.csv_tables {
-            let (name, path) = parse_named_table(mapping)?;
-            if !names.insert(name.to_ascii_lowercase()) {
-                return Err(format!("Duplicate table name: {name}").into());
-            }
-            let session = Arc::clone(&session);
-            let args = Arc::clone(&args);
-            let name = name.to_owned();
-            let path = path.to_owned();
-            registration_jobs.spawn(async move {
-                let options = csv_read_options(&args);
-                if let Some(marker) = args.csv_null_value.as_deref() {
-                    register_csv_with_null_value(&session, &name, &path, options, marker).await?;
-                } else {
-                    session
-                        .register_csv_with_options(&name, &path, options)
-                        .await?;
-                }
-                reject_duplicate_csv_headers(&session, &name).await
-            });
-            if registration_jobs.len() >= 4 {
-                registration_jobs
-                    .join_next()
-                    .await
-                    .expect("registration task exists")??;
-            }
-        }
-        for mapping in &args.parquet_tables {
-            let (name, path) = parse_named_table(mapping)?;
-            if !names.insert(name.to_ascii_lowercase()) {
-                return Err(format!("Duplicate table name: {name}").into());
-            }
-            let session = Arc::clone(&session);
-            let args = Arc::clone(&args);
-            let name = name.to_owned();
-            let path = path.to_owned();
-            registration_jobs.spawn(async move {
-                let options = parquet_read_options(&args);
-                session
-                    .register_parquet_with_options(&name, &path, options)
-                    .await
-            });
-            if registration_jobs.len() >= 4 {
-                registration_jobs
-                    .join_next()
-                    .await
-                    .expect("registration task exists")??;
-            }
-        }
-        for mapping in &args.json_tables {
-            let (name, path) = parse_named_table(mapping)?;
-            if !names.insert(name.to_ascii_lowercase()) {
-                return Err(format!("Duplicate table name: {name}").into());
-            }
-            let session = Arc::clone(&session);
-            let args = Arc::clone(&args);
-            let name = name.to_owned();
-            let path = path.to_owned();
-            registration_jobs.spawn(async move {
-                let options = json_read_options(&args);
-                session
-                    .register_json_with_options(&name, &path, options)
-                    .await
-            });
-            if registration_jobs.len() >= 4 {
-                registration_jobs
-                    .join_next()
-                    .await
-                    .expect("registration task exists")??;
-            }
-        }
-        while let Some(result) = registration_jobs.join_next().await {
-            result??;
-        }
-    }
+    validate_inputs(&args)?;
+    let session = new_session(&args)?;
+    validate_format_options(&args)?;
+    register_inputs(&session, &args).await?;
     let execution = execute_registered_query(&session, &args);
     if let Some(seconds) = args.query_timeout {
         tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
@@ -813,341 +531,11 @@ async fn execute_registered_query(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut union_names = HashSet::new();
-    for declaration in &args.unions_by_name {
-        let (name, _) = parse_union_by_name(declaration)?;
-        if !union_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate union destination: {name}").into());
-        }
-    }
-    for declaration in &args.unions_by_name {
-        let (name, sources) = parse_union_by_name(declaration)?;
-        let union = session.union_tables_by_name(&sources).await?;
-        session.register_dataframe(name, union)?;
-    }
-    let mut view_names = HashSet::new();
-    for definition in &args.sql_views {
-        let (name, sql) = parse_named_view(definition)?;
-        if !view_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate SQL view: {name}").into());
-        }
-        let dataframe = plan_query(session, sql, args).await?;
-        session.register_dataframe(name, dataframe)?;
-    }
-    for definition in &args.materialized_sql_views {
-        let (name, sql) = parse_named_view(definition)?;
-        if !view_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate SQL view: {name}").into());
-        }
-        let dataframe = plan_query(session, sql, args).await?.cache().await?;
-        session.register_dataframe(name, dataframe)?;
-    }
-    let query = if let Some(sql) = args.sql.as_ref() {
-        sql.clone()
-    } else if let Some(path) = args.sql_file.as_ref() {
-        if path.as_os_str() == "-" {
-            read_sql_stdin().await?
-        } else {
-            std::fs::read_to_string(path)?
-        }
-    } else {
-        unreachable!("clap requires either --sql or --sql-file")
-    };
-    let mut cached_names = HashSet::new();
-    for name in &args.cache_tables {
-        if !cached_names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate cached table: {name}").into());
-        }
-        session.cache_table(name).await?;
-    }
+    register_derived_tables(session, args).await?;
+    let query = read_query(args).await?;
+    cache_tables(session, args).await?;
     execute_script(session, &query, args).await
 }
 
-// Use a detached reader thread so a blocked stdin read cannot stall the query timer.
-async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let mut query = String::new();
-        let result = std::io::stdin().read_to_string(&mut query).map(|_| query);
-        let _ = sender.send(result);
-    });
-    Ok(receiver.await??)
-}
-
-// Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
-// or comments. Execute setup statements before presenting the final result.
-async fn execute_script(
-    session: &RustSparkSession,
-    script: &str,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let script = script.strip_prefix('\u{feff}').unwrap_or(script);
-    let mut statements = DFParser::parse_sql(script)?;
-    let last = statements
-        .pop_back()
-        .ok_or("SQL script must contain at least one statement")?;
-    for statement in statements {
-        plan_query(session, &statement.to_string(), args)
-            .await?
-            .collect()
-            .await?;
-    }
-    execute_query(session, &last.to_string(), args).await
-}
-
-async fn plan_query(
-    session: &RustSparkSession,
-    query: &str,
-    args: &Args,
-) -> Result<datafusion::prelude::DataFrame, Box<dyn std::error::Error>> {
-    let dataframe = if !args.named_params.is_empty() {
-        let mut params = HashMap::new();
-        for (name, value) in &args.named_params {
-            if params.insert(name.clone(), value.clone()).is_some() {
-                return Err(format!("Duplicate named parameter: {name}").into());
-            }
-        }
-        session.sql_with_params(query, params).await?
-    } else if !args.params.is_empty() {
-        session.sql_with_params(query, args.params.clone()).await?
-    } else {
-        session.sql(query).await?
-    };
-    Ok(dataframe)
-}
-
-fn reject_duplicate_output_fields(
-    dataframe: &datafusion::prelude::DataFrame,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut names = HashSet::new();
-    for field in dataframe.schema().fields() {
-        if !names.insert(field.name()) {
-            return Err(format!("Duplicate output column: {}", field.name()).into());
-        }
-    }
-    Ok(())
-}
-
-fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut source = Some(error);
-    while let Some(current) = source {
-        if current
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
-        {
-            return true;
-        }
-        // Arrow CSV/JSON writers may flatten I/O errors to string-only ArrowError values.
-        if current
-            .downcast_ref::<datafusion::arrow::error::ArrowError>()
-            .is_some_and(|arrow| {
-                let message = arrow.to_string().to_ascii_lowercase();
-                message.contains("broken pipe")
-                    || message.contains("pipe is being closed")
-                    || message.contains("pipe has been ended")
-            })
-        {
-            return true;
-        }
-        source = current.source();
-    }
-    false
-}
-
-async fn execute_query(
-    session: &RustSparkSession,
-    query: &str,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = plan_query(session, query, args).await?;
-    if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
-        reject_duplicate_output_fields(&dataframe)?;
-    }
-    if args.describe {
-        for field in dataframe.schema().fields() {
-            let nullability = if field.is_nullable() {
-                "NULL"
-            } else {
-                "NOT NULL"
-            };
-            println!("{}\t{}\t{nullability}", field.name(), field.data_type());
-        }
-    } else if args.explain {
-        dataframe.explain(false, false)?.show().await?;
-    } else if args.explain_analyze {
-        dataframe.explain(true, false)?.show().await?;
-    } else if let Some(path) = args.output_parquet.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        let writer_options = args.parquet_compression.as_ref().map(|codec| {
-            let mut options = TableParquetOptions::default();
-            options.global.compression = Some(codec.clone());
-            options
-        });
-        dataframe
-            .write_parquet(
-                path,
-                output_write_options(args.output_single_file),
-                writer_options,
-            )
-            .await?;
-    } else if let Some(path) = args.output_csv.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_csv(path, output_write_options(args.output_single_file), None)
-            .await?;
-    } else if let Some(path) = args.output_json.as_ref() {
-        let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
-        dataframe
-            .write_json(path, output_write_options(args.output_single_file), None)
-            .await?;
-    } else if let Some(path) = args.output_arrow.as_ref() {
-        write_arrow_ipc(dataframe, path).await?;
-    } else if let Some(format) = args.stdout_format {
-        let dataframe = if let Some(max_rows) = args.max_rows {
-            let offset = args.offset.unwrap_or(0);
-            offset
-                .checked_add(max_rows)
-                .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe.limit(offset, Some(max_rows))?
-        } else {
-            dataframe
-        };
-        if let Err(error) = write_stdout(dataframe, format).await
-            && !is_broken_pipe(error.as_ref())
-        {
-            return Err(error);
-        }
-    } else if args.count_only {
-        println!("{}", dataframe.count().await?);
-    } else if let Some(max_rows) = args.max_rows {
-        if let Some(offset) = args.offset {
-            offset
-                .checked_add(max_rows)
-                .ok_or("--offset plus --max-rows exceeds the supported range")?;
-            dataframe
-                .limit(offset, Some(max_rows))?
-                .show_limit(max_rows)
-                .await?;
-        } else {
-            dataframe.show_limit(max_rows).await?;
-        }
-    } else {
-        dataframe.show().await?;
-    }
-    Ok(())
-}
-
-// Arrow's CSV writer converts I/O errors into strings. Track the original
-// BrokenPipe kind before Arrow discards it so shell pipelines exit cleanly.
-struct PipeTrackingWriter<W> {
-    inner: W,
-    broken_pipe: Arc<AtomicBool>,
-}
-
-impl<W: Write> Write for PipeTrackingWriter<W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let result = self.inner.write(bytes);
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
-        {
-            self.broken_pipe.store(true, Ordering::Relaxed);
-        }
-        result
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.inner.flush();
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
-        {
-            self.broken_pipe.store(true, Ordering::Relaxed);
-        }
-        result
-    }
-}
-
-fn preserve_writer_pipe_error(
-    error: datafusion::arrow::error::ArrowError,
-    broken_pipe: &AtomicBool,
-) -> Box<dyn std::error::Error> {
-    if broken_pipe.load(Ordering::Relaxed) {
-        Box::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-    } else {
-        Box::new(error)
-    }
-}
-
-// Write one record batch at a time so stdout never requires collecting all results.
-async fn write_stdout(
-    dataframe: datafusion::prelude::DataFrame,
-    format: StdoutFormat,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = dataframe.execute_stream().await?;
-    let schema = stream.schema();
-    let stdout = std::io::stdout();
-    let mut output = std::io::BufWriter::new(stdout.lock());
-    let broken_pipe = Arc::new(AtomicBool::new(false));
-    let mut tracked = PipeTrackingWriter {
-        inner: &mut output,
-        broken_pipe: Arc::clone(&broken_pipe),
-    };
-    match format {
-        StdoutFormat::Csv => {
-            let mut writer = datafusion::arrow::csv::WriterBuilder::new().build(&mut tracked);
-            let mut wrote_batch = false;
-            while let Some(batch) = stream.next().await {
-                writer
-                    .write(&batch?)
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-                wrote_batch = true;
-            }
-            if !wrote_batch {
-                // Include column headers even when the query returns no rows.
-                writer
-                    .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
-                        schema,
-                    ))
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-            }
-        }
-        StdoutFormat::Json => {
-            let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()
-                .with_explicit_nulls(true)
-                .build::<_, datafusion::arrow::json::writer::LineDelimited>(&mut tracked);
-            while let Some(batch) = stream.next().await {
-                writer
-                    .write(&batch?)
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-            }
-            writer
-                .finish()
-                .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-        }
-    }
-    drop(tracked);
-    output.flush()?;
-    Ok(())
-}
-
-async fn write_arrow_ipc(
-    dataframe: datafusion::prelude::DataFrame,
-    path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = dataframe.execute_stream().await?;
-    let schema = stream.schema();
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let temporary = tempfile::NamedTempFile::new_in(directory)?;
-    let mut writer = FileWriter::try_new_buffered(temporary.reopen()?, &schema)?;
-    while let Some(batch) = stream.next().await {
-        writer.write(&batch?)?;
-    }
-    writer.finish()?;
-    drop(writer);
-    temporary.persist(path)?;
-    Ok(())
-}
+mod output;
+use output::{write_arrow_ipc, write_stdout};
