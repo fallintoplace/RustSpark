@@ -119,6 +119,9 @@ struct Args {
     #[arg(long = "union-by-name", value_name = "NAME=TABLE1,TABLE2,...")]
     unions_by_name: Vec<String>,
 
+    #[arg(long = "union-distinct-by-name", value_name = "NAME=TABLE1,TABLE2,...")]
+    unions_distinct_by_name: Vec<String>,
+
     #[arg(long, value_name = "QUERY")]
     sql: Option<String>,
 

@@ -42,13 +42,22 @@ pub(super) async fn register_derived_tables(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut union_names = HashSet::new();
-    for declaration in &args.unions_by_name {
+    for declaration in args
+        .unions_by_name
+        .iter()
+        .chain(&args.unions_distinct_by_name)
+    {
         let (name, _) = parse_union_by_name(declaration)?;
         ensure_unique_name(&mut union_names, name, "union destination")?;
     }
     for declaration in &args.unions_by_name {
         let (name, sources) = parse_union_by_name(declaration)?;
         let union = session.union_tables_by_name(&sources).await?;
+        session.register_dataframe(name, union)?;
+    }
+    for declaration in &args.unions_distinct_by_name {
+        let (name, sources) = parse_union_by_name(declaration)?;
+        let union = session.union_tables_distinct_by_name(&sources).await?;
         session.register_dataframe(name, union)?;
     }
     let mut view_names = HashSet::new();
