@@ -89,6 +89,10 @@ def load_cases(path: pathlib.Path):
     for case in cases:
         if not isinstance(case, dict) or not isinstance(case.get("id"), str):
             raise ValueError("Each case needs a string id")
+        if not case["id"].strip():
+            raise ValueError("SQL case id must not be empty")
+        if "ordered" in case and not isinstance(case["ordered"], bool):
+            raise ValueError(f"SQL case {case['id']} ordered must be a boolean")
         if case["id"] in ids:
             raise ValueError(f"Duplicate SQL case id: {case['id']}")
         if not isinstance(case.get("sql"), str) or not case["sql"].strip():
