@@ -36,6 +36,14 @@ Bound the number of result rows printed with `--max-rows`:
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --max-rows 10
 ```
 
+Print only the number of rows returned by a query:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data WHERE amount >= 10' --count-only
+```
+
+This counts the query result rows, not the rows in its source tables.
+
 Standalone SQL without a file also works:
 
 ```sh
