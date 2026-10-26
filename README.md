@@ -125,7 +125,7 @@ Enable Parquet late materialization for selective filters:
 ```sh
 cargo run -- --parquet /path/to/events.parquet \
   --parquet-pushdown-filters --parquet-reorder-filters \
-  --sql 'SELECT COUNT(*) FROM data WHERE event_type = '\''purchase'\'''
+  --sql "SELECT COUNT(*) FROM data WHERE event_type = 'purchase'"
 ```
 
 These options push predicates into Parquet decoding and can reorder them by
