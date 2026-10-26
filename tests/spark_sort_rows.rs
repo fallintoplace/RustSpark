@@ -26,15 +26,16 @@ async fn sort_rows_respects_multiple_keys_and_spark_null_defaults() -> TestResul
         let scores = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
         for row in 0..batch.num_rows() {
             actual.push((
-                if ids.is_null(row) { None } else { Some(ids.value(row)) },
+                if ids.is_null(row) {
+                    None
+                } else {
+                    Some(ids.value(row))
+                },
                 scores.value(row),
             ));
         }
     }
-    assert_eq!(
-        actual,
-        [(None, 5), (Some(1), 3), (Some(1), 1), (Some(2), 2)]
-    );
+    assert_eq!(actual, [(None, 5), (Some(1), 3), (Some(1), 1), (Some(2), 2)]);
 
     let descending = session.sort_rows("items", &[("id", false)]).await?;
     let reversed = descending.collect().await?;
