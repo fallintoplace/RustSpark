@@ -168,6 +168,32 @@ pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     Ok(file)
 }
 
+/// Restore the old snapshot if a crash left no visible table.
+fn recover_interrupted_insert(root: &Path, table: &str, staging: &Path) -> Result<(), Box<dyn Error>> {
+    let live = root.join(table);
+    let old = staging.join("old");
+    match fs::symlink_metadata(&live) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            // The new data has been published, or the old table is
+            // still live. Either way, the staging area is disposable.
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A crash happened between moving out the old table and
+            // publishing the new one. Restore the previous snapshot.
+            if !fs::symlink_metadata(&old)?.file_type().is_dir() {
+                return Err(format!("Missing INSERT backup for table '{table}'").into());
+            }
+            fs::rename(&old, &live)?;
+        }
+        Ok(_) => {
+            return Err(format!("Invalid persistent table path: {}", live.display()).into());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    fs::remove_dir_all(staging)?;
+    Ok(())
+}
+
 /// Remove reserved staging and drop tombstone directories after an interrupted
 /// session. The caller holds the exclusive database lock.
 fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
@@ -181,27 +207,7 @@ fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
             if !valid_identifier(table) || !entry.file_type()?.is_dir() {
                 return Err(format!("Invalid interrupted INSERT directory: {name}").into());
             }
-            let live = root.join(table);
-            let old = entry.path().join("old");
-            match fs::symlink_metadata(&live) {
-                Ok(metadata) if metadata.file_type().is_dir() => {
-                    // The new data has been published, or the old table is
-                    // still live. Either way, the staging area is disposable.
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    // A crash happened between moving out the old table and
-                    // publishing the new one. Restore the previous snapshot.
-                    if !fs::symlink_metadata(&old)?.file_type().is_dir() {
-                        return Err(format!("Missing INSERT backup for table '{table}'").into());
-                    }
-                    fs::rename(&old, &live)?;
-                }
-                Ok(_) => {
-                    return Err(format!("Invalid persistent table path: {}", live.display()).into());
-                }
-                Err(error) => return Err(error.into()),
-            }
-            fs::remove_dir_all(entry.path())?;
+            recover_interrupted_insert(root, table, &entry.path())?;
             continue;
         }
         let reserved =
