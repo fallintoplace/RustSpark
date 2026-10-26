@@ -1,4 +1,4 @@
-use super::{Args, parse_named_table};
+use super::{Args, StdoutFormat, parse_named_table};
 
 fn has_csv_input(args: &Args) -> bool {
     args.csv.is_some() || !args.csv_tables.is_empty()
@@ -100,6 +100,14 @@ pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Err
 }
 
 pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.stdout_no_header
+        && !matches!(
+            args.stdout_format,
+            Some(StdoutFormat::Csv | StdoutFormat::Tsv)
+        )
+    {
+        return Err("--stdout-no-header requires CSV or TSV stdout output".into());
+    }
     if args.csv_delimiter.is_some() && !has_csv_input(args) {
         return Err("--csv-delimiter requires --csv".into());
     }

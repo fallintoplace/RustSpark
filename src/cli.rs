@@ -185,6 +185,10 @@ struct Args {
     )]
     stdout_format: Option<StdoutFormat>,
 
+    /// Do not print CSV or TSV column names before result rows.
+    #[arg(long = "stdout-no-header", requires = "stdout_format")]
+    stdout_no_header: bool,
+
     #[arg(
         long = "count-only",
         conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json", "output_arrow"]
