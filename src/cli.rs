@@ -626,8 +626,20 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     .next() else {
         return Ok(());
     };
-    let Ok(destination) = destination.canonicalize() else {
-        return Ok(());
+    let destination = if let Ok(existing) = destination.canonicalize() {
+        existing
+    } else {
+        let parent = destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let Ok(parent) = parent.canonicalize() else {
+            return Ok(());
+        };
+        let Some(file_name) = destination.file_name() else {
+            return Ok(());
+        };
+        parent.join(file_name)
     };
     let mut sources: Vec<&std::path::Path> = Vec::new();
     for path in [
@@ -652,11 +664,12 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
         let (_, path) = parse_named_table(mapping)?;
         sources.push(std::path::Path::new(path));
     }
-    if sources
-        .iter()
-        .any(|source| source.canonicalize().is_ok_and(|path| path == destination))
-    {
-        return Err("Output path must not overwrite an input file or SQL script".into());
+    if sources.iter().any(|source| {
+        source.canonicalize().is_ok_and(|source| {
+            destination == source || (source.is_dir() && destination.starts_with(&source))
+        })
+    }) {
+        return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
     }
     Ok(())
 }
