@@ -3,7 +3,9 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
+use datafusion::prelude::{
+    CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
+};
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
@@ -53,6 +55,9 @@ struct Args {
     #[arg(long = "csv-comment", value_name = "CHAR", value_parser = parse_delimiter)]
     csv_comment: Option<u8>,
 
+    #[arg(long = "csv-null-value", value_name = "TEXT", value_parser = parse_csv_null_value)]
+    csv_null_value: Option<String>,
+
     #[arg(long = "csv-schema", value_name = "NAME:TYPE,...", value_parser = parse_csv_schema)]
     csv_schema: Option<Schema>,
 
@@ -62,8 +67,14 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
+    #[arg(long = "json-schema", value_name = "NAME:TYPE,...", value_parser = parse_json_schema)]
+    json_schema: Option<Schema>,
+
     #[arg(long = "json-schema-rows", value_name = "ROWS", value_parser = parse_json_schema_rows)]
     json_schema_rows: Option<usize>,
+
+    #[arg(long = "json-extension", value_name = ".EXT", value_parser = parse_file_extension)]
+    json_extension: Option<String>,
 
     #[arg(long = "json-array")]
     json_array: bool,
@@ -110,6 +121,15 @@ struct Args {
     #[arg(long, value_name = "ROWS", requires = "max_rows")]
     offset: Option<usize>,
 
+    #[arg(
+        long = "count-only",
+        conflicts_with_all = ["describe", "explain", "explain_analyze", "max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    count_only: bool,
+
+    #[arg(long = "query-timeout", value_name = "SECONDS", value_parser = parse_query_timeout)]
+    query_timeout: Option<u64>,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
@@ -136,6 +156,9 @@ struct Args {
         conflicts_with_all = ["max_rows", "output_parquet", "output_csv"]
     )]
     output_json: Option<PathBuf>,
+
+    #[arg(long = "output-single-file")]
+    output_single_file: bool,
 }
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
@@ -150,6 +173,26 @@ fn parse_csv_char(value: &str) -> Result<u8, String> {
         [byte] if *byte != b'\n' && *byte != b'\r' => Ok(*byte),
         _ => Err("CSV character must be one ASCII character other than newline".into()),
     }
+}
+
+fn parse_csv_null_value(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.contains('\n') || value.contains('\r') {
+        Err("CSV null marker cannot be empty or contain a newline".into())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn csv_null_regex(value: &str) -> String {
+    let mut pattern = String::from("^");
+    for character in value.chars() {
+        if r"\.^$|?*+()[]{}".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('$');
+    pattern
 }
 
 fn parse_file_extension(value: &str) -> Result<String, String> {
@@ -191,13 +234,13 @@ fn parse_named_view(value: &str) -> Result<(&str, &str), String> {
     Ok((name, sql))
 }
 
-fn parse_csv_schema(value: &str) -> Result<Schema, String> {
+fn parse_column_schema(value: &str, source: &str) -> Result<Schema, String> {
     let mut fields = Vec::new();
     let mut names = HashSet::new();
     for entry in value.split(',') {
         let (name, kind) = entry
             .split_once(':')
-            .ok_or_else(|| "CSV schema needs NAME:TYPE entries".to_owned())?;
+            .ok_or_else(|| format!("{source} schema needs NAME:TYPE entries"))?;
         let valid_first = name
             .bytes()
             .next()
@@ -207,21 +250,40 @@ fn parse_csv_schema(value: &str) -> Result<Schema, String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
-            return Err("CSV schema column names must be SQL identifiers".into());
+            return Err(format!(
+                "{source} schema column names must be SQL identifiers"
+            ));
         }
         if !names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Duplicate CSV schema column: {name}"));
+            return Err(format!("Duplicate {source} schema column: {name}"));
         }
         let data_type = match kind.to_ascii_lowercase().as_str() {
             "utf8" | "string" => DataType::Utf8,
+            "int8" | "tinyint" => DataType::Int8,
+            "int16" | "smallint" => DataType::Int16,
+            "int32" | "int" | "integer" => DataType::Int32,
             "int64" | "bigint" => DataType::Int64,
+            "uint8" => DataType::UInt8,
+            "uint16" => DataType::UInt16,
+            "uint32" => DataType::UInt32,
+            "uint64" => DataType::UInt64,
+            "float32" | "float" | "real" => DataType::Float32,
             "float64" | "double" => DataType::Float64,
             "bool" | "boolean" => DataType::Boolean,
-            _ => return Err(format!("Unsupported CSV type: {kind}")),
+            "date32" | "date" => DataType::Date32,
+            _ => return Err(format!("Unsupported {source} type: {kind}")),
         };
         fields.push(Field::new(name, data_type, true));
     }
     Ok(Schema::new(fields))
+}
+
+fn parse_csv_schema(value: &str) -> Result<Schema, String> {
+    parse_column_schema(value, "CSV")
+}
+
+fn parse_json_schema(value: &str) -> Result<Schema, String> {
+    parse_column_schema(value, "JSON")
 }
 
 fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
@@ -267,6 +329,11 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     } else {
         options
     };
+    let options = if let Some(value) = args.csv_null_value.as_deref() {
+        options.null_regex(Some(csv_null_regex(value)))
+    } else {
+        options
+    };
     if let Some(rows) = args.csv_schema_rows {
         options.schema_infer_max_records(rows)
     } else {
@@ -274,13 +341,71 @@ fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     }
 }
 
-fn json_read_options(array: bool, schema_rows: Option<usize>) -> JsonReadOptions<'static> {
-    let options = JsonReadOptions::default().newline_delimited(!array);
-    if let Some(rows) = schema_rows {
+fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
+    let options = JsonReadOptions::default().newline_delimited(!args.json_array);
+    let options = if let Some(extension) = args.json_extension.as_deref() {
+        options.file_extension(extension)
+    } else {
+        options
+    };
+    let options = if let Some(schema) = args.json_schema.as_ref() {
+        options.schema(schema)
+    } else {
+        options
+    };
+    if let Some(rows) = args.json_schema_rows {
         options.schema_infer_max_records(rows)
     } else {
         options
     }
+}
+
+// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
+// Read as strings and normalize before casting to the inferred input types.
+async fn register_csv_with_null_value(
+    session: &RustSparkSession,
+    name: &str,
+    path: impl AsRef<std::path::Path>,
+    options: CsvReadOptions<'_>,
+    marker: &str,
+) -> datafusion::error::Result<()> {
+    let inferred = session
+        .read_csv_with_options(&path, options.clone())
+        .await?;
+    let fields = inferred.schema().fields();
+    let string_schema = Schema::new(
+        fields
+            .iter()
+            .map(|field| Field::new(field.name(), DataType::Utf8, true))
+            .collect::<Vec<_>>(),
+    );
+    let raw = session
+        .read_csv_with_options(path, options.schema(&string_schema).null_regex(None))
+        .await?;
+    let expressions = fields
+        .iter()
+        .map(|field| {
+            let value = nullif(ident(field.name()), lit(marker));
+            let typed = if field.data_type() == &DataType::Utf8 {
+                value
+            } else {
+                cast(value, field.data_type().clone())
+            };
+            typed.alias(field.name())
+        })
+        .collect::<Vec<_>>();
+    session.register_dataframe(name, raw.select(expressions)?)?;
+    Ok(())
+}
+
+fn parse_query_timeout(value: &str) -> Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "--query-timeout requires a positive integer in seconds".to_owned())?;
+    if seconds == 0 {
+        return Err("--query-timeout must be greater than zero".into());
+    }
+    Ok(seconds)
 }
 
 fn parse_batch_size(value: &str) -> Result<usize, String> {
@@ -313,6 +438,15 @@ fn parse_positive_rows(value: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
+    let options = DataFrameWriteOptions::new();
+    if single_file {
+        options.with_single_file_output(true)
+    } else {
+        options
+    }
+}
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arc::new(Args::parse());
     let single_inputs = u8::from(args.csv.is_some())
@@ -321,6 +455,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let has_named = !args.csv_tables.is_empty()
         || !args.parquet_tables.is_empty()
         || !args.json_tables.is_empty();
+    if args.output_single_file
+        && args.output_parquet.is_none()
+        && args.output_csv.is_none()
+        && args.output_json.is_none()
+    {
+        return Err("--output-single-file requires an output format".into());
+    }
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
         return Err("Use one unnamed input or one or more named tables".into());
     }
@@ -373,17 +514,30 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.csv_comment.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
         return Err("--csv-comment requires a CSV input".into());
     }
+    if args.json_schema.is_some() && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-schema requires a JSON input".into());
+    }
+    if args.csv_null_value.is_some() && args.csv.is_none() && args.csv_tables.is_empty() {
+        return Err("--csv-null-value requires a CSV input".into());
+    }
     if args.json_schema_rows.is_some() && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-schema-rows requires a JSON input".into());
+    }
+    if args.json_extension.is_some() && args.json.is_none() && args.json_tables.is_empty() {
+        return Err("--json-extension requires a JSON input".into());
     }
     if args.json_array && args.json.is_none() && args.json_tables.is_empty() {
         return Err("--json-array requires a JSON input".into());
     }
     if let Some(csv) = args.csv.as_ref() {
         let options = csv_read_options(&args);
-        session
-            .register_csv_with_options(&args.table, csv, options)
-            .await?;
+        if let Some(marker) = args.csv_null_value.as_deref() {
+            register_csv_with_null_value(&session, &args.table, csv, options, marker).await?;
+        } else {
+            session
+                .register_csv_with_options(&args.table, csv, options)
+                .await?;
+        }
     } else if let Some(parquet) = args.parquet.as_ref() {
         let options = ParquetReadOptions::new()
             .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"));
@@ -391,7 +545,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .register_parquet_with_options(&args.table, parquet, options)
             .await?;
     } else if let Some(json) = args.json.as_ref() {
-        let options = json_read_options(args.json_array, args.json_schema_rows);
+        let options = json_read_options(&args);
         session
             .register_json_with_options(&args.table, json, options)
             .await?;
@@ -410,9 +564,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let name = name.to_owned();
             let path = path.to_owned();
             csv_jobs.spawn(async move {
-                session
-                    .register_csv_with_options(&name, &path, csv_read_options(&args))
-                    .await
+                let options = csv_read_options(&args);
+                if let Some(marker) = args.csv_null_value.as_deref() {
+                    register_csv_with_null_value(&session, &name, &path, options, marker).await
+                } else {
+                    session
+                        .register_csv_with_options(&name, &path, options)
+                        .await
+                }
             });
             if csv_jobs.len() >= 4 {
                 csv_jobs.join_next().await.expect("CSV task exists")??;
@@ -437,7 +596,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(format!("Duplicate table name: {name}").into());
             }
-            let options = json_read_options(args.json_array, args.json_schema_rows);
+            let options = json_read_options(&args);
             session
                 .register_json_with_options(name, path, options)
                 .await?;
@@ -467,7 +626,27 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         session.cache_table(name).await?;
     }
-    let dataframe = session.sql(&query).await?;
+    let execution = execute_query(&session, &query, &args);
+    if let Some(seconds) = args.query_timeout {
+        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("SQL query timed out after {seconds} seconds"),
+                )
+            })?
+    } else {
+        execution.await
+    }
+}
+
+async fn execute_query(
+    session: &RustSparkSession,
+    query: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dataframe = session.sql(query).await?;
     if args.describe {
         for field in dataframe.schema().fields() {
             let nullability = if field.is_nullable() {
@@ -484,18 +663,20 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
-            .write_parquet(path, DataFrameWriteOptions::new(), None)
+            .write_parquet(path, output_write_options(args.output_single_file), None)
             .await?;
     } else if let Some(path) = args.output_csv.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
-            .write_csv(path, DataFrameWriteOptions::new(), None)
+            .write_csv(path, output_write_options(args.output_single_file), None)
             .await?;
     } else if let Some(path) = args.output_json.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
-            .write_json(path, DataFrameWriteOptions::new(), None)
+            .write_json(path, output_write_options(args.output_single_file), None)
             .await?;
+    } else if args.count_only {
+        println!("{}", dataframe.count().await?);
     } else if let Some(max_rows) = args.max_rows {
         if let Some(offset) = args.offset {
             offset
