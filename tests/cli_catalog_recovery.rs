@@ -63,6 +63,39 @@ fn corrupted_persistent_parquet_rejected_at_startup() -> TestResult {
 }
 
 #[test]
+fn validates_many_parts_and_rejects_one_corrupt_footer() -> TestResult {
+    let db = tempfile::tempdir()?;
+    let root = db.path().to_str().ok_or("non UTF-8 temp path")?;
+    run_ok(root, "CREATE TABLE items AS SELECT 7 AS id")?;
+    let table = db.path().join("items");
+    let original = fs::read_dir(&table)?
+        .next()
+        .ok_or("missing original part")??
+        .path();
+    for index in 0..20 {
+        fs::copy(&original, table.join(format!("part-{index:03}.parquet")))?;
+    }
+
+    let good = run(root, "SELECT COUNT(*) FROM items");
+    assert!(
+        good.status.success(),
+        "{}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    assert!(String::from_utf8(good.stdout)?.contains("21"));
+
+    fs::write(table.join("part-019.parquet"), b"invalid parquet footer")?;
+    let broken = run(root, "SELECT 42");
+    assert!(!broken.status.success());
+    assert!(
+        String::from_utf8_lossy(&broken.stderr).contains("part-019.parquet"),
+        "{}",
+        String::from_utf8_lossy(&broken.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 fn unknown_file_in_persistent_table_fails_closed() -> TestResult {
     let db = tempfile::tempdir()?;
     let root = db.path().to_str().ok_or("non UTF-8 temp path")?;

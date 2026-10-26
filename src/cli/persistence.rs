@@ -180,32 +180,70 @@ impl Drop for StagedInsert {
     }
 }
 
-/// Validate every file before exposing a table. A Parquet footer check
-/// catches truncated writes without scanning or materializing all rows.
+/// Read the Parquet footer without materializing the table's rows.
+fn validate_parquet_part(path: &Path) -> Result<(), String> {
+    let file = fs::File::open(path).map_err(|error| {
+        format!(
+            "Cannot read persistent Parquet file '{}': {error}",
+            path.display()
+        )
+    })?;
+    SerializedFileReader::new(file).map_err(|error| {
+        format!(
+            "Cannot read persistent Parquet file '{}': {error}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Reject unexpected entries and validate Parquet footers before exposure.
+/// Large part sets can validate independent file footers in parallel.
 fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Error>> {
-    let mut found_parquet = false;
-    for file in fs::read_dir(directory)? {
-        let file = file?;
-        let path = file.path();
-        if !file.file_type()?.is_file() || !path.extension().is_some_and(|ext| ext == "parquet") {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() || !path.extension().is_some_and(|ext| ext == "parquet") {
             return Err(format!(
                 "Persistent table '{name}' has an unexpected entry: {}",
                 path.display()
             )
             .into());
         }
-        SerializedFileReader::new(fs::File::open(&path)?).map_err(|error| {
-            format!(
-                "Cannot read persistent Parquet file '{}': {error}",
-                path.display()
-            )
-        })?;
-        found_parquet = true;
+        paths.push(path);
     }
-    if !found_parquet {
+    if paths.is_empty() {
         return Err(format!("Database table '{name}' contains no Parquet files").into());
     }
-    Ok(())
+
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(8);
+    let validation = if workers > 1 && paths.len() >= 16 {
+        let chunk_size = paths.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            let jobs = paths
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .try_for_each(|path| validate_parquet_part(path))
+                    })
+                })
+                .collect::<Vec<_>>();
+            jobs.into_iter().try_for_each(|job| {
+                job.join()
+                    .expect("Parquet footer validation worker panicked")
+            })
+        })
+    } else {
+        paths
+            .iter()
+            .try_for_each(|path| validate_parquet_part(path))
+    };
+    validation.map_err(|message| -> Box<dyn Error> { message.into() })
 }
 
 /**
