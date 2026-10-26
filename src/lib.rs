@@ -252,13 +252,14 @@ impl RustSparkSession {
         // together, but keep the left/right schema order in the final plan.
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
         for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
+            let field_names: HashSet<&str> = frame
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect();
             for column in columns {
-                if !frame
-                    .schema()
-                    .fields()
-                    .iter()
-                    .any(|field| field.name().as_str() == *column)
-                {
+                if !field_names.contains(*column) {
                     return Err(DataFusionError::Plan(format!(
                         "Join column {column} does not exist in table {table}"
                     )));
@@ -423,6 +424,12 @@ impl RustSparkSession {
             return Ok(dataframe);
         }
 
+        let available: HashSet<&str> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
         let mut seen = HashSet::new();
         for name in &selected {
             if !seen.insert(name.to_ascii_lowercase()) {
@@ -430,12 +437,7 @@ impl RustSparkSession {
                     "Duplicate dropna column: {name}"
                 )));
             }
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == *name)
-            {
+            if !available.contains(*name) {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown dropna column: {name}"
                 )));
@@ -545,13 +547,14 @@ impl RustSparkSession {
                 )));
             }
         }
+        let available: HashSet<&str> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
         for source in mappings.keys() {
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == *source)
-            {
+            if !available.contains(*source) {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown column rename source: {source}"
                 )));
@@ -834,6 +837,12 @@ impl RustSparkSession {
             return dataframe.distinct();
         }
 
+        let available: HashSet<&str> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
         let mut seen = HashSet::new();
         for name in subset {
             if !seen.insert(name.to_ascii_lowercase()) {
@@ -841,12 +850,7 @@ impl RustSparkSession {
                     "Duplicate dropDuplicates column: {name}"
                 )));
             }
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == *name)
-            {
+            if !available.contains(*name) {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown dropDuplicates column: {name}"
                 )));
