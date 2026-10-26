@@ -3,10 +3,10 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::sql::parser::DFParser;
 use datafusion::prelude::{
     CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
 };
+use datafusion::sql::parser::DFParser;
 use rustspark::RustSparkSession;
 
 #[derive(Parser)]
