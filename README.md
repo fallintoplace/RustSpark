@@ -49,3 +49,9 @@ cargo run -- --csv tests/fixtures/sales.csv --csv-schema 'city:utf8,amount:int64
 ```
 
 Supported types: `utf8`, `int64`, `float64`, `bool` (and `string`, `bigint`, `double`, `boolean` aliases). Named CSV inputs share this schema.
+
+Inspect query output columns without executing the query:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data' --describe
+```

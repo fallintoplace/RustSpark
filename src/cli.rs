@@ -80,6 +80,12 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
 
+    #[arg(
+        long = "describe",
+        conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json"]
+    )]
+    describe: bool,
+
     #[arg(long, value_name = "ROWS", value_parser = parse_positive_rows)]
     max_rows: Option<usize>,
 
@@ -421,7 +427,16 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("clap requires either --sql or --sql-file")
     };
     let dataframe = session.sql(&query).await?;
-    if let Some(path) = args.output_parquet.as_ref() {
+    if args.describe {
+        for field in dataframe.schema().fields() {
+            let nullability = if field.is_nullable() {
+                "NULL"
+            } else {
+                "NOT NULL"
+            };
+            println!("{}\t{}\t{nullability}", field.name(), field.data_type());
+        }
+    } else if let Some(path) = args.output_parquet.as_ref() {
         let path = path.to_str().ok_or("Output path must be valid UTF-8")?;
         dataframe
             .write_parquet(path, DataFrameWriteOptions::new(), None)
