@@ -18,7 +18,7 @@ enum StdoutFormat {
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
     group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables"])),
-    group(ArgGroup::new("query").required(true).args(["sql", "sql_file"]))
+    group(ArgGroup::new("query").required(true).args(["sql", "sql_file", "interactive"]))
 )]
 struct Args {
     #[arg(long, value_name = "PATH")]
@@ -113,6 +113,10 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
+
+    /// Start a SQL shell that executes semicolon-terminated statements.
+    #[arg(long)]
+    interactive: bool,
 
     #[arg(long = "sql-view", value_name = "NAME=SQL")]
     sql_views: Vec<String>,
@@ -493,6 +497,9 @@ use registration::register_inputs;
 mod query;
 use query::{execute_script, plan_query};
 
+mod interactive;
+use interactive::run_interactive;
+
 mod setup;
 use setup::{cache_tables, read_query, register_derived_tables};
 
@@ -513,6 +520,9 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let session = new_session(&args)?;
     validate_format_options(&args)?;
     register_inputs(&session, &args).await?;
+    if args.interactive {
+        return run_interactive(&session, &args).await;
+    }
     let execution = execute_registered_query(&session, &args);
     if let Some(seconds) = args.query_timeout {
         tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
