@@ -415,9 +415,8 @@ pub(super) async fn register_database_tables(
                     })
                 })
                 .collect::<Vec<_>>();
-            jobs.into_iter().try_for_each(|job| {
-                job.join().expect("database validation worker panicked")
-            })
+            jobs.into_iter()
+                .try_for_each(|job| job.join().expect("database validation worker panicked"))
         });
         validation.map_err(|error| -> Box<dyn Error> { error.into() })?;
     } else {
