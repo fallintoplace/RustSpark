@@ -24,9 +24,13 @@ fn paginates_sorted_query_results() -> Result<(), Box<dyn std::error::Error>> {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(stdout.contains("| 10 |"), "{stdout}");
-    assert!(!stdout.contains("| 20 |"), "{stdout}");
-    assert!(!stdout.contains("| 5  |"), "{stdout}");
+    let rows: Vec<_> = stdout
+        .lines()
+        .map(|line| line.trim_matches('|').trim())
+        .collect();
+    assert!(rows.contains(&"10"), "{stdout}");
+    assert!(!rows.contains(&"20"), "{stdout}");
+    assert!(!rows.contains(&"5"), "{stdout}");
     Ok(())
 }
 
