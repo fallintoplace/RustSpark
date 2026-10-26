@@ -852,16 +852,19 @@ async fn execute_script(
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
     for statement in statements {
-        session.sql(&statement.to_string()).await?.collect().await?;
+        plan_query(session, &statement.to_string(), args)
+            .await?
+            .collect()
+            .await?;
     }
     execute_query(session, &last.to_string(), args).await
 }
 
-async fn execute_query(
+async fn plan_query(
     session: &RustSparkSession,
     query: &str,
     args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<datafusion::prelude::DataFrame, Box<dyn std::error::Error>> {
     let dataframe = if !args.named_params.is_empty() {
         let mut params = HashMap::new();
         for (name, value) in &args.named_params {
@@ -875,6 +878,15 @@ async fn execute_query(
     } else {
         session.sql(query).await?
     };
+    Ok(dataframe)
+}
+
+async fn execute_query(
+    session: &RustSparkSession,
+    query: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dataframe = plan_query(session, query, args).await?;
     if args.describe {
         for field in dataframe.schema().fields() {
             let nullability = if field.is_nullable() {
