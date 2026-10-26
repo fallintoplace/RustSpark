@@ -43,7 +43,11 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
             .collect();
         assert_eq!(
             column_names,
-            vec!["id".to_owned(), "left_payload".to_owned(), "right_payload".to_owned()]
+            vec![
+                "id".to_owned(),
+                "left_payload".to_owned(),
+                "right_payload".to_owned()
+            ]
         );
         assert_eq!(frame.count().await?, expected, "{kind:?}");
     }
@@ -57,7 +61,11 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
         .await?;
     let mut ids = Vec::new();
     for batch in batches {
-        let column = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         for index in 0..batch.num_rows() {
             ids.push(column.value(index));
         }
@@ -85,12 +93,7 @@ async fn multi_column_using_only_matches_complete_keys() -> TestResult {
         .await?;
 
     let joined = session
-        .join_tables_using(
-            "left_pair",
-            "right_pair",
-            JoinType::Inner,
-            &["id", "zone"],
-        )
+        .join_tables_using("left_pair", "right_pair", JoinType::Inner, &["id", "zone"])
         .await?;
     assert_eq!(joined.schema().fields().len(), 4);
     assert_eq!(joined.count().await?, 1);
