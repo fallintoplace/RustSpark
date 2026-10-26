@@ -84,6 +84,18 @@ impl RustSparkSession {
         self.sql(query).await?.execute_stream().await
     }
 
+    /// Stream a SQL query with typed positional or named parameters.
+    ///
+    /// Values are bound by DataFusion before execution. Results remain
+    /// incremental rather than being collected in memory.
+    pub async fn sql_stream_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.sql_with_params(query, params).await?.execute_stream().await
+    }
+
     /// Register in-memory Arrow batches for SQL queries.
     pub fn register_batches(
         &self,
