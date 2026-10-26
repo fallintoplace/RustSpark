@@ -107,6 +107,15 @@ pub(super) async fn execute_script(
     let last = statements
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
+    if args.describe || args.explain || args.explain_analyze {
+        // Every statement in an inspection script must be read-only, not
+        // just the final statement whose schema or plan is printed.
+        for statement in statements {
+            drain_dataframe(plan_read_only_query(session, &statement.to_string(), args).await?)
+                .await?;
+        }
+        return execute_query(session, &last.to_string(), args).await;
+    }
     for statement in statements {
         if let Some((source, destination)) = persistent_rename_table(&statement, args)? {
             let root = args
@@ -421,6 +430,24 @@ pub(super) async fn plan_query(
     Ok(dataframe)
 }
 
+async fn plan_read_only_query(
+    session: &RustSparkSession,
+    query: &str,
+    args: &Args,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    let dataframe = if !args.named_params.is_empty() {
+        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
+        session.sql_read_only_with_params(query, params).await?
+    } else if !args.params.is_empty() {
+        session
+            .sql_read_only_with_params(query, args.params.clone())
+            .await?
+    } else {
+        session.sql_read_only(query).await?
+    };
+    Ok(dataframe)
+}
+
 fn reject_duplicate_output_fields(dataframe: &DataFrame) -> Result<(), Box<dyn std::error::Error>> {
     let mut names = HashSet::new();
     for field in dataframe.schema().fields() {
@@ -436,7 +463,11 @@ async fn execute_query(
     query: &str,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let dataframe = plan_query(session, query, args).await?;
+    let dataframe = if args.describe || args.explain || args.explain_analyze {
+        plan_read_only_query(session, query, args).await?
+    } else {
+        plan_query(session, query, args).await?
+    };
     if let Some(name) = args.save_table.as_deref() {
         let directory = args
             .database_dir
