@@ -3,6 +3,7 @@ use std::{collections::HashSet, io::Read, path::PathBuf, sync::Arc};
 use clap::{ArgGroup, Parser};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::dataframe::DataFrameWriteOptions;
+use datafusion::sql::parser::DFParser;
 use datafusion::prelude::{
     CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig, cast, ident, lit, nullif,
 };
@@ -626,7 +627,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         session.cache_table(name).await?;
     }
-    let execution = execute_query(&session, &query, &args);
+    let execution = execute_script(&session, &query, &args);
     if let Some(seconds) = args.query_timeout {
         tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
             .await
@@ -639,6 +640,23 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         execution.await
     }
+}
+
+// Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
+// or comments. Execute setup statements before presenting the final result.
+async fn execute_script(
+    session: &RustSparkSession,
+    script: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut statements = DFParser::parse_sql(script)?;
+    let last = statements
+        .pop_back()
+        .ok_or("SQL script must contain at least one statement")?;
+    for statement in statements {
+        session.sql(&statement.to_string()).await?.collect().await?;
+    }
+    execute_query(session, &last.to_string(), args).await
 }
 
 async fn execute_query(
