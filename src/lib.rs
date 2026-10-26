@@ -530,6 +530,36 @@ impl RustSparkSession {
         dataframe.select(projection)
     }
 
+    /// Drop columns by name, like Spark DataFrame.drop.
+    ///
+    /// Unknown or repeated names are ignored. At least one column must remain,
+    /// since DataFusion cannot represent an empty projection reliably.
+    /// The returned DataFrame is lazy and does not change the source.
+    pub async fn drop_columns(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::HashSet;
+
+        let dataframe = self.table(table).await?;
+        if columns.is_empty() {
+            return Ok(dataframe);
+        }
+        let removed: HashSet<&str> = columns.iter().copied().collect();
+        let remaining: Vec<_> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .filter(|name| !removed.contains(name))
+            .map(|name| Expr::Column(Column::from_name(name)))
+            .collect();
+        if remaining.is_empty() {
+            return Err(DataFusionError::Plan(
+                "drop_columns would remove every column".into(),
+            ));
+        }
+        dataframe.select(remaining)
+    }
+
     /// Materialize a registered table in memory for repeated queries.
     ///
     /// This executes the table's plan once and keeps its contents in memory.
