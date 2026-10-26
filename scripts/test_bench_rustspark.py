@@ -38,7 +38,7 @@ class BenchmarkHarnessTests(unittest.TestCase):
         values = [(1.0, "same", []), (2.0, "same", []), (3.0, "same", [])]
         with mock.patch.object(bench, "execute", side_effect=values) as execute:
             result = bench.measure_workload(
-                "unused", pathlib.Path("unused"), "group_by", "SELECT 1", 4, 2, 1, 20
+                "unused", pathlib.Path("unused"), "group_by", "SELECT 1", "same", 2, 1, 20
             )
         self.assertEqual(execute.call_count, 3)
         self.assertEqual(result["samples_ms"], [2.0, 3.0])
@@ -51,8 +51,20 @@ class BenchmarkHarnessTests(unittest.TestCase):
         with mock.patch.object(bench, "execute", side_effect=values):
             with self.assertRaisesRegex(RuntimeError, "Nondeterministic"):
                 bench.measure_workload(
-                    "unused", pathlib.Path("unused"), "group_by", "SELECT 1", 4, 2, 0, 20
+                    "unused", pathlib.Path("unused"), "group_by", "SELECT 1", "first", 2, 0, 20
                 )
+
+    def test_expected_answers_include_zero_matches(self):
+        self.assertEqual(bench.expected_results(1)["filter_sum"], [{"total": None}])
+        expected = bench.expected_results(4)
+        self.assertEqual(expected["scan_count"], [{"n": 4}])
+        self.assertEqual(expected["filter_sum"], [{"total": 74}])
+        self.assertEqual(expected["aggregate_join"], [{"pairs": 4}])
+
+    def test_rejects_incorrect_benchmark_results(self):
+        with mock.patch.object(bench, "execute", return_value=(1.0, "wrong", [])):
+            with self.assertRaisesRegex(RuntimeError, "Incorrect benchmark results"):
+                bench.benchmark("unused", 4, 1, 0, 20)
 
     def test_invalid_bench_options_fail_before_execution(self):
         with self.assertRaises(ValueError):
