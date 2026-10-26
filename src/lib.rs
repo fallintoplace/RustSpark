@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use datafusion::{
-    execution::runtime_env::RuntimeEnv,
     arrow::record_batch::RecordBatch,
     error::{DataFusionError, Result},
+    execution::runtime_env::RuntimeEnv,
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 

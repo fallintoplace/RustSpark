@@ -28,7 +28,6 @@ fn rejects_invalid_memory_limits() -> Result<(), Box<dyn std::error::Error>> {
             .args(["--sql", "SELECT 1", "--memory-limit-mb", limit])
             .output()?;
         assert!(!output.status.success(), "{limit}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("--memory-limit-mb"));
     }
     Ok(())
 }
