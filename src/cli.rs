@@ -1,10 +1,10 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Write},
     path::PathBuf,
     sync::Arc,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{ArgGroup, Parser, ValueEnum};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
