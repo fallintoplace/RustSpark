@@ -54,8 +54,7 @@ async fn rejects_empty_and_unknown_input_tables() -> TestResult {
 }
 
 #[tokio::test]
-async fn concurrent_name_union_preserves_late_columns()
--> Result<(), Box<dyn std::error::Error>> {
+async fn concurrent_name_union_preserves_late_columns() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     let names: Vec<_> = (0..12).map(|index| format!("source_{index}")).collect();
     for (index, name) in names.iter().enumerate() {
@@ -76,8 +75,16 @@ async fn concurrent_name_union_preserves_late_columns()
         .collect()
         .await?;
     let batch = &rows[0];
-    let counts = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-    let tagged = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let tagged = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert_eq!(counts.value(0), 12);
     assert_eq!(tagged.value(0), 1);
     Ok(())
