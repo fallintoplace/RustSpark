@@ -60,10 +60,7 @@ async fn multiple_predicates_are_conjoined() -> TestResult {
             "points",
             "limits",
             JoinType::Inner,
-            [
-                col("point").lt(col("upper_bound")),
-                col("point").gt(lit(1)),
-            ],
+            [col("point").lt(col("upper_bound")), col("point").gt(lit(1))],
         )
         .await?
         .count()
