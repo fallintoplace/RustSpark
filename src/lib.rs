@@ -416,6 +416,19 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
+    /// Read a registered table's column names in schema order.
+    ///
+    /// This inspects metadata without executing the table's rows.
+    pub async fn column_names(&self, table: &str) -> Result<Vec<String>> {
+        let dataframe = self.table(table).await?;
+        Ok(dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_owned())
+            .collect())
+    }
+
     /// Inspect the names, types and nullability of a read-only SQL query.
     ///
     /// Query results are not executed or collected.
