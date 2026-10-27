@@ -805,23 +805,36 @@ impl RustSparkSession {
         left_frame.join(right_frame, join_type, &left_keys, &right_keys, None)
     }
 
-    /// Union registered tables with matching schemas by column position.
-    ///
-    /// Duplicate rows are preserved. All sources must have compatible schemas.
-    pub async fn union_tables(&self, names: &[&str]) -> Result<DataFrame> {
+    async fn union_registered_tables(&self, names: &[&str], by_name: bool) -> Result<DataFrame> {
         if names.is_empty() {
-            return Err(DataFusionError::Plan(
-                "union_tables requires at least one table".into(),
-            ));
+            let operation = if by_name {
+                "union_tables_by_name"
+            } else {
+                "union_tables"
+            };
+            return Err(DataFusionError::Plan(format!(
+                "{operation} requires at least one table"
+            )));
         }
         let frames =
             futures::future::try_join_all(names.iter().map(|name| self.table(name))).await?;
         let mut frames = frames.into_iter();
         let mut dataframe = frames.next().expect("non-empty table list");
         for frame in frames {
-            dataframe = dataframe.union(frame)?;
+            dataframe = if by_name {
+                dataframe.union_by_name(frame)?
+            } else {
+                dataframe.union(frame)?
+            };
         }
         Ok(dataframe)
+    }
+
+    /// Union registered tables with matching schemas by column position.
+    ///
+    /// Duplicate rows are preserved. All sources must have compatible schemas.
+    pub async fn union_tables(&self, names: &[&str]) -> Result<DataFrame> {
+        self.union_registered_tables(names, false).await
     }
 
     /// Union registered tables by column position and remove duplicate rows.
@@ -836,19 +849,7 @@ impl RustSparkSession {
     /// Unlike positional unions, column order may differ and new columns
     /// can appear in later tables. Duplicate rows are preserved.
     pub async fn union_tables_by_name(&self, names: &[&str]) -> Result<DataFrame> {
-        if names.is_empty() {
-            return Err(DataFusionError::Plan(
-                "union_tables_by_name requires at least one table".into(),
-            ));
-        }
-        let frames =
-            futures::future::try_join_all(names.iter().map(|name| self.table(name))).await?;
-        let mut frames = frames.into_iter();
-        let mut dataframe = frames.next().expect("non-empty table list");
-        for frame in frames {
-            dataframe = dataframe.union_by_name(frame)?;
-        }
-        Ok(dataframe)
+        self.union_registered_tables(names, true).await
     }
 
     /// Union registered tables by column name, removing duplicate rows.
