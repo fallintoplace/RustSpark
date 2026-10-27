@@ -55,8 +55,7 @@ async fn with_columns_evaluates_updates_against_original_input() -> TestResult {
     let error = session
         .with_columns("numbers", &[("A", lit(1i64))])
         .await
-        .err()
-        .expect("case-only new name should not shadow an existing column");
+        .expect_err("case-only new name should not shadow an existing column");
     assert!(
         error
             .to_string()
