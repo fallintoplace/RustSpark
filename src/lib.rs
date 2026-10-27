@@ -511,6 +511,13 @@ impl RustSparkSession {
             .collect())
     }
 
+    /// Count the fields of a registered table from its schema only.
+    ///
+    /// This never executes table data, even for lazy views.
+    pub async fn table_column_count(&self, table: &str) -> Result<usize> {
+        Ok(self.table(table).await?.schema().fields().len())
+    }
+
     /// Count NULL values in selected table columns without collecting rows.
     ///
     /// An empty column list includes all columns. The result is a lazy
