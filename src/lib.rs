@@ -201,6 +201,16 @@ impl RustSparkSession {
         self.register_dataframe(table, self.read_batches(batches)?)
     }
 
+    /// Stream a registered table as Arrow record batches.
+    ///
+    /// Rows are consumed incrementally without collecting the full table.
+    pub async fn table_stream(
+        &self,
+        table: &str,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.table(table).await?.execute_stream().await
+    }
+
     async fn register_view_dataframe(
         &self,
         name: &str,
