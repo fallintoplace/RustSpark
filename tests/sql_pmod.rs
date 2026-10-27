@@ -20,7 +20,7 @@ async fn pmod_works_with_rows_and_nulls() -> Result<(), Box<dyn std::error::Erro
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        result.extend(column.iter().map(|value| value));
+        result.extend(column.iter());
     }
     assert_eq!(result, vec![Some(2), Some(1), None, None]);
     Ok(())
