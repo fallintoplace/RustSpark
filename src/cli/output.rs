@@ -1,5 +1,5 @@
 use std::{
-    io::Write,
+    io::{BufWriter, Write},
     path::Path,
     sync::{
         Arc,
@@ -7,10 +7,16 @@ use std::{
     },
 };
 
-use datafusion::{arrow::ipc::writer::FileWriter, prelude::DataFrame};
+use datafusion::{
+    arrow::ipc::{
+        CompressionType,
+        writer::{FileWriter, IpcWriteOptions},
+    },
+    prelude::DataFrame,
+};
 use futures::StreamExt;
 
-use super::StdoutFormat;
+use super::{ArrowCompression, StdoutFormat};
 
 pub(super) fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(error);
@@ -110,11 +116,13 @@ async fn write_delimited<W: Write>(
 fn display_cell(
     column: &datafusion::arrow::array::ArrayRef,
     row: usize,
-) -> datafusion::arrow::error::Result<String> {
+) -> datafusion::arrow::error::Result<std::borrow::Cow<'static, str>> {
     if column.is_null(row) {
-        Ok("NULL".to_owned())
+        // NULL is repeated for every missing cell. Borrow the fixed label.
+        Ok(std::borrow::Cow::Borrowed("NULL"))
     } else {
         datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)
+            .map(std::borrow::Cow::Owned)
     }
 }
 
@@ -138,21 +146,22 @@ async fn write_vertical<W: Write>(
     output: &mut W,
     schema: &datafusion::arrow::datatypes::SchemaRef,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Column names are fixed for the stream; escape them once, not per row.
+    let escaped_headers: Vec<_> = schema
+        .fields()
+        .iter()
+        .map(|field| escape_vertical_value(field.name()))
+        .collect();
     let mut row_number = 0_usize;
     while let Some(batch) = stream.next().await {
         let batch = batch?;
         for row in 0..batch.num_rows() {
             row_number += 1;
             writeln!(output, "--- Row {row_number} ---")?;
-            for (index, field) in schema.fields().iter().enumerate() {
+            for (index, header) in escaped_headers.iter().enumerate() {
                 let column = batch.column(index);
                 let value = display_cell(column, row)?;
-                writeln!(
-                    output,
-                    "{}: {}",
-                    escape_vertical_value(field.name()),
-                    escape_vertical_value(&value)
-                )?;
+                writeln!(output, "{header}: {}", escape_vertical_value(&value))?;
             }
         }
     }
@@ -179,14 +188,21 @@ async fn write_arrow_stream<W: Write>(
 }
 
 fn escape_markdown_cell(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('\r', " ")
-        .replace('\n', "<br>")
+    // One allocation instead of rebuilding the string for each escape kind.
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\\' => escaped.push_str("\\\\"),
+            '|' => escaped.push_str("\\|"),
+            '\r' => escaped.push(' '),
+            '\n' => escaped.push_str("<br>"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 // Keep only one record batch and the current cell in memory.
@@ -219,7 +235,14 @@ async fn write_markdown<W: Write>(
     Ok(())
 }
 
-fn escape_html_cell(value: &str) -> String {
+fn escape_html_cell(value: &str) -> std::borrow::Cow<'_, str> {
+    // Plain text is the common case; it needs no copy or heap allocation.
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return std::borrow::Cow::Borrowed(value);
+    }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -231,7 +254,7 @@ fn escape_html_cell(value: &str) -> String {
             other => escaped.push(other),
         }
     }
-    escaped
+    std::borrow::Cow::Owned(escaped)
 }
 
 // Stream an embeddable HTML table, escaping all column names and cell values.
@@ -350,6 +373,7 @@ pub(super) async fn write_stdout(
 pub(super) async fn write_arrow_ipc(
     dataframe: DataFrame,
     path: &Path,
+    compression: Option<ArrowCompression>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
@@ -358,7 +382,13 @@ pub(super) async fn write_arrow_ipc(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::NamedTempFile::new_in(directory)?;
-    let mut writer = FileWriter::try_new_buffered(temporary.reopen()?, &schema)?;
+    let codec = compression.map(|compression| match compression {
+        ArrowCompression::Lz4 => CompressionType::LZ4_FRAME,
+        ArrowCompression::Zstd => CompressionType::ZSTD,
+    });
+    let options = IpcWriteOptions::default().try_with_compression(codec)?;
+    let mut writer =
+        FileWriter::try_new_with_options(BufWriter::new(temporary.reopen()?), &schema, options)?;
     while let Some(batch) = stream.next().await {
         writer.write(&batch?)?;
     }
@@ -370,11 +400,25 @@ pub(super) async fn write_arrow_ipc(
 
 #[cfg(test)]
 mod tests {
-    use super::escape_vertical_value;
+    use super::{display_cell, escape_vertical_value};
 
     #[test]
     fn escapes_vertical_controls_without_changing_unicode() {
         assert_eq!(escape_vertical_value("a\\b\r\n\té"), "a\\\\b\\r\\n\\té");
         assert_eq!(escape_vertical_value("plain"), "plain");
+    }
+
+    #[test]
+    fn null_display_reuses_a_borrowed_constant() {
+        let column: datafusion::arrow::array::ArrayRef =
+            std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec![
+                None,
+                Some("value"),
+            ]));
+        assert!(matches!(
+            display_cell(&column, 0).unwrap(),
+            std::borrow::Cow::Borrowed("NULL")
+        ));
+        assert_eq!(display_cell(&column, 1).unwrap(), "value");
     }
 }

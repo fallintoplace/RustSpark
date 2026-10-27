@@ -5,8 +5,8 @@ use std::{
 };
 
 use datafusion::{
-    dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader,
-    prelude::DataFrame,
+    config::TableParquetOptions, dataframe::DataFrameWriteOptions,
+    parquet::file::reader::SerializedFileReader, prelude::DataFrame,
 };
 use futures::{StreamExt, stream};
 use rustspark::RustSparkSession;
@@ -39,11 +39,16 @@ fn prepare_staged_insert_files(
 ) -> Result<(), Box<dyn Error>> {
     let new = staging.join("new");
     fs::create_dir(&new)?;
-    validate_table_files(original, table)?;
-    for entry in fs::read_dir(original)? {
-        let entry = entry?;
-        let source = entry.path();
-        let target = new.join(entry.file_name());
+    // The inventory already checked every entry. Reuse these paths after
+    // footer validation instead of scanning the source directory twice.
+    let parts = parquet_part_inventory(original, table)?;
+    validate_parquet_paths(&parts)?;
+    for source in parts {
+        let target = new.join(
+            source
+                .file_name()
+                .expect("validated Parquet parts always have a file name"),
+        );
         // ListingTable INSERT is append-only and writes fresh Parquet
         // parts. Existing parts are immutable, so they can be linked
         // into the private replacement snapshot without copying all
@@ -226,7 +231,10 @@ fn parquet_part_inventory(directory: &Path, name: &str) -> Result<Vec<PathBuf>, 
 /// Large part sets can validate independent file footers in parallel.
 fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Error>> {
     let paths = parquet_part_inventory(directory, name)?;
+    validate_parquet_paths(&paths)
+}
 
+fn validate_parquet_paths(paths: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
         .min(8);
@@ -496,6 +504,7 @@ pub(super) async fn save_table(
     dataframe: DataFrame,
     root: &Path,
     name: &str,
+    compression: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(root)?;
     let destination = root.join(name);
@@ -510,8 +519,13 @@ pub(super) async fn save_table(
     let staged = temporary.path().join("data");
     let staged_path = staged.to_str().ok_or("Database path must be valid UTF-8")?;
     let schema = dataframe.schema().inner().clone();
+    let parquet_options = compression.map(|codec| {
+        let mut options = TableParquetOptions::default();
+        options.global.compression = Some(codec.to_owned());
+        options
+    });
     dataframe
-        .write_parquet(staged_path, DataFrameWriteOptions::new(), None)
+        .write_parquet(staged_path, DataFrameWriteOptions::new(), parquet_options)
         .await?;
     if !staged.exists() || fs::read_dir(&staged)?.next().is_none() {
         // DataFusion emits no Parquet part for a zero-row result. Preserve

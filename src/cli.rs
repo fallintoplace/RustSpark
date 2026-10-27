@@ -17,6 +17,12 @@ enum StdoutFormat {
     Arrow,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ArrowCompression {
+    Lz4,
+    Zstd,
+}
+
 #[derive(Parser)]
 #[command(
     version,
@@ -290,6 +296,15 @@ struct Args {
     )]
     output_arrow: Option<PathBuf>,
 
+    /// Compress Arrow IPC file buffers. Default is uncompressed.
+    #[arg(
+        long = "arrow-compression",
+        value_enum,
+        value_name = "CODEC",
+        requires = "output_arrow"
+    )]
+    arrow_compression: Option<ArrowCompression>,
+
     #[arg(long = "output-single-file")]
     output_single_file: bool,
 
@@ -297,11 +312,8 @@ struct Args {
     #[arg(long = "output-rows-per-file", value_name = "ROWS", value_parser = parse_output_rows_per_file, conflicts_with = "output_single_file")]
     output_rows_per_file: Option<usize>,
 
-    #[arg(
-        long = "parquet-compression",
-        value_name = "CODEC",
-        requires = "output_parquet"
-    )]
+    /// Select the codec for --output-parquet or --save-table.
+    #[arg(long = "parquet-compression", value_name = "CODEC")]
     parquet_compression: Option<String>,
 }
 

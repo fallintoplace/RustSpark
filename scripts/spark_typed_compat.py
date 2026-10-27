@@ -11,6 +11,7 @@ import json
 import pathlib
 import re
 import subprocess
+import tempfile
 import sys
 from dataclasses import dataclass
 
@@ -65,11 +66,30 @@ def parse_rustspark_description(stdout: str) -> tuple[list[str], list[str], list
     )
 
 
-def rustspark_query(binary: str, sql: str) -> TypedResult:
+def rustspark_command(
+    binary: str, sql: str, input_format: str = "csv",
+    parquet_root: pathlib.Path | None = None,
+) -> list[str]:
     command = [binary]
-    for name in TABLES:
-        command.extend(["--csv-table", f"{name}={FIXTURES / (name + '.csv')}"])
-    command.extend(["--csv-schema", RUST_SCHEMA, "--sql", sql])
+    if input_format == "csv":
+        for name in TABLES:
+            command.extend(["--csv-table", f"{name}={FIXTURES / (name + '.csv')}"])
+        command.extend(["--csv-schema", RUST_SCHEMA])
+    elif input_format == "parquet":
+        if parquet_root is None:
+            raise ValueError("Parquet input requires a shared fixture directory")
+        for name in TABLES:
+            command.extend(["--parquet-table", f"{name}={parquet_root / name}"])
+    else:
+        raise ValueError(f"Unsupported input format: {input_format}")
+    return command + ["--sql", sql]
+
+
+def rustspark_query(
+    binary: str, sql: str, input_format: str = "csv",
+    parquet_root: pathlib.Path | None = None,
+) -> TypedResult:
+    command = rustspark_command(binary, sql, input_format, parquet_root)
     described = subprocess.run(
         command + ["--describe"], capture_output=True, text=True,
         check=True, timeout=120,
@@ -80,6 +100,25 @@ def rustspark_query(binary: str, sql: str) -> TypedResult:
         check=True, timeout=120,
     )
     return TypedResult(parse_rustspark_json(output.stdout, columns), types, nullables)
+
+
+def register_spark_sources(
+    session, input_format: str, parquet_root: pathlib.Path | None = None,
+) -> None:
+    if input_format not in ("csv", "parquet"):
+        raise ValueError(f"Unsupported input format: {input_format}")
+    if input_format == "parquet" and parquet_root is None:
+        raise ValueError("Parquet input requires a shared fixture directory")
+    for name in TABLES:
+        frame = (session.read.option("header", "true").schema(SPARK_SCHEMA)
+                 .csv(str(FIXTURES / (name + ".csv"))))
+        if input_format == "parquet":
+            # Write typed files once. Both engines then read the same Parquet
+            # directory instead of accidentally comparing CSV and Parquet.
+            output = parquet_root / name
+            frame.write.parquet(str(output))
+            frame = session.read.parquet(str(output))
+        frame.createOrReplaceTempView(name)
 
 
 def spark_query(session, sql: str) -> TypedResult:
@@ -184,6 +223,7 @@ def main(argv=None) -> int:
     parser.add_argument("--rustspark", default="./target/debug/rustspark")
     parser.add_argument("--cases", type=pathlib.Path, default=CASES)
     parser.add_argument("--spark-master", default="local[2]")
+    parser.add_argument("--input-format", choices=("csv", "parquet"), default="csv")
     parser.add_argument("--json-out", type=pathlib.Path)
     parser.add_argument(
         "--check-nullability", action="store_true",
@@ -203,16 +243,17 @@ def main(argv=None) -> int:
         .getOrCreate()
     )
     try:
-        for name in TABLES:
-            (session.read.option("header", "true").schema(SPARK_SCHEMA)
-             .csv(str(FIXTURES / (name + ".csv")))
-             .createOrReplaceTempView(name))
-        failed, results = run_cases(
-            cases,
-            lambda sql: rustspark_query(args.rustspark, sql),
-            lambda sql: spark_query(session, sql),
-            check_nullability=args.check_nullability,
-        )
+        with tempfile.TemporaryDirectory(prefix="rustspark-typed-compat-") as directory:
+            parquet_root = pathlib.Path(directory) if args.input_format == "parquet" else None
+            register_spark_sources(session, args.input_format, parquet_root)
+            failed, results = run_cases(
+                cases,
+                lambda sql: rustspark_query(
+                    args.rustspark, sql, args.input_format, parquet_root,
+                ),
+                lambda sql: spark_query(session, sql),
+                check_nullability=args.check_nullability,
+            )
     finally:
         session.stop()
     if args.json_out is not None:
@@ -223,6 +264,7 @@ def main(argv=None) -> int:
             "differed": sum(item["status"] == "DIFF" for item in results),
             "errors": sum(item["status"] == "ERROR" for item in results),
             "check_nullability": args.check_nullability,
+            "input_format": args.input_format,
             "results": results,
         }, indent=2) + "\n", encoding="utf-8")
     print(f"{len(cases) - failed}/{len(cases)} matched; {failed} differed or errored")
