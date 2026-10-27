@@ -833,6 +833,31 @@ impl RustSparkSession {
         dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, false))
     }
 
+    /// Exclude rows whose column belongs to a typed value set.
+    ///
+    /// Uses SQL NOT IN semantics: a NULL on either side yields an unknown
+    /// comparison. An empty set keeps every row, including NULLs.
+    /// Values are passed as typed expressions, never interpolated into SQL.
+    pub async fn filter_rows_not_in_values(
+        &self,
+        table: &str,
+        column: &str,
+        values: &[datafusion::common::ScalarValue],
+    ) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        if values.is_empty() {
+            return Ok(dataframe);
+        }
+        use datafusion::{common::Column, logical_expr::Expr};
+        let list = values
+            .iter()
+            .cloned()
+            .map(datafusion::prelude::lit)
+            .collect();
+        dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, true))
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
