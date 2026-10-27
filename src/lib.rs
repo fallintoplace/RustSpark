@@ -1434,8 +1434,13 @@ impl RustSparkSession {
                 "{operation} requires at least one table"
             )));
         }
-        let frames =
-            futures::future::try_join_all(names.iter().map(|name| self.table(name))).await?;
+        // Keep table lookup parallel but bound pending futures for large unions.
+        // Buffered lookups preserve the input order required by UNION.
+        use futures::{StreamExt, TryStreamExt, stream};
+        let frames: Vec<DataFrame> = stream::iter(names.iter().map(|name| self.table(name)))
+            .buffered(16)
+            .try_collect()
+            .await?;
         let mut frames = frames.into_iter();
         let mut dataframe = frames.next().expect("non-empty table list");
         for frame in frames {
