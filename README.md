@@ -360,6 +360,17 @@ Inspect logical and physical query plans without running the query:
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
 ```
 
+Choose a disk with enough free space for large-query spill files (sorting and joining):
+
+```sh
+cargo run -- --spill-dir /fast-ssd/scratch --memory-limit-mb 512 \\
+  --csv /data/large.csv --sql 'SELECT * FROM data ORDER BY amount' --output-parquet /tmp/sorted
+```
+
+The spill directory must exist. RustSpark keeps default temporary-file behavior
+when the flag is absent and rejects spill directories inside `--database-dir`.
+A memory limit is optional, but a limit can trigger external spilling.
+
 Set an execution deadline (in seconds) for query planning, running, and exporting:
 
 ```sh
