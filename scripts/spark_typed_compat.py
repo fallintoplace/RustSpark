@@ -155,9 +155,12 @@ def normalized_typed_value(value, logical_type: str):
     if logical_type == "date":
         return normalize_date(value)
     if logical_type.startswith("decimal("):
-        # The schema checks precision and scale. Values can be represented as
-        # JSON strings (RustSpark) or decimal.Decimal (PySpark).
-        return format(decimal.Decimal(str(value)).normalize(), "f")
+        # Values may use up to 38 digits, exceeding the default 28-digit
+        # Decimal context. Never round away differences during comparison.
+        number = decimal.Decimal(str(value))
+        with decimal.localcontext() as context:
+            context.prec = max(context.prec, len(number.as_tuple().digits))
+            return format(number.normalize(), "f")
     return value
 
 
