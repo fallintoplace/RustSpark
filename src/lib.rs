@@ -581,6 +581,23 @@ impl RustSparkSession {
         dataframe.select_columns(columns)?.distinct()
     }
 
+    /// Project typed DataFusion expressions from a registered table.
+    ///
+    /// Computed expressions and aliases are planned lazily. At least one
+    /// expression is required and the source table remains unchanged.
+    pub async fn select_expressions(
+        &self,
+        table: &str,
+        expressions: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        if expressions.is_empty() {
+            return Err(DataFusionError::Plan(
+                "select_expressions requires at least one expression".into(),
+            ));
+        }
+        self.table(table).await?.select(expressions.to_vec())
+    }
+
     fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
         use std::collections::HashSet;
 
