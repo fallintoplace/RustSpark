@@ -50,8 +50,8 @@ class BenchmarkReportTests(unittest.TestCase):
         sample["results"]["Duck|DB<test>"] = sample["results"].pop("duckdb")
         sample["metric"] = "Cold \\| <script>"
         rendered = bench_report.render_report(sample)
-        self.assertIn("Duck\\\\|DB&lt;test&gt;", rendered)
-        self.assertIn("Cold \\\\\\\| &lt;script&gt;", rendered)
+        self.assertIn(r"Duck\|DB&lt;test&gt;", rendered)
+        self.assertIn("Cold " + "\\" * 3 + "| &lt;script&gt;", rendered)
 
     def test_rejects_invalid_warmup_metadata(self):
         for value in (-1, True, "1", 1.5):
