@@ -10,6 +10,15 @@ enum MultisetOperation {
     Except,
 }
 
+fn numbered_input_sql(table: &str, columns: &[String], index: &str) -> String {
+    let partition = columns
+        .iter()
+        .map(|name| super::quote_join_identifier(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("(SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition}) AS {index} FROM {table})")
+}
+
 impl RustSparkSession {
     async fn set_operation(
         &self,
@@ -83,16 +92,8 @@ impl RustSparkSession {
             index_name.push('_');
         }
         let index = quote(&index_name);
-        let left_partition = left_columns
-            .iter()
-            .map(|name| quote(name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let right_partition = right_columns
-            .iter()
-            .map(|name| quote(name))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let left_numbered = numbered_input_sql(&left_path, &left_columns, &index);
+        let right_numbered = numbered_input_sql(&right_path, &right_columns, &index);
         let projection = left_columns
             .iter()
             .map(|name| format!("l.{}", quote(name)))
@@ -115,12 +116,8 @@ impl RustSparkSession {
             MultisetOperation::Except => ("LEFT JOIN", format!(" WHERE r.{index} IS NULL")),
         };
         let sql = format!(
-            "SELECT {projection} FROM \
-             (SELECT *, ROW_NUMBER() OVER (PARTITION BY {left_partition}) AS {index} \
-              FROM {left_path}) AS l \
-             {join} \
-             (SELECT *, ROW_NUMBER() OVER (PARTITION BY {right_partition}) AS {index} \
-              FROM {right_path}) AS r \
+            "SELECT {projection} FROM {left_numbered} AS l \
+             {join} {right_numbered} AS r \
              ON {}{filter}",
             conditions.join(" AND "),
         );
@@ -155,5 +152,23 @@ impl RustSparkSession {
              SELECT * FROM (SELECT * FROM {right} EXCEPT SELECT * FROM {left}) AS right_only"
         ))
         .await
+    }
+}
+
+#[cfg(test)]
+mod numbered_input_tests {
+    use super::numbered_input_sql;
+
+    #[test]
+    fn quotes_partition_columns_in_numbered_sources() {
+        let sql = numbered_input_sql(
+            "\"catalog\".\"events\"",
+            &["user id".to_owned(), "a\"b".to_owned()],
+            "\"__row\"",
+        );
+        assert_eq!(
+            sql,
+            "(SELECT *, ROW_NUMBER() OVER (PARTITION BY \"user id\", \"a\"\"b\") AS \"__row\" FROM \"catalog\".\"events\")"
+        );
     }
 }
