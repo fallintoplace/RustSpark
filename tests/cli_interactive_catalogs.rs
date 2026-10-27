@@ -23,7 +23,11 @@ fn shell_lists_catalogs_and_still_executes_sql() -> Result<(), Box<dyn std::erro
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout)?;
-    assert_eq!(stdout.lines().filter(|line| *line == "datafusion").count(), 1, "{stdout}");
+    assert_eq!(
+        stdout.lines().filter(|line| *line == "datafusion").count(),
+        1,
+        "{stdout}"
+    );
     assert!(stdout.contains("17"), "{stdout}");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("SQL error"));
     Ok(())
