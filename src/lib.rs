@@ -1414,6 +1414,16 @@ impl RustSparkSession {
         Self::extract_scalar(self.sql(query).await?).await
     }
 
+    /// Execute read-only SQL that must return one row and one column.
+    ///
+    /// Rejects DDL and DML before execution and reads at most two rows.
+    pub async fn sql_read_only_scalar(
+        &self,
+        query: &str,
+    ) -> Result<datafusion::common::ScalarValue> {
+        Self::extract_scalar(self.sql_read_only(query).await?).await
+    }
+
     /// Read a single typed SQL value with bound parameters.
     ///
     /// The query must produce exactly one column and one row.
