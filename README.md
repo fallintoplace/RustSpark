@@ -46,6 +46,7 @@ The `--query-timeout` applies to each executed statement.
 Run `.tables` to list registered tables, `.schemas` to list available catalog
 schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
+Use `.count data` to print the number of rows in a registered table.
 
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
