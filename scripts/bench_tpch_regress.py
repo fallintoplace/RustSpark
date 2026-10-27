@@ -53,8 +53,15 @@ def compare(baseline, candidate, max_regression=0.20):
             "ratio": round(ratio, 4),
             "regression": ratio > 1 + max_regression,
         })
+    full_suite = set(old) == set(range(1, 23))
+    suite_speedup = None
+    if full_suite:
+        log_ratio = math.fsum(math.log(old[q]) - math.log(new[q]) for q in old) / 22
+        suite_speedup = round(math.exp(log_ratio), 4)
     return {"threshold_fraction": max_regression,
             "regressions": [x["id"] for x in comparisons if x["regression"]],
+            "full_22_query_suite": full_suite,
+            "geometric_mean_baseline_over_candidate": suite_speedup,
             "results": comparisons}
 
 
