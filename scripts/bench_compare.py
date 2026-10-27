@@ -102,8 +102,9 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
 def benchmark(binary, engines, rows, repeat, warmup, timeout):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
-    if not engines or len(engines) != len(set(engines)):
-        raise ValueError("Select at least one unique engine")
+    if (not engines or len(engines) != len(set(engines))
+            or any(engine not in ("rustspark", "duckdb", "spark") for engine in engines)):
+        raise ValueError("Select unique engines from rustspark, duckdb and spark")
     check_dependencies(engines)
     with tempfile.TemporaryDirectory(prefix="rustspark-compare-") as directory:
         csv = pathlib.Path(directory) / "input.csv"

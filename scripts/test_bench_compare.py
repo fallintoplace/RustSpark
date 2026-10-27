@@ -20,6 +20,12 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench_compare.command_for("unknown", "binary", pathlib.Path("x"), "sql")
 
+    def test_unknown_engine_fails_before_writing_fixtures(self):
+        with mock.patch.object(bench_compare, "write_csv") as write_csv:
+            with self.assertRaisesRegex(ValueError, "Select unique engines"):
+                bench_compare.benchmark("fake", ["unknown"], 100000, 1, 0, 10)
+            write_csv.assert_not_called()
+
     def test_correctness_check_precedes_timing(self):
         with mock.patch.object(bench_compare, "execute",
                                return_value=(1.0, "wrong", [{"n": 0}])):
