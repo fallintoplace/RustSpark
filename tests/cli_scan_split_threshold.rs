@@ -34,7 +34,10 @@ fn reads_large_csv_with_custom_scan_split_threshold() -> TestResult {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout)?.trim(), r#"{"rows":20000}"#);
+    assert_eq!(
+        String::from_utf8(output.stdout)?.trim(),
+        r#"{"rows":20000}"#
+    );
     Ok(())
 }
 
