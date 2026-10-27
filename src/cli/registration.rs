@@ -139,9 +139,9 @@ async fn register_unnamed_input(
     Ok(true)
 }
 
-fn parsed_named_inputs(
-    args: &Args,
-) -> Result<Vec<(NamedInputKind, String, String)>, Box<dyn std::error::Error>> {
+type NamedInput = (NamedInputKind, String, String);
+
+fn parsed_named_inputs(args: &Args) -> Result<Vec<NamedInput>, Box<dyn std::error::Error>> {
     let mut names = HashSet::new();
     let mut inputs = Vec::new();
     for kind in INPUT_KINDS {
