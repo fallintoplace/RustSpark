@@ -134,7 +134,7 @@ async fn handle_read_command(
 async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bool {
     if command != ".columns"
         && !command.starts_with(".columns ")
-        && !command.starts_with(".columns\\t")
+        && !command.starts_with(".columns\t")
     {
         return false;
     }
@@ -158,7 +158,7 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
     if command != ".schema"
         && !command.starts_with(".schema ")
-        && !command.starts_with(".schema\\t")
+        && !command.starts_with(".schema\t")
     {
         return false;
     }
@@ -183,7 +183,7 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
 async fn handle_count_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
     if command != ".count"
         && !command.starts_with(".count ")
-        && !command.starts_with(".count\\t")
+        && !command.starts_with(".count\t")
     {
         return false;
     }
