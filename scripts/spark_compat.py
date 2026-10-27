@@ -27,8 +27,8 @@ def normalize(value):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
         return format(value, "f")
-    if isinstance(value, bytes):
-        return value.hex()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
     if isinstance(value, dict):
         return {str(k): normalize(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
