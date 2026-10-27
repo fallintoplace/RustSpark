@@ -62,6 +62,26 @@ class QueryRunnerTests(unittest.TestCase):
         self.assertEqual(result["result_rows"], 1)
         self.assertGreaterEqual(result["p95_ms"], result["median_ms"])
 
+    def test_benchmark_records_binary_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "queries").mkdir()
+            (root / "data").mkdir()
+            binary = root / "rustspark"
+            binary.write_bytes(b"test-rustspark-build")
+            (root / "queries/01.sql").write_text("SELECT 1")
+            for table in runner.TABLES:
+                (root / "data" / f"{table}.parquet").touch()
+            with mock.patch.object(runner, "measure", return_value={"status": "ok"}):
+                report = runner.benchmark(
+                    binary, runner.query_paths(root / "queries"), root / "data",
+                    repeat=1, warmup=0, timeout=60, partitions=4,
+                )
+            import hashlib
+            self.assertEqual(report["binary_sha256"], hashlib.sha256(binary.read_bytes()).hexdigest())
+            self.assertEqual(report["target_partitions"], 4)
+            self.assertEqual(report["timeout_seconds"], 60)
+
     def test_benchmark_detects_top_level_order_by(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

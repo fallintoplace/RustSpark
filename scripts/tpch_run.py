@@ -132,6 +132,10 @@ def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partiti
         "metric": "cold process + Parquet registration + SQL + JSON output",
         "warning": "Local end-to-end latency, not warm or distributed throughput",
         "platform": platform.platform(),
+        "binary_sha256": (hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+                          if Path(binary).is_file() else None),
+        "target_partitions": partitions,
+        "timeout_seconds": timeout,
         "repeat": repeat,
         "warmup": warmup,
         "results": reports,
