@@ -20,6 +20,13 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(verify.same_value("1.0000", Decimal(1), Decimal("0")))
         self.assertFalse(verify.same_value(True, 1, Decimal("0")))
 
+    def test_nonfinite_decimal_never_matches_or_raises(self):
+        for bad in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+            with self.subTest(value=str(bad)):
+                self.assertFalse(verify.same_value(bad, 1, Decimal("0.01")))
+                self.assertFalse(verify.same_value(str(bad), 1, Decimal("0.01")))
+                self.assertFalse(verify.same_value(1, str(bad), Decimal("0.01")))
+
     def test_dates_and_strings(self):
         self.assertTrue(verify.same_value("2026-01-01", datetime.date(2026, 1, 1), Decimal(0)))
         self.assertFalse(verify.same_value("abc", "ABC", Decimal(0)))
