@@ -99,6 +99,15 @@ impl RustSparkSession {
         Ok(())
     }
 
+    /// Return available catalog names in stable sorted order.
+    ///
+    /// Empty catalogs are included.
+    pub fn list_catalogs(&self) -> Vec<String> {
+        let mut catalogs = self.context.catalog_names();
+        catalogs.sort();
+        catalogs
+    }
+
     fn sorted_catalog_entries(&self, include_tables: bool) -> Vec<String> {
         let mut entries = Vec::new();
         for catalog_name in self.context.catalog_names() {
