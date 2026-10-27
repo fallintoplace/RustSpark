@@ -577,6 +577,15 @@ impl RustSparkSession {
     ) -> Result<()> {
         use std::collections::HashSet;
 
+        // One-name lookups are cheap as a scan. Wide projections benefit from
+        // indexing the schema once rather than rescanning it for every field.
+        let fields = dataframe.schema().fields();
+        let indexed = (columns.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         let mut seen = HashSet::new();
         for &name in columns {
             if !seen.insert(name.to_ascii_lowercase()) {
@@ -584,12 +593,11 @@ impl RustSparkSession {
                     "Duplicate {operation} column: {name}"
                 )));
             }
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name().as_str() == name)
-            {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(name),
+                None => fields.iter().any(|field| field.name().as_str() == name),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown {operation} column: {name}"
                 )));
