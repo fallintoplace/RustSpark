@@ -13,6 +13,6 @@ SELECT c.cohort,
        COUNT(*) AS cohort_size,
        COUNT(r.customer_id) AS returned
 FROM cohorts c
-LEFT JOIN return_visits r/ ON c.customer_id = r.customer_id
+LEFT JOIN return_visits r ON c.customer_id = r.customer_id
 GROUP BY c.cohort
 ORDER BY c.cohort;
