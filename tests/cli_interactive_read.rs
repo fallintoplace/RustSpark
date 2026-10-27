@@ -31,10 +31,7 @@ fn read_file_executes_multiple_statements_in_same_session() -> TestResult {
         &path,
         "\u{feff}CREATE VIEW from_file AS SELECT 13 AS n; SELECT 'semi;literal' AS word;",
     )?;
-    let script = format!(
-        ".read {}\nSELECT n FROM from_file;\n\\q\n",
-        path.display()
-    );
+    let script = format!(".read {}\nSELECT n FROM from_file;\n\\q\n", path.display());
     let output = shell(&script);
     assert!(
         output.status.success(),
