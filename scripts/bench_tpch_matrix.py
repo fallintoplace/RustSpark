@@ -29,25 +29,35 @@ def run_command(binary, queries, parquet, partitions, json_out, repeat, warmup):
             "--warmup", str(warmup), "--json-out", str(json_out)]
 
 
+def run_configuration(binary, queries, parquet, output, partitions, repeat, warmup):
+    path = output / f"partitions-{partitions}.json"
+    if path.exists():
+        raise ValueError(f"Report already exists: {path}")
+    process = subprocess.run(
+        run_command(binary, queries, parquet, partitions, path, repeat, warmup),
+        capture_output=True, text=True, check=False,
+    )
+    if not path.is_file():
+        raise RuntimeError(
+            f"No benchmark report for {partitions} partitions: {process.stderr[-400:]}"
+        )
+    report = json.loads(path.read_text(encoding="utf-8"))
+    results = report.get("results", [])
+    ok = sum(row.get("status") == "ok" for row in results)
+    return {"partitions": partitions, "queries_attempted": len(results),
+            "queries_ok": ok, "runner_exit": process.returncode,
+            "report": path.name}
+
+
 def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
     if repeat < 1 or warmup < 0:
         raise ValueError("Repeat and warmup must be valid")
     output.mkdir(parents=True, exist_ok=True)
     configurations = []
     for n in partitions:
-        path = output / f"partitions-{n}.json"
-        if path.exists():
-            raise ValueError(f"Report already exists: {path}")
-        process = subprocess.run(run_command(binary, queries, parquet, n, path, repeat, warmup),
-                                 capture_output=True, text=True, check=False)
-        if not path.is_file():
-            raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")
-        report = json.loads(path.read_text(encoding="utf-8"))
-        results = report.get("results", [])
-        ok = sum(row.get("status") == "ok" for row in results)
-        configurations.append({"partitions": n, "queries_attempted": len(results),
-                               "queries_ok": ok, "runner_exit": process.returncode,
-                               "report": path.name})
+        configurations.append(
+            run_configuration(binary, queries, parquet, output, n, repeat, warmup)
+        )
     summary = {"metric": "cold CLI + Parquet registration + SQL + JSON output",
                "configurations": configurations}
     (output / "matrix.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
