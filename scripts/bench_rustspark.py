@@ -6,10 +6,11 @@ import json
 import math
 import pathlib
 import platform
-import statistics
 import subprocess
 import tempfile
 import time
+
+from bench_stats import summarize_samples
 
 
 WORKLOADS = {
@@ -62,6 +63,13 @@ def _reject_nonfinite_json(value):
     raise ValueError(f"Non-finite JSON number in benchmark output: {value}")
 
 
+def _finite_json_float(token):
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError(f"Non-finite JSON number in benchmark output: {token}")
+    return value
+
+
 def _unique_json_keys(pairs):
     value = {}
     for key, item in pairs:
@@ -76,10 +84,10 @@ def output_signature(stdout: str):
     # Aggregate queries without ORDER BY may return rows in any order.
     rows = [
         json.loads(line, parse_constant=_reject_nonfinite_json,
-                   object_pairs_hook=_unique_json_keys)
+                   parse_float=_finite_json_float, object_pairs_hook=_unique_json_keys)
         for line in stdout.splitlines() if line.strip()
     ]
-    normalized = sorted(json.dumps(row, sort_keys=True) for row in rows)
+    normalized = sorted(json.dumps(row, sort_keys=True, allow_nan=False) for row in rows)
     digest = hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
     return digest, rows
 
@@ -132,6 +140,9 @@ def measure_workload(binary, csv, name, sql, expected_digest, repeat, warmup, ti
     digest = None
     for run in range(warmup + repeat):
         elapsed, current_digest, output = execute(binary, csv, sql, timeout)
+        if (isinstance(elapsed, bool) or not isinstance(elapsed, (float, int))
+                or not math.isfinite(elapsed) or elapsed < 0):
+            raise ValueError(f"Invalid benchmark duration for {name}: {elapsed}")
         if digest is not None and digest != current_digest:
             raise RuntimeError(f"Nondeterministic results for {name}")
         if current_digest != expected_digest:
@@ -142,9 +153,7 @@ def measure_workload(binary, csv, name, sql, expected_digest, repeat, warmup, ti
     return {
         "name": name,
         "sql": sql,
-        "median_ms": round(statistics.median(measurements), 3),
-        "p95_ms": round(percentile(measurements, 0.95), 3),
-        "samples_ms": measurements,
+        **summarize_samples(measurements),
         "result_sha256": digest,
     }
 

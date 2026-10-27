@@ -4,6 +4,7 @@
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 
 
@@ -52,14 +53,24 @@ def is_duration(value) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
+def valid_digest(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def valid_result(entry) -> bool:
+    return (valid_digest(entry.get("result_sha256"))
+            and type(entry.get("result_rows")) is int
+            and entry["result_rows"] >= 0)
+
+
 def result_mismatch(before: dict, after: dict) -> str | None:
     if not isinstance(before.get("sql"), str) or before["sql"] != after.get("sql"):
         return "SQL differs"
     if before.get("status") != "executed" or after.get("status") != "executed":
         return "query did not execute in both reports"
-    if not isinstance(before.get("result_sha256"), str) or (
-        before["result_sha256"] != after.get("result_sha256")
-        or before.get("result_rows") != after.get("result_rows")
+    if not valid_result(before) or not valid_result(after) or (
+        before["result_sha256"] != after["result_sha256"]
+        or before["result_rows"] != after["result_rows"]
     ):
         return "result differs"
     return None
@@ -69,7 +80,7 @@ def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None
     if max_slowdown is not None and (not is_duration(max_slowdown) or max_slowdown < 1):
         raise ValueError("--max-slowdown must be finite and at least 1")
     workload = reference.get("query_file_sha256")
-    if not isinstance(workload, str) or not workload or workload != candidate.get("query_file_sha256"):
+    if not valid_digest(workload) or workload != candidate.get("query_file_sha256"):
         raise ValueError("Reports use different SQL workloads")
     left = index_results(reference, "Reference")
     right = index_results(candidate, "Candidate")
@@ -93,7 +104,10 @@ def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None
             "id": number, "reference_ms": baseline_ms,
             "candidate_ms": candidate_ms, "slowdown": ratio,
         })
-        if ratio is not None and max_slowdown is not None and ratio > max_slowdown:
+        if max_slowdown is not None and (
+            (baseline_ms == 0 and candidate_ms > 0)
+            or (ratio is not None and ratio > max_slowdown)
+        ):
             slowdowns.append(number)
     return {
         "queries_compared": len(timings),

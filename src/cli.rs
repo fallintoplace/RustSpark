@@ -516,6 +516,16 @@ where
     Ok(wrap(Some(number)))
 }
 
+fn parse_boolean_param(raw: &str) -> Result<ScalarValue, String> {
+    if raw.eq_ignore_ascii_case("true") {
+        Ok(ScalarValue::Boolean(Some(true)))
+    } else if raw.eq_ignore_ascii_case("false") {
+        Ok(ScalarValue::Boolean(Some(false)))
+    } else {
+        Err("--param bool must be true or false".to_owned())
+    }
+}
+
 fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
     let (kind, raw) = value
         .split_once(':')
@@ -573,15 +583,7 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             "--param float64 must be finite",
             ScalarValue::Float64,
         ),
-        "bool" | "boolean" => {
-            if raw.eq_ignore_ascii_case("true") {
-                Ok(ScalarValue::Boolean(Some(true)))
-            } else if raw.eq_ignore_ascii_case("false") {
-                Ok(ScalarValue::Boolean(Some(false)))
-            } else {
-                Err("--param bool must be true or false".to_owned())
-            }
-        }
+        "bool" | "boolean" => parse_boolean_param(raw),
         "utf8" | "string" => Ok(ScalarValue::Utf8(Some(raw.to_owned()))),
         "null" if raw.is_empty() => Ok(ScalarValue::Null),
         _ => Err(
@@ -860,5 +862,23 @@ mod auto_input_tests {
             Ok((AutoInputKind::Parquet, extension)) if extension == ".PARQUET"
         ));
         assert!(classify_auto_input(Path::new("events.txt")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod boolean_parameter_tests {
+    use super::{ScalarValue, parse_boolean_param};
+
+    #[test]
+    fn preserves_case_insensitive_boolean_values() {
+        assert_eq!(
+            parse_boolean_param("TRUE").unwrap(),
+            ScalarValue::Boolean(Some(true))
+        );
+        assert_eq!(
+            parse_boolean_param("false").unwrap(),
+            ScalarValue::Boolean(Some(false))
+        );
+        assert!(parse_boolean_param("1").is_err());
     }
 }

@@ -234,6 +234,18 @@ fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Erro
     validate_parquet_paths(&paths)
 }
 
+// A failed worker must not unwind the process during storage validation.
+fn join_validation_jobs<'scope>(
+    jobs: impl IntoIterator<Item = std::thread::ScopedJoinHandle<'scope, Result<(), String>>>,
+    operation: &str,
+) -> Result<(), String> {
+    for job in jobs {
+        job.join()
+            .map_err(|_| format!("{operation} worker panicked"))??;
+    }
+    Ok(())
+}
+
 fn validate_parquet_paths(paths: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
@@ -251,10 +263,7 @@ fn validate_parquet_paths(paths: &[PathBuf]) -> Result<(), Box<dyn Error>> {
                     })
                 })
                 .collect::<Vec<_>>();
-            jobs.into_iter().try_for_each(|job| {
-                job.join()
-                    .expect("Parquet footer validation worker panicked")
-            })
+            join_validation_jobs(jobs, "Parquet footer validation")
         })
     } else {
         paths
@@ -448,8 +457,7 @@ pub(super) async fn register_database_tables(
                     })
                 })
                 .collect::<Vec<_>>();
-            jobs.into_iter()
-                .try_for_each(|job| job.join().expect("database validation worker panicked"))
+            join_validation_jobs(jobs, "Database validation")
         });
         validation.map_err(|error| -> Box<dyn Error> { error.into() })?;
     } else {
@@ -572,6 +580,13 @@ fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventor
     Ok(BackupInventory { tables, copies })
 }
 
+fn copy_backup_chunk(copies: &[(PathBuf, PathBuf)]) -> std::io::Result<()> {
+    for (source, target) in copies {
+        fs::copy(source, target)?;
+    }
+    Ok(())
+}
+
 // Copy independent immutable Parquet parts with a bounded worker count.
 fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>> {
     // Large backups can copy immutable parts independently. Bound the number
@@ -580,21 +595,14 @@ fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>
         .map_or(1, |count| count.get())
         .min(8);
     if copies.len() < 8 || workers == 1 {
-        for (source, target) in copies {
-            fs::copy(source, target)?;
-        }
+        copy_backup_chunk(copies)?;
     } else {
         std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
             let chunk_size = copies.len().div_ceil(workers);
             let jobs = copies
                 .chunks(chunk_size)
                 .map(|chunk| {
-                    scope.spawn(move || -> std::io::Result<()> {
-                        for (source, target) in chunk {
-                            fs::copy(source, target)?;
-                        }
-                        Ok(())
-                    })
+                    scope.spawn(move || copy_backup_chunk(chunk))
                 })
                 .collect::<Vec<_>>();
             for job in jobs {
@@ -751,4 +759,29 @@ pub(super) async fn rename_saved_table(
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod worker_join_tests {
+    use super::join_validation_jobs;
+
+    #[test]
+    fn worker_panics_are_returned_as_errors() {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| -> Result<(), String> {
+                panic!("injected worker panic");
+            });
+            let error = join_validation_jobs([worker], "Database validation").unwrap_err();
+            assert_eq!(error, "Database validation worker panicked");
+        });
+    }
+
+    #[test]
+    fn worker_validation_errors_are_preserved() {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| Err("invalid Parquet footer".to_owned()));
+            let error = join_validation_jobs([worker], "Parquet footer validation").unwrap_err();
+            assert_eq!(error, "invalid Parquet footer");
+        });
+    }
 }

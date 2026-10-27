@@ -26,7 +26,27 @@ fn parse_manifest_paths(input: &str, directory: &Path) -> Vec<(usize, PathBuf)> 
         .collect()
 }
 
-fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Option<usize> {
+fn first_missing_file_position(paths: &[(usize, PathBuf)]) -> Option<usize> {
+    paths.iter().position(|(_, path)| !path.is_file())
+}
+
+// Preserve the earliest invalid manifest entry and report unexpected worker failures.
+fn earliest_invalid_worker_result<'scope>(
+    checks: impl IntoIterator<Item = std::thread::ScopedJoinHandle<'scope, Option<usize>>>,
+) -> Result<Option<usize>> {
+    let mut first = None;
+    for check in checks {
+        let invalid = check.join().map_err(|_| {
+            DataFusionError::Execution("Parquet manifest validation worker panicked".into())
+        })?;
+        if let Some(index) = invalid {
+            first = Some(first.map_or(index, |current: usize| current.min(index)));
+        }
+    }
+    Ok(first)
+}
+
+fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Result<Option<usize>> {
     // Check large manifests in parallel while preserving the earliest error.
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
@@ -39,20 +59,15 @@ fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Option<usize> {
                 .enumerate()
                 .map(|(chunk_index, chunk)| {
                     scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .position(|(_, path)| !path.is_file())
+                        first_missing_file_position(chunk)
                             .map(|index| chunk_index * chunk_size + index)
                     })
                 })
                 .collect::<Vec<_>>();
-            checks
-                .into_iter()
-                .filter_map(|check| check.join().expect("Parquet validation worker panicked"))
-                .min()
+            earliest_invalid_worker_result(checks)
         })
     } else {
-        paths.iter().position(|(_, path)| !path.is_file())
+        Ok(first_missing_file_position(paths))
     }
 }
 
@@ -70,7 +85,7 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
         )));
     }
 
-    if let Some(index) = first_invalid_path(&paths) {
+    if let Some(index) = first_invalid_path(&paths)? {
         let (line, path) = &paths[index];
         return Err(DataFusionError::Plan(format!(
             "Parquet file list '{}' line {} must name an existing file: {}",
@@ -85,7 +100,7 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_parquet_file_list, parse_manifest_paths};
+    use super::{earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_paths};
     use std::{fs, path::Path};
 
     #[test]
@@ -145,4 +160,30 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn worker_results_keep_earliest_invalid_path() {
+        std::thread::scope(|scope| {
+            let checks = [
+                scope.spawn(|| Some(42)),
+                scope.spawn(|| Some(3)),
+                scope.spawn(|| None),
+            ];
+            assert_eq!(earliest_invalid_worker_result(checks).unwrap(), Some(3));
+        });
+    }
+
+    #[test]
+    fn worker_panics_return_a_manifest_error() {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| -> Option<usize> {
+                panic!("injected manifest worker panic");
+            });
+            let error = earliest_invalid_worker_result([worker]).unwrap_err();
+            assert!(
+                error.to_string().contains("Parquet manifest validation worker panicked"),
+                "{error}"
+            );
+        });
+    }
+
 }

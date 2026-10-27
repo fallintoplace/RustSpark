@@ -78,6 +78,15 @@ class QueryRunnerTests(unittest.TestCase):
             'SELECT n FROM (SELECT n FROM t ORDER BY n) AS nested'
         ))
         self.assertFalse(runner.has_top_level_order_by('SELECT "ORDER BY" FROM t'))
+        self.assertFalse(runner.has_top_level_order_by("SELECT `ORDER BY` FROM t"))
+        self.assertFalse(runner.has_top_level_order_by("SELECT order2by FROM t"))
+        self.assertFalse(runner.has_top_level_order_by("SELECT `a``ORDER BY` FROM t"))
+        self.assertFalse(runner.has_top_level_order_by(
+            "SELECT 1 /* outer /* nested */ ORDER BY false */"
+        ))
+        self.assertTrue(runner.has_top_level_order_by(
+            "SELECT 1 /* outer /* ORDER BY */ still comment */ ORDER BY 1"
+        ))
 
     def test_ordered_queries_reject_changed_row_order(self):
         first = subprocess.CompletedProcess([], 0, '{"n":1}\n{"n":2}\n', "")
