@@ -36,6 +36,7 @@ def check_catalog_lifecycle(binary: pathlib.Path) -> None:
         ("SELECT SUM(id) AS total FROM items", [{"total": 3}]),
         ("ALTER TABLE items RENAME TO entries", None),
         ("SELECT COUNT(*) AS n FROM entries", [{"n": 2}]),
+        ("DROP TABLE entries", None),
     ]
     with tempfile.TemporaryDirectory() as directory:
         for sql, expected in steps:
@@ -44,6 +45,8 @@ def check_catalog_lifecycle(binary: pathlib.Path) -> None:
                 execute(binary, *command)
             else:
                 expect_rows(binary, expected, *command)
+        if (pathlib.Path(directory) / "entries").exists():
+            raise AssertionError("DROP TABLE left the entries directory behind")
 
 
 def main() -> None:

@@ -30,8 +30,26 @@ class ReleaseSmokeTests(unittest.TestCase):
                 ("expect", "SELECT SUM(id) AS total FROM items", [{"total": 3}]),
                 ("execute", "ALTER TABLE items RENAME TO entries"),
                 ("expect", "SELECT COUNT(*) AS n FROM entries", [{"n": 2}]),
+                ("execute", "DROP TABLE entries"),
             ],
         )
+
+    def test_drop_leaves_no_table_directory(self):
+        import contextlib
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            (pathlib.Path(directory) / "entries").mkdir()
+            with (
+                patch.object(
+                    release_smoke.tempfile, "TemporaryDirectory",
+                    return_value=contextlib.nullcontext(directory),
+                ),
+                patch.object(release_smoke, "execute"),
+                patch.object(release_smoke, "expect_rows"),
+            ):
+                with self.assertRaisesRegex(AssertionError, "left the entries directory"):
+                    release_smoke.check_catalog_lifecycle(pathlib.Path("/unused/binary"))
 
 
 if __name__ == "__main__":
