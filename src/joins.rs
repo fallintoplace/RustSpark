@@ -197,6 +197,92 @@ impl RustSparkSession {
         .await
     }
 
+    /// Join shared keys while selecting only requested non-key columns.
+    ///
+    /// This avoids ambiguous output columns from broad SELECT * joins. Keys
+    /// are coalesced for FULL joins. Output names must be unique, and each
+    /// payload column must belong to its declared input.
+    pub async fn join_tables_using_projected(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[&str],
+        left_payload: &[&str],
+        right_payload: &[&str],
+    ) -> Result<DataFrame> {
+        use std::{collections::HashSet, fmt::Write as _};
+
+        if keys.is_empty() || keys.iter().any(|key| key.trim().is_empty()) {
+            return Err(DataFusionError::Plan(
+                "join_tables_using_projected requires non-empty keys".into(),
+            ));
+        }
+        let operator = outer_join_operator(
+            join_type,
+            "join_tables_using_projected supports inner and outer joins only",
+        )?;
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let mut output_names = HashSet::new();
+        let mut projection = String::new();
+        let mut predicates = String::new();
+
+        for key in keys {
+            if !output_names.insert(key.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!("Duplicate join key: {key}")));
+            }
+            for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
+                if !frame.schema().fields().iter().any(|field| field.name() == *key) {
+                    return Err(DataFusionError::Plan(format!(
+                        "Join column {key} does not exist in table {table}"
+                    )));
+                }
+            }
+            let name = quote_join_identifier(key);
+            if !projection.is_empty() {
+                projection.push_str(", ");
+                predicates.push_str(" AND ");
+            }
+            write!(
+                &mut projection,
+                "COALESCE({left_alias}.{name}, {right_alias}.{name}) AS {name}"
+            )
+            .expect("writing to a String cannot fail");
+            write!(&mut predicates, "{left_alias}.{name} = {right_alias}.{name}")
+                .expect("writing to a String cannot fail");
+        }
+        for (table, frame, alias, columns) in [
+            (left, &left_frame, left_alias, left_payload),
+            (right, &right_frame, right_alias, right_payload),
+        ] {
+            for column in columns {
+                if column.trim().is_empty()
+                    || !frame.schema().fields().iter().any(|field| field.name() == *column)
+                {
+                    return Err(DataFusionError::Plan(format!(
+                        "Payload column {column} does not exist in table {table}"
+                    )));
+                }
+                if !output_names.insert(column.to_ascii_lowercase()) {
+                    return Err(DataFusionError::Plan(format!(
+                        "Join output column name is not unique: {column}"
+                    )));
+                }
+                let name = quote_join_identifier(column);
+                write!(&mut projection, ", {alias}.{name} AS {name}")
+                    .expect("writing to a String cannot fail");
+            }
+        }
+        let query = format!(
+            "SELECT {projection} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {predicates}",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join two tables and suffix columns whose names occur on both sides.
     ///
     /// Both copies of each join key are kept, as in an ON join. Shared names
