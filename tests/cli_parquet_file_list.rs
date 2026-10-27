@@ -1,4 +1,8 @@
-use std::{fs::{self, File}, process::Command, sync::Arc};
+use std::{
+    fs::{self, File},
+    process::Command,
+    sync::Arc,
+};
 
 use datafusion::{
     arrow::{
@@ -16,11 +20,7 @@ fn reads_parquet_files_from_a_relative_path_manifest() -> TestResult {
     let dir = tempfile::tempdir()?;
     let parts = dir.path().join("parts");
     fs::create_dir(&parts)?;
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "n",
-        DataType::Int64,
-        false,
-    )]));
+    let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
     for index in 0..5 {
         let values = vec![index * 2, index * 2 + 1];
         let batch = RecordBatch::try_new(
