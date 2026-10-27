@@ -11,6 +11,32 @@ fn quote_join_table(path: &str) -> Result<String> {
     quote_catalog_table(path, "Join table name must be a non-empty catalog path")
 }
 
+fn validate_join_key_pairs(keys: &[(&str, &str)], message: &'static str) -> Result<()> {
+    if keys.is_empty()
+        || keys
+            .iter()
+            .any(|(left, right)| left.trim().is_empty() || right.trim().is_empty())
+    {
+        return Err(DataFusionError::Plan(message.into()));
+    }
+    Ok(())
+}
+
+fn outer_join_operator(
+    join_type: datafusion::logical_expr::JoinType,
+    message: &'static str,
+) -> Result<&'static str> {
+    use datafusion::logical_expr::JoinType;
+
+    match join_type {
+        JoinType::Inner => Ok("INNER"),
+        JoinType::Left => Ok("LEFT"),
+        JoinType::Right => Ok("RIGHT"),
+        JoinType::Full => Ok("FULL OUTER"),
+        _ => Err(DataFusionError::Plan(message.into())),
+    }
+}
+
 impl RustSparkSession {
     /// Join two registered tables by their shared column names (SQL USING).
     ///
@@ -37,7 +63,6 @@ impl RustSparkSession {
         columns: &[&str],
         preloaded: Option<(DataFrame, DataFrame)>,
     ) -> Result<DataFrame> {
-        use datafusion::logical_expr::JoinType;
         use std::collections::HashSet;
 
         if columns.is_empty() || columns.iter().any(|column| column.trim().is_empty()) {
@@ -53,17 +78,7 @@ impl RustSparkSession {
                 )));
             }
         }
-        let operator = match join_type {
-            JoinType::Inner => "INNER",
-            JoinType::Left => "LEFT",
-            JoinType::Right => "RIGHT",
-            JoinType::Full => "FULL OUTER",
-            _ => {
-                return Err(DataFusionError::Plan(
-                    "join_tables_using supports inner and outer joins only".into(),
-                ));
-            }
-        };
+        let operator = outer_join_operator(join_type, "join_tables_using supports inner and outer joins only")?;
 
         // The two read-only table lookups are independent. Resolve them
         // together, but keep the left/right schema order in the final plan.
@@ -195,34 +210,15 @@ impl RustSparkSession {
         left_suffix: &str,
         right_suffix: &str,
     ) -> Result<DataFrame> {
-        use datafusion::logical_expr::JoinType;
         use std::{collections::HashSet, fmt::Write as _};
 
-        if keys.is_empty()
-            || keys.iter().any(|(left_key, right_key)| {
-                left_key.trim().is_empty() || right_key.trim().is_empty()
-            })
-        {
-            return Err(DataFusionError::Plan(
-                "join_tables_with_suffixes requires non-empty key pairs".into(),
-            ));
-        }
+        validate_join_key_pairs(keys, "join_tables_with_suffixes requires non-empty key pairs")?;
         if left_suffix.trim().is_empty() || right_suffix.trim().is_empty() {
             return Err(DataFusionError::Plan(
                 "join_tables_with_suffixes requires non-empty suffixes".into(),
             ));
         }
-        let operator = match join_type {
-            JoinType::Inner => "INNER",
-            JoinType::Left => "LEFT",
-            JoinType::Right => "RIGHT",
-            JoinType::Full => "FULL OUTER",
-            _ => {
-                return Err(DataFusionError::Plan(
-                    "join_tables_with_suffixes supports inner and outer joins only".into(),
-                ));
-            }
-        };
+        let operator = outer_join_operator(join_type, "join_tables_with_suffixes supports inner and outer joins only")?;
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
         let left_names: HashSet<_> = left_frame
             .schema()
@@ -304,15 +300,7 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         keys: &[(&str, &str)],
     ) -> Result<DataFrame> {
-        if keys.is_empty()
-            || keys
-                .iter()
-                .any(|(l, r)| l.trim().is_empty() || r.trim().is_empty())
-        {
-            return Err(DataFusionError::Plan(
-                "join_tables requires at least one pair of non-empty join keys".into(),
-            ));
-        }
+        validate_join_key_pairs(keys, "join_tables requires at least one pair of non-empty join keys")?;
 
         let left_keys: Vec<_> = keys.iter().map(|(left, _)| *left).collect();
         let right_keys: Vec<_> = keys.iter().map(|(_, right)| *right).collect();
@@ -332,29 +320,10 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         keys: &[(&str, &str)],
     ) -> Result<DataFrame> {
-        use datafusion::logical_expr::JoinType;
         use std::fmt::Write as _;
 
-        if keys.is_empty()
-            || keys.iter().any(|(left_key, right_key)| {
-                left_key.trim().is_empty() || right_key.trim().is_empty()
-            })
-        {
-            return Err(DataFusionError::Plan(
-                "join_tables_null_safe requires one or more non-empty key pairs".into(),
-            ));
-        }
-        let operator = match join_type {
-            JoinType::Inner => "INNER",
-            JoinType::Left => "LEFT",
-            JoinType::Right => "RIGHT",
-            JoinType::Full => "FULL OUTER",
-            _ => {
-                return Err(DataFusionError::Plan(
-                    "join_tables_null_safe supports inner and outer joins only".into(),
-                ));
-            }
-        };
+        validate_join_key_pairs(keys, "join_tables_null_safe requires one or more non-empty key pairs")?;
+        let operator = outer_join_operator(join_type, "join_tables_null_safe supports inner and outer joins only")?;
         let mut predicates = String::with_capacity(keys.len() * 96);
         for (left_key, right_key) in keys {
             if !predicates.is_empty() {
@@ -413,15 +382,7 @@ impl RustSparkSession {
         keys: &[(&str, &str)],
         filter: datafusion::logical_expr::Expr,
     ) -> Result<DataFrame> {
-        if keys.is_empty()
-            || keys.iter().any(|(left_key, right_key)| {
-                left_key.trim().is_empty() || right_key.trim().is_empty()
-            })
-        {
-            return Err(DataFusionError::Plan(
-                "join_tables_filtered requires one or more non-empty key pairs".into(),
-            ));
-        }
+        validate_join_key_pairs(keys, "join_tables_filtered requires one or more non-empty key pairs")?;
         let left_keys: Vec<_> = keys.iter().map(|(key, _)| *key).collect();
         let right_keys: Vec<_> = keys.iter().map(|(_, key)| *key).collect();
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
@@ -502,5 +463,25 @@ impl RustSparkSession {
             quote_join_table(intervals_table)?,
         );
         self.sql(&query).await
+    }
+}
+
+#[cfg(test)]
+mod join_validation_tests {
+    use super::{outer_join_operator, validate_join_key_pairs};
+    use datafusion::logical_expr::JoinType;
+
+    #[test]
+    fn join_keys_reject_missing_or_blank_pairs() {
+        assert!(validate_join_key_pairs(&[("id", "key")], "invalid keys").is_ok());
+        assert!(validate_join_key_pairs(&[], "invalid keys").is_err());
+        assert!(validate_join_key_pairs(&[("id", " ")], "invalid keys").is_err());
+    }
+
+    #[test]
+    fn shared_outer_join_operator_preserves_supported_kinds() {
+        assert_eq!(outer_join_operator(JoinType::Inner, "invalid").unwrap(), "INNER");
+        assert_eq!(outer_join_operator(JoinType::Full, "invalid").unwrap(), "FULL OUTER");
+        assert!(outer_join_operator(JoinType::LeftSemi, "invalid").is_err());
     }
 }
