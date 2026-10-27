@@ -19,8 +19,8 @@ on:
         default: '3'
 
 concurrency:
-  group: ${ github.workflow }}-${ github.ref }}
-  cancel-in-progress: ${ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -46,8 +46,8 @@ jobs:
         run: |
           python3 scripts/bench_query_latency.py \
             --binary ./target/release/rustspark \
-            --rows "${ inputs.rows || '100000' }}" \
-            --repeat "${ inputs.repeats || '3' }}" --warmup 1 \
+            --rows "${{ inputs.rows || '100000' }}" \
+            --repeat "${{ inputs.repeats || '3' }}" --warmup 1 \
             --json-out benchmarks/results/query-latency.json \
             --markdown-out benchmarks/results/query-latency.md
       - name: Publish query timings
