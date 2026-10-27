@@ -4,6 +4,7 @@ import io
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 SOURCE = pathlib.Path(__file__).with_name("spark_typed_compat.py")
 spec = importlib.util.spec_from_file_location("spark_typed_compat", SOURCE)
@@ -119,6 +120,51 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual([item["status"] for item in results], ["PASS", "DIFF"])
 
+
+    def test_csv_command_preserves_typed_schema(self):
+        command = mod.rustspark_command("/bin/rustspark", "SELECT 1")
+        self.assertEqual(command.count("--csv-table"), 2)
+        self.assertIn(mod.RUST_SCHEMA, command)
+        self.assertNotIn("--parquet-table", command)
+
+    def test_parquet_command_reads_the_same_directories(self):
+        root = pathlib.Path("/tmp/parquet-fixtures")
+        command = mod.rustspark_command(
+            "/bin/rustspark", "SELECT COUNT(*) FROM events_left", "parquet", root,
+        )
+        self.assertNotIn("--csv-schema", command)
+        self.assertNotIn("--csv-table", command)
+        self.assertEqual(command.count("--parquet-table"), 2)
+        self.assertIn(f"events_left={root / 'events_left'}", command)
+        self.assertIn(f"events_right={root / 'events_right'}", command)
+
+    def test_bad_formats_and_missing_parquet_root(self):
+        with self.assertRaisesRegex(ValueError, "requires"):
+            mod.rustspark_command("rs", "SELECT 1", "parquet")
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            mod.rustspark_command("rs", "SELECT 1", "json")
+        with self.assertRaisesRegex(ValueError, "requires"):
+            mod.register_spark_sources(mock.Mock(), "parquet")
+
+    def test_spark_reads_the_parquet_it_wrote(self):
+        session = mock.Mock()
+        csv_frame = session.read.option.return_value.schema.return_value.csv.return_value
+        parquet_frame = session.read.parquet.return_value
+        root = pathlib.Path("/tmp/shared-parquet-data")
+        mod.register_spark_sources(session, "parquet", root)
+        self.assertEqual(csv_frame.write.parquet.call_count, len(mod.TABLES))
+        self.assertEqual(session.read.parquet.call_count, len(mod.TABLES))
+        self.assertEqual(parquet_frame.createOrReplaceTempView.call_count, len(mod.TABLES))
+        for name in mod.TABLES:
+            csv_frame.write.parquet.assert_any_call(str(root / name))
+            session.read.parquet.assert_any_call(str(root / name))
+
+    def test_csv_input_never_writes_parquet(self):
+        session = mock.Mock()
+        csv_frame = session.read.option.return_value.schema.return_value.csv.return_value
+        mod.register_spark_sources(session, "csv")
+        csv_frame.write.parquet.assert_not_called()
+        self.assertEqual(csv_frame.createOrReplaceTempView.call_count, len(mod.TABLES))
 
 if __name__ == "__main__":
     unittest.main()

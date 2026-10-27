@@ -71,3 +71,22 @@ SQL nullability is optionally checked with `--check-nullability`.
 Run the real PySpark 4 suite with `--check-nullability` to see NULL metadata
 differences. Every mismatch and error remains visible in the JSON report.
 Normalization does not establish full Spark compatibility.
+
+## Parquet-backed Spark SQL differential checks
+
+Run the existing typed table-backed queries using identical Parquet files
+read by RustSpark and PySpark. Spark first writes typed CSV fixtures as Parquet,
+then both engines read those exact files:
+
+```sh
+cargo build --locked
+python3 -m pip install 'pyspark>=4,<5'
+python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark \
+  --input-format parquet --check-nullability \
+  --json-out reports/spark-typed-parquet.json
+```
+
+The default remains `--input-format csv`. The weekly typed differential
+workflow runs both formats and uploads separately named reports. A passing
+case only establishes matching values and checked schema properties for
+these fixtures, not full Spark compatibility or distributed correctness.
