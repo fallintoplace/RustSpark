@@ -147,6 +147,27 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
     true
 }
 
+// Print table column names without row scans or full type metadata.
+async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bool {
+    if command != ".columns" && !command.starts_with(".columns ") {
+        return false;
+    }
+    let name = command.strip_prefix(".columns").unwrap_or_default().trim();
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("Shell error: .columns requires exactly one table name");
+    } else {
+        match session.describe_table(name).await {
+            Ok(columns) => {
+                for (column, _, _) in columns {
+                    println!("{column}");
+                }
+            }
+            Err(error) => eprintln!("Shell error: {error}"),
+        }
+    }
+    true
+}
+
 // Handle the schema-specific shell command without changing pending SQL.
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
     if command != ".schema" && !command.starts_with(".schema ") {

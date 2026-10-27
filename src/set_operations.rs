@@ -5,6 +5,11 @@ use datafusion::{
 
 use crate::RustSparkSession;
 
+enum MultisetOperation {
+    Intersect,
+    Except,
+}
+
 impl RustSparkSession {
     async fn set_operation(
         &self,
@@ -42,7 +47,7 @@ impl RustSparkSession {
         &self,
         left: &str,
         right: &str,
-        intersection: bool,
+        operation: MultisetOperation,
     ) -> Result<DataFrame> {
         let left_path =
             super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
@@ -68,7 +73,7 @@ impl RustSparkSession {
             ));
         }
 
-        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let quote = super::quote_join_identifier;
         let mut index_name = "__rustspark_multiset_row".to_owned();
         while left_columns
             .iter()
@@ -105,12 +110,10 @@ impl RustSparkSession {
             })
             .collect::<Vec<_>>();
         conditions.push(format!("l.{index} = r.{index}"));
-        let (join, filter) = if intersection {
-            ("INNER JOIN", "")
-        } else {
-            ("LEFT JOIN", " WHERE r.__PLACEHOLDER__ IS NULL")
+        let (join, filter) = match operation {
+            MultisetOperation::Intersect => ("INNER JOIN", String::new()),
+            MultisetOperation::Except => ("LEFT JOIN", format!(" WHERE r.{index} IS NULL")),
         };
-        let filter = filter.replace("__PLACEHOLDER__", &index);
         let sql = format!(
             "SELECT {projection} FROM \
              (SELECT *, ROW_NUMBER() OVER (PARTITION BY {left_partition}) AS {index} \
@@ -127,12 +130,14 @@ impl RustSparkSession {
     /// Keep duplicate rows common to both tables. A row that occurs m times
     /// on the left and n times on the right occurs min(m, n) times.
     pub async fn intersect_all_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
-        self.set_operation_all(left, right, true).await
+        self.set_operation_all(left, right, MultisetOperation::Intersect)
+            .await
     }
 
     /// Subtract row counts, keeping max(left_count - right_count, 0) copies.
     pub async fn except_all_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
-        self.set_operation_all(left, right, false).await
+        self.set_operation_all(left, right, MultisetOperation::Except)
+            .await
     }
 
     /// Return distinct rows belonging to exactly one of the registered tables.
