@@ -448,6 +448,42 @@ impl RustSparkSession {
             .collect())
     }
 
+    /// Count NULL values in selected table columns without collecting rows.
+    ///
+    /// An empty column list includes all columns. The result is a lazy
+    /// one-row DataFrame with one Int64 count per selected column.
+    pub async fn null_counts(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        let selected: Vec<&str> = if columns.is_empty() {
+            dataframe
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect()
+        } else {
+            columns.to_vec()
+        };
+        if selected.is_empty() {
+            return Err(DataFusionError::Plan(
+                "null_counts requires at least one column".into(),
+            ));
+        }
+        Self::validate_selected_columns(&dataframe, &selected)?;
+
+        let expressions = selected
+            .iter()
+            .map(|name| {
+                let quoted = quote_join_identifier(name);
+                format!("COUNT(*) - COUNT({quoted}) AS {quoted}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = quote_catalog_table(table, "null_counts requires a table name")?;
+        self.sql(&format!("SELECT {expressions} FROM {source}"))
+            .await
+    }
+
     /// Inspect the names, types and nullability of a read-only SQL query.
     ///
     /// Query results are not executed or collected.
