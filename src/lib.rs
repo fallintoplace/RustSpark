@@ -712,7 +712,10 @@ impl RustSparkSession {
         columns: &[&str],
         mode: NullDropMode,
     ) -> Result<usize> {
-        self.filter_null_rows(table, columns, mode).await?.count().await
+        self.filter_null_rows(table, columns, mode)
+            .await?
+            .count()
+            .await
     }
 
     /// Keep rows containing NULLs in selected columns.
