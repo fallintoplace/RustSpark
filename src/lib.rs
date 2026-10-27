@@ -520,14 +520,18 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
-    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
+    fn validate_named_columns(
+        dataframe: &DataFrame,
+        columns: &[&str],
+        operation: &str,
+    ) -> Result<()> {
         use std::collections::HashSet;
 
         let mut seen = HashSet::new();
         for &name in columns {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate selected column: {name}"
+                    "Duplicate {operation} column: {name}"
                 )));
             }
             if !dataframe
@@ -537,11 +541,15 @@ impl RustSparkSession {
                 .any(|field| field.name().as_str() == name)
             {
                 return Err(DataFusionError::Plan(format!(
-                    "Unknown selected column: {name}"
+                    "Unknown {operation} column: {name}"
                 )));
             }
         }
         Ok(())
+    }
+
+    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
+        Self::validate_named_columns(dataframe, columns, "selected")
     }
 
     /// Select and reorder columns from a registered table without reading its rows.
@@ -599,28 +607,7 @@ impl RustSparkSession {
     }
 
     fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
-        use std::collections::HashSet;
-
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in selected {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropna column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropna column: {name}"
-                )));
-            }
-        }
-        Ok(())
+        Self::validate_named_columns(dataframe, selected, "dropna")
     }
 
     /// Drop rows containing NULL values, like Spark DataFrame.na.drop.
@@ -1244,28 +1231,7 @@ impl RustSparkSession {
     }
 
     fn validate_dedup_subset(dataframe: &DataFrame, subset: &[&str]) -> Result<()> {
-        use std::collections::HashSet;
-
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in subset {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropDuplicates column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropDuplicates column: {name}"
-                )));
-            }
-        }
-        Ok(())
+        Self::validate_named_columns(dataframe, subset, "dropDuplicates")
     }
 
     /// Remove duplicate rows from a registered table, like Spark dropDuplicates.
