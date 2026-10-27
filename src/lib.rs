@@ -1540,6 +1540,26 @@ impl RustSparkSession {
         Self::sort_dataframe_with_nulls(dataframe, &keys)
     }
 
+    /// Select the first N rows under explicit sorting and NULL placement.
+    ///
+    /// Each order key contains (column, ascending, nulls_first). The sort and
+    /// limit remain lazy, and a zero limit returns no rows. Add a unique
+    /// tie-breaker when deterministic ordering matters.
+    pub async fn top_rows_with_nulls(
+        &self,
+        table: &str,
+        order: &[(&str, bool, bool)],
+        limit: usize,
+    ) -> Result<DataFrame> {
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "top_rows_with_nulls requires at least one sort key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::sort_dataframe_with_nulls(dataframe, order)?.limit(0, Some(limit))
+    }
+
     /// Sort rows by multiple named columns using Spark-like NULL ordering.
     ///
     /// A true direction means ascending with NULLs first; false means
