@@ -36,16 +36,16 @@ class ReleaseSmokeTests(unittest.TestCase):
 
     def test_release_rows_reject_ambiguous_json_and_overflow(self):
         for output in (
-            '{"answer": 1, "answer": 42}\\n',
-            '{"answer": NaN}\\n',
-            '{"answer": 1e400}\\n',
-            '42\\n',
+            '{"answer": 1, "answer": 42}\n',
+            '{"answer": NaN}\n',
+            '{"answer": 1e400}\n',
+            '42\n',
         ):
             with self.subTest(output=output):
                 with patch.object(release_smoke, "execute", return_value=output):
                     with self.assertRaises(ValueError):
                         release_smoke.rows(pathlib.Path("/unused/binary"))
-        with patch.object(release_smoke, "execute", return_value='{"answer":42}\\n'):
+        with patch.object(release_smoke, "execute", return_value='{"answer":42}\n'):
             self.assertEqual(
                 release_smoke.rows(pathlib.Path("/unused/binary")), [{"answer": 42}],
             )
