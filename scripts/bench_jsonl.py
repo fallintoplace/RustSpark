@@ -27,16 +27,21 @@ def command(binary, file, sql):
             "--sql", sql, "--stdout-format", "json"]
 
 
+def _run_verified_query(binary, file, sql, digest, timeout):
+    started = time.perf_counter()
+    run = subprocess.run(command(binary, file, sql),
+                         capture_output=True, text=True, timeout=timeout, check=True)
+    elapsed = (time.perf_counter() - started) * 1000
+    actual, _ = output_signature(run.stdout)
+    if actual != digest:
+        raise ValueError("RustSpark JSONL query result differs from the expected output")
+    return elapsed
+
+
 def measure(binary, file, sql, digest, repeat, warmup, timeout):
     samples = []
     for attempt in range(repeat + warmup):
-        started = time.perf_counter()
-        run = subprocess.run(command(binary, file, sql),
-                             capture_output=True, text=True, timeout=timeout, check=True)
-        elapsed = (time.perf_counter() - started) * 1000
-        actual, _ = output_signature(run.stdout)
-        if actual != digest:
-            raise ValueError("RustSpark JSONL query result differs from the expected output")
+        elapsed = _run_verified_query(binary, file, sql, digest, timeout)
         if attempt >= warmup:
             samples.append(elapsed)
     return {**summarize_samples(samples), "result_sha256": digest}
