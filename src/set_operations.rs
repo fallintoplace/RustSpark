@@ -97,7 +97,11 @@ impl RustSparkSession {
             .iter()
             .zip(&right_columns)
             .map(|(left, right)| {
-                format!("(l.{} IS NOT DISTINCT FROM r.{})", quote(left), quote(right))
+                format!(
+                    "(l.{} IS NOT DISTINCT FROM r.{})",
+                    quote(left),
+                    quote(right)
+                )
             })
             .collect::<Vec<_>>();
         conditions.push(format!("l.{index} = r.{index}"));
