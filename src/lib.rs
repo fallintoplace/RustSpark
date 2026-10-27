@@ -822,6 +822,18 @@ impl RustSparkSession {
         Ok(self.context.deregister_table(name)?.is_some())
     }
 
+    /// Count rows satisfying a typed filter without collecting result rows.
+    ///
+    /// SQL three-valued logic applies to the predicate. The table is not
+    /// changed and DataFusion plans a COUNT aggregate over the filter.
+    pub async fn count_filtered_rows(
+        &self,
+        table: &str,
+        predicate: datafusion::logical_expr::Expr,
+    ) -> Result<usize> {
+        self.filter_rows(table, predicate).await?.count().await
+    }
+
     /// Return whether a table or view is registered in this session.
     pub fn table_exists(&self, name: &str) -> Result<bool> {
         self.context.table_exist(name)
