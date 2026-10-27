@@ -617,6 +617,35 @@ impl RustSparkSession {
         dataframe.select_columns(columns)
     }
 
+    /// Select all table columns except the named exclusions in source order.
+    ///
+    /// Unknown, repeated, or all-column exclusions are rejected. A zero-length
+    /// exclusion list returns the original lazy table.
+    pub async fn select_columns_except(
+        &self,
+        table: &str,
+        excluded: &[&str],
+    ) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        if excluded.is_empty() {
+            return Ok(dataframe);
+        }
+        Self::validate_selected_columns(&dataframe, excluded)?;
+        let remaining: Vec<&str> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .filter(|name| !excluded.contains(name))
+            .collect();
+        if remaining.is_empty() {
+            return Err(DataFusionError::Plan(
+                "select_columns_except would remove every column".into(),
+            ));
+        }
+        dataframe.select_columns(&remaining)
+    }
+
     /// Return the unique values from a registered column as a lazy DataFrame.
     ///
     /// SQL DISTINCT preserves one NULL value; result order is not guaranteed.
