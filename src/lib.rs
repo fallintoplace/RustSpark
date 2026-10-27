@@ -8,6 +8,8 @@ use datafusion::{
 };
 
 mod export;
+#[path = "features/group_row_numbers.rs"]
+mod feature_group_row_numbers;
 mod joins;
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
