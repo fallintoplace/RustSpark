@@ -117,7 +117,7 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
 }
 
 // Count a registered table without requiring a SQL statement.
-async fn handle_count_command(session: &RustSparkSession, command: &str) -> bool {
+async fn handle_count_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
     if command != ".count" && !command.starts_with(".count ") {
         return false;
     }
@@ -125,12 +125,14 @@ async fn handle_count_command(session: &RustSparkSession, command: &str) -> bool
     if name.is_empty() || name.split_whitespace().count() != 1 {
         eprintln!("Shell error: .count requires exactly one table name");
     } else {
-        match session.table(name).await {
-            Ok(table) => match table.count().await {
-                Ok(count) => println!("{count}"),
-                Err(error) => eprintln!("Shell error: {error}"),
-            },
-            Err(error) => eprintln!("Shell error: {error}"),
+        let result = super::with_query_timeout(args.query_timeout, async {
+            let count = session.table(name).await?.count().await?;
+            println!("{count}");
+            Ok::<(), Box<dyn Error>>(())
+        })
+        .await;
+        if let Err(error) = result {
+            eprintln!("Shell error: {error}");
         }
     }
     true
@@ -142,7 +144,7 @@ enum ShellAction {
     Sql,
 }
 
-async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> ShellAction {
+async fn dispatch_shell_command(session: &RustSparkSession, args: &Args, command: &str) -> ShellAction {
     match command {
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
@@ -164,7 +166,7 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await || handle_count_command(session, command).await
+    if handle_schema_command(session, command).await || handle_count_command(session, args, command).await
     {
         ShellAction::Continue
     } else {
@@ -205,7 +207,7 @@ pub(super) async fn run_interactive(
             line = line.trim_start_matches('\u{feff}').to_owned();
         }
         if pending.trim().is_empty() {
-            match dispatch_shell_command(session, line.trim()).await {
+            match dispatch_shell_command(session, args, line.trim()).await {
                 ShellAction::Exit => break,
                 ShellAction::Continue => continue,
                 ShellAction::Sql => {}
