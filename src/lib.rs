@@ -11,7 +11,6 @@ mod export;
 mod joins;
 mod set_operations;
 mod sources;
-mod sql_results;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/endswith.rs"]
@@ -32,6 +31,7 @@ mod sql_compat_try_divide;
 mod sql_compat_try_mod;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+mod sql_results;
 
 pub use export::SqlExportFormat;
 
@@ -1843,8 +1843,6 @@ impl RustSparkSession {
     pub async fn union_sql_distinct_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
         self.union_sql_by_name(queries).await?.distinct()
     }
-
-
 }
 
 impl Default for RustSparkSession {
