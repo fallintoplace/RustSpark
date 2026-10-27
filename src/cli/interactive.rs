@@ -127,12 +127,18 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-            eprintln!("Shell commands: .tables, .schema TABLE, .quit.");
+            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .quit.");
             return ShellAction::Continue;
         }
         ".tables" => {
             for table in session.list_tables() {
                 println!("{table}");
+            }
+            return ShellAction::Continue;
+        }
+        ".schemas" => {
+            for schema in session.list_schemas() {
+                println!("{schema}");
             }
             return ShellAction::Continue;
         }
