@@ -47,11 +47,7 @@ impl RustSparkSession {
     ///
     /// This combines both directed SQL EXCEPT results, with SQL NULL equality.
     /// The schemas must be compatible by column position.
-    pub async fn symmetric_difference_tables(
-        &self,
-        left: &str,
-        right: &str,
-    ) -> Result<DataFrame> {
+    pub async fn symmetric_difference_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
         let left =
             super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
         let right =
