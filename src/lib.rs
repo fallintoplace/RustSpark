@@ -560,7 +560,7 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, excluded)?;
         // Avoid rescanning every exclusion for every field on wide tables.
         let excluded: std::collections::HashSet<&str> = excluded.iter().copied().collect();
-        let fields = dataframe.schema().fields().clone();
+        let fields = dataframe.schema().fields().iter().cloned().collect::<Vec<_>>();
         let remaining: Vec<&str> = fields
             .iter()
             .map(|field| field.name().as_str())
