@@ -138,24 +138,63 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
     true
 }
 
+// Count a registered table without requiring a SQL statement.
+async fn handle_count_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
+    if command != ".count" && !command.starts_with(".count ") {
+        return false;
+    }
+    let name = command.strip_prefix(".count").unwrap_or_default().trim();
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("Shell error: .count requires exactly one table name");
+    } else {
+        let result = super::with_query_timeout(args.query_timeout, async {
+            let count = session.table(name).await?.count().await?;
+            println!("{count}");
+            Ok::<(), Box<dyn Error>>(())
+        })
+        .await;
+        if let Err(error) = result {
+            eprintln!("Shell error: {error}");
+        }
+    }
+    true
+}
+
 enum ShellAction {
     Continue,
     Exit,
     Sql,
 }
 
-async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> ShellAction {
+async fn dispatch_shell_command(
+    session: &RustSparkSession,
+    args: &Args,
+    command: &str,
+) -> ShellAction {
     match command {
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
             eprintln!("Read SQL from a file with .read PATH.");
-            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .quit.");
+            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .quit.");
             return ShellAction::Continue;
         }
         ".tables" => {
             for table in session.list_tables() {
                 println!("{table}");
+            }
+            return ShellAction::Continue;
+        }
+        ".catalogs" => {
+            let mut catalogs: Vec<_> = session
+                .list_schemas()
+                .into_iter()
+                .filter_map(|schema| schema.split_once('.').map(|(name, _)| name.to_owned()))
+                .collect();
+            catalogs.sort();
+            catalogs.dedup();
+            for catalog in catalogs {
+                println!("{catalog}");
             }
             return ShellAction::Continue;
         }
@@ -167,7 +206,9 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await {
+    if handle_schema_command(session, command).await
+        || handle_count_command(session, args, command).await
+    {
         ShellAction::Continue
     } else {
         ShellAction::Sql
@@ -206,11 +247,21 @@ pub(super) async fn run_interactive(
         if pending.is_empty() && line.starts_with('\u{feff}') {
             line = line.trim_start_matches('\u{feff}').to_owned();
         }
+        if line.trim() == ".cancel" && terminator.quote.is_none() && terminator.block_depth == 0 {
+            if pending.trim().is_empty() {
+                eprintln!("No pending SQL");
+            } else {
+                pending.clear();
+                terminator = SqlTerminatorScanner::default();
+                eprintln!("Pending SQL cancelled");
+            }
+            continue;
+        }
         if pending.trim().is_empty() {
             if handle_read_command(session, args, line.trim()).await {
                 continue;
             }
-            match dispatch_shell_command(session, line.trim()).await {
+            match dispatch_shell_command(session, args, line.trim()).await {
                 ShellAction::Exit => break,
                 ShellAction::Continue => continue,
                 ShellAction::Sql => {}
@@ -218,6 +269,15 @@ pub(super) async fn run_interactive(
         }
         pending.push_str(&line);
         if !terminator.push(&line) {
+            // A standalone comment does not start a SQL statement. Clear it
+            // once all block comments are closed so shell commands still work.
+            if terminator.quote.is_none()
+                && terminator.block_depth == 0
+                && terminator.last_significant.is_none()
+            {
+                pending.clear();
+                terminator = SqlTerminatorScanner::default();
+            }
             continue;
         }
 
