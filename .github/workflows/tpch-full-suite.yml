@@ -51,6 +51,13 @@ jobs:
               raise SystemExit(f'TPC-H failed: {len(successes)}/22 queries successful')
           print('TPC-H: 22/22 queries successful')
           PY
+      - name: Verify output values with DuckDB
+        run: |
+          python3 scripts/bench_tpch_verify.py --binary target/release/rustspark \
+            --queries-dir "$RUNNER_TEMP/tpch/queries" \
+            --parquet-dir "$RUNNER_TEMP/tpch/data" \
+            --timeout 180 --target-partitions 2 \
+            --json-out "$RUNNER_TEMP/tpch-verification.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -58,4 +65,5 @@ jobs:
           path: |
             ${{ runner.temp }}/tpch-results.json
             ${{ runner.temp }}/tpch-run.log
+            ${{ runner.temp }}/tpch-verification.json
           if-no-files-found: warn
