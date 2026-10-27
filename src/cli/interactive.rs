@@ -144,7 +144,11 @@ enum ShellAction {
     Sql,
 }
 
-async fn dispatch_shell_command(session: &RustSparkSession, args: &Args, command: &str) -> ShellAction {
+async fn dispatch_shell_command(
+    session: &RustSparkSession,
+    args: &Args,
+    command: &str,
+) -> ShellAction {
     match command {
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
@@ -166,7 +170,8 @@ async fn dispatch_shell_command(session: &RustSparkSession, args: &Args, command
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await || handle_count_command(session, args, command).await
+    if handle_schema_command(session, command).await
+        || handle_count_command(session, args, command).await
     {
         ShellAction::Continue
     } else {
