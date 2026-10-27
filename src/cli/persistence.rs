@@ -13,6 +13,9 @@ use rustspark::RustSparkSession;
 
 use super::valid_identifier;
 
+mod backup;
+pub(super) use backup::backup_database;
+
 // Debug builds support deterministic interruption at storage commit
 // boundaries. Release builds omit the injection entirely.
 #[cfg(debug_assertions)]
@@ -234,6 +237,18 @@ fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Erro
     validate_parquet_paths(&paths)
 }
 
+// A failed worker must not unwind the process during storage validation.
+fn join_validation_jobs<'scope>(
+    jobs: impl IntoIterator<Item = std::thread::ScopedJoinHandle<'scope, Result<(), String>>>,
+    operation: &str,
+) -> Result<(), String> {
+    for job in jobs {
+        job.join()
+            .map_err(|_| format!("{operation} worker panicked"))??;
+    }
+    Ok(())
+}
+
 fn validate_parquet_paths(paths: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
@@ -251,10 +266,7 @@ fn validate_parquet_paths(paths: &[PathBuf]) -> Result<(), Box<dyn Error>> {
                     })
                 })
                 .collect::<Vec<_>>();
-            jobs.into_iter().try_for_each(|job| {
-                job.join()
-                    .expect("Parquet footer validation worker panicked")
-            })
+            join_validation_jobs(jobs, "Parquet footer validation")
         })
     } else {
         paths
@@ -448,8 +460,7 @@ pub(super) async fn register_database_tables(
                     })
                 })
                 .collect::<Vec<_>>();
-            jobs.into_iter()
-                .try_for_each(|job| job.join().expect("database validation worker panicked"))
+            join_validation_jobs(jobs, "Database validation")
         });
         validation.map_err(|error| -> Box<dyn Error> { error.into() })?;
     } else {
@@ -533,124 +544,6 @@ pub(super) async fn save_table(
         write_empty_parquet_part(&staged, schema)?;
     }
     fs::rename(&staged, &destination)?;
-    Ok(())
-}
-
-struct BackupInventory {
-    tables: Vec<String>,
-    copies: Vec<(PathBuf, PathBuf)>,
-}
-
-fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventory, Box<dyn Error>> {
-    let mut tables = Vec::new();
-    let mut copies = Vec::new();
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let filename = entry.file_name();
-        let Some(table) = filename.to_str() else {
-            continue;
-        };
-        if !valid_identifier(table) {
-            continue;
-        }
-        validate_table_files(&entry.path(), table)?;
-        let target = snapshot.join(table);
-        fs::create_dir(&target)?;
-        for part in fs::read_dir(entry.path())? {
-            let part = part?;
-            if !part.file_type()?.is_file() {
-                return Err(format!("Unexpected database part: {}", part.path().display()).into());
-            }
-            copies.push((part.path(), target.join(part.file_name())));
-        }
-        tables.push(table.to_owned());
-    }
-
-    Ok(BackupInventory { tables, copies })
-}
-
-fn copy_backup_chunk(copies: &[(PathBuf, PathBuf)]) -> std::io::Result<()> {
-    for (source, target) in copies {
-        fs::copy(source, target)?;
-    }
-    Ok(())
-}
-
-// Copy independent immutable Parquet parts with a bounded worker count.
-fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>> {
-    // Large backups can copy immutable parts independently. Bound the number
-    // of workers so fragmented tables do not spawn a thread per Parquet file.
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |count| count.get())
-        .min(8);
-    if copies.len() < 8 || workers == 1 {
-        copy_backup_chunk(copies)?;
-    } else {
-        std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
-            let chunk_size = copies.len().div_ceil(workers);
-            let jobs = copies
-                .chunks(chunk_size)
-                .map(|chunk| {
-                    scope.spawn(move || copy_backup_chunk(chunk))
-                })
-                .collect::<Vec<_>>();
-            for job in jobs {
-                job.join().map_err(|_| "Backup copy worker panicked")??;
-            }
-            Ok(())
-        })?;
-    }
-    Ok(())
-}
-
-/// Create an independent, consistent copy of a local database while its
-/// process lock is held. Copy rather than hard-link parts so later external
-/// edits to one snapshot cannot corrupt the other.
-pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
-    let source = root.canonicalize()?;
-    let parent = destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .canonicalize()?;
-    let name = destination
-        .file_name()
-        .ok_or("Backup destination must name a directory")?;
-    let normalized = parent.join(name);
-    if normalized.starts_with(&source) {
-        return Err("Backup destination must be outside --database-dir".into());
-    }
-    if fs::symlink_metadata(&normalized).is_ok() {
-        return Err(format!(
-            "Backup destination already exists: {}",
-            normalized.display()
-        )
-        .into());
-    }
-
-    let temporary = tempfile::Builder::new()
-        .prefix(".rustspark-backup-stage-")
-        .tempdir_in(&parent)?;
-    let snapshot = temporary.path().join("snapshot");
-    fs::create_dir(&snapshot)?;
-    let BackupInventory { mut tables, copies } = collect_backup_parts(&source, &snapshot)?;
-
-    copy_backup_parts(&copies)?;
-    // A backup is never published without validating every copied footer.
-    for table in &tables {
-        validate_table_files(&snapshot.join(table), table)?;
-    }
-    tables.sort();
-    let manifest = format!("rustspark-backup-v1\n{}\n", tables.join("\n"));
-    fs::write(snapshot.join(".rustspark-backup-manifest"), manifest)?;
-    // A second pre-publication check avoids overwriting a known destination.
-    if fs::symlink_metadata(&normalized).is_ok() {
-        return Err("Backup destination appeared during copy".into());
-    }
-    fs::rename(&snapshot, &normalized)?;
     Ok(())
 }
 
@@ -751,4 +644,29 @@ pub(super) async fn rename_saved_table(
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod worker_join_tests {
+    use super::join_validation_jobs;
+
+    #[test]
+    fn worker_panics_are_returned_as_errors() {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| -> Result<(), String> {
+                panic!("injected worker panic");
+            });
+            let error = join_validation_jobs([worker], "Database validation").unwrap_err();
+            assert_eq!(error, "Database validation worker panicked");
+        });
+    }
+
+    #[test]
+    fn worker_validation_errors_are_preserved() {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| Err("invalid Parquet footer".to_owned()));
+            let error = join_validation_jobs([worker], "Parquet footer validation").unwrap_err();
+            assert_eq!(error, "invalid Parquet footer");
+        });
+    }
 }
