@@ -11,6 +11,12 @@ use rustspark::RustSparkSession;
 mod remote_inputs;
 
 const MAX_STANDALONE_PARALLELISM: usize = 256;
+const DEFAULT_STANDALONE_PARALLELISM_CAP: usize = 16;
+
+fn default_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, |cores| cores.get().min(DEFAULT_STANDALONE_PARALLELISM_CAP))
+}
 
 fn default_if_unset(
     value: Result<String, std::env::VarError>,
@@ -37,7 +43,7 @@ fn parse_parallelism(value: &str) -> Result<usize, String> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parallelism = match std::env::var("RUSTSPARK_STANDALONE_PARALLELISM") {
         Ok(value) => parse_parallelism(&value)?,
-        Err(std::env::VarError::NotPresent) => 2,
+        Err(std::env::VarError::NotPresent) => default_parallelism(),
         Err(error) => return Err(error.into()),
     };
     let config = SessionConfig::new_with_ballista()
@@ -69,6 +75,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn default_uses_available_cores_without_unbounded_workers() {
+        let count = default_parallelism();
+        assert!((1..=DEFAULT_STANDALONE_PARALLELISM_CAP).contains(&count));
+    }
 
     #[test]
     fn validates_standalone_parallelism() {

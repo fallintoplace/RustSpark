@@ -63,6 +63,21 @@ class ClickBenchFetchTests(unittest.TestCase):
             self.assertFalse(missing.exists())
             self.assertEqual(target.read_bytes(), self.corpus)
 
+    def test_concurrent_output_creation_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "queries.sql"
+            real_link = fetch.os.link
+
+            def concurrent_creator(source, destination):
+                target.write_bytes(b"created by someone else")
+                return real_link(source, destination)
+
+            with mock.patch.object(fetch.os, "link", side_effect=concurrent_creator):
+                with self.assertRaises(FileExistsError):
+                    fetch.write_queries(target, self.corpus)
+            self.assertEqual(target.read_bytes(), b"created by someone else")
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["queries.sql"])
+
     def test_write_does_not_overwrite_unless_requested(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "queries" / "queries.sql"

@@ -40,6 +40,17 @@ The workload uses typed CSV and local Spark `local[2]`; it is **not**
 a distributed, Parquet lake, or fault-tolerance benchmark.
 The manual `Compare warm local SQL sessions` workflow uploads raw timings.
 
+## Scheduled comparisons
+
+GitHub Actions runs the cold comparison every Monday and the warm comparison
+every Tuesday. The runs use the manual workflow defaults and upload checked
+JSON and Markdown reports for 90 days. Manual runs can override row count
+and repetition count.
+
+GitHub-hosted runners vary, so these reports are observations, not a
+statistically reliable performance regression gate. Compare repeated runs on
+controlled hardware before claiming a speedup.
+
 ## Reading benchmark results
 
 The optional cold and warm comparison workflows upload measured JSON **and**

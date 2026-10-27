@@ -132,6 +132,9 @@ def measure_workload(binary, csv, name, sql, expected_digest, repeat, warmup, ti
     digest = None
     for run in range(warmup + repeat):
         elapsed, current_digest, output = execute(binary, csv, sql, timeout)
+        if (isinstance(elapsed, bool) or not isinstance(elapsed, (float, int))
+                or not math.isfinite(elapsed) or elapsed < 0):
+            raise ValueError(f"Invalid benchmark duration for {name}: {elapsed}")
         if digest is not None and digest != current_digest:
             raise RuntimeError(f"Nondeterministic results for {name}")
         if current_digest != expected_digest:

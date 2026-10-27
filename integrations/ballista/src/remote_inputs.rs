@@ -1,6 +1,6 @@
 //! Named data sources for the optional distributed Ballista client.
 //! Every location must be readable by the Ballista scheduler and executors.
-use std::{collections::HashSet, env, fs};
+use std::{collections::HashSet, env, fs, io::{BufRead, BufReader, Cursor}};
 
 use futures::{stream, StreamExt};
 
@@ -20,6 +20,33 @@ struct Source {
     path: String,
 }
 
+impl Format {
+    fn parse(kind: &str) -> Result<Self, String> {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "csv" => Ok(Self::Csv),
+            "json" => Ok(Self::Json),
+            "parquet" => Ok(Self::Parquet),
+            other => Err(format!("Unsupported distributed input format: {other}")),
+        }
+    }
+}
+
+impl Source {
+    async fn register(&self, session: &RustSparkSession) -> datafusion::error::Result<()> {
+        match self.format {
+            Format::Csv => session.register_csv(&self.name, &self.path).await,
+            Format::Json => session.register_json(&self.name, &self.path).await,
+            Format::Parquet => session.register_parquet(&self.name, &self.path).await,
+        }
+    }
+}
+
+fn is_sql_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn parse_source(item: &str) -> Result<Source, String> {
     let (kind_and_name, path) = item
         .split_once('=')
@@ -27,18 +54,10 @@ fn parse_source(item: &str) -> Result<Source, String> {
     let (kind, name) = kind_and_name
         .split_once(':')
         .ok_or_else(|| format!("Expected format:table=path in RUSTSPARK_INPUTS: {item}"))?;
-    let format = match kind.trim().to_ascii_lowercase().as_str() {
-        "csv" => Format::Csv,
-        "json" => Format::Json,
-        "parquet" => Format::Parquet,
-        other => return Err(format!("Unsupported distributed input format: {other}")),
-    };
+    let format = Format::parse(kind)?;
     let name = name.trim();
     let path = path.trim();
-    let mut chars = name.chars();
-    if !matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !is_sql_identifier(name) {
         return Err(format!("Invalid SQL table identifier: {name}"));
     }
     if path.is_empty() {
@@ -71,18 +90,36 @@ fn parse_source_items<'a>(items: impl IntoIterator<Item = &'a str>) -> Result<Ve
     Ok(sources)
 }
 
-fn parse_manifest(input: &str) -> Result<Vec<Source>, String> {
-    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-    let mut entries = input
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .flat_map(|line| line.split(';'))
-        .peekable();
-    if entries.peek().is_none() {
+fn parse_manifest_reader(reader: impl BufRead) -> Result<Vec<Source>, String> {
+    let mut seen = HashSet::new();
+    let mut sources = Vec::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| format!("Cannot read input manifest: {error}"))?;
+        let line = if index == 0 {
+            line.strip_prefix('\u{feff}').unwrap_or(&line)
+        } else {
+            &line
+        };
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        for item in line.split(';') {
+            let source = parse_source(item)?;
+            if !seen.insert(source.name.to_ascii_lowercase()) {
+                return Err(format!("Duplicate distributed table name: {}", source.name));
+            }
+            sources.push(source);
+        }
+    }
+    if sources.is_empty() {
         return Err("RUSTSPARK_INPUTS_FILE must contain at least one table".into());
     }
-    parse_source_items(entries)
+    Ok(sources)
+}
+
+fn parse_manifest(input: &str) -> Result<Vec<Source>, String> {
+    parse_manifest_reader(Cursor::new(input))
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
@@ -106,7 +143,7 @@ fn load_sources(
             if path.trim().is_empty() {
                 return Err("RUSTSPARK_INPUTS_FILE must name a file".into());
             }
-            Ok(Some(parse_manifest(&fs::read_to_string(path)?)?))
+            Ok(Some(parse_manifest_reader(BufReader::new(fs::File::open(path)?))?))
         }
         (None, None) => Ok(None),
     }
@@ -129,16 +166,10 @@ pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::err
         return Err("RUSTSPARK_INPUTS cannot redefine the legacy data table".into());
     }
 
-    // Independent metadata and schema reads can overlap without unbounded fan-out.
+    // Register independent input schemas concurrently, with bounded fan-out.
     let parallelism = registration_parallelism(sources.len());
     let mut registrations = stream::iter(sources)
-        .map(|source| async move {
-            match source.format {
-                Format::Csv => session.register_csv(&source.name, &source.path).await,
-                Format::Json => session.register_json(&source.name, &source.path).await,
-                Format::Parquet => session.register_parquet(&source.name, &source.path).await,
-            }
-        })
+        .map(|source| async move { source.register(session).await })
         .buffer_unordered(parallelism);
     while let Some(result) = registrations.next().await {
         result?;
@@ -149,6 +180,16 @@ pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_identifier_validation_is_ascii_and_nonempty() {
+        assert!(is_sql_identifier("some_table_2"));
+        assert!(is_sql_identifier("_hidden"));
+        assert!(!is_sql_identifier(""));
+        assert!(!is_sql_identifier("2bad"));
+        assert!(!is_sql_identifier("bad-name"));
+        assert!(!is_sql_identifier("naïve"));
+    }
 
     #[test]
     fn distributed_registration_uses_bounded_parallelism() {
@@ -195,6 +236,14 @@ mod tests {
         assert_eq!(sources[0].name, "Orders");
         assert_eq!(sources[1].format, Format::Csv);
         assert_eq!(sources[2].path, "s3://bucket/data?version=2");
+    }
+
+    #[test]
+    fn streamed_manifest_matches_in_memory_parsing() {
+        let content = "\u{feff}# comment\r\n\r\ncsv:left=/a;parquet:right=/b\r\njson:logs=/c\r\n";
+        let from_reader = parse_manifest_reader(BufReader::new(Cursor::new(content))).unwrap();
+        assert_eq!(from_reader, parse_manifest(content).unwrap());
+        assert_eq!(from_reader.len(), 3);
     }
 
     #[test]
