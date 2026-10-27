@@ -989,6 +989,26 @@ impl RustSparkSession {
         Self::sort_dataframe(dataframe, order)
     }
 
+    /// Return the first N rows in the requested sort order.
+    ///
+    /// Sort and limit are planned lazily. Supply a unique tie-breaker for a
+    /// deterministic selection when multiple rows share the same sort keys.
+    /// An empty order is rejected; a limit of zero returns no rows.
+    pub async fn top_rows(
+        &self,
+        table: &str,
+        order: &[(&str, bool)],
+        limit: usize,
+    ) -> Result<DataFrame> {
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "top_rows requires at least one sort key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::sort_dataframe(dataframe, order)?.limit(0, Some(limit))
+    }
+
     // Plan independent SQL inputs concurrently, with bounded outstanding
     // work. buffered() returns results in input order, so UNION semantics and
     // the first reported planning error still follow query order.

@@ -103,6 +103,15 @@ let rows = page.collect().await?;
 
 The call builds a DataFusion LIMIT/OFFSET plan, without collecting the source.
 
+Select the top N rows by one or more columns without collecting the source:
+
+```rust
+let top = session.top_rows("sales", &[("amount", false)], 5).await?;
+```
+
+Use `true` for ascending and `false` for descending order. Add a unique
+tie-breaker when values can be equal.
+
 Use multiple key pairs for compound equality joins. Supported types include
 INNER, LEFT, RIGHT, FULL, SEMI, and ANTI. Unmatched outer rows contain NULLs;
 NULL join keys do not match other NULL keys by default. A Cartesian product
@@ -120,6 +129,11 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 ```
 
 Column order can differ between inputs. Rows are appended without deduplication.
+
+RustSpark's table set operations also support duplicate-preserving
+`intersect_all_tables` and `except_all_tables`, along with
+`symmetric_difference_tables` for distinct rows found in only one input.
+All return lazy DataFrames and compare columns by position.
 
 To remove duplicate rows after matching columns by name, use
 `--union-distinct-by-name` instead:
