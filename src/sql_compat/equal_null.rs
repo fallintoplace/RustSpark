@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Int64Array, BooleanArray, }datatypes::DataType},
+    arrow::{array::{BooleanArray, Int64Array}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -29,9 +29,7 @@ pub(crate) fn udf() -> ScalarUDF {
             let result: Vec<Option<bool>> = lhs
                 .iter()
                 .zip(rhs.iter())
-                .map(|(left, right)| {
-                    Some(left == right)
-                })
+                .map(|(left, right)| Some(left == right))
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
