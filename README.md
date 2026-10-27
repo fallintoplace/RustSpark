@@ -493,3 +493,7 @@ part can reduce scan parallelism and requires enough free disk space for both
 versions. Keep other programs from mutating the table's files and use external
 backups for important data. The database lock prevents simultaneous RustSpark
 operations but does not protect against external writers.
+
+## License
+
+RustSpark is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
