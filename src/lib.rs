@@ -1154,12 +1154,15 @@ impl RustSparkSession {
         use std::collections::HashSet;
 
         let mut dataframe = self.table(table).await?;
-        let columns: HashSet<_> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().to_owned())
-            .collect();
+        let fields = dataframe.schema().fields();
+        // Sparse replacements should not allocate a full schema index.
+        // Large replacement sets still get constant-time membership checks.
+        let indexed = (replacements.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         let mut seen = HashSet::new();
         let mut grouped = Vec::<(&datafusion::common::ScalarValue, Vec<&str>)>::new();
         // Wide fillna calls used a linear search of prior groups for every
@@ -1172,7 +1175,11 @@ impl RustSparkSession {
                     "Duplicate fillna column: {name}"
                 )));
             }
-            if !columns.contains(*name) {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(*name),
+                None => fields.iter().any(|field| field.name().as_str() == *name),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown fillna column: {name}"
                 )));
