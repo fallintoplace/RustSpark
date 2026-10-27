@@ -501,6 +501,46 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    /// Keep rows containing NULLs in selected columns.
+    ///
+    /// An empty column list examines every column. Any matches a row when
+    /// at least one value is NULL; All requires every selected value to be NULL.
+    /// The result is lazy and leaves the source table unchanged.
+    pub async fn filter_null_rows(
+        &self,
+        table: &str,
+        columns: &[&str],
+        mode: NullDropMode,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+
+        let dataframe = self.table(table).await?;
+        let selected: Vec<&str> = if columns.is_empty() {
+            dataframe
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect()
+        } else {
+            columns.to_vec()
+        };
+        if selected.is_empty() {
+            return Ok(dataframe);
+        }
+        Self::validate_dropna_columns(&dataframe, &selected)?;
+
+        let mut checks = selected
+            .iter()
+            .map(|name| Expr::Column(Column::from_name(*name)).is_null());
+        let first = checks.next().expect("non-empty selected columns");
+        let predicate = checks.fold(first, |acc, check| match mode {
+            NullDropMode::Any => acc.or(check),
+            NullDropMode::All => acc.and(check),
+        });
+        dataframe.filter(predicate)
+    }
+
     /// Filter a registered table with a typed DataFusion expression.
     ///
     /// SQL NULL predicates do not keep rows. The operation is lazy, and the
