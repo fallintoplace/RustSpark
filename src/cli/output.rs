@@ -199,6 +199,15 @@ async fn write_arrow_stream<W: Write>(
     Ok(())
 }
 
+fn html_entity(character: char) -> Option<&'static str> {
+    match character {
+        '&' => Some("&amp;"),
+        '<' => Some("&lt;"),
+        '>' => Some("&gt;"),
+        _ => None,
+    }
+}
+
 fn escape_markdown_cell(value: &str) -> std::borrow::Cow<'_, str> {
     // Plain text needs neither an allocation nor a character-by-character copy.
     if !value
@@ -209,15 +218,16 @@ fn escape_markdown_cell(value: &str) -> std::borrow::Cow<'_, str> {
     }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '\\' => escaped.push_str("\\\\"),
-            '|' => escaped.push_str("\\|"),
-            '\r' => escaped.push(' '),
-            '\n' => escaped.push_str("<br>"),
-            other => escaped.push(other),
+        if let Some(entity) = html_entity(character) {
+            escaped.push_str(entity);
+        } else {
+            match character {
+                '\\' => escaped.push_str("\\\\"),
+                '|' => escaped.push_str("\\|"),
+                '\r' => escaped.push(' '),
+                '\n' => escaped.push_str("<br>"),
+                other => escaped.push(other),
+            }
         }
     }
     std::borrow::Cow::Owned(escaped)
@@ -263,13 +273,14 @@ fn escape_html_cell(value: &str) -> std::borrow::Cow<'_, str> {
     }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            other => escaped.push(other),
+        if let Some(entity) = html_entity(character) {
+            escaped.push_str(entity);
+        } else {
+            match character {
+                '"' => escaped.push_str("&quot;"),
+                '\'' => escaped.push_str("&#39;"),
+                other => escaped.push(other),
+            }
         }
     }
     std::borrow::Cow::Owned(escaped)
@@ -420,7 +431,7 @@ pub(super) async fn write_arrow_ipc(
 
 #[cfg(test)]
 mod tests {
-    use super::{display_cell, escape_markdown_cell, escape_vertical_value};
+    use super::{display_cell, escape_html_cell, escape_markdown_cell, escape_vertical_value};
 
     #[test]
     fn escapes_vertical_controls_without_changing_unicode() {
@@ -447,6 +458,14 @@ mod tests {
         ));
         assert_eq!(escape_markdown_cell("a|b"), r"a\|b");
         assert_eq!(escape_markdown_cell("<x>&"), "&lt;x&gt;&amp;");
+    }
+
+    #[test]
+    fn html_and_markdown_share_entity_escaping() {
+        assert_eq!(escape_html_cell("<tag>&"), "&lt;tag&gt;&amp;");
+        assert_eq!(escape_markdown_cell("<tag>&"), "&lt;tag&gt;&amp;");
+        assert_eq!(escape_html_cell("\"'"), "&quot;&#39;");
+        assert_eq!(escape_markdown_cell("\"'"), "\"'");
     }
 
     #[test]

@@ -8,21 +8,41 @@ use datafusion::{
 };
 
 mod export;
+#[path = "features/group_row_numbers.rs"]
+mod feature_group_row_numbers;
 mod joins;
+#[path = "features/regex_filter.rs"]
+mod feature_regex_filter;
 mod set_operations;
+#[path = "features/null_safe_equality.rs"]
+mod feature_null_safe_equality;
 mod sources;
+#[path = "features/top_rows_per_group.rs"]
+mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
+#[path = "features/unpivot_columns.rs"]
+mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "features/numeric_column_summary.rs"]
+mod feature_numeric_column_summary;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
+#[path = "features/approx_distinct_count.rs"]
+mod feature_approx_distinct_count;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
+#[path = "features/approx_percentile.rs"]
+mod feature_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
+#[path = "features/substring_filter.rs"]
+mod feature_substring_filter;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
+#[path = "features/group_ranks.rs"]
+mod feature_group_ranks;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
 #[path = "sql_compat/try_divide.rs"]
@@ -31,6 +51,7 @@ mod sql_compat_try_divide;
 mod sql_compat_try_mod;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+mod sql_results;
 
 pub use export::SqlExportFormat;
 
@@ -457,14 +478,16 @@ impl RustSparkSession {
         }
         Self::validate_selected_columns(&dataframe, &selected)?;
 
-        let expressions = selected
-            .iter()
-            .map(|name| {
-                let quoted = quote_join_identifier(name);
-                format!("COUNT(*) - COUNT({quoted}) AS {quoted}")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        use std::fmt::Write as _;
+        let mut expressions = String::with_capacity(selected.len() * 48);
+        for name in &selected {
+            if !expressions.is_empty() {
+                expressions.push_str(", ");
+            }
+            let quoted = quote_join_identifier(name);
+            write!(&mut expressions, "COUNT(*) - COUNT({quoted}) AS {quoted}")
+                .expect("writing to a String cannot fail");
+        }
         let source = quote_catalog_table(table, "null_counts requires a table name")?;
         self.sql(&format!("SELECT {expressions} FROM {source}"))
             .await
@@ -560,21 +583,20 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, excluded)?;
         // Avoid rescanning every exclusion for every field on wide tables.
         let excluded: std::collections::HashSet<&str> = excluded.iter().copied().collect();
-        let remaining: Vec<String> = dataframe
-            .schema()
-            .fields()
+        let fields = dataframe.schema().fields().iter().cloned().collect::<Vec<_>>();
+        let remaining: Vec<&str> = fields
             .iter()
             .map(|field| field.name().as_str())
             .filter(|name| !excluded.contains(*name))
-            .map(str::to_owned)
             .collect();
         if remaining.is_empty() {
             return Err(DataFusionError::Plan(
                 "select_columns_except would remove every column".into(),
             ));
         }
-        let names: Vec<&str> = remaining.iter().map(String::as_str).collect();
-        dataframe.select_columns(&names)
+        // Copy only shared field references, not the DataFrame's planner state
+        // or a String for every surviving column.
+        dataframe.select_columns(&remaining)
     }
 
     /// Return the unique values from a registered column as a lazy DataFrame.
@@ -905,6 +927,26 @@ impl RustSparkSession {
         self.context.register_udf(udf);
     }
 
+    async fn filter_rows_pattern(
+        &self,
+        table: &str,
+        column: &str,
+        pattern: &str,
+        case_insensitive: bool,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let column = Expr::Column(Column::from_name(column));
+        let predicate = if case_insensitive {
+            column.ilike(lit(pattern))
+        } else {
+            column.like(lit(pattern))
+        };
+        dataframe.filter(predicate)
+    }
+
     /// Filter text values with a case-sensitive SQL LIKE pattern.
     ///
     /// Percent and underscore retain SQL wildcard semantics. The pattern
@@ -915,11 +957,8 @@ impl RustSparkSession {
         column: &str,
         pattern: &str,
     ) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
-
-        let dataframe = self.table(table).await?;
-        Self::validate_selected_columns(&dataframe, &[column])?;
-        dataframe.filter(Expr::Column(Column::from_name(column)).like(lit(pattern)))
+        self.filter_rows_pattern(table, column, pattern, false)
+            .await
     }
 
     /// Filter text values with a case-insensitive SQL ILIKE pattern.
@@ -932,11 +971,7 @@ impl RustSparkSession {
         column: &str,
         pattern: &str,
     ) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
-
-        let dataframe = self.table(table).await?;
-        Self::validate_selected_columns(&dataframe, &[column])?;
-        dataframe.filter(Expr::Column(Column::from_name(column)).ilike(lit(pattern)))
+        self.filter_rows_pattern(table, column, pattern, true).await
     }
 
     /// Register an aggregate user-defined function for SQL queries.
@@ -1047,14 +1082,19 @@ impl RustSparkSession {
                 )));
             }
         }
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
+        let fields = dataframe.schema().fields();
+        let indexed = (renames.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         for source in mappings.keys() {
-            if !available.contains(*source) {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(*source),
+                None => fields.iter().any(|field| field.name().as_str() == *source),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown column rename source: {source}"
                 )));
@@ -1062,8 +1102,8 @@ impl RustSparkSession {
         }
 
         let mut names = HashSet::new();
-        let mut projection = Vec::new();
-        for field in dataframe.schema().fields() {
+        let mut projection = Vec::with_capacity(fields.len());
+        for field in fields {
             let source = field.name().as_str();
             let target = mappings.get(source).copied().unwrap_or(source);
             if !names.insert(target.to_ascii_lowercase()) {
@@ -1154,12 +1194,15 @@ impl RustSparkSession {
         use std::collections::HashSet;
 
         let mut dataframe = self.table(table).await?;
-        let columns: HashSet<_> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().to_owned())
-            .collect();
+        let fields = dataframe.schema().fields();
+        // Sparse replacements should not allocate a full schema index.
+        // Large replacement sets still get constant-time membership checks.
+        let indexed = (replacements.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         let mut seen = HashSet::new();
         let mut grouped = Vec::<(&datafusion::common::ScalarValue, Vec<&str>)>::new();
         // Wide fillna calls used a linear search of prior groups for every
@@ -1172,7 +1215,11 @@ impl RustSparkSession {
                     "Duplicate fillna column: {name}"
                 )));
             }
-            if !columns.contains(*name) {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(*name),
+                None => fields.iter().any(|field| field.name().as_str() == *name),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown fillna column: {name}"
                 )));
@@ -1203,12 +1250,13 @@ impl RustSparkSession {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
 
-        let existing: HashMap<_, _> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| (field.name().to_ascii_lowercase(), field.name().as_str()))
-            .collect();
+        let fields = dataframe.schema().fields();
+        let indexed = (columns.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| (field.name().to_ascii_lowercase(), field.name().as_str()))
+                .collect::<HashMap<_, _>>()
+        });
         let mut updates = HashMap::new();
         let mut seen = HashSet::new();
         for (name, expr) in columns {
@@ -1217,15 +1265,21 @@ impl RustSparkSession {
                     "with_columns requires non-empty, unpadded names".into(),
                 ));
             }
-            if !seen.insert(name.to_ascii_lowercase()) {
+            let normalized = name.to_ascii_lowercase();
+            if !seen.insert(normalized.clone()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate withColumns name: {name}"
                 )));
             }
-            if existing
-                .get(&name.to_ascii_lowercase())
-                .is_some_and(|original| original != name)
-            {
+            let conflicting = match &indexed {
+                Some(indexed) => indexed
+                    .get(&normalized)
+                    .is_some_and(|original| original != name),
+                None => fields.iter().any(|field| {
+                    field.name().as_str() != *name && field.name().eq_ignore_ascii_case(name)
+                }),
+            };
+            if conflicting {
                 return Err(DataFusionError::Plan(format!(
                     "with_columns name conflicts with an existing column: {name}"
                 )));
@@ -1841,324 +1895,6 @@ impl RustSparkSession {
     /// Column order can differ, and missing columns are filled with NULL.
     pub async fn union_sql_distinct_by_name(&self, queries: &[&str]) -> Result<DataFrame> {
         self.union_sql_by_name(queries).await?.distinct()
-    }
-
-    pub async fn sql(&self, query: &str) -> Result<DataFrame> {
-        self.context.sql(query).await
-    }
-
-    async fn has_rows(dataframe: DataFrame) -> Result<bool> {
-        use futures::StreamExt;
-
-        let mut batches = dataframe.limit(0, Some(1))?.execute_stream().await?;
-        while let Some(batch) = batches.next().await {
-            if batch?.num_rows() > 0 {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Return whether a registered table has at least one row.
-    ///
-    /// The underlying query is limited to one row, so it does not count or
-    /// collect the entire table.
-    pub async fn table_has_rows(&self, table: &str) -> Result<bool> {
-        Self::has_rows(self.table(table).await?).await
-    }
-
-    /// Return whether a read-only query produces at least one row.
-    ///
-    /// Limits the plan to one row to avoid collecting the full result.
-    pub async fn sql_exists(&self, query: &str) -> Result<bool> {
-        Self::has_rows(self.sql_read_only(query).await?).await
-    }
-
-    /// Check whether parameterized, read-only SQL produces any rows.
-    ///
-    /// Values are bound without string interpolation and only one row is read.
-    pub async fn sql_exists_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<bool> {
-        Self::has_rows(self.sql_read_only_with_params(query, params).await?).await
-    }
-
-    /// Count all rows produced by read-only SQL without collecting results.
-    ///
-    /// DDL, DML and session statements are rejected.
-    pub async fn sql_read_only_row_count(&self, query: &str) -> Result<usize> {
-        self.sql_read_only(query).await?.count().await
-    }
-
-    /// Count rows from parameterized read-only SQL with typed bindings.
-    pub async fn sql_read_only_row_count_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<usize> {
-        self.sql_read_only_with_params(query, params)
-            .await?
-            .count()
-            .await
-    }
-
-    async fn extract_scalar(dataframe: DataFrame) -> Result<datafusion::common::ScalarValue> {
-        use datafusion::common::ScalarValue;
-
-        if dataframe.schema().fields().len() != 1 {
-            return Err(DataFusionError::Plan(
-                "Scalar query must return exactly one column".into(),
-            ));
-        }
-        use futures::StreamExt;
-
-        let mut batches = dataframe.limit(0, Some(2))?.execute_stream().await?;
-        let mut result = None;
-        while let Some(batch) = batches.next().await {
-            let batch = batch?;
-            if batch.num_rows() > 1 || (batch.num_rows() > 0 && result.is_some()) {
-                return Err(DataFusionError::Plan(
-                    "Scalar query must return exactly one row".into(),
-                ));
-            }
-            if batch.num_rows() == 1 {
-                result = Some(ScalarValue::try_from_array(batch.column(0).as_ref(), 0)?);
-            }
-        }
-        result.ok_or_else(|| DataFusionError::Plan("Scalar query returned no rows".into()))
-    }
-
-    /// Execute SQL that must produce exactly one column and one row.
-    ///
-    /// Reads at most two rows so invalid multi-row queries remain bounded.
-    pub async fn sql_scalar(&self, query: &str) -> Result<datafusion::common::ScalarValue> {
-        Self::extract_scalar(self.sql(query).await?).await
-    }
-
-    /// Execute read-only SQL that must return one row and one column.
-    ///
-    /// Rejects DDL and DML before execution and reads at most two rows.
-    pub async fn sql_read_only_scalar(
-        &self,
-        query: &str,
-    ) -> Result<datafusion::common::ScalarValue> {
-        Self::extract_scalar(self.sql_read_only(query).await?).await
-    }
-
-    /// Read a single typed SQL value with bound parameters.
-    ///
-    /// The query must produce exactly one column and one row.
-    pub async fn sql_scalar_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<datafusion::common::ScalarValue> {
-        Self::extract_scalar(self.sql_with_params(query, params).await?).await
-    }
-
-    /// Read one typed scalar from parameterized, read-only SQL.
-    ///
-    /// The query must return exactly one column and one row. The result is
-    /// bounded to two rows and DDL or DML is rejected during planning.
-    pub async fn sql_read_only_scalar_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<datafusion::common::ScalarValue> {
-        Self::extract_scalar(self.sql_read_only_with_params(query, params).await?).await
-    }
-
-    fn validate_page_window(offset: usize, limit: usize) -> Result<()> {
-        if limit == 0 {
-            return Err(DataFusionError::Plan(
-                "SQL page limit must be positive".into(),
-            ));
-        }
-        if offset.checked_add(limit).is_none() {
-            return Err(DataFusionError::Plan(
-                "SQL page offset plus limit overflows".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn paginate<F>(frame: F, offset: usize, limit: usize) -> Result<DataFrame>
-    where
-        F: std::future::Future<Output = Result<DataFrame>>,
-    {
-        Self::validate_page_window(offset, limit)?;
-        frame.await?.limit(offset, Some(limit))
-    }
-
-    /// Plan a paginated query without collecting all its rows.
-    ///
-    /// Use ORDER BY in the SQL query for deterministic pages.
-    pub async fn sql_page(&self, query: &str, offset: usize, limit: usize) -> Result<DataFrame> {
-        Self::paginate(self.sql(query), offset, limit).await
-    }
-
-    /// Plan a page of read-only SQL without loading the full result.
-    ///
-    /// Add ORDER BY to the query for deterministic pages.
-    pub async fn sql_read_only_page(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<DataFrame> {
-        Self::paginate(self.sql_read_only(query), offset, limit).await
-    }
-
-    /// Plan a parameterized, read-only SQL page without collecting all rows.
-    ///
-    /// Use ORDER BY in the SQL query for deterministic pages.
-    /// Writes and DDL are rejected before binding the parameters.
-    pub async fn sql_read_only_page_with_params(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<DataFrame> {
-        Self::paginate(self.sql_read_only_with_params(query, params), offset, limit).await
-    }
-
-    /// Plan a parameterized SQL page with bounded row count.
-    ///
-    /// Use ORDER BY in SQL for stable page boundaries.
-    pub async fn sql_page_with_params(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<DataFrame> {
-        Self::paginate(self.sql_with_params(query, params), offset, limit).await
-    }
-
-    async fn extract_first_row(
-        dataframe: DataFrame,
-    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
-        use datafusion::common::ScalarValue;
-
-        use futures::StreamExt;
-
-        let mut batches = dataframe.limit(0, Some(1))?.execute_stream().await?;
-        while let Some(batch) = batches.next().await {
-            let batch = batch?;
-            if batch.num_rows() > 0 {
-                let values = (0..batch.num_columns())
-                    .map(|index| ScalarValue::try_from_array(batch.column(index).as_ref(), 0))
-                    .collect::<Result<Vec<_>>>()?;
-                return Ok(Some(values));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Fetch the first SQL result row as typed Arrow scalar values.
-    ///
-    /// Returns None for an empty result without collecting the full query.
-    pub async fn sql_first_row(
-        &self,
-        query: &str,
-    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
-        Self::extract_first_row(self.sql(query).await?).await
-    }
-
-    /// Fetch the first row of a read-only SQL query as typed scalar values.
-    ///
-    /// Returns None for no rows and rejects mutations before execution.
-    pub async fn sql_read_only_first_row(
-        &self,
-        query: &str,
-    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
-        Self::extract_first_row(self.sql_read_only(query).await?).await
-    }
-
-    /// Fetch the first result row from a parameterized SQL query.
-    ///
-    /// Returns None for an empty result and preserves typed NULL values.
-    pub async fn sql_first_row_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
-        Self::extract_first_row(self.sql_with_params(query, params).await?).await
-    }
-
-    /// Fetch the first row from parameterized, read-only SQL.
-    ///
-    /// Returns None for an empty result, preserves typed NULLs, and rejects
-    /// DDL or DML without executing the query.
-    pub async fn sql_read_only_first_row_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
-        Self::extract_first_row(self.sql_read_only_with_params(query, params).await?).await
-    }
-
-    /// Plan SQL with typed positional or named parameters.
-    ///
-    /// Values are bound by DataFusion rather than interpolated into SQL text.
-    /// The returned DataFrame remains lazy until executed.
-    pub async fn sql_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<DataFrame> {
-        self.sql(query).await?.with_param_values(params)
-    }
-
-    /// Plan read-only SQL with typed positional or named parameters.
-    ///
-    /// Disallowed statement kinds are rejected before binding values.
-    pub async fn sql_read_only_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<DataFrame> {
-        self.sql_read_only(query).await?.with_param_values(params)
-    }
-
-    /// Stream read-only SQL results without collecting all rows.
-    ///
-    /// DDL, DML and session statements are rejected during planning.
-    pub async fn sql_read_only_stream(
-        &self,
-        query: &str,
-    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
-        self.sql_read_only(query).await?.execute_stream().await
-    }
-
-    /// Stream safely bound SQL results while rejecting writes and DDL.
-    ///
-    /// The query is validated as read-only before DataFusion binds parameters.
-    /// Results are streamed as Arrow batches without collecting every row.
-    pub async fn sql_read_only_stream_with_params(
-        &self,
-        query: &str,
-        params: impl Into<datafusion::common::ParamValues>,
-    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
-        self.sql_read_only_with_params(query, params)
-            .await?
-            .execute_stream()
-            .await
-    }
-
-    /// Plan only read-only SQL, rejecting DDL, DML and session statements.
-    ///
-    /// This is not a replacement for table-level authorization or process isolation.
-    pub async fn sql_read_only(&self, query: &str) -> Result<DataFrame> {
-        use datafusion::execution::context::SQLOptions;
-        let options = SQLOptions::new()
-            .with_allow_ddl(false)
-            .with_allow_dml(false)
-            .with_allow_statements(false);
-        self.context.sql_with_options(query, options).await
     }
 }
 

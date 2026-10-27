@@ -1,6 +1,9 @@
 use std::{path::Path, sync::Arc};
 
-use datafusion::{execution::runtime_env::RuntimeEnvBuilder, prelude::SessionConfig};
+use datafusion::{
+    execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
+    prelude::SessionConfig,
+};
 use rustspark::RustSparkSession;
 
 use super::Args;
@@ -52,10 +55,10 @@ fn validate_spill_directory(
     Ok(())
 }
 
-pub(super) fn new_session(
-    args: &Args,
-) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
-    let config = build_session_config(args);
+fn custom_runtime(args: &Args) -> Result<Option<Arc<RuntimeEnv>>, Box<dyn std::error::Error>> {
+    if args.memory_limit_bytes.is_none() && args.spill_dir.is_none() {
+        return Ok(None);
+    }
     let mut runtime = RuntimeEnvBuilder::new();
     if let Some(limit) = args.memory_limit_bytes {
         runtime = runtime.with_memory_limit(limit, 1.0);
@@ -64,18 +67,31 @@ pub(super) fn new_session(
         validate_spill_directory(path, args.database_dir.as_deref())?;
         runtime = runtime.with_temp_file_path(path.to_path_buf());
     }
-    let session = if args.memory_limit_bytes.is_some() || args.spill_dir.is_some() {
-        RustSparkSession::with_config_and_runtime(config, runtime.build_arc()?)
-    } else {
-        RustSparkSession::with_config(config)
+    Ok(Some(runtime.build_arc()?))
+}
+
+pub(super) fn new_session(
+    args: &Args,
+) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
+    let config = build_session_config(args);
+    let session = match custom_runtime(args)? {
+        Some(runtime) => RustSparkSession::with_config_and_runtime(config, runtime),
+        None => RustSparkSession::with_config(config),
     };
     Ok(Arc::new(session))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_spill_directory;
+    use super::{Args, custom_runtime, validate_spill_directory};
+    use clap::Parser;
     use std::fs;
+
+    #[test]
+    fn leaves_the_default_session_without_custom_runtime() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        assert!(custom_runtime(&args).unwrap().is_none());
+    }
 
     #[test]
     fn validates_spill_paths_without_changing_runtime_setup() {

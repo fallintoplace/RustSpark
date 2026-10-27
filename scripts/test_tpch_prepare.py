@@ -47,6 +47,26 @@ class FixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "empty"):
                 prepare.prepare(connection, destination, 0.1)
 
+    def test_rejects_symlinked_and_regular_file_destinations(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            target = root / "elsewhere"
+            target.mkdir()
+            linked = root / "fixtures-link"
+            try:
+                linked.symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                prepare.prepare(FakeConnection(), linked, 0.1)
+            self.assertEqual(list(target.iterdir()), [])
+
+            regular_file = root / "fixtures-file"
+            regular_file.write_text("keep", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "directory"):
+                prepare.prepare(FakeConnection(), regular_file, 0.1)
+            self.assertEqual(regular_file.read_text(encoding="utf-8"), "keep")
+
     def test_rejects_missing_queries(self):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(ValueError, "22"):

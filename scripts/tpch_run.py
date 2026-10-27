@@ -11,6 +11,8 @@ import statistics
 import subprocess
 import time
 
+from clickbench_run import has_top_level_order_by
+
 TABLES = ("customer", "lineitem", "nation", "orders",
           "part", "partsupp", "region", "supplier")
 
@@ -28,15 +30,20 @@ def unique_keys(pairs):
     return output
 
 
-def result_signature(stdout):
-    rows = [
-        json.loads(line, parse_constant=reject_nonfinite,
-                   object_pairs_hook=unique_keys)
-        for line in stdout.splitlines() if line.strip()
-    ]
-    normalized = "\n".join(
-        sorted(json.dumps(row, sort_keys=True) for row in rows)
-    )
+def result_signature(stdout, ordered=False):
+    rows = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        value = json.loads(
+            line, parse_constant=reject_nonfinite, object_pairs_hook=unique_keys
+        )
+        if not isinstance(value, dict):
+            raise ValueError("Expected a JSON object for each SQL result row")
+        rows.append(json.dumps(value, sort_keys=True, allow_nan=False))
+    if not ordered:
+        rows.sort()
+    normalized = "\n".join(rows)
     return hashlib.sha256(normalized.encode()).hexdigest(), len(rows)
 
 
@@ -62,7 +69,7 @@ def input_arguments(directory):
     return args
 
 
-def measure(command, repeat, warmup, timeout):
+def measure(command, repeat, warmup, timeout, ordered=False):
     samples = []
     digest = None
     count = 0
@@ -76,7 +83,7 @@ def measure(command, repeat, warmup, timeout):
             raise RuntimeError(
                 f"SQL exited {process.returncode}: {process.stderr.strip()[-600:]}"
             )
-        current, count = result_signature(process.stdout)
+        current, count = result_signature(process.stdout, ordered=ordered)
         if digest is not None and current != digest:
             raise ValueError("Nondeterministic SQL results across repetitions")
         digest = current
@@ -92,19 +99,27 @@ def measure(command, repeat, warmup, timeout):
     }
 
 
+def command_for(binary, input_args, sql_file, partitions):
+    return [
+        str(binary), *input_args, "--sql-file", str(sql_file),
+        "--stdout-format", "json", "--target-partitions", str(partitions),
+    ]
+
+
 def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partitions=2):
     if repeat < 1 or warmup < 0 or timeout < 1 or partitions < 1:
         raise ValueError("Invalid repeat, warmup, timeout or partitions")
     args = input_arguments(parquet)
     reports = []
     for number, path in queries:
-        command = [
-            str(binary), *args, "--sql-file", str(path),
-            "--stdout-format", "json", "--target-partitions", str(partitions),
-        ]
+        command = command_for(binary, args, path, partitions)
         entry = {"id": number, "sql_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         try:
-            entry.update(measure(command, repeat, warmup, timeout))
+            sql = path.read_text(encoding="utf-8")
+            entry.update(measure(
+                command, repeat, warmup, timeout,
+                ordered=has_top_level_order_by(sql),
+            ))
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             entry.update({"status": "error", "error": str(error)[-900:]})
         reports.append(entry)

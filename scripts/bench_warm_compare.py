@@ -185,8 +185,22 @@ def summarize(samples, requests, row_count, warmup, repeat):
     return report
 
 
+def competitor_median_ratios(reports, engine):
+    if "rustspark" not in reports or engine not in reports:
+        return {}
+    return {
+        name: (
+            round(reports[engine][name]["median_ms"]
+                  / reports["rustspark"][name]["median_ms"], 3)
+            if reports["rustspark"][name]["median_ms"] > 0 else None
+        )
+        for name in WORKLOADS
+    }
+
+
 def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master):
-    if min(rows, repeat, timeout, partitions) < 1 or warmup < 0:
+    if (min(rows, repeat, partitions) < 1 or warmup < 0
+            or not math.isfinite(timeout) or timeout < 1):
         raise ValueError("rows, repeat, timeout, partitions must be positive; warmup >= 0")
     if (not engines or len(engines) != len(set(engines))
             or any(engine not in ("rustspark", "spark", "duckdb") for engine in engines)):
@@ -204,26 +218,8 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
             else:
                 samples = run_duckdb(csv, requests, timeout)
             reports[engine] = summarize(samples, requests, rows, warmup, repeat)
-        ratios = {}
-        if "rustspark" in reports and "spark" in reports:
-            ratios = {
-                name: (
-                    round(reports["spark"][name]["median_ms"]
-                          / reports["rustspark"][name]["median_ms"], 3)
-                    if reports["rustspark"][name]["median_ms"] > 0 else None
-                )
-                for name in WORKLOADS
-            }
-        duckdb_ratios = {}
-        if "rustspark" in reports and "duckdb" in reports:
-            duckdb_ratios = {
-                name: (
-                    round(reports["duckdb"][name]["median_ms"]
-                          / reports["rustspark"][name]["median_ms"], 3)
-                    if reports["rustspark"][name]["median_ms"] > 0 else None
-                )
-                for name in WORKLOADS
-            }
+        ratios = competitor_median_ratios(reports, "spark")
+        duckdb_ratios = competitor_median_ratios(reports, "duckdb")
         return {
             "metric": "Warm local SQL planning, execution and JSON serialization",
             "warning": "Excludes startup, input registration and distributed execution",

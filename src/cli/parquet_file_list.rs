@@ -26,6 +26,10 @@ fn parse_manifest_paths(input: &str, directory: &Path) -> Vec<(usize, PathBuf)> 
         .collect()
 }
 
+fn first_missing_file_position(paths: &[(usize, PathBuf)]) -> Option<usize> {
+    paths.iter().position(|(_, path)| !path.is_file())
+}
+
 fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Option<usize> {
     // Check large manifests in parallel while preserving the earliest error.
     let workers = std::thread::available_parallelism()
@@ -39,9 +43,7 @@ fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Option<usize> {
                 .enumerate()
                 .map(|(chunk_index, chunk)| {
                     scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .position(|(_, path)| !path.is_file())
+                        first_missing_file_position(chunk)
                             .map(|index| chunk_index * chunk_size + index)
                     })
                 })
@@ -52,7 +54,7 @@ fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Option<usize> {
                 .min()
         })
     } else {
-        paths.iter().position(|(_, path)| !path.is_file())
+        first_missing_file_position(paths)
     }
 }
 

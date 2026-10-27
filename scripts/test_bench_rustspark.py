@@ -92,6 +92,16 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(result["p95_ms"], 3.0)
         self.assertEqual(result["result_sha256"], "same")
 
+    def test_measure_workload_rejects_invalid_measurements(self):
+        for elapsed in (float("nan"), float("inf"), -1.0, True, "1.0"):
+            with self.subTest(elapsed=elapsed):
+                with mock.patch.object(bench, "execute", return_value=(elapsed, "same", [])):
+                    with self.assertRaisesRegex(ValueError, "Invalid benchmark duration"):
+                        bench.measure_workload(
+                            "unused", pathlib.Path("unused"), "scan_count",
+                            "SELECT 1", "same", 1, 0, 20,
+                        )
+
     def test_measure_workload_rejects_mismatched_output(self):
         values = [(1.0, "first", []), (2.0, "second", [])]
         with mock.patch.object(bench, "execute", side_effect=values):

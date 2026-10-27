@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 from urllib.request import urlopen
@@ -53,7 +54,11 @@ def write_queries(path: Path, data: bytes, overwrite: bool = False) -> None:
         ) as stream:
             temporary = Path(stream.name)
             stream.write(data)
-        temporary.replace(path)
+        if overwrite:
+            temporary.replace(path)
+        else:
+            # Publish without a check-then-replace race. A concurrent creator wins.
+            os.link(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

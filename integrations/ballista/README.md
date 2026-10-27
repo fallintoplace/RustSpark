@@ -44,7 +44,7 @@ The remote test requires all executors to see the same fixture directory
 (the script uses a temporary local directory). It is suitable for shared-host
 smoke checks, not as proof of multi-host storage or recovery correctness.
 
-The default standalone parallelism is two. Values above 256 are rejected to
+The default standalone parallelism follows available CPU capacity, capped at 16. Values above 256 are rejected to
 avoid starting too many in-process executors. `RUSTSPARK_PARQUET` can point to
 a dataset visible to the process. Standalone mode does **not** validate
 multi-host scheduling, worker failure handling, or shared-storage access.

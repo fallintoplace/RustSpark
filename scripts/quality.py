@@ -13,7 +13,7 @@ SCRIPTS = Path(__file__).resolve().parent
 TEST_PATTERNS = {
     "bench": (
         "test_bench_*.py", "test_clickbench_*.py", "test_tpch_*.py",
-        "test_quality.py", "test_ballista_smoke.py",
+        "test_quality.py", "test_ballista_smoke.py", "test_sql_result_verify.py",
     ),
     "compat": (
         "test_spark_*.py", "test_release_*.py", "test_verify_release_*.py",
