@@ -98,7 +98,7 @@ def execute(binary: str, parquet: Path, sql: str, timeout: float) -> dict:
         )
     except subprocess.TimeoutExpired:
         return {"error": f"Timed out after {timeout:g} seconds", "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         return {"error": str(error), "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
     elapsed = round((time.perf_counter() - started) * 1000, 3)
     if process.returncode:
