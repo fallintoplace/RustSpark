@@ -161,10 +161,7 @@ async fn execute_script_statement(
     final_statement: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some((source, destination)) = persistent_rename_table(statement, args)? {
-        let root = args
-            .database_dir
-            .as_deref()
-            .ok_or("Missing database directory")?;
+        let root = super::database_root(args)?;
         return super::persistence::rename_saved_table(session, root, &source, &destination).await;
     }
     validate_persistent_table_name(statement, args)?;
@@ -270,10 +267,7 @@ async fn execute_staged_insert(
     table: &str,
     final_statement: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = args
-        .database_dir
-        .as_deref()
-        .ok_or("Missing database directory")?;
+    let root = super::database_root(args)?;
     let stage = super::persistence::StagedInsert::prepare(root, table)?;
     let original = session.table_provider(table).await?;
     let mut guard = RestoreTableOnCancel {
@@ -430,10 +424,7 @@ fn persist_dropped_table(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = name {
-        let root = args
-            .database_dir
-            .as_deref()
-            .ok_or("Missing database directory")?;
+        let root = super::database_root(args)?;
         super::persistence::drop_saved_table(root, &name)?;
     }
     Ok(())
@@ -447,10 +438,7 @@ async fn persist_created_table(
     let Some(create) = persistent_create_table(statement, args) else {
         return Ok(());
     };
-    let directory = args
-        .database_dir
-        .as_deref()
-        .ok_or("Missing database directory")?;
+    let directory = super::database_root(args)?;
     let name = create.name.to_string().to_ascii_lowercase();
     if create.if_not_exists && directory.join(&name).exists() {
         return Ok(());
