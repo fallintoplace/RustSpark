@@ -14,18 +14,27 @@ import tempfile
 import zipfile
 
 
-def archive_contents(path: pathlib.Path) -> dict[str, tuple[bytes, int]]:
+MAX_ARCHIVE_ENTRY_BYTES = 512 * 1024 * 1024
+
+
+def archive_contents(path: pathlib.Path, expected_sizes: dict[str, int] | None = None) -> dict[str, tuple[bytes, int]]:
     entries = {}
     if path.name.endswith(".tar.gz"):
         with tarfile.open(path, "r:gz") as archive:
             for member in archive.getmembers():
                 if not member.isfile() or member.name in entries:
                     raise ValueError(f"Unexpected archive entry: {member.name}")
+                if expected_sizes is not None and member.name not in expected_sizes:
+                    raise ValueError(f"Archive members differ: unexpected {member.name}")
+                limit = (expected_sizes[member.name] if expected_sizes is not None
+                         else MAX_ARCHIVE_ENTRY_BYTES)
+                if member.size > limit:
+                    raise ValueError(f"Packaged {member.name} size differs from checked source")
                 stream = archive.extractfile(member)
                 if stream is None:
                     raise ValueError(f"Unreadable archive member: {member.name}")
                 with stream:
-                    entries[member.name] = (stream.read(), member.mode)
+                    entries[member.name] = (stream.read(limit + 1), member.mode)
     elif path.suffix.lower() == ".zip":
         with zipfile.ZipFile(path) as archive:
             for member in archive.infolist():
@@ -33,7 +42,14 @@ def archive_contents(path: pathlib.Path) -> dict[str, tuple[bytes, int]]:
                 if (member.is_dir() or stat.S_ISLNK(mode)
                         or member.filename in entries):
                     raise ValueError(f"Unexpected archive entry: {member.filename}")
-                entries[member.filename] = (archive.read(member), mode)
+                if expected_sizes is not None and member.filename not in expected_sizes:
+                    raise ValueError(f"Archive members differ: unexpected {member.filename}")
+                limit = (expected_sizes[member.filename] if expected_sizes is not None
+                         else MAX_ARCHIVE_ENTRY_BYTES)
+                if member.file_size > limit:
+                    raise ValueError(f"Packaged {member.filename} size differs from checked source")
+                with archive.open(member) as stream:
+                    entries[member.filename] = (stream.read(limit + 1), mode)
     else:
         raise ValueError(f"Unsupported release archive: {path}")
     return entries
@@ -46,7 +62,7 @@ def verify_archive(archive: pathlib.Path, binary: pathlib.Path,
         "LICENSE": (repo_root / "LICENSE").read_bytes(),
         binary.name: binary.read_bytes(),
     }
-    entries = archive_contents(archive)
+    entries = archive_contents(archive, {name: len(contents) for name, contents in expected.items()})
     if set(entries) != set(expected):
         raise ValueError(
             f"Archive members differ: expected {sorted(expected)}, got {sorted(entries)}"
