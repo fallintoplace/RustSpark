@@ -1082,9 +1082,12 @@ impl RustSparkSession {
                 "Scalar query must return exactly one column".into(),
             ));
         }
-        let batches = dataframe.limit(0, Some(2))?.collect().await?;
+        use futures::StreamExt;
+
+        let mut batches = dataframe.limit(0, Some(2))?.execute_stream().await?;
         let mut result = None;
-        for batch in batches {
+        while let Some(batch) = batches.next().await {
+            let batch = batch?;
             if batch.num_rows() > 1 || (batch.num_rows() > 0 && result.is_some()) {
                 return Err(DataFusionError::Plan(
                     "Scalar query must return exactly one row".into(),
