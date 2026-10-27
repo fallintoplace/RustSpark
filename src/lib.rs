@@ -1047,14 +1047,19 @@ impl RustSparkSession {
                 )));
             }
         }
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
+        let fields = dataframe.schema().fields();
+        let indexed = (renames.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         for source in mappings.keys() {
-            if !available.contains(*source) {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(*source),
+                None => fields.iter().any(|field| field.name().as_str() == *source),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown column rename source: {source}"
                 )));
@@ -1062,8 +1067,8 @@ impl RustSparkSession {
         }
 
         let mut names = HashSet::new();
-        let mut projection = Vec::new();
-        for field in dataframe.schema().fields() {
+        let mut projection = Vec::with_capacity(fields.len());
+        for field in fields {
             let source = field.name().as_str();
             let target = mappings.get(source).copied().unwrap_or(source);
             if !names.insert(target.to_ascii_lowercase()) {
