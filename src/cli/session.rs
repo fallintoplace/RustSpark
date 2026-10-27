@@ -52,10 +52,7 @@ fn validate_spill_directory(
     Ok(())
 }
 
-pub(super) fn new_session(
-    args: &Args,
-) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
-    let config = build_session_config(args);
+fn build_runtime(args: &Args) -> Result<RuntimeEnvBuilder, Box<dyn std::error::Error>> {
     let mut runtime = RuntimeEnvBuilder::new();
     if let Some(limit) = args.memory_limit_bytes {
         runtime = runtime.with_memory_limit(limit, 1.0);
@@ -64,6 +61,14 @@ pub(super) fn new_session(
         validate_spill_directory(path, args.database_dir.as_deref())?;
         runtime = runtime.with_temp_file_path(path.to_path_buf());
     }
+    Ok(runtime)
+}
+
+pub(super) fn new_session(
+    args: &Args,
+) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
+    let config = build_session_config(args);
+    let runtime = build_runtime(args)?;
     let session = if args.memory_limit_bytes.is_some() || args.spill_dir.is_some() {
         RustSparkSession::with_config_and_runtime(config, runtime.build_arc()?)
     } else {
