@@ -248,6 +248,10 @@ struct Args {
     #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
     target_partitions: Option<usize>,
 
+    /// Maximum concurrent file metadata reads during schema and statistics discovery.
+    #[arg(long = "metadata-fetch-concurrency", value_name = "FILES", value_parser = parse_positive_metadata_concurrency)]
+    metadata_fetch_concurrency: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
@@ -615,6 +619,10 @@ fn parse_target_partitions(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--target-partitions")
 }
 
+fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
 fn parse_positive_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--max-rows")
 }
@@ -639,6 +647,13 @@ use interactive::run_interactive;
 
 mod setup;
 use setup::{cache_tables, read_query, register_derived_tables};
+
+fn database_root(args: &Args) -> Result<&std::path::Path, Box<dyn std::error::Error>> {
+    Ok(args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?)
+}
 
 fn normalized_export_path(
     destination: &std::path::Path,
@@ -732,18 +747,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         register_database_tables(&session, directory).await?;
     }
     if let Some(destination) = args.backup_database.as_deref() {
-        let root = args
-            .database_dir
-            .as_deref()
-            .ok_or("Missing database directory")?;
+        let root = database_root(&args)?;
         return persistence::backup_database(root, destination);
     }
     if args.interactive {
         if let Some(table) = args.compact_table.as_deref() {
-            let root = args
-                .database_dir
-                .as_deref()
-                .ok_or("Missing database directory")?;
+            let root = database_root(&args)?;
             persistence::compact_saved_table(&session, root, &table.to_ascii_lowercase()).await?;
         }
         return run_interactive(&session, &args).await;
@@ -760,10 +769,7 @@ async fn execute_registered_query(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(table) = args.compact_table.as_deref() {
-        let root = args
-            .database_dir
-            .as_deref()
-            .ok_or("Missing database directory")?;
+        let root = database_root(args)?;
         persistence::compact_saved_table(session, root, &table.to_ascii_lowercase()).await?;
     }
     register_derived_tables(session, args).await?;

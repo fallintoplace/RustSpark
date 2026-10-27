@@ -18,6 +18,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }
+    if let Some(files) = args.metadata_fetch_concurrency {
+        config = config.set_usize("datafusion.execution.meta_fetch_concurrency", files);
+    }
     config
 }
 
@@ -45,12 +48,9 @@ pub(super) fn new_session(
         runtime = runtime.with_temp_file_path(path.to_path_buf());
     }
     let session = if args.memory_limit_bytes.is_some() || args.spill_dir.is_some() {
-        Arc::new(RustSparkSession::with_config_and_runtime(
-            config,
-            runtime.build_arc()?,
-        ))
+        RustSparkSession::with_config_and_runtime(config, runtime.build_arc()?)
     } else {
-        Arc::new(RustSparkSession::with_config(config))
+        RustSparkSession::with_config(config)
     };
-    Ok(session)
+    Ok(Arc::new(session))
 }

@@ -48,6 +48,10 @@ schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
 Use `.count data` to print the number of rows in a registered table.
 
+Use `.preview data` to display up to 10 rows from a table or
+`.preview data 3` to set a limit of 3 rows (maximum 1000).
+Qualified names such as `.preview datafusion.public.data 3` also work.
+
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
 ```sh
@@ -165,6 +169,17 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 
 Missing columns are filled with NULL and duplicates are removed across all
 sources. Union destination names must be unique across both union flags.
+
+Increase file metadata concurrency when loading directories with many files:
+
+```sh
+cargo run -- --parquet /data/lake/events --metadata-fetch-concurrency 64 \\
+  --sql 'SELECT COUNT(*) FROM data'
+```
+
+This controls concurrent file schema and statistics reads. Higher settings can
+reduce metadata latency but use more memory and storage I/O. The default is
+unchanged when the flag is omitted.
 
 Enable Parquet late materialization for selective filters:
 
@@ -504,3 +519,7 @@ part can reduce scan parallelism and requires enough free disk space for both
 versions. Keep other programs from mutating the table's files and use external
 backups for important data. The database lock prevents simultaneous RustSpark
 operations but does not protect against external writers.
+
+## License
+
+RustSpark is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

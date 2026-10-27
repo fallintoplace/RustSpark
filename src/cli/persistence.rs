@@ -25,6 +25,13 @@ fn crash_after(phase: &str) {
 #[cfg(not(debug_assertions))]
 fn crash_after(_phase: &str) {}
 
+fn require_regular_directory(path: &Path, message: &'static str) -> Result<(), Box<dyn Error>> {
+    if !fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Err(message.into());
+    }
+    Ok(())
+}
+
 fn prepare_staged_insert_files(
     original: &Path,
     staging: &Path,
@@ -71,9 +78,7 @@ impl StagedInsert {
             return Err("Persistent INSERT requires a simple table name".into());
         }
         let original = root.join(table);
-        if !fs::symlink_metadata(&original)?.file_type().is_dir() {
-            return Err("Persistent table must be a regular directory".into());
-        }
+        require_regular_directory(&original, "Persistent table must be a regular directory")?;
         // Deterministic name makes crash recovery independent of ephemeral ids.
         // The caller holds the exclusive database lock for this session.
         let staging = root.join(format!(".rustspark-insert-{table}"));
@@ -100,9 +105,7 @@ impl StagedInsert {
             return Err("Persistent compaction requires a simple table name".into());
         }
         let original = root.join(table);
-        if !fs::symlink_metadata(&original)?.file_type().is_dir() {
-            return Err("Persistent table must be a regular directory".into());
-        }
+        require_regular_directory(&original, "Persistent table must be a regular directory")?;
         validate_table_files(&original, table)?;
         let staging = root.join(format!(".rustspark-insert-{table}"));
         fs::create_dir(&staging)?;
@@ -681,9 +684,7 @@ pub(super) fn drop_saved_table(root: &Path, name: &str) -> Result<(), Box<dyn Er
         return Err("Persistent table name must be a SQL identifier".into());
     }
     let source = root.join(name);
-    if !fs::symlink_metadata(&source)?.file_type().is_dir() {
-        return Err("Persistent table path is not a regular directory".into());
-    }
+    require_regular_directory(&source, "Persistent table path is not a regular directory")?;
     let temporary = tempfile::Builder::new()
         .prefix(".rustspark-drop-")
         .tempdir_in(root)?;
@@ -712,9 +713,10 @@ pub(super) async fn rename_saved_table(
     }
     let source = root.join(source_name);
     let destination = root.join(destination_name);
-    if !fs::symlink_metadata(&source)?.file_type().is_dir() {
-        return Err("Persistent source table must be a regular directory".into());
-    }
+    require_regular_directory(
+        &source,
+        "Persistent source table must be a regular directory",
+    )?;
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(format!("Destination table already exists: {destination_name}").into());
     }
