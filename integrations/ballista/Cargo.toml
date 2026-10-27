@@ -20,4 +20,5 @@ datafusion = { version = "=55.1.0", default-features = false, features = ["sql",
 futures = "0.3"
 rustspark = { path = "../.." }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+url = "2"
