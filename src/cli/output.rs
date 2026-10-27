@@ -394,6 +394,8 @@ pub(super) async fn write_arrow_ipc(
     }
     writer.finish()?;
     drop(writer);
+    // Flush the completed IPC file before publishing its new name.
+    temporary.as_file().sync_all()?;
     temporary.persist(path)?;
     Ok(())
 }
