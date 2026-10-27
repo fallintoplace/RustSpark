@@ -90,6 +90,8 @@ mod sql_compat_url_decode;
 mod sql_compat_width_bucket;
 #[path = "sql_compat/soundex.rs"]
 mod sql_compat_soundex;
+#[path = "sql_compat/luhn_check.rs"]
+mod sql_compat_luhn_check;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -212,6 +214,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_url_decode::udf());
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
+        context.register_udf(sql_compat_luhn_check::udf());
         Self { context }
     }
 
