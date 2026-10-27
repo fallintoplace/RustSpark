@@ -68,3 +68,13 @@ fn html_rejects_csv_only_no_header_flag() -> TestResult {
     assert!(String::from_utf8_lossy(&output.stderr).contains("CSV or TSV"));
     Ok(())
 }
+
+#[test]
+fn html_handles_plain_and_escaped_values_together() -> TestResult {
+    let output = run("SELECT 'plain text' AS simple, 'a&b' AS encoded", &[])?;
+    assert_success(&output);
+    let html = String::from_utf8(output.stdout)?;
+    assert!(html.contains("<th>simple</th><th>encoded</th>"), "{html}");
+    assert!(html.contains("<td>plain text</td><td>a&amp;b</td>"), "{html}");
+    Ok(())
+}
