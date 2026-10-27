@@ -129,7 +129,7 @@ def has_top_level_order_by(sql: str) -> bool:
         elif char.isascii() and (char.isalpha() or char == "_"):
             end = index + 1
             while end < len(sql) and sql[end].isascii() and (
-                sql[end].isalpha() or sql[end] == "_"
+                sql[end].isalnum() or sql[end] == "_"
             ):
                 end += 1
             if depth == 0:
