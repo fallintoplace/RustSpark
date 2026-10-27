@@ -197,9 +197,8 @@ fn validate_parquet_part(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Reject unexpected entries and validate Parquet footers before exposure.
-/// Large part sets can validate independent file footers in parallel.
-fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+// Check the complete inventory before validating any footer.
+fn parquet_part_inventory(directory: &Path, name: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
@@ -216,6 +215,14 @@ fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Erro
     if paths.is_empty() {
         return Err(format!("Database table '{name}' contains no Parquet files").into());
     }
+
+    Ok(paths)
+}
+
+/// Reject unexpected entries and validate Parquet footers before exposure.
+/// Large part sets can validate independent file footers in parallel.
+fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+    let paths = parquet_part_inventory(directory, name)?;
 
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
