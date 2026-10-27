@@ -110,11 +110,13 @@ async fn write_delimited<W: Write>(
 fn display_cell(
     column: &datafusion::arrow::array::ArrayRef,
     row: usize,
-) -> datafusion::arrow::error::Result<String> {
+) -> datafusion::arrow::error::Result<std::borrow::Cow<'static, str>> {
     if column.is_null(row) {
-        Ok("NULL".to_owned())
+        // NULL is repeated for every missing cell. Borrow the fixed label.
+        Ok(std::borrow::Cow::Borrowed("NULL"))
     } else {
         datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)
+            .map(std::borrow::Cow::Owned)
     }
 }
 
@@ -378,11 +380,25 @@ pub(super) async fn write_arrow_ipc(
 
 #[cfg(test)]
 mod tests {
-    use super::escape_vertical_value;
+    use super::{display_cell, escape_vertical_value};
 
     #[test]
     fn escapes_vertical_controls_without_changing_unicode() {
         assert_eq!(escape_vertical_value("a\\b\r\n\té"), "a\\\\b\\r\\n\\té");
         assert_eq!(escape_vertical_value("plain"), "plain");
+    }
+
+    #[test]
+    fn null_display_reuses_a_borrowed_constant() {
+        let column: datafusion::arrow::array::ArrayRef =
+            std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec![
+                None,
+                Some("value"),
+            ]));
+        assert!(matches!(
+            display_cell(&column, 0).unwrap(),
+            std::borrow::Cow::Borrowed("NULL")
+        ));
+        assert_eq!(display_cell(&column, 1).unwrap(), "value");
     }
 }
