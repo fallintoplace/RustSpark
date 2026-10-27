@@ -1,8 +1,4 @@
-use datafusion::{
-    common::ScalarValue,
-    functions_aggregate::expr_fn::sum,
-    prelude::col,
-};
+use datafusion::{common::ScalarValue, functions_aggregate::expr_fn::sum, prelude::col};
 use rustspark::RustSparkSession;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
