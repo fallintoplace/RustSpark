@@ -107,8 +107,8 @@ impl RustSparkSession {
     ///
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
-        context.register_udf(sql_compat_try_divide::udf());
         context.register_udf(sql_compat_bin::udf());
+        context.register_udf(sql_compat_try_divide::udf());
         Self { context }
     }
 
