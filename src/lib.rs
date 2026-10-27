@@ -1104,6 +1104,14 @@ impl RustSparkSession {
         Ok(false)
     }
 
+    /// Return whether a registered table has at least one row.
+    ///
+    /// The underlying query is limited to one row, so it does not count or
+    /// collect the entire table.
+    pub async fn table_has_rows(&self, table: &str) -> Result<bool> {
+        Self::has_rows(self.table(table).await?).await
+    }
+
     /// Return whether a read-only query produces at least one row.
     ///
     /// Limits the plan to one row to avoid collecting the full result.
