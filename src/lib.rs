@@ -11,26 +11,26 @@ mod export;
 mod joins;
 mod set_operations;
 mod sources;
-#[path = "sql_compat/endswith.rs"]
-mod sql_compat_endswith;
-#[path = "sql_compat/startswith.rs"]
-mod sql_compat_startswith;
-#[path = "sql_compat/oct.rs"]
-mod sql_compat_oct;
-#[path = "sql_compat/space.rs"]
-mod sql_compat_space;
-#[path = "sql_compat/zeroifnull.rs"]
-mod sql_compat_zeroifnull;
-#[path = "sql_compat/nullifzero.rs"]
-mod sql_compat_nullifzero;
-#[path = "sql_compat/pmod.rs"]
-mod sql_compat_pmod;
-#[path = "sql_compat/try_mod.rs"]
-mod sql_compat_try_mod;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
+#[path = "sql_compat/endswith.rs"]
+mod sql_compat_endswith;
+#[path = "sql_compat/nullifzero.rs"]
+mod sql_compat_nullifzero;
+#[path = "sql_compat/oct.rs"]
+mod sql_compat_oct;
+#[path = "sql_compat/pmod.rs"]
+mod sql_compat_pmod;
+#[path = "sql_compat/space.rs"]
+mod sql_compat_space;
+#[path = "sql_compat/startswith.rs"]
+mod sql_compat_startswith;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
+#[path = "sql_compat/try_mod.rs"]
+mod sql_compat_try_mod;
+#[path = "sql_compat/zeroifnull.rs"]
+mod sql_compat_zeroifnull;
 
 pub use export::SqlExportFormat;
 

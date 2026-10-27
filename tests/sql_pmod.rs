@@ -23,7 +23,10 @@ async fn pmod_works_with_rows_and_nulls() -> Result<(), Box<dyn std::error::Erro
             .unwrap();
         result.extend(column.iter());
     }
-    assert_eq!(result, vec![Some(2), Some(1), None, None, Some(1), Some(-1)]);
+    assert_eq!(
+        result,
+        vec![Some(2), Some(1), None, None, Some(1), Some(-1)]
+    );
     Ok(())
 }
 
