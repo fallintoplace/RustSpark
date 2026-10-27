@@ -12,13 +12,16 @@ from bench_rustspark import WORKLOADS, benchmark_row, expected_results, output_s
 from bench_stats import summarize_samples
 
 
+def encode_jsonl_row(index):
+    city, amount = benchmark_row(index)
+    return json.dumps({"id": index, "city": city, "amount": amount}) + "\n"
+
+
 def write_jsonl(path, rows):
     if rows < 1:
         raise ValueError("rows must be positive")
     with Path(path).open("w", encoding="utf-8") as stream:
-        for index in range(rows):
-            city, amount = benchmark_row(index)
-            stream.write(json.dumps({"id": index, "city": city, "amount": amount}) + "\n")
+        stream.writelines(encode_jsonl_row(index) for index in range(rows))
 
 
 def command(binary, file, sql):
@@ -27,16 +30,21 @@ def command(binary, file, sql):
             "--sql", sql, "--stdout-format", "json"]
 
 
+def _run_verified_query(binary, file, sql, digest, timeout):
+    started = time.perf_counter()
+    run = subprocess.run(command(binary, file, sql),
+                         capture_output=True, text=True, timeout=timeout, check=True)
+    elapsed = (time.perf_counter() - started) * 1000
+    actual, _ = output_signature(run.stdout)
+    if actual != digest:
+        raise ValueError("RustSpark JSONL query result differs from the expected output")
+    return elapsed
+
+
 def measure(binary, file, sql, digest, repeat, warmup, timeout):
     samples = []
     for attempt in range(repeat + warmup):
-        started = time.perf_counter()
-        run = subprocess.run(command(binary, file, sql),
-                             capture_output=True, text=True, timeout=timeout, check=True)
-        elapsed = (time.perf_counter() - started) * 1000
-        actual, _ = output_signature(run.stdout)
-        if actual != digest:
-            raise ValueError("RustSpark JSONL query result differs from the expected output")
+        elapsed = _run_verified_query(binary, file, sql, digest, timeout)
         if attempt >= warmup:
             samples.append(elapsed)
     return {**summarize_samples(samples), "result_sha256": digest}

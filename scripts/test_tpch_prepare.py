@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import re
 from pathlib import Path
 import tempfile
@@ -32,6 +33,14 @@ class FakeConnection:
 
 
 class FixtureTests(unittest.TestCase):
+    def test_large_parquet_checksum_uses_chunks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "large.parquet"
+            content = b"PAR1" * (1024 * 1024)
+            path.write_bytes(content)
+            self.assertEqual(prepare.sha256_file(path),
+                             hashlib.sha256(content).hexdigest())
+
     def test_requires_positive_finite_scale(self):
         for scale in (0, -1, float("nan"), float("inf")):
             with self.subTest(scale=scale), tempfile.TemporaryDirectory() as folder:

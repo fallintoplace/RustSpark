@@ -142,16 +142,17 @@ def has_top_level_order_by(sql: str) -> bool:
         index += 1
     return False
 
+def _canonical_result_row(line: str) -> str:
+    value = json.loads(
+        line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object for each result row")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
-    rows = []
-    for line in stdout.splitlines():
-        if line.strip():
-            value = json.loads(
-                line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite,
-            )
-            if not isinstance(value, dict):
-                raise ValueError("expected a JSON object for each result row")
-            rows.append(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    rows = [_canonical_result_row(line) for line in stdout.splitlines() if line.strip()]
     if not ordered:
         rows.sort()
     digest = hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()

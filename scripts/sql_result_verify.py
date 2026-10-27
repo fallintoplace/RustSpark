@@ -52,6 +52,18 @@ def valid_digest(value) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _append_row_differences(number, observed, prior, issues):
+    for label, result in [("Actual", observed), ("Reference", prior)]:
+        count = result.get("result_rows")
+        if type(count) is not int or count < 0:
+            issues.append(f"Query {number}: invalid {label.lower()} row count")
+            return
+    if observed["result_rows"] != prior["result_rows"]:
+        issues.append(f"Query {number}: row count differs")
+    if observed["result_sha256"] != prior["result_sha256"]:
+        issues.append(f"Query {number}: result hash differs")
+
+
 def verify_reports(actual: dict, reference: dict) -> list[str]:
     digest = actual.get("query_file_sha256")
     if not valid_digest(digest) or digest != reference.get("query_file_sha256"):
@@ -75,16 +87,7 @@ def verify_reports(actual: dict, reference: dict) -> list[str]:
         if observed.get("status") != "executed" or not valid_digest(observed.get("result_sha256")):
             issues.append(f"Query {number}: query did not execute successfully")
             continue
-        for label, result in [("Actual", observed), ("Reference", prior)]:
-            count = result.get("result_rows")
-            if type(count) is not int or count < 0:
-                issues.append(f"Query {number}: invalid {label.lower()} row count")
-                break
-        else:
-            if observed["result_rows"] != prior["result_rows"]:
-                issues.append(f"Query {number}: row count differs")
-            if observed["result_sha256"] != prior["result_sha256"]:
-                issues.append(f"Query {number}: result hash differs")
+        _append_row_differences(number, observed, prior, issues)
     return issues
 
 

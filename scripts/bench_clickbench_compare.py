@@ -7,24 +7,29 @@ import math
 from pathlib import Path
 
 
+def checked_entry(item, seen):
+    query = item.get("id")
+    if type(query) is not int or query not in range(1, 44) or query in seen:
+        raise ValueError("Invalid or duplicate query ID")
+    if item.get("status") != "executed":
+        raise ValueError(f"Query {query} did not execute successfully")
+    digest = item.get("result_sha256")
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError(f"Missing or invalid result hash in query {query}")
+    median = item.get("median_ms")
+    if isinstance(median, bool) or not isinstance(median, (float, int)) or not math.isfinite(median) or median <= 0:
+        raise ValueError(f"Invalid query {query} median")
+    return query, {"hash": digest, "median": float(median)}
+
+
 def entries(report):
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("Missing ClickBench results")
     checked = {}
     for item in results:
-        query = item.get("id")
-        if type(query) is not int or query not in range(1, 44) or query in checked:
-            raise ValueError("Invalid or duplicate query ID")
-        if item.get("status") != "executed":
-            raise ValueError(f"Query {query} did not execute successfully")
-        digest = item.get("result_sha256")
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-            raise ValueError(f"Missing or invalid result hash in query {query}")
-        median = item.get("median_ms")
-        if isinstance(median, bool) or not isinstance(median, (float, int)) or not math.isfinite(median) or median <= 0:
-            raise ValueError(f"Invalid query {query} median")
-        checked[query] = {"hash": digest, "median": float(median)}
+        query, value = checked_entry(item, checked)
+        checked[query] = value
     return checked
 
 
