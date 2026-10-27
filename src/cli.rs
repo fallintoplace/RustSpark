@@ -9,6 +9,7 @@ use rustspark::RustSparkSession;
 enum StdoutFormat {
     Csv,
     Tsv,
+    Vertical,
     Json,
     JsonArray,
     Arrow,
