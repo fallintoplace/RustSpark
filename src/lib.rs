@@ -1192,9 +1192,9 @@ impl RustSparkSession {
         use std::fmt::Write as _;
 
         if keys.is_empty()
-            || keys
-                .iter()
-                .any(|(left_key, right_key)| left_key.trim().is_empty() || right_key.trim().is_empty())
+            || keys.iter().any(|(left_key, right_key)| {
+                left_key.trim().is_empty() || right_key.trim().is_empty()
+            })
         {
             return Err(DataFusionError::Plan(
                 "join_tables_null_safe requires one or more non-empty key pairs".into(),

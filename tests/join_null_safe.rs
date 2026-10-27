@@ -72,13 +72,23 @@ async fn null_safe_join_requires_real_columns_and_keys() -> TestResult {
     );
     assert!(
         session
-            .join_tables_null_safe("left_keys", "right_keys", JoinType::LeftSemi, &[("id", "other_id")])
+            .join_tables_null_safe(
+                "left_keys",
+                "right_keys",
+                JoinType::LeftSemi,
+                &[("id", "other_id")]
+            )
             .await
             .is_err()
     );
     assert!(
         session
-            .join_tables_null_safe("left_keys", "right_keys", JoinType::Inner, &[("bad", "other_id")])
+            .join_tables_null_safe(
+                "left_keys",
+                "right_keys",
+                JoinType::Inner,
+                &[("bad", "other_id")]
+            )
             .await
             .is_err()
     );
