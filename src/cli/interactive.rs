@@ -138,6 +138,46 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
     true
 }
 
+// Use quoted identifiers so a shell table name cannot change the SQL plan.
+async fn handle_preview_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
+    if command != ".preview"
+        && !command.starts_with(".preview ")
+        && !command.starts_with(".preview\t")
+    {
+        return false;
+    }
+    let usage = "Shell error: .preview requires TABLE [ROWS] (ROWS must be 1..=1000)";
+    let parts: Vec<_> = command[".preview".len()..].split_whitespace().collect();
+    let (table, rows) = match parts.as_slice() {
+        [table] => (*table, 10),
+        [table, count] => match count.parse::<usize>() {
+            Ok(rows) if (1..=1000).contains(&rows) => (*table, rows),
+            _ => {
+                eprintln!("{usage}");
+                return true;
+            }
+        },
+        _ => {
+            eprintln!("{usage}");
+            return true;
+        }
+    };
+    if table.split('.').any(str::is_empty) {
+        eprintln!("Shell error: .preview requires a valid table name");
+        return true;
+    }
+    let source = table
+        .split('.')
+        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(".");
+    let query = format!("SELECT * FROM {source} LIMIT {rows}");
+    if let Err(error) = execute_interactive_statement(session, args, &query).await {
+        eprintln!("Shell error: {error}");
+    }
+    true
+}
+
 enum ShellAction {
     Continue,
     Exit,
@@ -153,7 +193,9 @@ async fn dispatch_shell_command(
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .quit.");
+            eprintln!(
+                "Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .preview TABLE [ROWS], .quit."
+            );
             return ShellAction::Continue;
         }
         ".tables" => {
@@ -183,7 +225,8 @@ async fn dispatch_shell_command(
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await
+    if handle_preview_command(session, args, command).await
+        || handle_schema_command(session, command).await
         || handle_count_command(session, args, command).await
     {
         ShellAction::Continue

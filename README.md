@@ -48,6 +48,10 @@ schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
 Use `.count data` to print the number of rows in a registered table.
 
+Use `.preview data` to display up to 10 rows from a table or
+`.preview data 3` to set a limit of 3 rows (maximum 1000).
+Qualified names such as `.preview datafusion.public.data 3` also work.
+
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
 ```sh
