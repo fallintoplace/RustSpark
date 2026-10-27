@@ -1691,6 +1691,29 @@ impl RustSparkSession {
         .await
     }
 
+    /// Count distinct values in a column with configurable NULL treatment.
+    ///
+    /// SQL COUNT(DISTINCT) excludes NULL, while Spark-style cardinality may
+    /// include one NULL group. Pass include_null to choose the convention.
+    /// Rows are aggregated without collecting them in application memory.
+    pub async fn column_distinct_count(
+        &self,
+        table: &str,
+        column: &str,
+        include_null: bool,
+    ) -> Result<usize> {
+        let distinct = self.select_columns(table, &[column]).await?.distinct()?;
+        if include_null {
+            distinct.count().await
+        } else {
+            use datafusion::{common::Column, logical_expr::Expr};
+            distinct
+                .filter(Expr::Column(Column::from_name(column)).is_not_null())?
+                .count()
+                .await
+        }
+    }
+
     /// Count unique whole rows, treating repeated NULL rows as duplicates.
     ///
     /// Unlike row counts, this requires a distinct aggregation over the input.
