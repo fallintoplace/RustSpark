@@ -107,6 +107,45 @@ async fn write_delimited<W: Write>(
     Ok(())
 }
 
+fn escape_vertical_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
+// Present one row at a time, even for batches with very wide schemas.
+async fn write_vertical<W: Write>(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+    output: &mut W,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut row_number = 0_usize;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        for row in 0..batch.num_rows() {
+            row_number += 1;
+            writeln!(output, "--- Row {row_number} ---")?;
+            for (index, field) in schema.fields().iter().enumerate() {
+                let column = batch.column(index);
+                let value = if column.is_null(row) {
+                    "NULL".to_owned()
+                } else {
+                    datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)?
+                };
+                writeln!(
+                    output,
+                    "{}: {}",
+                    escape_vertical_value(field.name()),
+                    escape_vertical_value(&value)
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn write_arrow_stream<W: Write>(
     stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
     output: &mut W,
@@ -201,6 +240,9 @@ pub(super) async fn write_stdout(
                 &broken_pipe,
             )
             .await?;
+        }
+        StdoutFormat::Vertical => {
+            write_vertical(&mut stream, &mut tracked, &schema).await?;
         }
         StdoutFormat::Json => {
             let mut writer = datafusion::arrow::json::writer::WriterBuilder::new()

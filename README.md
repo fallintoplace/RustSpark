@@ -374,6 +374,15 @@ The Arrow output is always one file. It preserves Arrow column types and
 supports empty results. Like other exports, a failed or timed-out query can
 leave a partial output file.
 
+For wide queries, print one column per line instead of a horizontal table:
+
+```sh
+cargo run -- --sql "SELECT 42 AS answer" --stdout-format vertical
+```
+
+Vertical output streams one row at a time, displays NULL explicitly, and
+escapes embedded line breaks and tabs. Empty queries emit no rows.
+
 To omit the header row in CSV or TSV pipelines, add `--stdout-no-header`
 alongside `--stdout-format csv` or `--stdout-format tsv`. This also
 produces empty stdout for a query returning no rows.
