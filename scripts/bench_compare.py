@@ -79,6 +79,22 @@ def execute(command, timeout):
     return elapsed, digest, rows
 
 
+def measure_engine_workload(engine, workload, command, expected_digest, repeat, warmup, timeout):
+    samples = []
+    for iteration in range(warmup + repeat):
+        elapsed, digest, actual = execute(command, timeout)
+        if digest != expected_digest:
+            raise RuntimeError(f"Incorrect result for {engine}/{workload}: {actual!r}")
+        if iteration >= warmup:
+            samples.append(round(elapsed, 3))
+    return {
+        "median_ms": round(statistics.median(samples), 3),
+        "p95_ms": round(percentile(samples, 0.95), 3),
+        "samples_ms": samples,
+        "result_sha256": expected_digest,
+    }
+
+
 def benchmark(binary, engines, rows, repeat, warmup, timeout):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
@@ -96,21 +112,10 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
         for engine in engines:
             results[engine] = {}
             for workload, query in WORKLOADS.items():
-                samples = []
-                for iteration in range(warmup + repeat):
-                    elapsed, digest, actual = execute(
-                        command_for(engine, binary, csv, query), timeout)
-                    if digest != expected[workload]:
-                        raise RuntimeError(
-                            f"Incorrect result for {engine}/{workload}: {actual!r}")
-                    if iteration >= warmup:
-                        samples.append(round(elapsed, 3))
-                results[engine][workload] = {
-                    "median_ms": round(statistics.median(samples), 3),
-                    "p95_ms": round(percentile(samples, 0.95), 3),
-                    "samples_ms": samples,
-                    "result_sha256": expected[workload],
-                }
+                results[engine][workload] = measure_engine_workload(
+                    engine, workload, command_for(engine, binary, csv, query),
+                    expected[workload], repeat, warmup, timeout
+                )
         ratios = {}
         if "rustspark" in results:
             for engine in engines:
