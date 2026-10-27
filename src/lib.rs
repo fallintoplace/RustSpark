@@ -1147,6 +1147,116 @@ impl RustSparkSession {
         Self::paginate(self.table(table), offset, limit).await
     }
 
+    /// Join two tables and suffix columns whose names occur on both sides.
+    ///
+    /// Both copies of each join key are kept, as in an ON join. Shared names
+    /// receive the given left/right suffixes; unique names stay unchanged.
+    /// Rejects suffixes that would still create duplicate output names.
+    pub async fn join_tables_with_suffixes(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+        left_suffix: &str,
+        right_suffix: &str,
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+        use std::{collections::HashSet, fmt::Write as _};
+
+        if keys.is_empty()
+            || keys
+                .iter()
+                .any(|(left_key, right_key)| left_key.trim().is_empty() || right_key.trim().is_empty())
+        {
+            return Err(DataFusionError::Plan(
+                "join_tables_with_suffixes requires non-empty key pairs".into(),
+            ));
+        }
+        if left_suffix.trim().is_empty() || right_suffix.trim().is_empty() {
+            return Err(DataFusionError::Plan(
+                "join_tables_with_suffixes requires non-empty suffixes".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            JoinType::Right => "RIGHT",
+            JoinType::Full => "FULL OUTER",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "join_tables_with_suffixes supports inner and outer joins only".into(),
+                ));
+            }
+        };
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        let left_names: HashSet<_> = left_frame
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_ascii_lowercase())
+            .collect();
+        let right_names: HashSet<_> = right_frame
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_ascii_lowercase())
+            .collect();
+
+        let mut output_names = HashSet::new();
+        let mut projection = String::new();
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        for (frame, alias, other_names, suffix) in [
+            (&left_frame, left_alias, &right_names, left_suffix),
+            (&right_frame, right_alias, &left_names, right_suffix),
+        ] {
+            for field in frame.schema().fields() {
+                let name = field.name();
+                let output_name = if other_names.contains(&name.to_ascii_lowercase()) {
+                    format!("{name}{suffix}")
+                } else {
+                    name.to_owned()
+                };
+                if !output_names.insert(output_name.to_ascii_lowercase()) {
+                    return Err(DataFusionError::Plan(format!(
+                        "Join output column name is not unique: {output_name}"
+                    )));
+                }
+                if !projection.is_empty() {
+                    projection.push_str(", ");
+                }
+                write!(
+                    &mut projection,
+                    "{alias}.{} AS {}",
+                    quote_join_identifier(name),
+                    quote_join_identifier(&output_name),
+                )
+                .expect("writing to a String cannot fail");
+            }
+        }
+        let mut predicates = String::with_capacity(keys.len() * 64);
+        for (left_key, right_key) in keys {
+            if !predicates.is_empty() {
+                predicates.push_str(" AND ");
+            }
+            write!(
+                &mut predicates,
+                "{left_alias}.{} = {right_alias}.{}",
+                quote_join_identifier(left_key),
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
+        }
+
+        let query = format!(
+            "SELECT {projection} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {predicates}",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join two registered tables on one or more pairs of equality keys.
     ///
     /// The result is a lazy DataFrame. Join types such as inner, left, right,
