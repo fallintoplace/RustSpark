@@ -33,6 +33,8 @@ mod sql_compat_nullifzero;
 mod feature_approx_distinct_count;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
+#[path = "features/approx_percentile.rs"]
+mod feature_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
 #[path = "sql_compat/space.rs"]
