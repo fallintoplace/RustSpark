@@ -71,6 +71,7 @@ def sqlite_reference(sql, rows):
                 ((index, *benchmark_row(index))
                  for index in range(start, min(rows, start + 4096))),
             )
+        connection.execute("CREATE UNIQUE INDEX data_id_idx ON data(id)")
         result = connection.execute(sql)
         keys = [column[0] for column in result.description]
         values = [dict(zip(keys, row)) for row in result.fetchall()]
