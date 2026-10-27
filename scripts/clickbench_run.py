@@ -7,7 +7,6 @@ import json
 import math
 from pathlib import Path
 import platform
-import re
 import statistics
 import subprocess
 import time
@@ -77,27 +76,71 @@ def reject_nonfinite(value: str):
 
 
 def has_top_level_order_by(sql: str) -> bool:
-    # Ignore quoted values, identifiers, and SQL comments before scanning keywords.
-    masked = re.sub(
-        r"""'(?:''|[^'])*'|"(?:\"\"|[^"])*"|--[^\n]*|/\*.*?\*/""",
-        " ",
-        sql,
-        flags=re.DOTALL,
-    )
+    # Track nested SQL comments and quoted identifiers instead of matching
+    # ORDER BY text that is not a keyword in the outer query.
     depth = 0
+    comment_depth = 0
+    line_comment = False
+    quoted = None
     previous = ""
-    for token in re.findall(r"[A-Za-z_]+|[()]", masked):
-        if token == "(":
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if comment_depth:
+            if char == "/" and following == "*":
+                comment_depth += 1
+                index += 2
+            elif char == "*" and following == "/":
+                comment_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if quoted is not None:
+            if char == quoted:
+                if following == quoted:
+                    index += 2
+                    continue
+                quoted = None
+            index += 1
+            continue
+        if char == "-" and following == "-":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            comment_depth = 1
+            index += 2
+            continue
+        if char in ("'", '"', "`"):
+            quoted = char
+            index += 1
+            continue
+        if char == "(":
             depth += 1
-        elif token == ")":
+        elif char == ")":
             depth = max(0, depth - 1)
-        elif depth == 0:
-            word = token.upper()
-            if previous == "ORDER" and word == "BY":
-                return True
-            previous = word
+        elif char.isascii() and (char.isalpha() or char == "_"):
+            end = index + 1
+            while end < len(sql) and sql[end].isascii() and (
+                sql[end].isalpha() or sql[end] == "_"
+            ):
+                end += 1
+            if depth == 0:
+                word = sql[index:end].upper()
+                if previous == "ORDER" and word == "BY":
+                    return True
+                previous = word
+            index = end
+            continue
+        index += 1
     return False
-
 
 def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
     rows = []
