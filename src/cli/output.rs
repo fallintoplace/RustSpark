@@ -119,11 +119,17 @@ fn display_cell(
 }
 
 fn escape_vertical_value(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\r', "\\r")
-        .replace('\n', "\\n")
-        .replace('\t', "\\t")
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\r' => escaped.push_str("\\r"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 // Present one row at a time, even for batches with very wide schemas.
@@ -360,4 +366,15 @@ pub(super) async fn write_arrow_ipc(
     drop(writer);
     temporary.persist(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_vertical_value;
+
+    #[test]
+    fn escapes_vertical_controls_without_changing_unicode() {
+        assert_eq!(escape_vertical_value("a\\b\r\n\té"), "a\\\\b\\r\\n\\té");
+        assert_eq!(escape_vertical_value("plain"), "plain");
+    }
 }

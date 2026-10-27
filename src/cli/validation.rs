@@ -21,16 +21,20 @@ fn overlaps_input_path(source: &Path, destination: &Path) -> bool {
     })
 }
 
-fn has_csv_input(args: &Args) -> bool {
-    args.csv.is_some() || !args.csv_tables.is_empty()
+struct InputAvailability {
+    csv: bool,
+    parquet: bool,
+    json: bool,
 }
 
-fn has_parquet_input(args: &Args) -> bool {
-    args.parquet.is_some() || args.parquet_file_list.is_some() || !args.parquet_tables.is_empty()
-}
-
-fn has_json_input(args: &Args) -> bool {
-    args.json.is_some() || !args.json_tables.is_empty()
+impl InputAvailability {
+    fn from_args(args: &Args) -> Self {
+        Self {
+            csv: args.csv.is_some() || !args.csv_tables.is_empty(),
+            parquet: args.parquet.is_some() || args.parquet_file_list.is_some() || !args.parquet_tables.is_empty(),
+            json: args.json.is_some() || !args.json_tables.is_empty(),
+        }
+    }
 }
 
 fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -62,6 +66,18 @@ fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> 
         sources.extend(load_parquet_file_list(manifest)?);
     }
     Ok(sources)
+}
+
+fn selected_output_path(args: &Args) -> Option<&Path> {
+    [
+        args.output_arrow.as_deref(),
+        args.output_parquet.as_deref(),
+        args.output_csv.as_deref(),
+        args.output_json.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
 }
 
 fn selected_output_path(args: &Args) -> Option<&Path> {
@@ -139,7 +155,7 @@ pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Err
         return Err("Use one unnamed input or one or more named tables".into());
     }
     reject_output_input_collision(args)?;
-    if args.parquet_pushdown_filters && !has_parquet_input(args) {
+    if args.parquet_pushdown_filters && !InputAvailability::from_args(args).parquet {
         return Err("--parquet-pushdown-filters requires a Parquet input".into());
     }
     Ok(())
@@ -178,9 +194,7 @@ pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::er
     {
         return Err("--stdout-no-header requires CSV or TSV stdout output".into());
     }
-    let csv = has_csv_input(args);
-    let parquet = has_parquet_input(args);
-    let json = has_json_input(args);
+    let InputAvailability { csv, parquet, json } = InputAvailability::from_args(args);
 
     reject_missing_format_inputs([
         (

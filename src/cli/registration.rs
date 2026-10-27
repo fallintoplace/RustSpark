@@ -71,6 +71,30 @@ enum NamedInputKind {
     Json,
 }
 
+const INPUT_KINDS: [NamedInputKind; 3] = [
+    NamedInputKind::Csv,
+    NamedInputKind::Parquet,
+    NamedInputKind::Json,
+];
+
+impl NamedInputKind {
+    fn unnamed_path(self, args: &Args) -> Option<&Path> {
+        match self {
+            Self::Csv => args.csv.as_deref(),
+            Self::Parquet => args.parquet.as_deref(),
+            Self::Json => args.json.as_deref(),
+        }
+    }
+
+    fn named_tables(self, args: &Args) -> &[String] {
+        match self {
+            Self::Csv => &args.csv_tables,
+            Self::Parquet => &args.parquet_tables,
+            Self::Json => &args.json_tables,
+        }
+    }
+}
+
 async fn register_named_input(
     session: &RustSparkSession,
     args: &Args,
@@ -105,13 +129,9 @@ async fn register_unnamed_input(
         session.register_dataframe(&args.table, frame)?;
         return Ok(true);
     }
-    let input = [
-        (args.csv.as_deref(), NamedInputKind::Csv),
-        (args.parquet.as_deref(), NamedInputKind::Parquet),
-        (args.json.as_deref(), NamedInputKind::Json),
-    ]
-    .into_iter()
-    .find_map(|(path, kind)| path.map(|path| (path, kind)));
+    let input = INPUT_KINDS
+        .into_iter()
+        .find_map(|kind| kind.unnamed_path(args).map(|path| (path, kind)));
     let Some((path, kind)) = input else {
         return Ok(false);
     };
@@ -132,12 +152,8 @@ pub(super) async fn register_inputs(
     // but bound outstanding jobs to avoid loading hundreds of schemas at once.
     let max_parallel =
         std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(4, 16));
-    for (mappings, kind) in [
-        (&args.csv_tables, NamedInputKind::Csv),
-        (&args.parquet_tables, NamedInputKind::Parquet),
-        (&args.json_tables, NamedInputKind::Json),
-    ] {
-        for mapping in mappings {
+    for kind in INPUT_KINDS {
+        for mapping in kind.named_tables(args) {
             let (name, path) = parse_unique_named_table(mapping, &mut names)?;
             let session = Arc::clone(session);
             let args = Arc::clone(args);
