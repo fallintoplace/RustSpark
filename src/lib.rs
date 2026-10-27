@@ -15,6 +15,8 @@ mod set_operations;
 #[path = "features/null_safe_equality.rs"]
 mod feature_null_safe_equality;
 mod sources;
+#[path = "features/top_rows_per_group.rs"]
+mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/endswith.rs"]
