@@ -44,7 +44,10 @@ class SparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(mod.parse_rustspark_json("", ["a"]).rows, [])
 
     def test_rejects_ambiguous_json_result_values(self):
-        for value in ('{"a": 1, "a": 1}', '{"a": NaN}', '{"a": Infinity}'):
+        for value in (
+            '{"a": 1, "a": 1}', '{"a": NaN}', '{"a": Infinity}',
+            '{"a": 1e400}', '{"a": {"nested": -1e400}}',
+        ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 mod.parse_rustspark_json(value, ["a"])
 
