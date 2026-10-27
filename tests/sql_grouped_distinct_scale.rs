@@ -33,8 +33,16 @@ async fn grouped_distinct_counts_are_exact_with_many_keys() -> TestResult {
 
     let mut group_count = 0;
     for batch in &result {
-        let counts = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        let distinct = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let counts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let distinct = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         for index in 0..batch.num_rows() {
             assert_eq!(counts.value(index), 10);
             assert_eq!(distinct.value(index), 10);
