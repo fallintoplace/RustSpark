@@ -33,11 +33,18 @@ class TypedResult:
 
 def canonical_type(value: str) -> str:
     value = re.sub(r"\s+", "", value).lower()
-    value = value.replace("int64", "bigint").replace("int32", "int")
-    value = value.replace("int16", "smallint").replace("int8", "tinyint")
-    value = value.replace("utf8", "string").replace("float64", "double")
-    value = value.replace("float32", "float").replace("boolean", "boolean")
-    value = value.replace("date32", "date")
+    aliases = {
+        "int64": "bigint",
+        "int32": "int",
+        "int16": "smallint",
+        "int8": "tinyint",
+        "utf8": "string",
+        "float64": "double",
+        "float32": "float",
+        "date32": "date",
+    }
+    value = re.sub(r"\b(?:int64|int32|int16|int8|utf8|float64|float32|date32)\b",
+                   lambda match: aliases[match.group(0)], value)
     value = re.sub(r"decimal128\((\d+),(\d+)\)", r"decimal(\1,\2)", value)
     if value.startswith("timestamp("):
         return "timestamp"
@@ -45,8 +52,8 @@ def canonical_type(value: str) -> str:
 
 
 def parse_rustspark_description(stdout: str) -> tuple[list[str], list[str], list[bool]]:
-    fields = [line.split("\t") for line in stdout.splitlines() if line.strip()]
-    if any(len(parts) < 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
+    fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
+    if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
         raise ValueError("Invalid RustSpark schema description")
     return (
         [parts[0] for parts in fields],

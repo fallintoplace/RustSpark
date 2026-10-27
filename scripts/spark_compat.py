@@ -55,16 +55,19 @@ def compare(left: QueryResult, right: QueryResult, ordered: bool = False):
     return None
 
 
+def parse_rustspark_columns(stdout: str) -> list[str]:
+    fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
+    if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
+        raise ValueError("Invalid RustSpark schema description")
+    return [parts[0] for parts in fields]
+
+
 def rustspark_query(binary: str, sql: str):
     common = [binary, "--sql", sql]
     described = subprocess.run(
         common + ["--describe"], capture_output=True, text=True, check=True, timeout=120
     )
-    columns = [
-        line.split("\t", 1)[0]
-        for line in described.stdout.splitlines()
-        if line.strip()
-    ]
+    columns = parse_rustspark_columns(described.stdout)
     result = subprocess.run(
         common + ["--stdout-format", "json"],
         capture_output=True, text=True, check=True, timeout=120
@@ -128,6 +131,13 @@ def run_cases(cases, rustspark_runner, spark_runner):
     return failed
 
 
+def build_spark_session(spark_session, master: str):
+    return (spark_session.builder.master(master)
+            .appName("RustSpark SQL compatibility")
+            .config("spark.sql.session.timeZone", "UTC")
+            .getOrCreate())
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rustspark", default="./target/debug/rustspark")
@@ -148,7 +158,7 @@ def main(argv=None):
     except ImportError:
         parser.error("Install PySpark 4.x before differential comparison: pip install pyspark")
 
-    session = SparkSession.builder.master(args.spark_master).appName("RustSpark SQL compatibility").getOrCreate()
+    session = build_spark_session(SparkSession, args.spark_master)
     try:
         failed = run_cases(
             cases,
