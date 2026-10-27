@@ -14,7 +14,30 @@ mod sources;
 pub use export::SqlExportFormat;
 
 fn quote_join_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    // Avoid a replacement string followed by a second formatting allocation.
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    for character in name.chars() {
+        if character == '"' {
+            quoted.push('"');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(test)]
+mod join_identifier_tests {
+    use super::quote_join_identifier;
+
+    #[test]
+    fn quotes_names_without_intermediate_strings() {
+        assert_eq!(quote_join_identifier("col"), "\"col\"");
+        assert_eq!(quote_join_identifier("a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_join_identifier("é名\""), "\"é名\"\"\"");
+        assert_eq!(quote_join_identifier(""), "\"\"");
+    }
 }
 
 fn quote_catalog_table(path: &str, invalid_name_message: &str) -> Result<String> {
