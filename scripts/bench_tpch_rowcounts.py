@@ -32,6 +32,16 @@ def count_command(binary, fixture, table):
             "--sql", f"SELECT COUNT(*) AS n FROM {table}", "--stdout-format", "json"]
 
 
+def execute_count(binary, fixture, table, timeout):
+    output = subprocess.run(
+        count_command(binary, fixture, table), capture_output=True,
+        text=True, timeout=timeout, check=False,
+    )
+    if output.returncode:
+        raise RuntimeError(f"COUNT({table}) exited {output.returncode}: {output.stderr[-400:]}")
+    return parse_count(output.stdout)
+
+
 def check(binary, fixture, timeout=120):
     if timeout < 1:
         raise ValueError("Timeout must be positive")
@@ -44,13 +54,7 @@ def check(binary, fixture, timeout=120):
         count = expected[table]
         if type(count) is not int or count < 0:
             raise ValueError(f"Invalid expected row count for {table}")
-        output = subprocess.run(
-            count_command(binary, fixture, table), capture_output=True,
-            text=True, timeout=timeout, check=False,
-        )
-        if output.returncode:
-            raise RuntimeError(f"COUNT({table}) exited {output.returncode}: {output.stderr[-400:]}")
-        actual = parse_count(output.stdout)
+        actual = execute_count(binary, fixture, table, timeout)
         results.append({"table": table, "expected": count, "actual": actual,
                         "status": "ok" if count == actual else "mismatch"})
     return {"results": results}

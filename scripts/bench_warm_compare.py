@@ -125,30 +125,30 @@ def run_rustspark(binary, csv, requests, row_count, timeout, partitions):
     return parse_rustspark(output.stdout, output.stderr, requests, row_count)
 
 
-def run_spark(csv, requests, timeout, master):
-    if importlib.util.find_spec("pyspark") is None:
-        raise RuntimeError("Install PySpark 4.x: pip install 'pyspark>=4,<5'")
+def _run_worker(label, command, requests, timeout):
     output = subprocess.run(
-        [sys.executable, "-c", SPARK_WORKER, str(csv), master],
-        input=json.dumps(requests), capture_output=True, text=True,
+        command, input=json.dumps(requests), capture_output=True, text=True,
         check=False, timeout=timeout,
     )
     if output.returncode:
-        raise RuntimeError(f"PySpark exit {output.returncode}: {output.stderr}")
+        raise RuntimeError(f"{label} exit {output.returncode}: {output.stderr}")
     return [parse_result_line(line) for line in output.stdout.splitlines() if line.strip()]
+
+
+def run_spark(csv, requests, timeout, master):
+    if importlib.util.find_spec("pyspark") is None:
+        raise RuntimeError("Install PySpark 4.x: pip install 'pyspark>=4,<5'")
+    return _run_worker(
+        "PySpark", [sys.executable, "-c", SPARK_WORKER, str(csv), master], requests, timeout,
+    )
 
 
 def run_duckdb(csv, requests, timeout):
     if importlib.util.find_spec("duckdb") is None:
         raise RuntimeError("Install DuckDB: pip install 'duckdb>=1,<3'")
-    output = subprocess.run(
-        [sys.executable, "-c", DUCKDB_WORKER, str(csv)],
-        input=json.dumps(requests), capture_output=True, text=True,
-        check=False, timeout=timeout,
+    return _run_worker(
+        "DuckDB", [sys.executable, "-c", DUCKDB_WORKER, str(csv)], requests, timeout,
     )
-    if output.returncode:
-        raise RuntimeError(f"DuckDB exit {output.returncode}: {output.stderr}")
-    return [parse_result_line(line) for line in output.stdout.splitlines() if line.strip()]
 
 
 def summarize(samples, requests, row_count, warmup, repeat):

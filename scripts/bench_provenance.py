@@ -30,6 +30,18 @@ def git_revision(directory):
     return None
 
 
+def _collect_provenance(executable, repository):
+    return {
+        "binary_sha256": sha256(executable),
+        "binary_bytes": executable.stat().st_size,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "python": platform.python_version(),
+        "git_revision": git_revision(repository),
+    }
+
+
 def enrich(report, binary, repository="."):
     if not isinstance(report, dict):
         raise ValueError("Input report must be a JSON object")
@@ -39,15 +51,7 @@ def enrich(report, binary, repository="."):
     copy = dict(report)
     if "provenance" in copy:
         raise ValueError("Report already contains provenance")
-    copy["provenance"] = {
-        "binary_sha256": sha256(executable),
-        "binary_bytes": executable.stat().st_size,
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "python": platform.python_version(),
-        "git_revision": git_revision(repository),
-    }
+    copy["provenance"] = _collect_provenance(executable, repository)
     return copy
 
 

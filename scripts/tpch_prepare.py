@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 
 def sha256_file(path):
-    """Hash input files using bounded memory at large TPC-H scale factors."""
+    """Hash input files in bounded-size chunks."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):

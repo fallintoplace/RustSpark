@@ -24,6 +24,19 @@ def inside(root, relative):
     return path
 
 
+def check_table(root, manifest, hashes, table):
+    path = f"data/{table}.parquet"
+    if manifest["tables"][table] != path:
+        raise ValueError(f"Unexpected Parquet path for {table}")
+    actual = sha256_file(inside(root, path))
+    expected = hashes[table]
+    if not isinstance(expected, str) or actual != expected:
+        raise ValueError(f"Parquet checksum mismatch for {table}")
+    count = manifest["rows"][table]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError(f"Invalid row count for {table}")
+
+
 def check(root):
     root = Path(root)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -38,16 +51,7 @@ def check(root):
     if set(manifest.get("rows", {})) != TABLES:
         raise ValueError("Missing TPC-H row counts")
     for table in sorted(TABLES):
-        path = f"data/{table}.parquet"
-        if manifest["tables"][table] != path:
-            raise ValueError(f"Unexpected Parquet path for {table}")
-        actual = sha256_file(inside(root, path))
-        expected = hashes[table]
-        if not isinstance(expected, str) or actual != expected:
-            raise ValueError(f"Parquet checksum mismatch for {table}")
-        count = manifest["rows"][table]
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            raise ValueError(f"Invalid row count for {table}")
+        check_table(root, manifest, hashes, table)
     queries = manifest.get("queries")
     if not isinstance(queries, list) or len(queries) != 22:
         raise ValueError("Expected exactly 22 TPC-H queries")
