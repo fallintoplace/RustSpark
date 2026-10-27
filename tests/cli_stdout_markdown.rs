@@ -63,7 +63,10 @@ fn markdown_rejects_csv_only_no_header_flag() -> TestResult {
 
 #[test]
 fn markdown_displays_html_like_values_as_text() -> TestResult {
-    let output = run("SELECT '<img src=x onerror=alert(1)>' AS html, 'A&B' AS text", &[])?;
+    let output = run(
+        "SELECT '<img src=x onerror=alert(1)>' AS html, 'A&B' AS text",
+        &[],
+    )?;
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout)?,
