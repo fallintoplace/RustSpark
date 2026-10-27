@@ -17,5 +17,5 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - run: python3 -m unittest discover -s scripts -p test_ballista_smoke.py
+      - run: python3 scripts/quality.py test --suite bench
       - run: python3 scripts/ballista_smoke.py --mode standalone --timeout 900

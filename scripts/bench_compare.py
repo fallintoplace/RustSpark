@@ -10,13 +10,13 @@ import json
 import math
 import pathlib
 import platform
-import statistics
 import subprocess
 import sys
 import tempfile
 import time
 
-from bench_rustspark import WORKLOADS, expected_results, output_signature, percentile, write_csv
+from bench_rustspark import WORKLOADS, expected_results, output_signature, write_csv
+from bench_stats import summarize_samples
 
 
 DUCKDB_WORKER = """
@@ -91,12 +91,7 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
             raise RuntimeError(f"Incorrect result for {engine}/{workload}: {actual!r}")
         if iteration >= warmup:
             samples.append(round(elapsed, 3))
-    return {
-        "median_ms": round(statistics.median(samples), 3),
-        "p95_ms": round(percentile(samples, 0.95), 3),
-        "samples_ms": samples,
-        "result_sha256": expected_digest,
-    }
+    return {**summarize_samples(samples), "result_sha256": expected_digest}
 
 
 def benchmark(binary, engines, rows, repeat, warmup, timeout):

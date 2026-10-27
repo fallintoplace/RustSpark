@@ -47,6 +47,10 @@ class WarmComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             warm.parse_result_line('{"name": "x", "name": "x"}')
 
+    def test_worker_output_rejects_float_overflow(self):
+        with self.assertRaises(ValueError):
+            warm.parse_result_line('{"elapsed_ms": 1e999}')
+
     def test_rejects_missing_timers_and_sql_failures(self):
         requests, _ = fixture(2)
         with self.assertRaisesRegex(ValueError, "timers"):
