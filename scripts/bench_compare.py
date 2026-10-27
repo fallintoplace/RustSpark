@@ -99,6 +99,22 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
     }
 
 
+def competitor_median_ratios(results, engines):
+    if "rustspark" not in results:
+        return {}
+    return {
+        engine: {
+            workload: (
+                round(measured["median_ms"]
+                      / results["rustspark"][workload]["median_ms"], 3)
+                if results["rustspark"][workload]["median_ms"] > 0 else None
+            )
+            for workload, measured in results[engine].items()
+        }
+        for engine in engines if engine != "rustspark"
+    }
+
+
 def benchmark(binary, engines, rows, repeat, warmup, timeout):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
@@ -121,18 +137,7 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
                     engine, workload, command_for(engine, binary, csv, query),
                     expected[workload], repeat, warmup, timeout
                 )
-        ratios = {}
-        if "rustspark" in results:
-            for engine in engines:
-                if engine != "rustspark":
-                    ratios[engine] = {
-                        workload: (
-                            round(measured["median_ms"]
-                                  / results["rustspark"][workload]["median_ms"], 3)
-                            if results["rustspark"][workload]["median_ms"] > 0 else None
-                        )
-                        for workload, measured in results[engine].items()
-                    }
+        ratios = competitor_median_ratios(results, engines)
         return {
             "metric": "cold process startup + typed CSV registration + SQL + JSON output",
             "warning": "Not warm engine or distributed Spark throughput",
