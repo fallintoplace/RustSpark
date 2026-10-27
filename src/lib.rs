@@ -560,21 +560,21 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, excluded)?;
         // Avoid rescanning every exclusion for every field on wide tables.
         let excluded: std::collections::HashSet<&str> = excluded.iter().copied().collect();
-        let remaining: Vec<String> = dataframe
+        let remaining: Vec<&str> = dataframe
             .schema()
             .fields()
             .iter()
             .map(|field| field.name().as_str())
             .filter(|name| !excluded.contains(*name))
-            .map(str::to_owned)
             .collect();
         if remaining.is_empty() {
             return Err(DataFusionError::Plan(
                 "select_columns_except would remove every column".into(),
             ));
         }
-        let names: Vec<&str> = remaining.iter().map(String::as_str).collect();
-        dataframe.select_columns(&names)
+        // select_columns consumes its DataFrame. Clone the lightweight plan
+        // so projected names can borrow the original schema.
+        dataframe.clone().select_columns(&remaining)
     }
 
     /// Return the unique values from a registered column as a lazy DataFrame.
