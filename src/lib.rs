@@ -11,6 +11,8 @@ mod export;
 mod joins;
 mod set_operations;
 mod sources;
+#[path = "sql_compat/oct.rs"]
+mod sql_compat_oct;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/zeroifnull.rs"]
@@ -117,6 +119,7 @@ impl RustSparkSession {
     ///
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
+        context.register_udf(sql_compat_oct::udf());
         context.register_udf(sql_compat_space::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_nullifzero::udf());
