@@ -156,24 +156,26 @@ impl RustSparkSession {
             .iter()
             .map(|field| field.name().as_str())
             .collect();
-        let columns: Vec<&str> = left_frame
+        let columns: Vec<String> = left_frame
             .schema()
             .fields()
             .iter()
             .map(|field| field.name().as_str())
             .filter(|column| right_columns.contains(column))
+            .map(str::to_owned)
             .collect();
         if columns.is_empty() {
             return Err(DataFusionError::Plan(format!(
                 "Tables {left} and {right} have no common join columns"
             )));
         }
-        // Reuse the table plans already loaded for shared-column discovery.
+        // Own the key names so the preloaded frames can move into the join.
+        let column_refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
         self.join_tables_using_inner(
             left,
             right,
             join_type,
-            &columns,
+            &column_refs,
             Some((left_frame, right_frame)),
         )
         .await
