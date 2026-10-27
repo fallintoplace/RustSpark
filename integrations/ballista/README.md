@@ -35,6 +35,23 @@ RUSTSPARK_SQL='SELECT COUNT(*) FROM data' \
 cargo run --manifest-path integrations/ballista/Cargo.toml
 ```
 
+### In-process distributed mode for local development
+
+Ballista can run an in-process scheduler with multiple executor slots. This
+exercises distributed plan execution without first installing separate
+scheduler and executor binaries:
+
+```sh
+RUSTSPARK_STANDALONE_PARALLELISM=4 \
+RUSTSPARK_SQL='SELECT SUM(id) FROM (VALUES (1), (2), (3)) AS t(id)' \
+cargo run --manifest-path integrations/ballista/Cargo.toml --example standalone
+```
+
+The default standalone parallelism is two. `RUSTSPARK_PARQUET` can point to
+a dataset visible to the process. Standalone mode does **not** validate
+multi-host scheduling, worker failure handling, or shared-storage access.
+Use the remote client above for tests across machines.
+
 ### Limitations
 
 - This is a separate, opt-in binary, not `rustspark --distributed`.
