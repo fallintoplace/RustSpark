@@ -57,7 +57,11 @@ async fn with_columns_evaluates_updates_against_original_input() -> TestResult {
         .await
         .err()
         .expect("case-only new name should not shadow an existing column");
-    assert!(error.to_string().contains("conflicts with an existing column"));
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with an existing column")
+    );
     assert!(
         session
             .with_columns("numbers", &[(" ", lit(1i64))])
