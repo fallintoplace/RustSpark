@@ -62,9 +62,11 @@ mod tests {
         let schema = raw_string_schema(["id", "name"]);
         assert_eq!(schema.fields()[0].name(), "id");
         assert_eq!(schema.fields()[1].name(), "name");
-        assert!(schema
-            .fields()
-            .iter()
-            .all(|field| field.is_nullable() && field.data_type() == &DataType::Utf8));
+        assert!(
+            schema
+                .fields()
+                .iter()
+                .all(|field| field.is_nullable() && field.data_type() == &DataType::Utf8)
+        );
     }
 }

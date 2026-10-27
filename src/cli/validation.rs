@@ -31,7 +31,9 @@ impl InputAvailability {
     fn from_args(args: &Args) -> Self {
         Self {
             csv: args.csv.is_some() || !args.csv_tables.is_empty(),
-            parquet: args.parquet.is_some() || args.parquet_file_list.is_some() || !args.parquet_tables.is_empty(),
+            parquet: args.parquet.is_some()
+                || args.parquet_file_list.is_some()
+                || !args.parquet_tables.is_empty(),
             json: args.json.is_some() || !args.json_tables.is_empty(),
         }
     }
@@ -66,30 +68,6 @@ fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> 
         sources.extend(load_parquet_file_list(manifest)?);
     }
     Ok(sources)
-}
-
-fn selected_output_path(args: &Args) -> Option<&Path> {
-    [
-        args.output_arrow.as_deref(),
-        args.output_parquet.as_deref(),
-        args.output_csv.as_deref(),
-        args.output_json.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
-}
-
-fn selected_output_path(args: &Args) -> Option<&Path> {
-    [
-        args.output_arrow.as_deref(),
-        args.output_parquet.as_deref(),
-        args.output_csv.as_deref(),
-        args.output_json.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
 }
 
 fn selected_output_path(args: &Args) -> Option<&Path> {
