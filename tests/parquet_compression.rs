@@ -89,7 +89,10 @@ fn saves_tables_with_selected_parquet_codec() -> Result<(), Box<dyn std::error::
         let mut parts = 0;
         for entry in std::fs::read_dir(database.join(&table))? {
             let path = entry?.path();
-            if path.extension().is_some_and(|extension| extension == "parquet") {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+            {
                 let reader = SerializedFileReader::new(File::open(path)?)?;
                 assert!(reader.metadata().num_row_groups() > 0);
                 for row_group in reader.metadata().row_groups() {
