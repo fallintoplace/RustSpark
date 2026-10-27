@@ -116,7 +116,9 @@ pub(super) async fn write_stdout(
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
     let stdout = std::io::stdout();
-    let mut output = std::io::BufWriter::new(stdout.lock());
+    // Buffer large result streams without accumulating Arrow batches.
+    // Fewer writes to stdout improve CSV, JSON and IPC export throughput.
+    let mut output = std::io::BufWriter::with_capacity(128 * 1024, stdout.lock());
     let broken_pipe = Arc::new(AtomicBool::new(false));
     let mut tracked = PipeTrackingWriter {
         inner: &mut output,
