@@ -162,9 +162,10 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
         ratios = {}
         if "rustspark" in reports and "spark" in reports:
             ratios = {
-                name: round(
-                    reports["rustspark"][name]["median_ms"]
-                    / max(reports["spark"][name]["median_ms"], 0.001), 3,
+                name: (
+                    round(reports["spark"][name]["median_ms"]
+                          / reports["rustspark"][name]["median_ms"], 3)
+                    if reports["rustspark"][name]["median_ms"] > 0 else None
                 )
                 for name in WORKLOADS
             }
@@ -175,7 +176,7 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
             "warmup": warmup, "repeat": repeat, "partitions": partitions,
             "spark_master": master, "platform": platform.platform(),
             "workloads": WORKLOADS, "results": reports,
-            "rustspark_median_over_spark_median": ratios,
+            "spark_median_over_rustspark_median": ratios,
         }
 
 
