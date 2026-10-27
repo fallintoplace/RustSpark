@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Int64Array, }datatypes::DataType},
+    arrow::{array::Int64Array, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
