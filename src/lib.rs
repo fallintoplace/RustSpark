@@ -947,6 +947,23 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
+    /// Count occurrences of each distinct value in a registered table column.
+    ///
+    /// Returns a lazy DataFrame with columns named value and frequency. NULL
+    /// values form their own group, and the output order is not guaranteed.
+    /// The source table is never mutated or collected into memory.
+    pub async fn value_counts(&self, table: &str, column: &str) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let table_name =
+            quote_catalog_table(table, "value_counts requires a non-empty table path")?;
+        let column_name = quote_join_identifier(column);
+        self.sql_read_only(&format!(
+            "SELECT {column_name} AS value, COUNT(*) AS frequency FROM {table_name} GROUP BY {column_name}"
+        ))
+        .await
+    }
+
     fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
