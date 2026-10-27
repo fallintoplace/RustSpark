@@ -34,8 +34,7 @@ async fn keyed_ranges_match_only_intervals_from_the_same_group() -> TestResult {
                 "windows",
                 JoinType::Inner,
                 keys,
-                "moment",
-                ("lower_bound", "upper_bound"),
+                ("moment", ("lower_bound", "upper_bound")),
                 bounds,
             )
             .await?
@@ -50,8 +49,7 @@ async fn keyed_ranges_match_only_intervals_from_the_same_group() -> TestResult {
                 "windows",
                 JoinType::Left,
                 keys,
-                "moment",
-                ("lower_bound", "upper_bound"),
+                ("moment", ("lower_bound", "upper_bound")),
                 RangeJoinBounds::LeftClosed,
             )
             .await?
@@ -83,8 +81,7 @@ async fn keyed_range_rejects_invalid_declarations() -> TestResult {
                     "r",
                     join_type,
                     keys,
-                    value,
-                    ("lo", "hi"),
+                    (value, ("lo", "hi")),
                     RangeJoinBounds::Closed,
                 )
                 .await
