@@ -23,7 +23,7 @@ def read_queries(path: Path) -> list[str]:
     if not queries:
         raise ValueError("query file is empty")
     for number, query in enumerate(queries, 1):
-        if not query.upper().startswith("SELECT ") or not query.endswith(";"):
+        if not query.upper().startswith("SELECT ") or not query.endswith(";") or query.count(";") != 1:
             raise ValueError(f"query {number} is not one semicolon-terminated SELECT statement")
     return queries
 
@@ -58,11 +58,26 @@ def command(binary: str, parquet: Path, sql: str) -> list[str]:
     ]
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON result key: {key}")
+        result[key] = value
+    return result
+
+
+def reject_nonfinite(value: str):
+    raise ValueError(f"invalid JSON numeric value: {value}")
+
+
 def result_signature(stdout: str) -> tuple[str, int]:
     rows = []
     for line in stdout.splitlines():
         if line.strip():
-            value = json.loads(line)
+            value = json.loads(
+                line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite,
+            )
             if not isinstance(value, dict):
                 raise ValueError("expected a JSON object for each result row")
             rows.append(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
@@ -122,7 +137,7 @@ def measure_query(
         if run >= warmup:
             times.append(result["elapsed_ms"])
     return {
-        "id": number, "sql": sql, "status": "pass",
+        "id": number, "sql": sql, "status": "executed",
         "median_ms": round(statistics.median(times), 3),
         "p95_ms": round(percentile(times, 0.95), 3),
         "samples_ms": times,
@@ -157,7 +172,7 @@ def benchmark(
         "platform": platform.platform(),
         "queries_total": len(queries),
         "queries_attempted": len(results),
-        "queries_passed": sum(result["status"] == "pass" for result in results),
+        "queries_executed": sum(result["status"] == "executed" for result in results),
         "results": results,
     }
 
@@ -182,8 +197,8 @@ def main(argv=None) -> int:
         parser.error(str(error))
     args.json_out.parent.mkdir(parents=True, exist_ok=True)
     args.json_out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"{report['queries_passed']}/{report['queries_attempted']} queries passed")
-    return 0 if report["queries_passed"] == report["queries_attempted"] else 1
+    print(f"{report['queries_executed']}/{report['queries_attempted']} queries executed")
+    return 0 if report["queries_executed"] == report["queries_attempted"] else 1
 
 
 if __name__ == "__main__":
