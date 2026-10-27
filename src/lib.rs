@@ -631,19 +631,21 @@ impl RustSparkSession {
             return Ok(dataframe);
         }
         Self::validate_selected_columns(&dataframe, excluded)?;
-        let remaining: Vec<&str> = dataframe
+        let remaining: Vec<String> = dataframe
             .schema()
             .fields()
             .iter()
             .map(|field| field.name().as_str())
             .filter(|name| !excluded.contains(name))
+            .map(str::to_owned)
             .collect();
         if remaining.is_empty() {
             return Err(DataFusionError::Plan(
                 "select_columns_except would remove every column".into(),
             ));
         }
-        dataframe.select_columns(&remaining)
+        let names: Vec<&str> = remaining.iter().map(String::as_str).collect();
+        dataframe.select_columns(&names)
     }
 
     /// Return the unique values from a registered column as a lazy DataFrame.
