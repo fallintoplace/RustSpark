@@ -2,6 +2,7 @@
 """Measure TPC-H SQL in one warmed RustSpark shell, excluding process startup."""
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -22,11 +23,13 @@ def requests_for(queries, warmup, repeat):
         raise ValueError("Queries required; warmup >= 0 and repeat >= 1")
     requests = []
     for number, path in queries:
-        sql = path.read_text(encoding="utf-8").strip()
+        sql_bytes = path.read_bytes()
+        sql = sql_bytes.decode("utf-8").strip()
         if not sql:
             raise ValueError(f"Empty SQL file: {path}")
         for attempt in range(warmup + repeat):
             requests.append({"id": number, "sql": sql,
+                             "sql_sha256": hashlib.sha256(sql_bytes).hexdigest(),
                              "attempt": attempt, "ordered": has_top_level_order_by(sql)})
     return requests
 
@@ -77,6 +80,7 @@ def parse_shell(stdout, stderr, requests, warmup, repeat):
         if not math.isfinite(elapsed) or elapsed < 0:
             raise ValueError("Invalid warm SQL statement time")
         group = grouped.setdefault(request["id"], {"result_sha256": digest,
+                                                   "sql_sha256": request["sql_sha256"],
                                                    "result_rows": count, "samples_ms": []})
         if group["result_sha256"] != digest or group["result_rows"] != count:
             raise ValueError(f"Nondeterministic results for Q{request['id']:02}")
