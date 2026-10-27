@@ -5,8 +5,18 @@ use rustspark::RustSparkSession;
 async fn grouped_join_with_having_filter_and_limit_keeps_correct_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
-    session.register_sql_view("customer", "SELECT 1 AS custkey, 'Alpha' AS name UNION ALL SELECT 2, 'Beta'").await?;
-    session.register_sql_view("orders", "SELECT 100 AS orderkey, 1 AS custkey, 900 AS totalprice UNION ALL SELECT 200, 2, 800").await?;
+    session
+        .register_sql_view(
+            "customer",
+            "SELECT 1 AS custkey, 'Alpha' AS name UNION ALL SELECT 2, 'Beta'",
+        )
+        .await?;
+    session
+        .register_sql_view(
+            "orders",
+            "SELECT 100 AS orderkey, 1 AS custkey, 900 AS totalprice UNION ALL SELECT 200, 2, 800",
+        )
+        .await?;
     session.register_sql_view("lineitem", "SELECT 100 AS orderkey, 160 AS qty UNION ALL SELECT 100, 151 UNION ALL SELECT 200, 200 UNION ALL SELECT 200, 50").await?;
     let count = session.sql_scalar(
         "SELECT COUNT(*) FROM (
