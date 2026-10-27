@@ -99,6 +99,15 @@ impl RustSparkSession {
         Ok(())
     }
 
+    /// Return available catalog names in stable sorted order.
+    ///
+    /// Empty catalogs are included.
+    pub fn list_catalogs(&self) -> Vec<String> {
+        let mut catalogs = self.context.catalog_names();
+        catalogs.sort();
+        catalogs
+    }
+
     fn sorted_catalog_entries(&self, include_tables: bool) -> Vec<String> {
         let mut entries = Vec::new();
         for catalog_name in self.context.catalog_names() {
@@ -132,6 +141,22 @@ impl RustSparkSession {
     /// Empty schemas are included even when they contain no tables.
     pub fn list_schemas(&self) -> Vec<String> {
         self.sorted_catalog_entries(false)
+    }
+
+    /// List unqualified table names in a catalog schema.
+    ///
+    /// The result is sorted, and missing catalogs or schemas return errors.
+    pub fn list_tables_in_schema(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
+        let catalog_provider = self
+            .context
+            .catalog(catalog)
+            .ok_or_else(|| DataFusionError::Plan(format!("Unknown catalog: {catalog}")))?;
+        let schema_provider = catalog_provider
+            .schema(schema)
+            .ok_or_else(|| DataFusionError::Plan(format!("Unknown schema: {catalog}.{schema}")))?;
+        let mut tables = schema_provider.table_names();
+        tables.sort();
+        Ok(tables)
     }
 
     /// Create a lazy DataFrame from in-memory Arrow record batches.
@@ -176,6 +201,16 @@ impl RustSparkSession {
         self.register_dataframe(table, self.read_batches(batches)?)
     }
 
+    /// Stream a registered table as Arrow record batches.
+    ///
+    /// Rows are consumed incrementally without collecting the full table.
+    pub async fn table_stream(
+        &self,
+        table: &str,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.table(table).await?.execute_stream().await
+    }
+
     async fn register_view_dataframe(
         &self,
         name: &str,
@@ -194,12 +229,12 @@ impl RustSparkSession {
     ///
     /// The query is planned now but its rows are read when the view is queried.
     pub async fn register_sql_view(&self, name: &str, query: &str) -> Result<()> {
-        self.register_view_dataframe(name, self.sql(query).await?, false)
+        self.register_view_dataframe(name, self.sql_read_only(query).await?, false)
             .await
     }
 
     pub async fn register_materialized_sql_view(&self, name: &str, query: &str) -> Result<()> {
-        self.register_view_dataframe(name, self.sql(query).await?, true)
+        self.register_view_dataframe(name, self.sql_read_only(query).await?, true)
             .await
     }
 
@@ -213,8 +248,12 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        self.register_view_dataframe(name, self.sql_with_params(query, params).await?, false)
-            .await
+        self.register_view_dataframe(
+            name,
+            self.sql_read_only_with_params(query, params).await?,
+            false,
+        )
+        .await
     }
 
     /// Materialize a parameterized SQL query once and register its cached result.
@@ -224,7 +263,30 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        self.register_view_dataframe(name, self.sql_with_params(query, params).await?, true)
+        self.register_view_dataframe(
+            name,
+            self.sql_read_only_with_params(query, params).await?,
+            true,
+        )
+        .await
+    }
+
+    /// Materialize read-only SQL results into an independent cached DataFrame.
+    ///
+    /// The snapshot stays available after the source table is deregistered.
+    pub async fn sql_snapshot(&self, query: &str) -> Result<DataFrame> {
+        self.sql_read_only(query).await?.cache().await
+    }
+
+    /// Materialize parameterized, read-only SQL with typed bindings.
+    pub async fn sql_snapshot_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        self.sql_read_only_with_params(query, params)
+            .await?
+            .cache()
             .await
     }
 
@@ -373,6 +435,19 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
+    /// Read a registered table's column names in schema order.
+    ///
+    /// This inspects metadata without executing the table's rows.
+    pub async fn column_names(&self, table: &str) -> Result<Vec<String>> {
+        let dataframe = self.table(table).await?;
+        Ok(dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_owned())
+            .collect())
+    }
+
     /// Inspect the names, types and nullability of a read-only SQL query.
     ///
     /// Query results are not executed or collected.
@@ -433,6 +508,13 @@ impl RustSparkSession {
         let dataframe = self.table(table).await?;
         Self::validate_selected_columns(&dataframe, columns)?;
         dataframe.select_columns(columns)
+    }
+
+    /// Return the unique values from a registered column as a lazy DataFrame.
+    ///
+    /// SQL DISTINCT preserves one NULL value; result order is not guaranteed.
+    pub async fn distinct_column_values(&self, table: &str, column: &str) -> Result<DataFrame> {
+        self.select_columns(table, &[column]).await?.distinct()
     }
 
     fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
@@ -501,6 +583,46 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    /// Keep rows containing NULLs in selected columns.
+    ///
+    /// An empty column list examines every column. Any matches a row when
+    /// at least one value is NULL; All requires every selected value to be NULL.
+    /// The result is lazy and leaves the source table unchanged.
+    pub async fn filter_null_rows(
+        &self,
+        table: &str,
+        columns: &[&str],
+        mode: NullDropMode,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+
+        let dataframe = self.table(table).await?;
+        let selected: Vec<&str> = if columns.is_empty() {
+            dataframe
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect()
+        } else {
+            columns.to_vec()
+        };
+        if selected.is_empty() {
+            return Ok(dataframe);
+        }
+        Self::validate_dropna_columns(&dataframe, &selected)?;
+
+        let mut checks = selected
+            .iter()
+            .map(|name| Expr::Column(Column::from_name(*name)).is_null());
+        let first = checks.next().expect("non-empty selected columns");
+        let predicate = checks.fold(first, |acc, check| match mode {
+            NullDropMode::Any => acc.or(check),
+            NullDropMode::All => acc.and(check),
+        });
+        dataframe.filter(predicate)
+    }
+
     /// Filter a registered table with a typed DataFusion expression.
     ///
     /// SQL NULL predicates do not keep rows. The operation is lazy, and the
@@ -512,6 +634,30 @@ impl RustSparkSession {
         predicate: datafusion::logical_expr::Expr,
     ) -> Result<DataFrame> {
         self.table(table).await?.filter(predicate)
+    }
+
+    /// Keep rows whose selected column is within an inclusive typed range.
+    ///
+    /// NULL rows are excluded by SQL comparison semantics. Invalid columns,
+    /// incompatible types, and NULL bounds are rejected during planning.
+    pub async fn filter_rows_between(
+        &self,
+        table: &str,
+        column: &str,
+        lower: datafusion::common::ScalarValue,
+        upper: datafusion::common::ScalarValue,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        if lower.is_null() || upper.is_null() {
+            return Err(DataFusionError::Plan(
+                "filter_rows_between requires non-NULL bounds".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let key = Expr::Column(Column::from_name(column));
+        dataframe.filter(key.clone().gt_eq(lit(lower)).and(key.lt_eq(lit(upper))))
     }
 
     /// Register a scalar user-defined function for SQL queries in this session.
@@ -537,6 +683,13 @@ impl RustSparkSession {
     /// Return whether a table or view is registered in this session.
     pub fn table_exists(&self, name: &str) -> Result<bool> {
         self.context.table_exist(name)
+    }
+
+    /// Count rows in a registered table.
+    ///
+    /// This runs a count aggregate without collecting the table's rows.
+    pub async fn table_row_count(&self, table: &str) -> Result<usize> {
+        self.table(table).await?.count().await
     }
 
     /// Rename a registered table without copying its data.
@@ -790,6 +943,59 @@ impl RustSparkSession {
         dataframe.select(projection)
     }
 
+    /// Add a one-based row number column using a window function.
+    ///
+    /// The supplied sort order determines numbering, with NULLs first for
+    /// ascending keys and last for descending keys. Add a unique tie-breaker
+    /// for stable numbers. The output is lazy and the input is unchanged.
+    pub async fn with_row_numbers(
+        &self,
+        table: &str,
+        output_column: &str,
+        order: &[(&str, bool)],
+    ) -> Result<DataFrame> {
+        if output_column.is_empty() || output_column.trim() != output_column {
+            return Err(DataFusionError::Plan(
+                "with_row_numbers requires an unpadded output column name".into(),
+            ));
+        }
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "with_row_numbers requires at least one sort key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        if dataframe
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name().eq_ignore_ascii_case(output_column))
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Row number column already exists: {output_column}"
+            )));
+        }
+        // Reuse the same key and duplicate checks as sort_rows without
+        // executing the resulting plan.
+        Self::sort_dataframe(dataframe, order)?;
+        let ordering = order
+            .iter()
+            .map(|(name, ascending)| {
+                let direction = if *ascending { "ASC" } else { "DESC" };
+                let nulls = if *ascending { "FIRST" } else { "LAST" };
+                format!("{} {direction} NULLS {nulls}", quote_join_identifier(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source =
+            quote_catalog_table(table, "with_row_numbers requires a non-empty table path")?;
+        let alias = quote_join_identifier(output_column);
+        self.sql_read_only(&format!(
+            "SELECT *, ROW_NUMBER() OVER (ORDER BY {ordering}) AS {alias} FROM {source}"
+        ))
+        .await
+    }
+
     pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
         let dataframe = self.table(source).await?;
         self.register_dataframe(alias, dataframe)
@@ -798,6 +1004,16 @@ impl RustSparkSession {
     /// Access a registered SQL table as a lazy DataFrame.
     pub async fn table(&self, name: &str) -> Result<DataFrame> {
         self.context.table(name).await
+    }
+
+    /// Read the first row of a registered table as typed scalar values.
+    ///
+    /// Returns None for an empty table. Use an ordered view when row order matters.
+    pub async fn table_first_row(
+        &self,
+        table: &str,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        Self::extract_first_row(self.table(table).await?).await
     }
 
     /// Return a lazy window of rows from a registered table.
@@ -809,6 +1025,15 @@ impl RustSparkSession {
             DataFusionError::Plan("slice_rows offset plus length exceeds usize".into())
         })?;
         self.table(table).await?.limit(offset, Some(length))
+    }
+
+    /// Return a bounded page of rows from a registered table.
+    ///
+    /// The plan remains lazy. Use a sorted view for deterministic page order.
+    /// The limit must be positive, and offset plus limit must not overflow.
+    pub async fn table_page(&self, table: &str, offset: usize, limit: usize) -> Result<DataFrame> {
+        Self::validate_page_window(offset, limit)?;
+        self.table(table).await?.limit(offset, Some(limit))
     }
 
     /// Join two registered tables on one or more pairs of equality keys.
@@ -947,6 +1172,23 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
+    /// Count occurrences of each distinct value in a registered table column.
+    ///
+    /// Returns a lazy DataFrame with columns named value and frequency. NULL
+    /// values form their own group, and the output order is not guaranteed.
+    /// The source table is never mutated or collected into memory.
+    pub async fn value_counts(&self, table: &str, column: &str) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let table_name =
+            quote_catalog_table(table, "value_counts requires a non-empty table path")?;
+        let column_name = quote_join_identifier(column);
+        self.sql_read_only(&format!(
+            "SELECT {column_name} AS value, COUNT(*) AS frequency FROM {table_name} GROUP BY {column_name}"
+        ))
+        .await
+    }
+
     fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
@@ -989,6 +1231,26 @@ impl RustSparkSession {
         Self::sort_dataframe(dataframe, order)
     }
 
+    /// Return the first N rows in the requested sort order.
+    ///
+    /// Sort and limit are planned lazily. Supply a unique tie-breaker for a
+    /// deterministic selection when multiple rows share the same sort keys.
+    /// An empty order is rejected; a limit of zero returns no rows.
+    pub async fn top_rows(
+        &self,
+        table: &str,
+        order: &[(&str, bool)],
+        limit: usize,
+    ) -> Result<DataFrame> {
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "top_rows requires at least one sort key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::sort_dataframe(dataframe, order)?.limit(0, Some(limit))
+    }
+
     // Plan independent SQL inputs concurrently, with bounded outstanding
     // work. buffered() returns results in input order, so UNION semantics and
     // the first reported planning error still follow query order.
@@ -1029,6 +1291,14 @@ impl RustSparkSession {
     /// Each query must return a compatible schema. Duplicate rows remain.
     pub async fn union_sql(&self, queries: &[&str]) -> Result<DataFrame> {
         self.union_sql_internal(queries, false).await
+    }
+
+    /// Union SQL query results by column position and remove duplicates.
+    ///
+    /// Each query must return compatible columns. NULL rows compare equal
+    /// for deduplication. The result is a lazy DataFrame.
+    pub async fn union_sql_distinct(&self, queries: &[&str]) -> Result<DataFrame> {
+        self.union_sql(queries).await?.distinct()
     }
 
     /// Union lazy SQL query results by column name.
@@ -1104,6 +1374,14 @@ impl RustSparkSession {
         Ok(false)
     }
 
+    /// Return whether a registered table has at least one row.
+    ///
+    /// The underlying query is limited to one row, so it does not count or
+    /// collect the entire table.
+    pub async fn table_has_rows(&self, table: &str) -> Result<bool> {
+        Self::has_rows(self.table(table).await?).await
+    }
+
     /// Return whether a read-only query produces at least one row.
     ///
     /// Limits the plan to one row to avoid collecting the full result.
@@ -1120,6 +1398,25 @@ impl RustSparkSession {
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<bool> {
         Self::has_rows(self.sql_read_only_with_params(query, params).await?).await
+    }
+
+    /// Count all rows produced by read-only SQL without collecting results.
+    ///
+    /// DDL, DML and session statements are rejected.
+    pub async fn sql_read_only_row_count(&self, query: &str) -> Result<usize> {
+        self.sql_read_only(query).await?.count().await
+    }
+
+    /// Count rows from parameterized read-only SQL with typed bindings.
+    pub async fn sql_read_only_row_count_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<usize> {
+        self.sql_read_only_with_params(query, params)
+            .await?
+            .count()
+            .await
     }
 
     async fn extract_scalar(dataframe: DataFrame) -> Result<datafusion::common::ScalarValue> {
@@ -1153,6 +1450,16 @@ impl RustSparkSession {
     /// Reads at most two rows so invalid multi-row queries remain bounded.
     pub async fn sql_scalar(&self, query: &str) -> Result<datafusion::common::ScalarValue> {
         Self::extract_scalar(self.sql(query).await?).await
+    }
+
+    /// Execute read-only SQL that must return one row and one column.
+    ///
+    /// Rejects DDL and DML before execution and reads at most two rows.
+    pub async fn sql_read_only_scalar(
+        &self,
+        query: &str,
+    ) -> Result<datafusion::common::ScalarValue> {
+        Self::extract_scalar(self.sql_read_only(query).await?).await
     }
 
     /// Read a single typed SQL value with bound parameters.
@@ -1274,6 +1581,16 @@ impl RustSparkSession {
         query: &str,
     ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
         Self::extract_first_row(self.sql(query).await?).await
+    }
+
+    /// Fetch the first row of a read-only SQL query as typed scalar values.
+    ///
+    /// Returns None for no rows and rejects mutations before execution.
+    pub async fn sql_read_only_first_row(
+        &self,
+        query: &str,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        Self::extract_first_row(self.sql_read_only(query).await?).await
     }
 
     /// Fetch the first result row from a parameterized SQL query.

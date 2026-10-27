@@ -25,6 +25,12 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(mod.canonical_type("Utf8"), "string")
 
 
+    def test_rustspark_description_preserves_column_tabs(self):
+        names, types, nullables = mod.parse_rustspark_description(
+            "first\tpart\tInt64\tNOT NULL\n"
+        )
+        self.assertEqual((names, types, nullables), (["first\tpart"], ["bigint"], [False]))
+
     def test_unsigned_types_are_not_mangled_by_signed_aliases(self):
         for type_name in ("UInt8", "UInt16", "UInt32", "UInt64"):
             self.assertEqual(mod.canonical_type(type_name), type_name.lower())

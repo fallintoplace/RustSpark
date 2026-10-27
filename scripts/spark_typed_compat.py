@@ -52,8 +52,8 @@ def canonical_type(value: str) -> str:
 
 
 def parse_rustspark_description(stdout: str) -> tuple[list[str], list[str], list[bool]]:
-    fields = [line.split("\t") for line in stdout.splitlines() if line.strip()]
-    if any(len(parts) < 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
+    fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
+    if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
         raise ValueError("Invalid RustSpark schema description")
     return (
         [parts[0] for parts in fields],
