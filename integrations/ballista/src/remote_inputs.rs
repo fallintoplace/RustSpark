@@ -1,6 +1,6 @@
 //! Named data sources for the optional distributed Ballista client.
 //! Every location must be readable by the Ballista scheduler and executors.
-use std::{collections::HashSet, env};
+use std::{collections::HashSet, env, fs};
 
 use rustspark::RustSparkSession;
 
@@ -61,13 +61,52 @@ fn parse_sources(input: &str) -> Result<Vec<Source>, String> {
     Ok(sources)
 }
 
+fn parse_manifest(input: &str) -> Result<Vec<Source>, String> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let entries: Vec<_> = input
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    if entries.is_empty() {
+        return Err("RUSTSPARK_INPUTS_FILE must contain at least one table".into());
+    }
+    parse_sources(&entries.join(";"))
+}
+
+fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn load_sources(
+    inline: Option<String>,
+    manifest_path: Option<String>,
+) -> Result<Option<Vec<Source>>, Box<dyn std::error::Error>> {
+    match (inline, manifest_path) {
+        (Some(_), Some(_)) => {
+            Err("RUSTSPARK_INPUTS and RUSTSPARK_INPUTS_FILE cannot both be set".into())
+        }
+        (Some(specification), None) => Ok(Some(parse_sources(&specification)?)),
+        (None, Some(path)) => {
+            if path.trim().is_empty() {
+                return Err("RUSTSPARK_INPUTS_FILE must name a file".into());
+            }
+            Ok(Some(parse_manifest(&fs::read_to_string(path)?)?))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::error::Error>> {
-    let specification = match env::var("RUSTSPARK_INPUTS") {
-        Ok(value) => value,
-        Err(env::VarError::NotPresent) => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let inline = optional_env("RUSTSPARK_INPUTS")?;
+    let manifest = optional_env("RUSTSPARK_INPUTS_FILE")?;
+    let Some(sources) = load_sources(inline, manifest)? else {
+        return Ok(());
     };
-    let sources = parse_sources(&specification)?;
     if env::var_os("RUSTSPARK_PARQUET").is_some()
         && sources.iter().any(|source| source.name.eq_ignore_ascii_case("data"))
     {
@@ -104,6 +143,35 @@ mod tests {
     fn rejects_duplicate_names_case_insensitively() {
         let error = parse_sources("parquet:Orders=/tmp/a;json:orders=/tmp/b").unwrap_err();
         assert!(error.contains("Duplicate"));
+    }
+
+    #[test]
+    fn manifest_supports_comments_blanks_and_bom() {
+        let sources = parse_manifest(
+            "\u{feff}# shared inputs\nparquet:Orders=s3://bucket/orders\n\n  # lookup tables\n csv:rates=/mnt/rates.csv\njson:events=s3://bucket/data?version=2\n",
+        )
+        .unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].name, "Orders");
+        assert_eq!(sources[1].format, Format::Csv);
+        assert_eq!(sources[2].path, "s3://bucket/data?version=2");
+    }
+
+    #[test]
+    fn manifest_rejects_ambiguous_or_empty_sources() {
+        for input in ["", "  # nothing\n\n", "csv:Orders=/a\nparquet:orders=/b", "csv:bad-name=/a"] {
+            assert!(parse_manifest(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn manifest_and_inline_sources_are_mutually_exclusive() {
+        assert!(load_sources(None, None).unwrap().is_none());
+        assert!(load_sources(Some("csv:t=/a".into()), None).unwrap().is_some());
+        let error = load_sources(Some("csv:t=/a".into()), Some("inputs.txt".into())).unwrap_err();
+        assert!(error.to_string().contains("cannot both be set"));
+        assert!(load_sources(None, Some(" ".into())).is_err());
+        assert!(load_sources(None, Some("/path/that/does/not/exist".into())).is_err());
     }
 
     #[test]
