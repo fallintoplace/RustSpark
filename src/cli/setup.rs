@@ -48,9 +48,11 @@ fn union_definitions(args: &Args) -> impl Iterator<Item = (&str, bool)> {
         )
 }
 
+type ParsedUnionDefinition<'a> = (&'a str, Vec<&'a str>, bool);
+
 fn parsed_union_definitions(
     args: &Args,
-) -> Result<Vec<(&str, Vec<&str>, bool)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<ParsedUnionDefinition<'_>>, Box<dyn std::error::Error>> {
     let mut names = HashSet::new();
     union_definitions(args)
         .map(
