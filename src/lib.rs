@@ -996,7 +996,8 @@ impl RustSparkSession {
         let mut grouped = Vec::<(&datafusion::common::ScalarValue, Vec<&str>)>::new();
         // Wide fillna calls used a linear search of prior groups for every
         // column. Index the typed scalar values while retaining group order.
-        let mut group_indices = std::collections::HashMap::new();
+        let mut group_indices: std::collections::HashMap<&datafusion::common::ScalarValue, usize> =
+            std::collections::HashMap::new();
         for (name, value) in replacements {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
