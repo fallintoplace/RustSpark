@@ -1066,6 +1066,56 @@ impl RustSparkSession {
         Ok(projection)
     }
 
+    /// Drop rows with fewer than required non-NULL values in selected columns.
+    ///
+    /// An empty column slice inspects all columns. A zero threshold keeps
+    /// every row. The predicate is planned lazily, like Spark dropna(thresh).
+    pub async fn drop_null_rows_with_threshold(
+        &self,
+        table: &str,
+        columns: &[&str],
+        required: usize,
+    ) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        let selected: Vec<&str> = if columns.is_empty() {
+            dataframe
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect()
+        } else {
+            columns.to_vec()
+        };
+        Self::validate_dropna_columns(&dataframe, &selected)?;
+        if required > selected.len() {
+            return Err(DataFusionError::Plan(
+                "drop_null_rows_with_threshold exceeds selected column count".into(),
+            ));
+        }
+        if required == 0 {
+            return Ok(dataframe);
+        }
+        let non_nulls = selected
+            .iter()
+            .map(|name| {
+                format!(
+                    "(CASE WHEN {} IS NOT NULL THEN 1 ELSE 0 END)",
+                    quote_join_identifier(name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let source = quote_catalog_table(
+            table,
+            "drop_null_rows_with_threshold requires a table path",
+        )?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {source} WHERE ({non_nulls}) >= {required}"
+        ))
+        .await
+    }
+
     /// Add or replace several columns atomically, like Spark withColumns.
     ///
     /// Every expression refers to the original input schema. Existing columns
