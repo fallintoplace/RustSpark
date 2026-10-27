@@ -138,21 +138,22 @@ async fn write_vertical<W: Write>(
     output: &mut W,
     schema: &datafusion::arrow::datatypes::SchemaRef,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Column names are fixed for the stream; escape them once, not per row.
+    let escaped_headers: Vec<_> = schema
+        .fields()
+        .iter()
+        .map(|field| escape_vertical_value(field.name()))
+        .collect();
     let mut row_number = 0_usize;
     while let Some(batch) = stream.next().await {
         let batch = batch?;
         for row in 0..batch.num_rows() {
             row_number += 1;
             writeln!(output, "--- Row {row_number} ---")?;
-            for (index, field) in schema.fields().iter().enumerate() {
+            for (index, header) in escaped_headers.iter().enumerate() {
                 let column = batch.column(index);
                 let value = display_cell(column, row)?;
-                writeln!(
-                    output,
-                    "{}: {}",
-                    escape_vertical_value(field.name()),
-                    escape_vertical_value(&value)
-                )?;
+                writeln!(output, "{header}: {}", escape_vertical_value(&value))?;
             }
         }
     }
