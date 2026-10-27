@@ -14,8 +14,18 @@ async fn distinct_count_can_include_or_exclude_nulls() -> TestResult {
         )
         .await?;
 
-    assert_eq!(session.column_distinct_count("items", "label", false).await?, 2);
-    assert_eq!(session.column_distinct_count("items", "label", true).await?, 3);
+    assert_eq!(
+        session
+            .column_distinct_count("items", "label", false)
+            .await?,
+        2
+    );
+    assert_eq!(
+        session
+            .column_distinct_count("items", "label", true)
+            .await?,
+        3
+    );
     assert_eq!(session.table("items").await?.count().await?, 5);
     assert!(
         session
