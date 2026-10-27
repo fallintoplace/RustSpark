@@ -56,11 +56,23 @@ class BallistaSmokeTests(unittest.TestCase):
         ballista_smoke.run_smoke("standalone", timeout=15)
         args, kwargs = run.call_args
         self.assertEqual(kwargs["timeout"], 15)
+        self.assertEqual(kwargs["cwd"], ballista_smoke.ROOT)
         self.assertEqual(kwargs["env"]["RUSTSPARK_SQL"], ballista_smoke.QUERY)
         self.assertIn("csv:orders=", kwargs["env"]["RUSTSPARK_INPUTS"])
         self.assertIn(";csv:rates=", kwargs["env"]["RUSTSPARK_INPUTS"])
         self.assertEqual(kwargs["env"]["RUSTSPARK_STANDALONE_PARALLELISM"], "4")
         self.assertFalse(pathlib.Path(kwargs["env"]["RUSTSPARK_INPUTS"].split("=")[1].split(";")[0]).exists())
+
+    @mock.patch.object(ballista_smoke.subprocess, "run")
+    def test_remote_client_keeps_callers_working_directory(self, run):
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout="| matches | weighted_total |\n| 2 | 80 |\n",
+            stderr="",
+        )
+        ballista_smoke.run_smoke("remote", "./bin/ballista-client", timeout=20)
+        self.assertEqual(run.call_args.args[0], ["./bin/ballista-client"])
+        self.assertIsNone(run.call_args.kwargs["cwd"])
 
     @mock.patch.object(ballista_smoke.subprocess, "run")
     def test_failure_is_not_accepted(self, run):

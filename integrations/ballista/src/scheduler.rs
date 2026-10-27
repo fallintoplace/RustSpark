@@ -100,18 +100,57 @@ async fn connect_endpoint(endpoint: &str, state: SessionState) -> Result<Session
         .map_err(|error| error.to_string())
 }
 
+// Bound both the TCP reachability probe and the Ballista session handshake.
+// A reachable TCP port is not necessarily a responsive Ballista scheduler.
+async fn bounded_connect<T>(
+    limit: Option<Duration>,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match limit {
+        Some(limit) => tokio::time::timeout(limit, operation)
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "connection timed out after {} seconds",
+                    limit.as_secs()
+                ))
+            }),
+        None => operation.await,
+    }
+}
+
+struct SchedulerOptions {
+    partitions: Option<usize>,
+    endpoints: Vec<String>,
+    timeout: Option<Duration>,
+}
+
+impl SchedulerOptions {
+    fn from_env(primary: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let partitions = optional_env("RUSTSPARK_TARGET_PARTITIONS")?
+            .as_deref()
+            .map(parse_partitions)
+            .transpose()?;
+        let configured = optional_env("RUSTSPARK_SCHEDULER_URLS")?;
+        let endpoints = parse_endpoints(primary, configured.as_deref())?;
+        let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
+        let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
+        Ok(Self {
+            partitions,
+            endpoints,
+            timeout,
+        })
+    }
+}
+
 pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Error>> {
-    let partitions = match env::var("RUSTSPARK_TARGET_PARTITIONS") {
-        Ok(value) => Some(parse_partitions(&value)?),
-        Err(env::VarError::NotPresent) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let configured = optional_env("RUSTSPARK_SCHEDULER_URLS")?;
-    let endpoints = parse_endpoints(url, configured.as_deref())?;
-    let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
-    let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
-    // Building DataFusion's function registry and planner is independent of the
-    // chosen scheduler. Reuse it when trying fallback endpoints.
+    let SchedulerOptions {
+        partitions,
+        endpoints,
+        timeout,
+    } = SchedulerOptions::from_env(url)?;
+    // Building DataFusion's planner is independent of the chosen scheduler.
+    // Reuse session state when trying fallback endpoints.
     let state = connection_state(partitions);
     let mut failures = Vec::new();
 
@@ -120,13 +159,13 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
             failures.push(format!("{endpoint}: {message}"));
             continue;
         }
-        if let Some(limit) = timeout {
-            if let Err(message) = probe_reachable(endpoint, limit).await {
-                failures.push(format!("{endpoint}: {message}"));
-                continue;
+        let result = bounded_connect(timeout, async {
+            if let Some(limit) = timeout {
+                probe_reachable(endpoint, limit).await?;
             }
-        }
-        let result = connect_endpoint(endpoint, state.clone()).await;
+            connect_endpoint(endpoint, state.clone()).await
+        })
+        .await;
         match result {
             Ok(context) => {
                 if index > 0 {
@@ -197,6 +236,29 @@ mod tests {
         assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_ok());
         drop(listener);
         assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn times_out_a_stalled_connection_attempt() {
+        let error = bounded_connect(
+            Some(Duration::from_millis(10)),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("connection timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn preserves_connection_results() {
+        let ok = bounded_connect(None, async { Ok::<_, String>(42) }).await;
+        assert_eq!(ok, Ok(42));
+
+        let failed = bounded_connect(Some(Duration::from_secs(1)), async {
+            Err::<(), String>("scheduler refused connection".into())
+        })
+        .await;
+        assert_eq!(failed, Err("scheduler refused connection".into()));
     }
 
     #[test]

@@ -87,6 +87,17 @@ class WarmComparisonTests(unittest.TestCase):
         self.assertIn(".timer on", run.call_args.kwargs["input"])
         self.assertIn(".quit", run.call_args.kwargs["input"])
 
+    def test_benchmark_rejects_nonfinite_timeouts_before_launch(self):
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0):
+            with self.subTest(timeout=timeout):
+                with mock.patch.object(warm, "run_rustspark") as run:
+                    with self.assertRaisesRegex(ValueError, "timeout"):
+                        warm.benchmark(
+                            "bin", ["rustspark"], 2, 0, 1,
+                            timeout, 2, "local[2]",
+                        )
+                    run.assert_not_called()
+
     @mock.patch.object(warm, "run_rustspark")
     def test_benchmark_rejects_incorrect_engine_output(self, run):
         requests, samples = fixture(2)

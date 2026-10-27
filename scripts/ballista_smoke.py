@@ -76,7 +76,8 @@ def run_smoke(mode: str, client: str | None = None, timeout: int = 300) -> None:
             "RUSTSPARK_STANDALONE_PARALLELISM": "4",
         })
         result = subprocess.run(
-            command, cwd=ROOT, env=env, capture_output=True, text=True,
+            command, cwd=ROOT if mode == "standalone" else None,
+            env=env, capture_output=True, text=True,
             timeout=timeout, check=False,
         )
         if result.returncode:
