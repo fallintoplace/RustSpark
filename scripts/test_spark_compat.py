@@ -16,7 +16,7 @@ spec.loader.exec_module(mod)
 
 class SparkCompatibilityTests(unittest.TestCase):
     def test_described_columns_preserve_quoted_tabs(self):
-        columns = mod.parse_rustspark_columns("first\\tpart\tInt64\tNOT NULL\n")
+        columns = mod.parse_rustspark_columns("first\tpart\tInt64\tNOT NULL\n")
         self.assertEqual(columns, ["first\tpart"])
         with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
             mod.parse_rustspark_columns("missing_types\n")
