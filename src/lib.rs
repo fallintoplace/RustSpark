@@ -39,6 +39,8 @@ mod feature_approx_percentile;
 mod sql_compat_pmod;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
+#[path = "features/group_ranks.rs"]
+mod feature_group_ranks;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
 #[path = "sql_compat/try_divide.rs"]
