@@ -227,6 +227,15 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data WHERE amou
 
 This counts the query result rows, not the rows in its source tables.
 
+For a fast row-existence check, use the Rust API instead of a full count:
+
+```rust
+let has_sales = session.table_has_rows("sales").await?;
+```
+
+This reads at most one row and works with registered tables and SQL views.
+
+
 Persist a query result as a Parquet-backed SQL table. Later processes automatically
 load the tables from the same directory:
 
