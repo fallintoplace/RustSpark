@@ -187,7 +187,8 @@ def summarize(samples, requests, row_count, warmup, repeat):
 
 
 def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master):
-    if min(rows, repeat, timeout, partitions) < 1 or warmup < 0:
+    if (min(rows, repeat, partitions) < 1 or warmup < 0
+            or not math.isfinite(timeout) or timeout < 1):
         raise ValueError("rows, repeat, timeout, partitions must be positive; warmup >= 0")
     if (not engines or len(engines) != len(set(engines))
             or any(engine not in ("rustspark", "spark", "duckdb") for engine in engines)):
