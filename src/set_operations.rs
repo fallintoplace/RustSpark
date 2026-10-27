@@ -105,7 +105,11 @@ impl RustSparkSession {
             })
             .collect::<Vec<_>>();
         conditions.push(format!("l.{index} = r.{index}"));
-        let join = if intersection { "INNER JOIN" } else { "LEFT JOIN" };
+        let join = if intersection {
+            "INNER JOIN"
+        } else {
+            "LEFT JOIN"
+        };
         let filter = if intersection {
             String::new()
         } else {
