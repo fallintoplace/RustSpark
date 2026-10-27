@@ -117,8 +117,10 @@ mod tests {
             "\u{feff}# generated file list\npart.parquet\n",
         ] {
             fs::write(&manifest, contents).unwrap();
-            assert_eq!(load_parquet_file_list(&manifest).unwrap(), vec![part.clone()]);
+            assert_eq!(
+                load_parquet_file_list(&manifest).unwrap(),
+                vec![part.clone()]
+            );
         }
     }
-
 }
