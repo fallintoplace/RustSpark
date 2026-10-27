@@ -17,19 +17,25 @@ import zipfile
 MAX_ARCHIVE_ENTRY_BYTES = 512 * 1024 * 1024
 
 
+def _checked_member_limit(name, size, entries, expected_sizes):
+    if name in entries:
+        raise ValueError(f"Unexpected archive entry: {name}")
+    if expected_sizes is not None and name not in expected_sizes:
+        raise ValueError(f"Archive members differ: unexpected {name}")
+    limit = expected_sizes[name] if expected_sizes is not None else MAX_ARCHIVE_ENTRY_BYTES
+    if size > limit:
+        raise ValueError(f"Packaged {name} size differs from checked source")
+    return limit
+
+
 def archive_contents(path: pathlib.Path, expected_sizes: dict[str, int] | None = None) -> dict[str, tuple[bytes, int]]:
     entries = {}
     if path.name.endswith(".tar.gz"):
         with tarfile.open(path, "r:gz") as archive:
             for member in archive.getmembers():
-                if not member.isfile() or member.name in entries:
+                if not member.isfile():
                     raise ValueError(f"Unexpected archive entry: {member.name}")
-                if expected_sizes is not None and member.name not in expected_sizes:
-                    raise ValueError(f"Archive members differ: unexpected {member.name}")
-                limit = (expected_sizes[member.name] if expected_sizes is not None
-                         else MAX_ARCHIVE_ENTRY_BYTES)
-                if member.size > limit:
-                    raise ValueError(f"Packaged {member.name} size differs from checked source")
+                limit = _checked_member_limit(member.name, member.size, entries, expected_sizes)
                 stream = archive.extractfile(member)
                 if stream is None:
                     raise ValueError(f"Unreadable archive member: {member.name}")
@@ -39,15 +45,9 @@ def archive_contents(path: pathlib.Path, expected_sizes: dict[str, int] | None =
         with zipfile.ZipFile(path) as archive:
             for member in archive.infolist():
                 mode = member.external_attr >> 16
-                if (member.is_dir() or stat.S_ISLNK(mode)
-                        or member.filename in entries):
+                if member.is_dir() or stat.S_ISLNK(mode):
                     raise ValueError(f"Unexpected archive entry: {member.filename}")
-                if expected_sizes is not None and member.filename not in expected_sizes:
-                    raise ValueError(f"Archive members differ: unexpected {member.filename}")
-                limit = (expected_sizes[member.filename] if expected_sizes is not None
-                         else MAX_ARCHIVE_ENTRY_BYTES)
-                if member.file_size > limit:
-                    raise ValueError(f"Packaged {member.filename} size differs from checked source")
+                limit = _checked_member_limit(member.filename, member.file_size, entries, expected_sizes)
                 with archive.open(member) as stream:
                     entries[member.filename] = (stream.read(limit + 1), mode)
     else:
