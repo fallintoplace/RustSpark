@@ -68,7 +68,7 @@ impl RustSparkSession {
             ));
         }
 
-        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let quote = super::quote_join_identifier;
         let mut index_name = "__rustspark_multiset_row".to_owned();
         while left_columns
             .iter()
@@ -105,12 +105,12 @@ impl RustSparkSession {
             })
             .collect::<Vec<_>>();
         conditions.push(format!("l.{index} = r.{index}"));
-        let (join, filter) = if intersection {
-            ("INNER JOIN", "")
+        let join = if intersection { "INNER JOIN" } else { "LEFT JOIN" };
+        let filter = if intersection {
+            String::new()
         } else {
-            ("LEFT JOIN", " WHERE r.__PLACEHOLDER__ IS NULL")
+            format!(" WHERE r.{index} IS NULL")
         };
-        let filter = filter.replace("__PLACEHOLDER__", &index);
         let sql = format!(
             "SELECT {projection} FROM \
              (SELECT *, ROW_NUMBER() OVER (PARTITION BY {left_partition}) AS {index} \
