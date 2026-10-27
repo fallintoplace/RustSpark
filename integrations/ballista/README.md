@@ -7,6 +7,23 @@ It demonstrates an **actual Ballista remote SessionContext** wrapped by the
 RustSpark session API. This is a feasibility spike, not a production distributed
 mode or a claim of Apache Spark SQL compatibility.
 
+## In-process distributed mode for local development
+
+Ballista can run an in-process scheduler with multiple executor slots. This
+exercises distributed plan execution without first installing separate
+scheduler and executor binaries:
+
+```sh
+RUSTSPARK_STANDALONE_PARALLELISM=4 \
+RUSTSPARK_SQL='SELECT SUM(id) FROM (VALUES (1), (2), (3)) AS t(id)' \
+cargo run --manifest-path integrations/ballista/Cargo.toml --features standalone --example standalone
+```
+
+The default standalone parallelism is two. `RUSTSPARK_PARQUET` can point to
+a dataset visible to the process. Standalone mode does **not** validate
+multi-host scheduling, worker failure handling, or shared-storage access.
+Use the remote client above for tests across machines.
+
 ## Run with a Ballista 55 scheduler and executor
 
 Install / start a compatible scheduler and executor on the same machine:
