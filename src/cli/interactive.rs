@@ -116,6 +116,26 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
     true
 }
 
+// Count a registered table without requiring a SQL statement.
+async fn handle_count_command(session: &RustSparkSession, command: &str) -> bool {
+    if command != ".count" && !command.starts_with(".count ") {
+        return false;
+    }
+    let name = command.strip_prefix(".count").unwrap_or_default().trim();
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("Shell error: .count requires exactly one table name");
+    } else {
+        match session.table(name).await {
+            Ok(table) => match table.count().await {
+                Ok(count) => println!("{count}"),
+                Err(error) => eprintln!("Shell error: {error}"),
+            },
+            Err(error) => eprintln!("Shell error: {error}"),
+        }
+    }
+    true
+}
+
 enum ShellAction {
     Continue,
     Exit,
@@ -127,7 +147,7 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .quit.");
+            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .quit.");
             return ShellAction::Continue;
         }
         ".tables" => {
@@ -144,7 +164,7 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await {
+    if handle_schema_command(session, command).await || handle_count_command(session, command).await {
         ShellAction::Continue
     } else {
         ShellAction::Sql

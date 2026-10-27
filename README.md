@@ -46,6 +46,7 @@ The `--query-timeout` applies to each executed statement.
 Run `.tables` to list registered tables, `.schemas` to list available catalog
 schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
+Use `.count data` to print the number of rows in a registered table.
 
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
@@ -120,6 +121,11 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 ```
 
 Column order can differ between inputs. Rows are appended without deduplication.
+
+RustSpark's table set operations also support duplicate-preserving
+`intersect_all_tables` and `except_all_tables`, along with
+`symmetric_difference_tables` for distinct rows found in only one input.
+All return lazy DataFrames and compare columns by position.
 
 To remove duplicate rows after matching columns by name, use
 `--union-distinct-by-name` instead:
