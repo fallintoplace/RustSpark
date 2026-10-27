@@ -105,15 +105,13 @@ async fn register_unnamed_input(
         session.register_dataframe(&args.table, frame)?;
         return Ok(true);
     }
-    let input = if let Some(path) = args.csv.as_deref() {
-        Some((path, NamedInputKind::Csv))
-    } else if let Some(path) = args.parquet.as_deref() {
-        Some((path, NamedInputKind::Parquet))
-    } else {
-        args.json
-            .as_deref()
-            .map(|path| (path, NamedInputKind::Json))
-    };
+    let input = [
+        (args.csv.as_deref(), NamedInputKind::Csv),
+        (args.parquet.as_deref(), NamedInputKind::Parquet),
+        (args.json.as_deref(), NamedInputKind::Json),
+    ]
+    .into_iter()
+    .find_map(|(path, kind)| path.map(|path| (path, kind)));
     let Some((path, kind)) = input else {
         return Ok(false);
     };

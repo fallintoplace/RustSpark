@@ -48,6 +48,10 @@ schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
 Use `.count data` to print the number of rows in a registered table.
 
+Use `.preview data` to display up to 10 rows from a table or
+`.preview data 3` to set a limit of 3 rows (maximum 1000).
+Qualified names such as `.preview datafusion.public.data 3` also work.
+
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
 ```sh
@@ -165,6 +169,29 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 
 Missing columns are filled with NULL and duplicates are removed across all
 sources. Union destination names must be unique across both union flags.
+
+Increase file metadata concurrency when loading directories with many files:
+
+```sh
+cargo run -- --parquet /data/lake/events --metadata-fetch-concurrency 64 \\
+  --sql 'SELECT COUNT(*) FROM data'
+```
+
+This controls concurrent file schema and statistics reads. Higher settings can
+reduce metadata latency but use more memory and storage I/O. The default is
+unchanged when the flag is omitted.
+
+Tune scan splitting for large input files and many available CPU cores:
+
+```sh
+cargo run -- --csv /data/large.csv --target-partitions 8 \\
+  --scan-split-min-kb 256 --sql 'SELECT SUM(amount) FROM data'
+```
+
+The option sets the minimum file-group size that DataFusion considers for
+splitting a scan. Smaller values can help fill workers on moderate-size files
+but add scheduling and I/O overhead. The default stays unchanged unless the
+option is specified. Compressed or unsplittable formats may not benefit.
 
 Enable Parquet late materialization for selective filters:
 
@@ -436,6 +463,19 @@ cargo run -- --sql 'SELECT 42 AS answer' --stdout-format html
 
 NULL cells receive a `null` CSS class. Column names and values are HTML-escaped.
 
+Split very large partitioned exports into manageable part files:
+
+```sh
+cargo run -- --csv /data/events.csv --batch-size 4096 \\
+  --sql 'SELECT * FROM data' --output-parquet /data/exported \\
+  --output-rows-per-file 1000000
+```
+
+This is a soft limit (batch boundaries may exceed it). DataFusion may produce
+multiple Parquet, CSV or JSON parts, depending on the input partitions.
+The same tuning also applies to persistent database writes. It cannot be
+combined with `--output-single-file`.
+
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
 
@@ -507,3 +547,7 @@ part can reduce scan parallelism and requires enough free disk space for both
 versions. Keep other programs from mutating the table's files and use external
 backups for important data. The database lock prevents simultaneous RustSpark
 operations but does not protect against external writers.
+
+## License
+
+RustSpark is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

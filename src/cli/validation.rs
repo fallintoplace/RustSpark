@@ -64,16 +64,20 @@ fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> 
     Ok(sources)
 }
 
-fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(destination) = [
-        args.output_arrow.as_ref(),
-        args.output_parquet.as_ref(),
-        args.output_csv.as_ref(),
-        args.output_json.as_ref(),
+fn selected_output_path(args: &Args) -> Option<&Path> {
+    [
+        args.output_arrow.as_deref(),
+        args.output_parquet.as_deref(),
+        args.output_csv.as_deref(),
+        args.output_json.as_deref(),
     ]
     .into_iter()
     .flatten()
-    .next() else {
+    .next()
+}
+
+fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(destination) = selected_output_path(args) else {
         return Ok(());
     };
     let Some(destination) = canonical_output_path(destination) else {
@@ -101,6 +105,14 @@ fn reject_missing_format_inputs(
 }
 
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.output_rows_per_file.is_some()
+        && args.output_parquet.is_none()
+        && args.output_csv.is_none()
+        && args.output_json.is_none()
+        && args.database_dir.is_none()
+    {
+        return Err("--output-rows-per-file requires a file export or --database-dir".into());
+    }
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some())
@@ -108,12 +120,7 @@ pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Err
     let has_named = !args.csv_tables.is_empty()
         || !args.parquet_tables.is_empty()
         || !args.json_tables.is_empty();
-    if args.output_single_file
-        && args.output_parquet.is_none()
-        && args.output_csv.is_none()
-        && args.output_json.is_none()
-        && args.output_arrow.is_none()
-    {
+    if args.output_single_file && selected_output_path(args).is_none() {
         return Err("--output-single-file requires an output format".into());
     }
     if single_inputs > 1 || (single_inputs > 0 && has_named) {
