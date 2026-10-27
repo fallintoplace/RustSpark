@@ -7,12 +7,12 @@ use datafusion::{
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 
-#[path = "sql_compat/try_divide.rs"]
-mod sql_compat_try_divide;
 mod export;
 mod joins;
 mod set_operations;
 mod sources;
+#[path = "sql_compat/try_divide.rs"]
+mod sql_compat_try_divide;
 
 pub use export::SqlExportFormat;
 
