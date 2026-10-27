@@ -732,12 +732,12 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         register_database_tables(&session, directory).await?;
     }
     if let Some(destination) = args.backup_database.as_deref() {
-        let root = database_root(args)?;
+        let root = database_root(&args)?;
         return persistence::backup_database(root, destination);
     }
     if args.interactive {
         if let Some(table) = args.compact_table.as_deref() {
-            let root = database_root(args)?;
+            let root = database_root(&args)?;
             persistence::compact_saved_table(&session, root, &table.to_ascii_lowercase()).await?;
         }
         return run_interactive(&session, &args).await;
