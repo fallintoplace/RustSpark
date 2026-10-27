@@ -13,6 +13,7 @@ enum StdoutFormat {
     Json,
     JsonArray,
     Markdown,
+    Html,
     Arrow,
 }
 

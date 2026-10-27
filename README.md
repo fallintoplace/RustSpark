@@ -121,6 +121,11 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 
 Column order can differ between inputs. Rows are appended without deduplication.
 
+RustSpark's table set operations also support duplicate-preserving
+`intersect_all_tables` and `except_all_tables`, along with
+`symmetric_difference_tables` for distinct rows found in only one input.
+All return lazy DataFrames and compare columns by position.
+
 To remove duplicate rows after matching columns by name, use
 `--union-distinct-by-name` instead:
 
@@ -372,6 +377,14 @@ cargo run -- --sql "SELECT 42 AS answer" --stdout-format markdown
 
 Markdown output streams by record batch, includes headers even for empty results,
 and prints SQL NULL values as `NULL`. Pipes and line breaks are escaped.
+
+For HTML reports, stream an embeddable table with escaped cell values:
+
+```sh
+cargo run -- --sql 'SELECT 42 AS answer' --stdout-format html
+```
+
+NULL cells receive a `null` CSS class. Column names and values are HTML-escaped.
 
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
