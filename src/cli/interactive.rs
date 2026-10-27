@@ -193,7 +193,9 @@ async fn dispatch_shell_command(
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .preview TABLE [ROWS], .quit.");
+            eprintln!(
+                "Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .preview TABLE [ROWS], .quit."
+            );
             return ShellAction::Continue;
         }
         ".tables" => {
