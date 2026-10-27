@@ -115,6 +115,10 @@ def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
     return digest, len(rows)
 
 
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
 def execute(
     binary: str, parquet: Path, sql: str, timeout: float, engine_args: tuple[str, ...] = (),
 ) -> dict:
@@ -128,10 +132,10 @@ def execute(
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return {"error": f"Timed out after {timeout:g} seconds", "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+        return {"error": f"Timed out after {timeout:g} seconds", "elapsed_ms": _elapsed_ms(started)}
     except (OSError, UnicodeError) as error:
-        return {"error": str(error), "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
-    elapsed = round((time.perf_counter() - started) * 1000, 3)
+        return {"error": str(error), "elapsed_ms": _elapsed_ms(started)}
+    elapsed = _elapsed_ms(started)
     if process.returncode:
         return {"error": f"Exit {process.returncode}: {process.stderr.strip()[:4096]}", "elapsed_ms": elapsed}
     try:
