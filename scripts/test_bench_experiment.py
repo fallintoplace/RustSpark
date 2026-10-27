@@ -25,6 +25,19 @@ class ExperimentTests(unittest.TestCase):
             file.write_text(json.dumps(value), encoding="utf-8")
             return load_experiment(file)
 
+    def test_shipped_scenarios_have_valid_sql_and_variants(self):
+        directory = Path(__file__).resolve().parents[1] / "benchmarks" / "perf_experiments"
+        paths = sorted(directory.glob("*.json"))
+        self.assertTrue(paths, "At least one shipped performance experiment is required")
+        seen = set()
+        for path in paths:
+            case = load_experiment(path)
+            self.assertNotIn(case["name"], seen)
+            seen.add(case["name"])
+            digest, values = sqlite_reference(case["sql"], min(case["rows"], 128))
+            self.assertEqual(len(digest), 64)
+            self.assertIsInstance(values, list)
+
     def test_accepts_valid_configuration(self):
         self.assertEqual(self.load(configuration())["rows"], 8)
 
