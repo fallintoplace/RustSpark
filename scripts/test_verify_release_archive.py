@@ -48,7 +48,8 @@ class ArchiveVerifierTests(unittest.TestCase):
         path, binary = self.build("tar")
         extracted = archive.verify_archive(path, binary, self.root, self.root)
         self.assertEqual(extracted.read_bytes(), binary.read_bytes())
-        self.assertTrue(extracted.stat().st_mode & 0o111)
+        if sys.platform != "win32":
+            self.assertTrue(extracted.stat().st_mode & 0o111)
 
     def test_windows_zip_binary_and_docs_round_trip(self):
         path, binary = self.build("zip")
