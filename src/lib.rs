@@ -411,6 +411,42 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
+    /// Join on every column name that both registered tables share.
+    ///
+    /// Shared columns are selected in left-table schema order and appear once
+    /// in the output, as in a USING join. Columns are matched by exact name.
+    /// Unlike SQL NATURAL JOIN, this rejects a pair with no common columns
+    /// rather than producing an accidental Cartesian product.
+    pub async fn join_tables_on_common_columns(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+    ) -> Result<DataFrame> {
+        use std::collections::HashSet;
+
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        let right_columns: HashSet<&str> = right_frame
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        let columns: Vec<&str> = left_frame
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .filter(|column| right_columns.contains(column))
+            .collect();
+        if columns.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "Tables {left} and {right} have no common join columns"
+            )));
+        }
+        self.join_tables_using(left, right, join_type, &columns).await
+    }
+
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
         if dataframe.task_ctx().session_id() != self.context.session_id() {
             return Err(DataFusionError::Plan(
