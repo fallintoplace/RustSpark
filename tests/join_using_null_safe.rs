@@ -24,8 +24,11 @@ async fn null_safe_using_matches_null_keys_and_coalesces_the_output() -> TestRes
         .await?;
 
     assert_eq!(
-        session.join_tables_using("order", "lookup", JoinType::Inner, &["id"])
-            .await?.count().await?,
+        session
+            .join_tables_using("order", "lookup", JoinType::Inner, &["id"])
+            .await?
+            .count()
+            .await?,
         1
     );
     for (kind, expected) in [
@@ -37,11 +40,14 @@ async fn null_safe_using_matches_null_keys_and_coalesces_the_output() -> TestRes
         let result = session
             .join_tables_using_null_safe("order", "lookup", kind, &["id"])
             .await?;
+        let key_count = result
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() == "id")
+            .count();
+        assert_eq!(key_count, 1);
         assert_eq!(result.count().await?, expected, "{kind:?}");
-        assert_eq!(
-            result.schema().fields().iter().filter(|field| field.name() == "id").count(),
-            1
-        );
     }
     Ok(())
 }
@@ -49,9 +55,18 @@ async fn null_safe_using_matches_null_keys_and_coalesces_the_output() -> TestRes
 #[tokio::test]
 async fn null_safe_using_checks_keys_and_join_type() -> TestResult {
     let session = RustSparkSession::new();
-    session.register_sql_view("l", "SELECT 1 AS id").await?;
-    session.register_sql_view("r", "SELECT 1 AS id").await?;
-    assert!(session.join_tables_using_null_safe("l", "r", JoinType::Inner, &[]).await.is_err());
+    session
+        .register_sql_view("l", "SELECT 1 AS id")
+        .await?;
+    session
+        .register_sql_view("r", "SELECT 1 AS id")
+        .await?;
+    assert!(
+        session
+            .join_tables_using_null_safe("l", "r", JoinType::Inner, &[])
+            .await
+            .is_err()
+    );
     assert!(
         session
             .join_tables_using_null_safe("l", "r", JoinType::Inner, &["id", "ID"])
