@@ -51,7 +51,7 @@ def choose_queries(queries: list[str], only: str | None) -> list[tuple[int, str]
     return [(number, queries[number - 1]) for number in parse_query_numbers(only, len(queries))]
 
 
-def command(binary: str, parquet: Path, sql: str) -> list[str]:
+def command(binary: str, parquet: Path, sql: str, engine_args: tuple[str, ...] = ()) -> list[str]:
     return [
         binary,
         "--parquet", str(parquet),
@@ -60,7 +60,7 @@ def command(binary: str, parquet: Path, sql: str) -> list[str]:
         "--sql-view", VIEW_SQL,
         "--sql", sql,
         "--stdout-format", "json",
-    ]
+    ] + list(engine_args)
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -115,11 +115,13 @@ def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
     return digest, len(rows)
 
 
-def execute(binary: str, parquet: Path, sql: str, timeout: float) -> dict:
+def execute(
+    binary: str, parquet: Path, sql: str, timeout: float, engine_args: tuple[str, ...] = (),
+) -> dict:
     started = time.perf_counter()
     try:
         process = subprocess.run(
-            command(binary, parquet, sql),
+            command(binary, parquet, sql, engine_args),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -145,12 +147,13 @@ def percentile(samples: list[float], fraction: float) -> float:
 
 def measure_query(
     binary: str, parquet: Path, number: int, sql: str, repeat: int, warmup: int, timeout: float,
+    engine_args: tuple[str, ...] = (),
 ) -> dict:
     times = []
     signature = None
     result_rows = None
     for run in range(repeat + warmup):
-        result = execute(binary, parquet, sql, timeout)
+        result = execute(binary, parquet, sql, timeout, engine_args)
         if "error" in result:
             return {
                 "id": number, "sql": sql, "status": "error",
@@ -177,7 +180,7 @@ def measure_query(
 
 def benchmark(
     binary: str, parquet: Path, query_file: Path, repeat: int, warmup: int,
-    timeout: float, only: str | None = None,
+    timeout: float, only: str | None = None, engine_args: tuple[str, ...] = (),
 ) -> dict:
     if repeat < 1 or warmup < 0 or not (math.isfinite(timeout) and timeout > 0):
         raise ValueError("repeat and timeout must be positive; warmup cannot be negative")
@@ -186,11 +189,12 @@ def benchmark(
     queries = read_queries(query_file)
     selected = choose_queries(queries, only)
     results = [
-        measure_query(binary, parquet, number, sql, repeat, warmup, timeout)
+        measure_query(binary, parquet, number, sql, repeat, warmup, timeout, engine_args)
         for number, sql in selected
     ]
     return {
         "binary": binary,
+        "engine_args": list(engine_args),
         "parquet": str(parquet.resolve()),
         "query_file": str(query_file.resolve()),
         "query_file_sha256": hashlib.sha256(query_file.read_bytes()).hexdigest(),
@@ -206,6 +210,24 @@ def benchmark(
     }
 
 
+def build_engine_args(args: argparse.Namespace) -> tuple[str, ...]:
+    engine_args = []
+    for flag, value in [
+        ("--batch-size", args.batch_size),
+        ("--target-partitions", args.target_partitions),
+        ("--memory-limit-mb", args.memory_limit_mb),
+    ]:
+        if value is not None:
+            if value <= 0:
+                raise ValueError(f"{flag} must be positive")
+            engine_args.extend([flag, str(value)])
+    if args.spill_dir is not None:
+        if not args.spill_dir.is_dir():
+            raise ValueError("--spill-dir must name an existing directory")
+        engine_args.extend(["--spill-dir", str(args.spill_dir)])
+    return tuple(engine_args)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="./target/release/rustspark")
@@ -216,11 +238,16 @@ def main(argv=None) -> int:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--json-out", type=Path, required=True)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--target-partitions", type=int)
+    parser.add_argument("--memory-limit-mb", type=int)
+    parser.add_argument("--spill-dir", type=Path)
     args = parser.parse_args(argv)
     try:
+        engine_args = build_engine_args(args)
         report = benchmark(
             args.binary, args.parquet, args.queries, args.repeat, args.warmup,
-            args.timeout, args.only,
+            args.timeout, args.only, engine_args,
         )
     except (OSError, UnicodeError, ValueError) as error:
         parser.error(str(error))
