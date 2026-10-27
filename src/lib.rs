@@ -1571,6 +1571,40 @@ impl RustSparkSession {
         left_frame.join_on(right_frame, join_type, predicates)
     }
 
+    /// Join registered tables on equality keys and an extra ON predicate.
+    ///
+    /// The filter is part of the join condition, not a post-join WHERE clause.
+    /// This matters for outer joins because unmatched rows are preserved.
+    /// The result is lazy, and semi and anti joins are also supported.
+    pub async fn join_tables_filtered(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+        filter: datafusion::logical_expr::Expr,
+    ) -> Result<DataFrame> {
+        if keys.is_empty()
+            || keys.iter().any(|(left_key, right_key)| {
+                left_key.trim().is_empty() || right_key.trim().is_empty()
+            })
+        {
+            return Err(DataFusionError::Plan(
+                "join_tables_filtered requires one or more non-empty key pairs".into(),
+            ));
+        }
+        let left_keys: Vec<_> = keys.iter().map(|(key, _)| *key).collect();
+        let right_keys: Vec<_> = keys.iter().map(|(_, key)| *key).collect();
+        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        left_frame.join(
+            right_frame,
+            join_type,
+            &left_keys,
+            &right_keys,
+            Some(filter),
+        )
+    }
+
     /// Cross join two registered tables, like Spark DataFrame.crossJoin.
     ///
     /// The result has left_rows * right_rows entries. This operation can
