@@ -25,6 +25,12 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(mod.canonical_type("Utf8"), "string")
 
 
+    def test_rustspark_description_preserves_column_tabs(self):
+        names, types, nullables = mod.parse_rustspark_description(
+            "first\tpart\tInt64\tNOT NULL\n"
+        )
+        self.assertEqual((names, types, nullables), (["first\tpart"], ["bigint"], [False]))
+
     def test_parse_rustspark_description_rejects_incomplete_fields(self):
         self.assertEqual(
             mod.parse_rustspark_description("count\tInt64\tNULL\n"),
