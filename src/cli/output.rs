@@ -128,7 +128,10 @@ fn display_cell(
 
 fn escape_vertical_value(value: &str) -> std::borrow::Cow<'_, str> {
     // Most cells contain no control characters and need no allocation.
-    if !value.bytes().any(|byte| matches!(byte, b'\\' | b'\r' | b'\n' | b'\t')) {
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'\\' | b'\r' | b'\n' | b'\t'))
+    {
         return std::borrow::Cow::Borrowed(value);
     }
     let mut escaped = String::with_capacity(value.len());
