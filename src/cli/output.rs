@@ -187,8 +187,14 @@ async fn write_arrow_stream<W: Write>(
     Ok(())
 }
 
-fn escape_markdown_cell(value: &str) -> String {
-    // One allocation instead of rebuilding the string for each escape kind.
+fn escape_markdown_cell(value: &str) -> std::borrow::Cow<'_, str> {
+    // Plain text needs neither an allocation nor a character-by-character copy.
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'\\' | b'|' | b'\r' | b'\n'))
+    {
+        return std::borrow::Cow::Borrowed(value);
+    }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -202,7 +208,7 @@ fn escape_markdown_cell(value: &str) -> String {
             other => escaped.push(other),
         }
     }
-    escaped
+    std::borrow::Cow::Owned(escaped)
 }
 
 // Keep only one record batch and the current cell in memory.
@@ -402,12 +408,22 @@ pub(super) async fn write_arrow_ipc(
 
 #[cfg(test)]
 mod tests {
-    use super::{display_cell, escape_vertical_value};
+    use super::{display_cell, escape_markdown_cell, escape_vertical_value};
 
     #[test]
     fn escapes_vertical_controls_without_changing_unicode() {
         assert_eq!(escape_vertical_value("a\\b\r\n\té"), "a\\\\b\\r\\n\\té");
         assert_eq!(escape_vertical_value("plain"), "plain");
+    }
+
+    #[test]
+    fn markdown_escape_borrows_plain_values() {
+        assert!(matches!(
+            escape_markdown_cell("plain text"),
+            std::borrow::Cow::Borrowed("plain text")
+        ));
+        assert_eq!(escape_markdown_cell("a|b"), r"a\|b");
+        assert_eq!(escape_markdown_cell("<x>&"), "&lt;x&gt;&amp;");
     }
 
     #[test]
