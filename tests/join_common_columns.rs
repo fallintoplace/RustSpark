@@ -76,3 +76,29 @@ async fn shared_column_join_rejects_unrelated_tables() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn common_column_join_matches_explicit_using() -> TestResult {
+    let session = session_with_shared_keys().await?;
+    let inferred = session
+        .join_tables_on_common_columns("order", "lookup", JoinType::Full)
+        .await?;
+    let explicit = session
+        .join_tables_using("order", "lookup", JoinType::Full, &["id", "region"])
+        .await?;
+    let inferred_columns = inferred
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let explicit_columns = explicit
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(inferred_columns, explicit_columns);
+    assert_eq!(inferred.count().await?, explicit.count().await?);
+    Ok(())
+}

@@ -46,7 +46,11 @@ The optional cold and warm comparison workflows upload measured JSON **and**
 a readable Markdown report. The summary includes per-workload median and p95
 latencies, verified cross-engine result fingerprints, and speed ratios.
 For a ratio of competitor median / RustSpark median, **above 1x** means
-RustSpark ran faster in that workload on that machine.
+RustSpark ran faster in that workload on that machine. The raw JSON fields
+`competitor_median_over_rustspark_median` (cold) and
+`spark_median_over_rustspark_median` (warm) use the same direction as the
+Markdown report. A zero RustSpark median produces `null`, not a misleading
+speed ratio.
 
 Generate a report locally after either harness completes:
 
