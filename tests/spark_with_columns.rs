@@ -75,3 +75,30 @@ async fn with_columns_evaluates_updates_against_original_input() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn sparse_updates_on_wide_tables_preserve_order() -> TestResult {
+    let session = RustSparkSession::new();
+    let columns = (0..64)
+        .map(|index| format!("{index} AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    session
+        .register_sql_view("wide", &format!("SELECT {columns}"))
+        .await?;
+    let result = session
+        .with_columns("wide", &[("c63", lit(99i64)), ("extra", col("c0"))])
+        .await?;
+    assert_eq!(result.schema().fields().len(), 65);
+    let names = result
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names[0], "c0");
+    assert_eq!(names[63], "c63");
+    assert_eq!(names[64], "extra");
+    assert!(session.with_columns("wide", &[("C63", lit(1))]).await.is_err());
+    Ok(())
+}
