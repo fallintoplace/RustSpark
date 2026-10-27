@@ -119,16 +119,36 @@ async fn bounded_connect<T>(
     }
 }
 
+struct SchedulerOptions {
+    partitions: Option<usize>,
+    endpoints: Vec<String>,
+    timeout: Option<Duration>,
+}
+
+impl SchedulerOptions {
+    fn from_env(primary: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let partitions = optional_env("RUSTSPARK_TARGET_PARTITIONS")?
+            .as_deref()
+            .map(parse_partitions)
+            .transpose()?;
+        let configured = optional_env("RUSTSPARK_SCHEDULER_URLS")?;
+        let endpoints = parse_endpoints(primary, configured.as_deref())?;
+        let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
+        let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
+        Ok(Self {
+            partitions,
+            endpoints,
+            timeout,
+        })
+    }
+}
+
 pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Error>> {
-    let partitions = match env::var("RUSTSPARK_TARGET_PARTITIONS") {
-        Ok(value) => Some(parse_partitions(&value)?),
-        Err(env::VarError::NotPresent) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let configured = optional_env("RUSTSPARK_SCHEDULER_URLS")?;
-    let endpoints = parse_endpoints(url, configured.as_deref())?;
-    let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
-    let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
+    let SchedulerOptions {
+        partitions,
+        endpoints,
+        timeout,
+    } = SchedulerOptions::from_env(url)?;
     let mut failures = Vec::new();
 
     for (index, endpoint) in endpoints.iter().enumerate() {
