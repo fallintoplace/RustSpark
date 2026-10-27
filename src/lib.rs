@@ -15,6 +15,8 @@ mod sources;
 mod sql_compat_bin;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "features/numeric_column_summary.rs"]
+mod feature_numeric_column_summary;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
 #[path = "sql_compat/oct.rs"]
