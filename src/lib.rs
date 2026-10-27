@@ -17,6 +17,8 @@ mod sql_compat_bin;
 mod sql_compat_endswith;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
+#[path = "features/approx_distinct_count.rs"]
+mod feature_approx_distinct_count;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
 #[path = "sql_compat/pmod.rs"]
