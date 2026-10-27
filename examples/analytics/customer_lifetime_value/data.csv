@@ -1,0 +1,7 @@
+customer_id,region,order_id,amount
+1,eu,11,20
+1,eu,12,30
+2,eu,13,40
+3,us,14,15
+3,us,15,45
+4,us,16,10
