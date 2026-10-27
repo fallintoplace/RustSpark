@@ -138,9 +138,10 @@ impl RustSparkSession {
     ///
     /// Unknown catalogs return an error instead of an empty list.
     pub fn list_schemas_in_catalog(&self, catalog_name: &str) -> Result<Vec<String>> {
-        let catalog = self.context.catalog(catalog_name).ok_or_else(|| {
-            DataFusionError::Plan(format!("Unknown catalog: {catalog_name}"))
-        })?;
+        let catalog = self
+            .context
+            .catalog(catalog_name)
+            .ok_or_else(|| DataFusionError::Plan(format!("Unknown catalog: {catalog_name}")))?;
         let mut schemas = catalog.schema_names();
         schemas.sort();
         Ok(schemas)
