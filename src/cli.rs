@@ -11,6 +11,7 @@ enum StdoutFormat {
     Tsv,
     Json,
     JsonArray,
+    Markdown,
     Arrow,
 }
 
