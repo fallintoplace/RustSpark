@@ -790,6 +790,26 @@ impl RustSparkSession {
         dataframe.select(projection)
     }
 
+    /// Aggregate a registered table by typed grouping and aggregate expressions.
+    ///
+    /// An empty group list produces a single global aggregation. At least one
+    /// aggregate is required. The result is lazy and does not change the table.
+    pub async fn group_rows(
+        &self,
+        table: &str,
+        groups: &[datafusion::logical_expr::Expr],
+        aggregates: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        if aggregates.is_empty() {
+            return Err(DataFusionError::Plan(
+                "group_rows requires at least one aggregate".into(),
+            ));
+        }
+        self.table(table)
+            .await?
+            .aggregate(groups.to_vec(), aggregates.to_vec())
+    }
+
     pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
         let dataframe = self.table(source).await?;
         self.register_dataframe(alias, dataframe)
