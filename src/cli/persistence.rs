@@ -556,6 +556,40 @@ fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventor
     Ok(BackupInventory { tables, copies })
 }
 
+// Copy independent immutable Parquet parts with a bounded worker count.
+fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>> {
+    // Large backups can copy immutable parts independently. Bound the number
+    // of workers so fragmented tables do not spawn a thread per Parquet file.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(8);
+    if copies.len() < 8 || workers == 1 {
+        for (source, target) in copies {
+            fs::copy(source, target)?;
+        }
+    } else {
+        std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+            let chunk_size = copies.len().div_ceil(workers);
+            let jobs = copies
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> std::io::Result<()> {
+                        for (source, target) in chunk {
+                            fs::copy(source, target)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            for job in jobs {
+                job.join().map_err(|_| "Backup copy worker panicked")??;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 /// Create an independent, consistent copy of a local database while its
 /// process lock is held. Copy rather than hard-link parts so later external
 /// edits to one snapshot cannot corrupt the other.
@@ -588,35 +622,7 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     fs::create_dir(&snapshot)?;
     let BackupInventory { mut tables, copies } = collect_backup_parts(&source, &snapshot)?;
 
-    // Large backups can copy immutable parts independently. Bound the number
-    // of workers so fragmented tables do not spawn a thread per Parquet file.
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |count| count.get())
-        .min(8);
-    if copies.len() < 8 || workers == 1 {
-        for (source, target) in &copies {
-            fs::copy(source, target)?;
-        }
-    } else {
-        std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
-            let chunk_size = copies.len().div_ceil(workers);
-            let jobs = copies
-                .chunks(chunk_size)
-                .map(|chunk| {
-                    scope.spawn(move || -> std::io::Result<()> {
-                        for (source, target) in chunk {
-                            fs::copy(source, target)?;
-                        }
-                        Ok(())
-                    })
-                })
-                .collect::<Vec<_>>();
-            for job in jobs {
-                job.join().map_err(|_| "Backup copy worker panicked")??;
-            }
-            Ok(())
-        })?;
-    }
+    copy_backup_parts(&copies)?;
     // A backup is never published without validating every copied footer.
     for table in &tables {
         validate_table_files(&snapshot.join(table), table)?;
