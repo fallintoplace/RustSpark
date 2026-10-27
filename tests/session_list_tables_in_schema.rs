@@ -18,7 +18,15 @@ async fn lists_tables_within_a_catalog_schema() -> Result<(), Box<dyn std::error
     assert!(tables.contains(&"alpha".to_string()));
     assert!(tables.contains(&"beta".to_string()));
     assert!(tables.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert!(session.list_tables_in_schema("missing_catalog", schema).is_err());
-    assert!(session.list_tables_in_schema(catalog, "missing_schema").is_err());
+    assert!(
+        session
+            .list_tables_in_schema("missing_catalog", schema)
+            .is_err()
+    );
+    assert!(
+        session
+            .list_tables_in_schema(catalog, "missing_schema")
+            .is_err()
+    );
     Ok(())
 }
