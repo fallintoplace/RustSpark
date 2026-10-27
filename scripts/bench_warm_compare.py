@@ -125,30 +125,27 @@ def run_rustspark(binary, csv, requests, row_count, timeout, partitions):
     return parse_rustspark(output.stdout, output.stderr, requests, row_count)
 
 
-def _run_worker(label, command, requests, timeout):
+def run_python_worker(script, arguments, requests, timeout, engine):
     output = subprocess.run(
-        command, input=json.dumps(requests), capture_output=True, text=True,
+        [sys.executable, "-c", script, *arguments],
+        input=json.dumps(requests), capture_output=True, text=True,
         check=False, timeout=timeout,
     )
     if output.returncode:
-        raise RuntimeError(f"{label} exit {output.returncode}: {output.stderr}")
+        raise RuntimeError(f"{engine} exit {output.returncode}: {output.stderr}")
     return [parse_result_line(line) for line in output.stdout.splitlines() if line.strip()]
 
 
 def run_spark(csv, requests, timeout, master):
     if importlib.util.find_spec("pyspark") is None:
         raise RuntimeError("Install PySpark 4.x: pip install 'pyspark>=4,<5'")
-    return _run_worker(
-        "PySpark", [sys.executable, "-c", SPARK_WORKER, str(csv), master], requests, timeout,
-    )
+    return run_python_worker(SPARK_WORKER, [str(csv), master], requests, timeout, "PySpark")
 
 
 def run_duckdb(csv, requests, timeout):
     if importlib.util.find_spec("duckdb") is None:
         raise RuntimeError("Install DuckDB: pip install 'duckdb>=1,<3'")
-    return _run_worker(
-        "DuckDB", [sys.executable, "-c", DUCKDB_WORKER, str(csv)], requests, timeout,
-    )
+    return run_python_worker(DUCKDB_WORKER, [str(csv)], requests, timeout, "DuckDB")
 
 
 def summarize(samples, requests, row_count, warmup, repeat):
