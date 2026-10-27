@@ -6,7 +6,7 @@ DuckDB and PySpark processes.
 Run: install DuckDB and PySpark 4, build RustSpark with cargo build --release
 --locked, then execute:
 
-    python3 scripts/bench_compare.py --binary ./target/release/rustspark --engines rustspark duckdb spark --rows 100000 --repeat 5 --json-out benchmarks/engine-comparison.json
+    python3 scripts/quality.py bench cold --binary ./target/release/rustspark --engines rustspark duckdb spark --rows 100000 --repeat 5 --json-out benchmarks/engine-comparison.json
 
 Each engine receives the same deterministic CSV and explicit column types,
 runs identical SQL and must return identical normalized JSON results.

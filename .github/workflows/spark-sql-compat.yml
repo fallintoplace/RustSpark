@@ -21,6 +21,4 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: python3 -m unittest discover -s scripts -p 'test_spark_compat.py'
-      - run: python3 -m unittest discover -s scripts -p 'test_spark_typed_compat.py'
-      - run: python3 -m unittest discover -s scripts -p 'test_release_smoke.py'
+      - run: python3 scripts/quality.py test --suite compat

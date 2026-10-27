@@ -38,8 +38,7 @@ cargo test --all-targets --locked
 cargo test --locked --test v1_workflows
 cargo test --locked --test cli_insert_recovery --test cli_database_lock \
   --test cli_catalog_recovery --test cli_database_backup
-python3 -m unittest discover -s scripts -p 'test_release_smoke.py'
-python3 -m unittest discover -s scripts -p 'test_verify_release_archive.py'
+python3 scripts/quality.py test --suite all
 ```
 
 These tests exercise the actual CLI in separate processes. On GitHub, also
