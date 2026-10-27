@@ -23,12 +23,7 @@ async fn extrema_ignores_nulls_and_quotes_column_names() -> TestResult {
         session.sql_scalar("SELECT max_value FROM extrema").await?,
         ScalarValue::Int64(Some(9))
     );
-    assert!(
-        session
-            .column_extrema("metrics", "missing")
-            .await
-            .is_err()
-    );
+    assert!(session.column_extrema("metrics", "missing").await.is_err());
     Ok(())
 }
 
