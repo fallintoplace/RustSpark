@@ -447,6 +447,66 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
+    /// Annotate each left row with a Boolean indicating a right-key match.
+    ///
+    /// Unlike an ordinary join, duplicate right keys never multiply the left
+    /// rows. Set null_safe to match pairs of NULL values. The flag name must
+    /// not collide with an existing left column.
+    pub async fn join_tables_with_existence_flag(
+        &self,
+        left: &str,
+        right: &str,
+        keys: &[(&str, &str)],
+        flag_name: &str,
+        null_safe: bool,
+    ) -> Result<DataFrame> {
+        use std::fmt::Write as _;
+
+        validate_join_key_pairs(
+            keys,
+            "join_tables_with_existence_flag requires non-empty key pairs",
+        )?;
+        if flag_name.trim().is_empty() {
+            return Err(DataFusionError::Plan(
+                "Existence flag name must not be empty".into(),
+            ));
+        }
+        let left_frame = self.table(left).await?;
+        if left_frame
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name().eq_ignore_ascii_case(flag_name))
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Existence flag conflicts with existing column: {flag_name}"
+            )));
+        }
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let comparison = if null_safe { "IS NOT DISTINCT FROM" } else { "=" };
+        let mut predicates = String::new();
+        for (left_key, right_key) in keys {
+            if !predicates.is_empty() {
+                predicates.push_str(" AND ");
+            }
+            write!(
+                &mut predicates,
+                "{left_alias}.{} {comparison} {right_alias}.{}",
+                quote_join_identifier(left_key),
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let query = format!(
+            "SELECT {left_alias}.*, EXISTS (SELECT 1 FROM {} AS {right_alias} WHERE {predicates}) AS {} FROM {} AS {left_alias}",
+            quote_join_table(right)?,
+            quote_join_identifier(flag_name),
+            quote_join_table(left)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join registered tables using arbitrary DataFusion expressions.
     ///
     /// Unlike equality-key joins, predicates may be comparisons or multiple
