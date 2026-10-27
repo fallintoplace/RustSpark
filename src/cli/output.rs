@@ -243,8 +243,10 @@ async fn write_html<W: Write>(
                 if column.is_null(row) {
                     write!(output, "<td class=\"null\">NULL</td>")?;
                 } else {
-                    let value =
-                        datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)?;
+                    let value = datafusion::arrow::util::display::array_value_to_string(
+                        column.as_ref(),
+                        row,
+                    )?;
                     write!(output, "<td>{}</td>", escape_html_cell(&value))?;
                 }
             }
