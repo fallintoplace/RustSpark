@@ -1147,12 +1147,19 @@ impl RustSparkSession {
         Ok(())
     }
 
+    async fn paginate<F>(frame: F, offset: usize, limit: usize) -> Result<DataFrame>
+    where
+        F: std::future::Future<Output = Result<DataFrame>>,
+    {
+        Self::validate_page_window(offset, limit)?;
+        frame.await?.limit(offset, Some(limit))
+    }
+
     /// Plan a paginated query without collecting all its rows.
     ///
     /// Use ORDER BY in the SQL query for deterministic pages.
     pub async fn sql_page(&self, query: &str, offset: usize, limit: usize) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.sql(query).await?.limit(offset, Some(limit))
+        Self::paginate(self.sql(query), offset, limit).await
     }
 
     /// Plan a page of read-only SQL without loading the full result.
@@ -1164,8 +1171,7 @@ impl RustSparkSession {
         offset: usize,
         limit: usize,
     ) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.sql_read_only(query).await?.limit(offset, Some(limit))
+        Self::paginate(self.sql_read_only(query), offset, limit).await
     }
 
     /// Plan a parameterized, read-only SQL page without collecting all rows.
@@ -1179,10 +1185,7 @@ impl RustSparkSession {
         limit: usize,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.sql_read_only_with_params(query, params)
-            .await?
-            .limit(offset, Some(limit))
+        Self::paginate(self.sql_read_only_with_params(query, params), offset, limit).await
     }
 
     /// Plan a parameterized SQL page with bounded row count.
@@ -1195,10 +1198,7 @@ impl RustSparkSession {
         limit: usize,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.sql_with_params(query, params)
-            .await?
-            .limit(offset, Some(limit))
+        Self::paginate(self.sql_with_params(query, params), offset, limit).await
     }
 
     async fn extract_first_row(
