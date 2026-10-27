@@ -55,11 +55,21 @@ def compare(left: QueryResult, right: QueryResult, ordered: bool = False):
     return None
 
 
-def parse_rustspark_columns(stdout: str) -> list[str]:
+def parse_rustspark_schema_fields(stdout: str) -> list[list[str]]:
     fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
     if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
         raise ValueError("Invalid RustSpark schema description")
-    return [parts[0] for parts in fields]
+    return fields
+
+
+def parse_rustspark_columns(stdout: str) -> list[str]:
+    return [parts[0] for parts in parse_rustspark_schema_fields(stdout)]
+
+
+def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
+    objects = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    rows = [[obj[column] for column in columns] for obj in objects]
+    return QueryResult(columns=columns, rows=rows)
 
 
 def rustspark_query(binary: str, sql: str):
@@ -72,9 +82,7 @@ def rustspark_query(binary: str, sql: str):
         common + ["--stdout-format", "json"],
         capture_output=True, text=True, check=True, timeout=120
     )
-    objects = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    rows = [[obj[column] for column in columns] for obj in objects]
-    return QueryResult(columns=columns, rows=rows)
+    return parse_rustspark_json(result.stdout, columns)
 
 
 def spark_query(session, sql: str):

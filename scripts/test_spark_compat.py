@@ -21,6 +21,13 @@ class SparkCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
             mod.parse_rustspark_columns("missing_types\n")
 
+    def test_shared_schema_and_json_parsers(self):
+        fields = mod.parse_rustspark_schema_fields("first\tpart\tInt64\tNOT NULL\n")
+        self.assertEqual(fields, [["first\tpart", "Int64", "NOT NULL"]])
+        result = mod.parse_rustspark_json('{"a":1,"b":null}\n', ["b", "a"])
+        self.assertEqual(result.columns, ["b", "a"])
+        self.assertEqual(result.rows, [[None, 1]])
+
     def test_unordered_results_are_multiset_compared(self):
         first = mod.QueryResult(["id"], [[2], [1], [1]])
         second = mod.QueryResult(["id"], [[1], [2], [1]])
