@@ -1157,8 +1157,7 @@ impl RustSparkSession {
     /// The plan remains lazy. Use a sorted view for deterministic page order.
     /// The limit must be positive, and offset plus limit must not overflow.
     pub async fn table_page(&self, table: &str, offset: usize, limit: usize) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.table(table).await?.limit(offset, Some(limit))
+        Self::paginate(self.table(table), offset, limit).await
     }
 
     /// Join two registered tables on one or more pairs of equality keys.
