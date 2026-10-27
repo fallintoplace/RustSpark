@@ -47,8 +47,31 @@ jobs:
             exit 1
           fi
 
-  build:
+  storage-qualification:
     needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Qualify local storage and V1 CLI workflows
+        run: >-
+          cargo test --locked
+          --test cli_insert_recovery
+          --test cli_database_lock
+          --test cli_catalog_recovery
+          --test cli_database_backup
+          --test v1_workflows
+
+  build:
+    needs: [verify, storage-qualification]
     strategy:
       fail-fast: false
       matrix:
@@ -82,25 +105,44 @@ jobs:
           test "$result" = '{"answer":42}'
       - name: Cross-process SQL smoke test
         run: python scripts/release_smoke.py --binary ${{ matrix.binary }}
+      - name: Unit-test archive verifier
+        run: python -m unittest discover -s scripts -p 'test_verify_release_archive.py'
       - name: Package Linux executable
         if: runner.os == 'Linux'
         shell: bash
         run: |
           mkdir -p dist
-          tar -czf dist/rustspark-linux-x86_64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md
+          tar -czf dist/rustspark-linux-x86_64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md LICENSE
       - name: Package Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/rustspark.exe, README.md -DestinationPath dist/rustspark-windows-x86_64.zip -CompressionLevel Optimal
+          Compress-Archive -Path target/release/rustspark.exe, README.md, LICENSE -DestinationPath dist/rustspark-windows-x86_64.zip -CompressionLevel Optimal
       - name: Package macOS arm64 executable
         if: runner.os == 'macOS'
         shell: bash
         run: |
           test "$(uname -m)" = arm64
           mkdir -p dist
-          tar -czf dist/rustspark-macos-arm64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md
+          tar -czf dist/rustspark-macos-arm64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md LICENSE
+      - name: Verify final archive and smoke-test extracted binary
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)
+              python scripts/verify_release_archive.py --archive dist/rustspark-linux-x86_64.tar.gz --binary "${{ matrix.binary }}"
+              ;;
+            Windows)
+              python scripts/verify_release_archive.py --archive dist/rustspark-windows-x86_64.zip --binary "${{ matrix.binary }}"
+              ;;
+            macOS)
+              python scripts/verify_release_archive.py --archive dist/rustspark-macos-arm64.tar.gz --binary "${{ matrix.binary }}"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.id }}

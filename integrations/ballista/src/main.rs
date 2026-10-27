@@ -4,6 +4,7 @@ use rustspark::RustSparkSession;
 
 mod deadline;
 mod remote_inputs;
+mod result_export;
 mod result_preview;
 mod scheduler;
 
@@ -49,11 +50,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     remote_inputs::register(&session).await?;
 
-    let result = session.sql(&query).await?;
-    if let Some(rows) = result_preview::configured_rows()? {
-        result.show_limit(rows).await?;
-    } else {
-        result.show().await?;
+    match std::env::var("RUSTSPARK_OUTPUT_ARROW") {
+        Ok(path) => {
+            if result_preview::configured_rows()?.is_some() {
+                return Err("RUSTSPARK_OUTPUT_ARROW cannot be combined with RUSTSPARK_MAX_ROWS".into());
+            }
+            result_export::write_arrow(&session, &query, std::path::Path::new(&path)).await?;
+            eprintln!("Wrote Arrow IPC result to {path}");
+        }
+        Err(std::env::VarError::NotPresent) => {
+            let result = session.sql(&query).await?;
+            if let Some(rows) = result_preview::configured_rows()? {
+                result.show_limit(rows).await?;
+            } else {
+                result.show().await?;
+            }
+        }
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
