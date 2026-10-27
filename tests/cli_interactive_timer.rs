@@ -4,7 +4,8 @@ use std::{
 };
 
 #[test]
-fn query_timer_can_be_enabled_and_disabled_between_statements() -> Result<(), Box<dyn std::error::Error>> {
+fn query_timer_can_be_enabled_and_disabled_between_statements()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args(["--interactive", "--csv", "tests/fixtures/sales.csv"])
         .stdin(Stdio::piped())
@@ -15,9 +16,7 @@ fn query_timer_can_be_enabled_and_disabled_between_statements() -> Result<(), Bo
         .stdin
         .take()
         .ok_or("missing stdin")?
-        .write_all(
-            b".timer on\nSELECT 17 AS first;\n.timer off\nSELECT 19 AS second;\n.quit\n",
-        )?;
+        .write_all(b".timer on\nSELECT 17 AS first;\n.timer off\nSELECT 19 AS second;\n.quit\n")?;
     let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
