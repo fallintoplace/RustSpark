@@ -1203,12 +1203,13 @@ impl RustSparkSession {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
 
-        let existing: HashMap<_, _> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| (field.name().to_ascii_lowercase(), field.name().as_str()))
-            .collect();
+        let fields = dataframe.schema().fields();
+        let indexed = (columns.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| (field.name().to_ascii_lowercase(), field.name().as_str()))
+                .collect::<HashMap<_, _>>()
+        });
         let mut updates = HashMap::new();
         let mut seen = HashSet::new();
         for (name, expr) in columns {
@@ -1217,15 +1218,22 @@ impl RustSparkSession {
                     "with_columns requires non-empty, unpadded names".into(),
                 ));
             }
-            if !seen.insert(name.to_ascii_lowercase()) {
+            let normalized = name.to_ascii_lowercase();
+            if !seen.insert(normalized.clone()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate withColumns name: {name}"
                 )));
             }
-            if existing
-                .get(&name.to_ascii_lowercase())
-                .is_some_and(|original| original != name)
-            {
+            let conflicting = match &indexed {
+                Some(indexed) => indexed
+                    .get(&normalized)
+                    .is_some_and(|original| original != name),
+                None => fields.iter().any(|field| {
+                    field.name().as_str() != *name
+                        && field.name().eq_ignore_ascii_case(name)
+                }),
+            };
+            if conflicting {
                 return Err(DataFusionError::Plan(format!(
                     "with_columns name conflicts with an existing column: {name}"
                 )));
