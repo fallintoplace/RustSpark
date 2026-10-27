@@ -78,7 +78,10 @@ impl RustSparkSession {
                 )));
             }
         }
-        let operator = outer_join_operator(join_type, "join_tables_using supports inner and outer joins only")?;
+        let operator = outer_join_operator(
+            join_type,
+            "join_tables_using supports inner and outer joins only",
+        )?;
 
         // The two read-only table lookups are independent. Resolve them
         // together, but keep the left/right schema order in the final plan.
@@ -212,13 +215,19 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         use std::{collections::HashSet, fmt::Write as _};
 
-        validate_join_key_pairs(keys, "join_tables_with_suffixes requires non-empty key pairs")?;
+        validate_join_key_pairs(
+            keys,
+            "join_tables_with_suffixes requires non-empty key pairs",
+        )?;
         if left_suffix.trim().is_empty() || right_suffix.trim().is_empty() {
             return Err(DataFusionError::Plan(
                 "join_tables_with_suffixes requires non-empty suffixes".into(),
             ));
         }
-        let operator = outer_join_operator(join_type, "join_tables_with_suffixes supports inner and outer joins only")?;
+        let operator = outer_join_operator(
+            join_type,
+            "join_tables_with_suffixes supports inner and outer joins only",
+        )?;
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
         let left_names: HashSet<_> = left_frame
             .schema()
@@ -300,7 +309,10 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         keys: &[(&str, &str)],
     ) -> Result<DataFrame> {
-        validate_join_key_pairs(keys, "join_tables requires at least one pair of non-empty join keys")?;
+        validate_join_key_pairs(
+            keys,
+            "join_tables requires at least one pair of non-empty join keys",
+        )?;
 
         let left_keys: Vec<_> = keys.iter().map(|(left, _)| *left).collect();
         let right_keys: Vec<_> = keys.iter().map(|(_, right)| *right).collect();
@@ -322,8 +334,14 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         use std::fmt::Write as _;
 
-        validate_join_key_pairs(keys, "join_tables_null_safe requires one or more non-empty key pairs")?;
-        let operator = outer_join_operator(join_type, "join_tables_null_safe supports inner and outer joins only")?;
+        validate_join_key_pairs(
+            keys,
+            "join_tables_null_safe requires one or more non-empty key pairs",
+        )?;
+        let operator = outer_join_operator(
+            join_type,
+            "join_tables_null_safe supports inner and outer joins only",
+        )?;
         let mut predicates = String::with_capacity(keys.len() * 96);
         for (left_key, right_key) in keys {
             if !predicates.is_empty() {
@@ -382,7 +400,10 @@ impl RustSparkSession {
         keys: &[(&str, &str)],
         filter: datafusion::logical_expr::Expr,
     ) -> Result<DataFrame> {
-        validate_join_key_pairs(keys, "join_tables_filtered requires one or more non-empty key pairs")?;
+        validate_join_key_pairs(
+            keys,
+            "join_tables_filtered requires one or more non-empty key pairs",
+        )?;
         let left_keys: Vec<_> = keys.iter().map(|(key, _)| *key).collect();
         let right_keys: Vec<_> = keys.iter().map(|(_, key)| *key).collect();
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
@@ -480,8 +501,14 @@ mod join_validation_tests {
 
     #[test]
     fn shared_outer_join_operator_preserves_supported_kinds() {
-        assert_eq!(outer_join_operator(JoinType::Inner, "invalid").unwrap(), "INNER");
-        assert_eq!(outer_join_operator(JoinType::Full, "invalid").unwrap(), "FULL OUTER");
+        assert_eq!(
+            outer_join_operator(JoinType::Inner, "invalid").unwrap(),
+            "INNER"
+        );
+        assert_eq!(
+            outer_join_operator(JoinType::Full, "invalid").unwrap(),
+            "FULL OUTER"
+        );
         assert!(outer_join_operator(JoinType::LeftSemi, "invalid").is_err());
     }
 }
