@@ -1,0 +1,35 @@
+{
+  "name": "distinct_batch",
+  "sql": "SELECT COUNT(DISTINCT city) AS n, COUNT(DISTINCT amount) AS amounts FROM data",
+  "rows": 100000,
+  "variants": [
+    {
+      "name": "batch_512",
+      "flags": [
+        "--batch-size",
+        "512"
+      ]
+    },
+    {
+      "name": "batch_2048",
+      "flags": [
+        "--batch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "batch_8192",
+      "flags": [
+        "--batch-size",
+        "8192"
+      ]
+    },
+    {
+      "name": "batch_32768",
+      "flags": [
+        "--batch-size",
+        "32768"
+      ]
+    }
+  ]
+}
