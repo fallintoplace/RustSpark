@@ -103,6 +103,15 @@ let rows = page.collect().await?;
 
 The call builds a DataFusion LIMIT/OFFSET plan, without collecting the source.
 
+Select the top N rows by one or more columns without collecting the source:
+
+```rust
+let top = session.top_rows("sales", &[("amount", false)], 5).await?;
+```
+
+Use `true` for ascending and `false` for descending order. Add a unique
+tie-breaker when values can be equal.
+
 Use multiple key pairs for compound equality joins. Supported types include
 INNER, LEFT, RIGHT, FULL, SEMI, and ANTI. Unmatched outer rows contain NULLs;
 NULL join keys do not match other NULL keys by default. A Cartesian product
