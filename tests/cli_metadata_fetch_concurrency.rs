@@ -14,11 +14,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[test]
 fn loads_directory_with_parallel_file_metadata_reads() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "n",
-        DataType::Int64,
-        false,
-    )]));
+    let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
     for index in 0..8 {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
