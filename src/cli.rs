@@ -732,7 +732,10 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.interactive {
         if let Some(table) = args.compact_table.as_deref() {
-            let root = args.database_dir.as_deref().ok_or("Missing database directory")?;
+            let root = args
+                .database_dir
+                .as_deref()
+                .ok_or("Missing database directory")?;
             persistence::compact_saved_table(&session, root, &table.to_ascii_lowercase()).await?;
         }
         return run_interactive(&session, &args).await;
