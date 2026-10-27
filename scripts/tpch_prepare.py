@@ -15,6 +15,10 @@ def prepare(connection, destination, scale):
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("Scale factor must be a finite positive number")
     output = Path(destination)
+    if output.is_symlink():
+        raise ValueError(f"Destination must not be a symlink: {output}")
+    if output.exists() and not output.is_dir():
+        raise ValueError(f"Destination must be a directory: {output}")
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"Destination must be empty: {output}")
     parquet_dir = output / "data"

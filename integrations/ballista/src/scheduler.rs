@@ -100,6 +100,25 @@ async fn connect_endpoint(
         .map_err(|error| error.to_string())
 }
 
+// Bound both the TCP reachability probe and the Ballista session handshake.
+// A reachable TCP port is not necessarily a responsive Ballista scheduler.
+async fn bounded_connect<T>(
+    limit: Option<Duration>,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match limit {
+        Some(limit) => tokio::time::timeout(limit, operation)
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "connection timed out after {} seconds",
+                    limit.as_secs()
+                ))
+            }),
+        None => operation.await,
+    }
+}
+
 struct SchedulerOptions {
     partitions: Option<usize>,
     endpoints: Vec<String>,
@@ -137,13 +156,13 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
             failures.push(format!("{endpoint}: {message}"));
             continue;
         }
-        if let Some(limit) = timeout {
-            if let Err(message) = probe_reachable(endpoint, limit).await {
-                failures.push(format!("{endpoint}: {message}"));
-                continue;
+        let result = bounded_connect(timeout, async {
+            if let Some(limit) = timeout {
+                probe_reachable(endpoint, limit).await?;
             }
-        }
-        let result = connect_endpoint(endpoint, partitions).await;
+            connect_endpoint(endpoint, partitions).await
+        })
+        .await;
         match result {
             Ok(context) => {
                 if index > 0 {
@@ -214,6 +233,29 @@ mod tests {
         assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_ok());
         drop(listener);
         assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn times_out_a_stalled_connection_attempt() {
+        let error = bounded_connect(
+            Some(Duration::from_millis(10)),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("connection timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn preserves_connection_results() {
+        let ok = bounded_connect(None, async { Ok::<_, String>(42) }).await;
+        assert_eq!(ok, Ok(42));
+
+        let failed = bounded_connect(Some(Duration::from_secs(1)), async {
+            Err::<(), String>("scheduler refused connection".into())
+        })
+        .await;
+        assert_eq!(failed, Err("scheduler refused connection".into()));
     }
 
     #[test]

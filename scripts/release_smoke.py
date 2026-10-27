@@ -18,9 +18,34 @@ def execute(binary: pathlib.Path, *args: str) -> str:
     return result.stdout
 
 
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate JSON result key: {key}")
+        value[key] = item
+    return value
+
+
+def reject_nonfinite(value):
+    raise ValueError(f"Non-finite JSON result: {value}")
+
+
 def rows(binary: pathlib.Path, *args: str) -> list[dict]:
     data = execute(binary, *args, "--stdout-format", "json")
-    return [json.loads(line) for line in data.splitlines() if line]
+    results = []
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(
+            line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite,
+        )
+        if not isinstance(row, dict):
+            raise ValueError("Expected a JSON object for each SQL result row")
+        # json.loads also accepts out-of-range exponents such as 1e400 as infinity.
+        json.dumps(row, allow_nan=False)
+        results.append(row)
+    return results
 
 
 def expect_rows(binary: pathlib.Path, expected: list[dict], *args: str) -> None:

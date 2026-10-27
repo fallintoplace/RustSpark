@@ -56,3 +56,27 @@ async fn rename_columns_supports_atomic_swaps() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn sparse_rename_on_wide_table_preserves_other_names() -> TestResult {
+    let session = RustSparkSession::new();
+    let projection = (0..64)
+        .map(|index| format!("{index} AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    session
+        .register_sql_view("wide", &format!("SELECT {projection}"))
+        .await?;
+    let updated = session.rename_columns("wide", &[("c63", "renamed")]).await?;
+    let names = updated
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 64);
+    assert_eq!(names[0], "c0");
+    assert_eq!(names[63], "renamed");
+    assert!(session.rename_columns("wide", &[("missing", "renamed")]).await.is_err());
+    Ok(())
+}

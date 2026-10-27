@@ -59,6 +59,8 @@ def verify_reports(actual: dict, reference: dict) -> list[str]:
     rows = index_queries(actual, "Actual")
     expected = index_queries(reference, "Reference")
     issues = []
+    for number in sorted(expected.keys() - rows.keys()):
+        issues.append(f"Query {number}: missing actual result")
     for number, observed in sorted(rows.items()):
         prior = expected.get(number)
         if prior is None:
