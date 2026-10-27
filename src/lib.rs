@@ -7,6 +7,8 @@ use datafusion::{
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 
+#[path = "sql_compat/try_divide.rs"]
+mod sql_compat_try_divide;
 mod export;
 mod joins;
 mod set_operations;
@@ -95,9 +97,7 @@ impl RustSparkSession {
     }
 
     pub fn with_config(config: SessionConfig) -> Self {
-        Self {
-            context: SessionContext::new_with_config(config),
-        }
+        Self::from_context(SessionContext::new_with_config(config))
     }
 
     /// Wrap a preconfigured DataFusion context, including an externally
@@ -105,13 +105,12 @@ impl RustSparkSession {
     ///
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
+        context.register_udf(sql_compat_try_divide::udf());
         Self { context }
     }
 
     pub fn with_config_and_runtime(config: SessionConfig, runtime: Arc<RuntimeEnv>) -> Self {
-        Self {
-            context: SessionContext::new_with_config_rt(config, runtime),
-        }
+        Self::from_context(SessionContext::new_with_config_rt(config, runtime))
     }
 
     /// Return the underlying provider for cancellation-safe table replacement.
