@@ -22,7 +22,10 @@ fn tabs_separate_interactive_table_commands() -> Result<(), Box<dyn std::error::
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("Shell error:"), "{stderr}");
     assert!(stdout.lines().any(|line| line == "city"), "{stdout}");
-    assert!(stdout.lines().any(|line| line.starts_with("city\t")), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line.starts_with("city\t")),
+        "{stdout}"
+    );
     assert!(stdout.lines().any(|line| line == "3"), "{stdout}");
     Ok(())
 }
