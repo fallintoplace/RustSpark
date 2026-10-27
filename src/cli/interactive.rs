@@ -339,11 +339,14 @@ pub(super) async fn run_interactive(
         }
         if pending.trim().is_empty() {
             let command = line.trim();
-            if command == ".timer" || command.starts_with(".timer ") {
-                match command {
-                    ".timer on" => timer_on = true,
-                    ".timer off" => timer_on = false,
-                    ".timer" => eprintln!("Timer: {}", if timer_on { "on" } else { "off" }),
+            if command == ".timer"
+                || command.starts_with(".timer ")
+                || command.starts_with(".timer\t")
+            {
+                match command[".timer".len()..].trim() {
+                    "on" => timer_on = true,
+                    "off" => timer_on = false,
+                    "" => eprintln!("Timer: {}", if timer_on { "on" } else { "off" }),
                     _ => eprintln!("Shell error: use .timer on or .timer off"),
                 }
                 continue;
