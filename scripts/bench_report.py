@@ -45,28 +45,7 @@ def _cell(value):
             .replace("|", "\\|").replace("\n", " ").replace("\r", " "))
 
 
-def _validate(report):
-    if not isinstance(report, dict):
-        raise ValueError("Benchmark report must be an object")
-    results = report.get("results")
-    if not isinstance(results, dict) or not results or "rustspark" not in results:
-        raise ValueError("Benchmark must contain RustSpark engine results")
-    if isinstance(report.get("rows"), bool) or not isinstance(report.get("rows"), int) or report["rows"] < 1:
-        raise ValueError("Benchmark rows must be a positive integer")
-    if not isinstance(report.get("metric"), str) or not report["metric"].strip():
-        raise ValueError("Benchmark metric is missing")
-    if not isinstance(report.get("warning"), str) or not report["warning"].strip():
-        raise ValueError("Benchmark warning is missing")
-    repeat = report.get("repeat")
-    if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
-        raise ValueError("Benchmark repeat must be a positive integer")
-    warmup = report.get("warmup")
-    if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 0:
-        raise ValueError("Benchmark warmup must be a nonnegative integer")
-    rustspark = results["rustspark"]
-    if not isinstance(rustspark, dict) or not rustspark:
-        raise ValueError("RustSpark workloads are missing")
-    workloads = list(rustspark)
+def _validate_measurements(results, workloads, rustspark, repeat):
     for engine, measurements in results.items():
         if not isinstance(measurements, dict) or set(measurements) != set(workloads):
             raise ValueError(f"Workloads differ between RustSpark and {engine}")
@@ -92,6 +71,31 @@ def _validate(report):
                 raise ValueError(f"Invalid result digest for {engine}/{workload}")
             if digest != rustspark[workload].get("result_sha256"):
                 raise ValueError(f"Result digest mismatch for {engine}/{workload}")
+
+
+def _validate(report):
+    if not isinstance(report, dict):
+        raise ValueError("Benchmark report must be an object")
+    results = report.get("results")
+    if not isinstance(results, dict) or not results or "rustspark" not in results:
+        raise ValueError("Benchmark must contain RustSpark engine results")
+    if isinstance(report.get("rows"), bool) or not isinstance(report.get("rows"), int) or report["rows"] < 1:
+        raise ValueError("Benchmark rows must be a positive integer")
+    if not isinstance(report.get("metric"), str) or not report["metric"].strip():
+        raise ValueError("Benchmark metric is missing")
+    if not isinstance(report.get("warning"), str) or not report["warning"].strip():
+        raise ValueError("Benchmark warning is missing")
+    repeat = report.get("repeat")
+    if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
+        raise ValueError("Benchmark repeat must be a positive integer")
+    warmup = report.get("warmup")
+    if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 0:
+        raise ValueError("Benchmark warmup must be a nonnegative integer")
+    rustspark = results["rustspark"]
+    if not isinstance(rustspark, dict) or not rustspark:
+        raise ValueError("RustSpark workloads are missing")
+    workloads = list(rustspark)
+    _validate_measurements(results, workloads, rustspark, repeat)
     return results, workloads
 
 
