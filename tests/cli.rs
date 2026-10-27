@@ -759,11 +759,7 @@ fn rejects_conflicting_csv_parser_characters() {
             .output()
             .unwrap();
         assert!(!output.status.success(), "{flags:?}");
-        let expected = if flags == ["--csv-comment", "\""] {
-            "invalid value"
-        } else {
-            "must differ"
-        };
+        let expected = "must differ";
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(expected),
             "{flags:?}: {}",

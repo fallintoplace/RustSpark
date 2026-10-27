@@ -13,6 +13,7 @@ enum StdoutFormat {
     Json,
     JsonArray,
     Markdown,
+    Html,
     Arrow,
 }
 
@@ -154,7 +155,8 @@ struct Args {
         long = "compact-table",
         value_name = "NAME",
         value_parser = parse_table_name,
-        requires = "database_dir"
+        requires = "database_dir",
+        conflicts_with = "backup_database"
     )]
     compact_table: Option<String>,
 
@@ -291,16 +293,21 @@ fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>>
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
         .ok_or("--input needs a .csv, .json, .jsonl, .ndjson or .parquet extension")?;
-    match extension.as_str() {
-        "csv" => args.csv = Some(path.clone()),
-        "json" => args.json = Some(path.clone()),
-        "jsonl" | "ndjson" => {
-            args.json = Some(path.clone());
-            args.json_extension.get_or_insert(format!(".{extension}"));
+    let actual_extension = format!(".{extension}");
+    match extension.to_ascii_lowercase().as_str() {
+        "csv" => {
+            args.csv = Some(path.clone());
+            args.csv_extension.get_or_insert(actual_extension);
         }
-        "parquet" => args.parquet = Some(path.clone()),
+        "json" | "jsonl" | "ndjson" => {
+            args.json = Some(path.clone());
+            args.json_extension.get_or_insert(actual_extension);
+        }
+        "parquet" => {
+            args.parquet = Some(path.clone());
+            args.parquet_extension.get_or_insert(actual_extension);
+        }
         _ => return Err(format!("Unsupported --input extension: .{extension}").into()),
     }
     Ok(())
@@ -315,10 +322,7 @@ fn parse_ascii_csv_char(value: &str) -> Option<u8> {
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
     parse_ascii_csv_char(value)
-        .filter(|byte| *byte != b'"')
-        .ok_or_else(|| {
-            "CSV delimiter must be one ASCII character other than a quote or newline".into()
-        })
+        .ok_or_else(|| "CSV delimiter must be one ASCII character other than newline".into())
 }
 
 fn parse_csv_char(value: &str) -> Result<u8, String> {
@@ -731,6 +735,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return persistence::backup_database(root, destination);
     }
     if args.interactive {
+        if let Some(table) = args.compact_table.as_deref() {
+            let root = args
+                .database_dir
+                .as_deref()
+                .ok_or("Missing database directory")?;
+            persistence::compact_saved_table(&session, root, &table.to_ascii_lowercase()).await?;
+        }
         return run_interactive(&session, &args).await;
     }
     with_query_timeout(
