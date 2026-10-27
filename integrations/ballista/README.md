@@ -35,6 +35,26 @@ RUSTSPARK_SQL='SELECT COUNT(*) FROM data' \
 cargo run --manifest-path integrations/ballista/Cargo.toml
 ```
 
+### Register several distributed tables
+
+Use `RUSTSPARK_INPUTS` to register named Parquet, CSV, or newline-delimited
+JSON inputs on the remote session. This enables joins and aggregations across
+different sources without collecting them in the client:
+
+```sh
+BALLISTA_URL=df://scheduler:50050 \
+RUSTSPARK_INPUTS='parquet:orders=/shared/orders;csv:customers=/shared/customers.csv' \
+RUSTSPARK_SQL='SELECT COUNT(*) FROM orders JOIN customers USING (customer_id)' \
+cargo run --manifest-path integrations/ballista/Cargo.toml
+```
+
+Entries are separated by semicolons and use `format:table=path`. Table names
+must be simple SQL identifiers and are unique ignoring case. Paths must not
+contain semicolons. The older `RUSTSPARK_PARQUET` still registers `data`;
+`RUSTSPARK_INPUTS` cannot also use that name. All paths or object store
+locations must be accessible from the worker nodes. This example does not
+configure object store credentials.
+
 ### Limitations
 
 - This is a separate, opt-in binary, not `rustspark --distributed`.
