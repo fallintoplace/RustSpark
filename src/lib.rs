@@ -1031,6 +1031,14 @@ impl RustSparkSession {
         self.union_sql_internal(queries, false).await
     }
 
+    /// Union SQL query results by column position and remove duplicates.
+    ///
+    /// Each query must return compatible columns. NULL rows compare equal
+    /// for deduplication. The result is a lazy DataFrame.
+    pub async fn union_sql_distinct(&self, queries: &[&str]) -> Result<DataFrame> {
+        self.union_sql(queries).await?.distinct()
+    }
+
     /// Union lazy SQL query results by column name.
     ///
     /// Missing fields are filled with NULL and duplicate rows are preserved.
