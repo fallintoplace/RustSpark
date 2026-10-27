@@ -11,9 +11,7 @@ async fn wide_sort_preserves_validation_and_schema() -> Result<(), Box<dyn std::
         .register_sql_view("wide", &format!("SELECT {projection}"))
         .await?;
 
-    let names = (0..32)
-        .map(|index| format!("c{index}"))
-        .collect::<Vec<_>>();
+    let names = (0..32).map(|index| format!("c{index}")).collect::<Vec<_>>();
     let order = names
         .iter()
         .map(|name| (name.as_str(), true, true))
