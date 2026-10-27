@@ -529,12 +529,13 @@ impl RustSparkSession {
         if values.is_empty() {
             return dataframe.filter(datafusion::prelude::lit(false));
         }
+        use datafusion::{common::Column, logical_expr::Expr};
         let list = values
             .iter()
             .cloned()
             .map(datafusion::prelude::lit)
             .collect();
-        dataframe.filter(datafusion::prelude::col(column).in_list(list, false))
+        dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, false))
     }
 
     /// Register a scalar user-defined function for SQL queries in this session.
