@@ -15,7 +15,7 @@ fn shell_lists_schemas_and_continues_running_sql() -> Result<(), Box<dyn std::er
         .stdin
         .take()
         .ok_or("missing stdin")?
-        .write_all(b".schemas\\n.help\\nSELECT 9 AS answer;\\n\\q\\n")?;
+        .write_all(b".schemas\n.help\nSELECT 9 AS answer;\n\\q\n")?;
     let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
