@@ -275,6 +275,10 @@ struct Args {
     #[arg(long = "output-single-file")]
     output_single_file: bool,
 
+    /// Soft row limit per file for partitioned CSV, JSON, and Parquet exports.
+    #[arg(long = "output-rows-per-file", value_name = "ROWS", value_parser = parse_output_rows_per_file, conflicts_with = "output_single_file")]
+    output_rows_per_file: Option<usize>,
+
     #[arg(
         long = "parquet-compression",
         value_name = "CODEC",
@@ -609,6 +613,10 @@ fn parse_batch_size(value: &str) -> Result<usize, String> {
 
 fn parse_target_partitions(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--target-partitions")
+}
+
+fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--output-rows-per-file")
 }
 
 fn parse_positive_rows(value: &str) -> Result<usize, String> {

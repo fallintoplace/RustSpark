@@ -18,6 +18,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }
+    if let Some(rows) = args.output_rows_per_file {
+        config = config.set_usize("datafusion.execution.soft_max_rows_per_output_file", rows);
+    }
     config
 }
 
