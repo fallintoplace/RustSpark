@@ -25,7 +25,11 @@ async fn colliding_session() -> Result<RustSparkSession, Box<dyn std::error::Err
 #[tokio::test]
 async fn shared_join_column_names_get_unique_suffixes() -> TestResult {
     let session = colliding_session().await?;
-    for (kind, expected) in [(JoinType::Inner, 1), (JoinType::Left, 2), (JoinType::Full, 3)] {
+    for (kind, expected) in [
+        (JoinType::Inner, 1),
+        (JoinType::Left, 2),
+        (JoinType::Full, 3),
+    ] {
         let joined = session
             .join_tables_with_suffixes("order", "lookup", kind, &[("id", "id")], "_l", "_r")
             .await?;
@@ -57,7 +61,13 @@ async fn suffixes_are_sql_quoted_and_collisions_are_rejected() -> TestResult {
             "_r",
         )
         .await?;
-    assert!(joined.schema().fields().iter().any(|field| field.name() == "id_l\"quoted"));
+    assert!(
+        joined
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == "id_l\"quoted")
+    );
     assert_eq!(joined.count().await?, 1);
 
     assert!(
