@@ -154,7 +154,8 @@ struct Args {
         long = "compact-table",
         value_name = "NAME",
         value_parser = parse_table_name,
-        requires = "database_dir"
+        requires = "database_dir",
+        conflicts_with = "backup_database"
     )]
     compact_table: Option<String>,
 
