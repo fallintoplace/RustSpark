@@ -1,8 +1,8 @@
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn column_count_reads_schema_without_scanning_rows()
--> Result<(), Box<dyn std::error::Error>> {
+async fn column_count_reads_schema_without_scanning_rows() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     session
         .register_sql_view("items", "SELECT 1 AS id, 'north' AS region, 9 AS score")
