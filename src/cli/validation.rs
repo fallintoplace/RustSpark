@@ -3,14 +3,23 @@ use super::{Args, StdoutFormat, load_parquet_file_list, parse_named_table};
 use std::path::{Path, PathBuf};
 
 fn canonical_output_path(destination: &Path) -> Option<PathBuf> {
-    if let Ok(existing) = destination.canonicalize() {
-        return Some(existing);
+    let mut ancestor = destination;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(resolved) = ancestor.canonicalize() {
+            return Some(
+                missing
+                    .into_iter()
+                    .rev()
+                    .fold(resolved, |path: PathBuf, component| path.join(component)),
+            );
+        }
+        missing.push(ancestor.file_name()?);
+        ancestor = ancestor
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
     }
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    Some(parent.canonicalize().ok()?.join(destination.file_name()?))
 }
 
 fn overlaps_input_path(source: &Path, destination: &Path) -> bool {
@@ -262,4 +271,42 @@ pub(super) fn validate_format_options(args: &Args) -> Result<(), Box<dyn std::er
         (args.json_array, json, "--json-array requires a JSON input"),
     ])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod path_collision_tests {
+    use super::{canonical_output_path, overlaps_input_path};
+    use std::fs;
+
+    #[test]
+    fn nested_output_paths_still_collide_with_input_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let nested = source.join("new/subdirectory/output.csv");
+        let normalized = canonical_output_path(&nested).unwrap();
+        assert_eq!(
+            normalized,
+            source
+                .canonicalize()
+                .unwrap()
+                .join("new")
+                .join("subdirectory")
+                .join("output.csv")
+        );
+        assert!(overlaps_input_path(&source, &normalized));
+
+        let unrelated = temp.path().join("other/subdirectory/output.csv");
+        let normalized = canonical_output_path(&unrelated).unwrap();
+        assert_eq!(
+            normalized,
+            temp.path()
+                .canonicalize()
+                .unwrap()
+                .join("other")
+                .join("subdirectory")
+                .join("output.csv")
+        );
+        assert!(!overlaps_input_path(&source, &normalized));
+    }
 }
