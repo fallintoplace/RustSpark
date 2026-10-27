@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,6 +17,11 @@ class FakeConnection:
 
     def execute(self, command):
         self.commands.append(command)
+        if command.startswith("COPY "):
+            path = re.search(r" TO '((?:''|[^'])*)'", command)
+            if path is None:
+                raise ValueError("Expected COPY destination")
+            Path(path.group(1).replace("''", "'")).write_bytes(b"PAR1")
         return self
 
     def fetchone(self):
@@ -40,6 +46,7 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(report["rows"]["orders"], 5)
             self.assertEqual(len(report["queries"]), 22)
             self.assertEqual(len(report["tables"]), 8)
+            self.assertEqual(len(report["table_sha256"]), 8)
             self.assertEqual((destination / "queries/18.sql").read_text(),
                              "SELECT 18\n")
             self.assertTrue((destination / "manifest.json").exists())
