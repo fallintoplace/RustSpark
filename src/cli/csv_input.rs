@@ -4,7 +4,7 @@ use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
     error::Result,
     logical_expr::Expr,
-    prelude::{CsvReadOptions, cast, ident, lit, nullif},
+    prelude::{CsvReadOptions, DataFrame, cast, ident, lit, nullif},
 };
 use rustspark::RustSparkSession;
 
@@ -29,13 +29,12 @@ fn null_normalizing_projection(field: &Field, marker: &str) -> Expr {
     typed.alias(field.name())
 }
 
-pub(super) async fn register_csv_with_null_value(
+async fn read_normalized_csv(
     session: &RustSparkSession,
-    name: &str,
     path: impl AsRef<Path>,
     options: CsvReadOptions<'_>,
     marker: &str,
-) -> Result<()> {
+) -> Result<DataFrame> {
     let inferred = session
         .read_csv_with_options(&path, options.clone())
         .await?;
@@ -48,8 +47,18 @@ pub(super) async fn register_csv_with_null_value(
         .iter()
         .map(|field| null_normalizing_projection(field, marker))
         .collect::<Vec<_>>();
-    session.register_dataframe(name, raw.select(expressions)?)?;
-    Ok(())
+    Ok(raw.select(expressions)?)
+}
+
+pub(super) async fn register_csv_with_null_value(
+    session: &RustSparkSession,
+    name: &str,
+    path: impl AsRef<Path>,
+    options: CsvReadOptions<'_>,
+    marker: &str,
+) -> Result<()> {
+    let normalized = read_normalized_csv(session, path, options, marker).await?;
+    session.register_dataframe(name, normalized)
 }
 
 #[cfg(test)]

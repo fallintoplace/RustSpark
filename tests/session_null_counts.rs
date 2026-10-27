@@ -95,3 +95,21 @@ async fn null_counts_validate_columns_and_count_empty_tables() -> TestResult {
     assert!(session.null_counts("missing", &[]).await.is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn wide_null_counts_return_all_fields() -> TestResult {
+    let session = RustSparkSession::new();
+    let projection = (0..32)
+        .map(|index| format!("CAST(NULL AS BIGINT) AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    session
+        .register_sql_view("wide_nulls", &format!("SELECT {projection}"))
+        .await?;
+    let batches = session.null_counts("wide_nulls", &[]).await?.collect().await?;
+    assert_eq!(batches[0].num_columns(), 32);
+    for column in batches[0].columns() {
+        assert_eq!(column.as_any().downcast_ref::<Int64Array>().unwrap().value(0), 1);
+    }
+    Ok(())
+}

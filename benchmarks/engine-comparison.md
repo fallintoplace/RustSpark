@@ -6,7 +6,7 @@ DuckDB and PySpark processes.
 Run: install DuckDB and PySpark 4, build RustSpark with cargo build --release
 --locked, then execute:
 
-    python3 scripts/bench_compare.py --binary ./target/release/rustspark --engines rustspark duckdb spark --rows 100000 --repeat 5 --json-out benchmarks/engine-comparison.json
+    python3 scripts/quality.py bench cold --binary ./target/release/rustspark --engines rustspark duckdb spark --rows 100000 --repeat 5 --json-out benchmarks/engine-comparison.json
 
 Each engine receives the same deterministic CSV and explicit column types,
 runs identical SQL and must return identical normalized JSON results.
@@ -39,6 +39,17 @@ deterministic expected results, including multi-row GROUP BY output.
 The workload uses typed CSV and local Spark `local[2]`; it is **not**
 a distributed, Parquet lake, or fault-tolerance benchmark.
 The manual `Compare warm local SQL sessions` workflow uploads raw timings.
+
+## Scheduled comparisons
+
+GitHub Actions runs the cold comparison every Monday and the warm comparison
+every Tuesday. The runs use the manual workflow defaults and upload checked
+JSON and Markdown reports for 90 days. Manual runs can override row count
+and repetition count.
+
+GitHub-hosted runners vary, so these reports are observations, not a
+statistically reliable performance regression gate. Compare repeated runs on
+controlled hardware before claiming a speedup.
 
 ## Reading benchmark results
 

@@ -34,7 +34,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The tag workflow verifies the version and `main` ancestry. It qualifies
+The tag workflow verifies the version, `main` ancestry and a successful
+Rust CI push run for the exact tagged commit. Pending, failed or cancelled
+runs cannot satisfy the release gate. It qualifies
 storage recovery on Linux and Windows, builds each binary with `--locked`,
 verifies the **packaged** binary matches the build output, and runs CLI smoke
 tests from the extracted archive. Publication depends on these jobs succeeding.

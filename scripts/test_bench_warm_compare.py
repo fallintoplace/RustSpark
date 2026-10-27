@@ -47,6 +47,10 @@ class WarmComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             warm.parse_result_line('{"name": "x", "name": "x"}')
 
+    def test_worker_output_rejects_float_overflow(self):
+        with self.assertRaises(ValueError):
+            warm.parse_result_line('{"elapsed_ms": 1e999}')
+
     def test_rejects_missing_timers_and_sql_failures(self):
         requests, _ = fixture(2)
         with self.assertRaisesRegex(ValueError, "timers"):
@@ -86,6 +90,17 @@ class WarmComparisonTests(unittest.TestCase):
         self.assertIn("--stdout-format", command)
         self.assertIn(".timer on", run.call_args.kwargs["input"])
         self.assertIn(".quit", run.call_args.kwargs["input"])
+
+    def test_benchmark_rejects_nonfinite_timeouts_before_launch(self):
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0):
+            with self.subTest(timeout=timeout):
+                with mock.patch.object(warm, "run_rustspark") as run:
+                    with self.assertRaisesRegex(ValueError, "timeout"):
+                        warm.benchmark(
+                            "bin", ["rustspark"], 2, 0, 1,
+                            timeout, 2, "local[2]",
+                        )
+                    run.assert_not_called()
 
     @mock.patch.object(warm, "run_rustspark")
     def test_benchmark_rejects_incorrect_engine_output(self, run):

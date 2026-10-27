@@ -1,3 +1,4 @@
+import copy
 import json
 import pathlib
 import sys
@@ -7,6 +8,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import bench_report
 import sql_result_verify
+import sql_report_compare
 
 
 def measurement(median, digest="a" * 64):
@@ -195,6 +197,54 @@ class SQLResultVerificationTests(unittest.TestCase):
             actual_path.write_text('{"results": [], "results": []}', encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Duplicate JSON key"):
                 sql_result_verify.load_report(actual_path)
+
+
+
+class SQLReportComparisonTests(unittest.TestCase):
+    def reports(self):
+        reference = sql_report_sample()
+        candidate = copy.deepcopy(reference)
+        for result in reference["results"]:
+            result["median_ms"] = 1.0
+        for result in candidate["results"]:
+            result["median_ms"] = 1.0
+        return reference, candidate
+
+    def test_rejects_invalid_matching_result_digests_and_counts(self):
+        for value in ("", "not-a-sha"):
+            reference, candidate = self.reports()
+            reference["results"][0]["result_sha256"] = value
+            candidate["results"][0]["result_sha256"] = value
+            result = sql_report_compare.compare_reports(reference, candidate)
+            self.assertIn("result differs", result["errors"][0])
+        for value in (-1, True, None):
+            reference, candidate = self.reports()
+            reference["results"][0]["result_rows"] = value
+            candidate["results"][0]["result_rows"] = value
+            result = sql_report_compare.compare_reports(reference, candidate)
+            self.assertIn("result differs", result["errors"][0])
+
+    def test_zero_baseline_with_positive_candidate_is_a_slowdown(self):
+        reference, candidate = self.reports()
+        reference["results"][0]["median_ms"] = 0.0
+        candidate["results"][0]["median_ms"] = 2.0
+        result = sql_report_compare.compare_reports(reference, candidate, 1.5)
+        self.assertEqual(result["slowdown_query_ids"], [1])
+        self.assertIsNone(result["timings"][0]["slowdown"])
+
+    def test_zero_baseline_with_zero_candidate_is_not_a_slowdown(self):
+        reference, candidate = self.reports()
+        reference["results"][0]["median_ms"] = 0.0
+        candidate["results"][0]["median_ms"] = 0.0
+        result = sql_report_compare.compare_reports(reference, candidate, 1.5)
+        self.assertEqual(result["slowdown_query_ids"], [])
+
+    def test_rejects_malformed_workload_digest(self):
+        reference, candidate = self.reports()
+        reference["query_file_sha256"] = "same"
+        candidate["query_file_sha256"] = "same"
+        with self.assertRaisesRegex(ValueError, "SQL workloads"):
+            sql_report_compare.compare_reports(reference, candidate)
 
 
 if __name__ == "__main__":

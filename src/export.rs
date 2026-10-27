@@ -40,11 +40,14 @@ impl RustSparkSession {
 
         let frame = self.sql_read_only(query).await?;
         write_export_dataframe(frame, staged_path, format).await?;
-        // A concurrent creator should not be overwritten after our query finishes.
-        reject_existing_export(destination)?;
-        fs::rename(&staged, destination).map_err(external_io)?;
-        Ok(())
+        publish_completed_export(&staged, destination)
     }
+}
+
+fn publish_completed_export(staged: &Path, destination: &Path) -> Result<()> {
+    // A concurrent creator should not be overwritten after our query finishes.
+    reject_existing_export(destination)?;
+    fs::rename(staged, destination).map_err(external_io)
 }
 
 fn prepare_export_staging(destination: &Path) -> Result<tempfile::TempDir> {
