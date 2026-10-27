@@ -82,6 +82,8 @@ class BallistaSmokeTests(unittest.TestCase):
             "RUSTSPARK_PARQUET": "/tmp/unrelated.parquet",
             "RUSTSPARK_MAX_ROWS": "1",
             "RUSTSPARK_QUERY_TIMEOUT_SECS": "1",
+            "RUSTSPARK_SCHEDULER_URLS": "df://wrong:55555",
+            "RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS": "1",
         }
         with mock.patch.dict(ballista_smoke.os.environ, inherited):
             ballista_smoke.run_smoke("standalone")
