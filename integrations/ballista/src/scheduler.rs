@@ -58,6 +58,25 @@ fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
     }
 }
 
+fn scheduler_address(endpoint: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(endpoint).map_err(|error| error.to_string())?;
+    let host = parsed.host().ok_or("Ballista endpoint must contain a hostname")?;
+    let port = parsed.port().unwrap_or(50050);
+    Ok(format!("{host}:{port}"))
+}
+
+async fn probe_reachable(endpoint: &str, limit: Duration) -> Result<(), String> {
+    let address = scheduler_address(endpoint)?;
+    match tokio::time::timeout(limit, tokio::net::TcpStream::connect(address)).await {
+        Ok(Ok(connection)) => {
+            drop(connection);
+            Ok(())
+        }
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!("connection timed out after {} seconds", limit.as_secs())),
+    }
+}
+
 pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Error>> {
     let partitions = match env::var("RUSTSPARK_TARGET_PARTITIONS") {
         Ok(value) => Some(parse_partitions(&value)?),
@@ -71,6 +90,12 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
     let mut failures = Vec::new();
 
     for (index, endpoint) in endpoints.iter().enumerate() {
+        if let Some(limit) = timeout {
+            if let Err(message) = probe_reachable(endpoint, limit).await {
+                failures.push(format!("{endpoint}: {message}"));
+                continue;
+            }
+        }
         let mut config = SessionConfig::new_with_ballista();
         if let Some(partitions) = partitions {
             config = config.with_target_partitions(partitions);
@@ -79,14 +104,9 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
             .with_config(config)
             .with_default_features()
             .build();
-        let attempt = SessionContext::remote_with_state(endpoint, state);
-        let result = match timeout {
-            Some(limit) => match tokio::time::timeout(limit, attempt).await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(_) => Err(format!("connection timed out after {} seconds", limit.as_secs())),
-            },
-            None => attempt.await.map_err(|error| error.to_string()),
-        };
+        let result = SessionContext::remote_with_state(endpoint, state)
+            .await
+            .map_err(|error| error.to_string());
         match result {
             Ok(context) => {
                 if index > 0 {
@@ -139,6 +159,22 @@ mod tests {
         }
         let many = vec!["df://host:50050"; 17].join(",");
         assert!(parse_endpoints("df://ignored:50050", Some(&many)).is_err());
+    }
+
+    #[test]
+    fn scheduler_probe_uses_ballista_url_defaults() {
+        assert_eq!(scheduler_address("df://scheduler").unwrap(), "scheduler:50050");
+        assert_eq!(scheduler_address("df://scheduler:50100").unwrap(), "scheduler:50100");
+        assert!(scheduler_address("df:///no-host").is_err());
+    }
+
+    #[tokio::test]
+    async fn scheduler_probe_detects_live_and_closed_listeners() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("df://{}", listener.local_addr().unwrap());
+        assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_ok());
+        drop(listener);
+        assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_err());
     }
 
     #[test]
