@@ -21,7 +21,9 @@ def _number(value, field):
 
 
 def _cell(value):
-    return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+    return (str(value).replace("\\", "\\\\").replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;")
+            .replace("|", "\\|").replace("\n", " ").replace("\r", " "))
 
 
 def _validate(report):
@@ -39,6 +41,9 @@ def _validate(report):
     repeat = report.get("repeat")
     if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
         raise ValueError("Benchmark repeat must be a positive integer")
+    warmup = report.get("warmup")
+    if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 0:
+        raise ValueError("Benchmark warmup must be a nonnegative integer")
     rustspark = results["rustspark"]
     if not isinstance(rustspark, dict) or not rustspark:
         raise ValueError("RustSpark workloads are missing")
@@ -89,21 +94,21 @@ def render_report(report):
         "",
         "## Median latency (ms, lower is better)",
         "",
-        "| Workload | " + " | ".join(engines) + " |",
+        "| Workload | " + " | ".join(_cell(engine) for engine in engines) + " |",
         "| --- | " + " | ".join("---:" for _ in engines) + " |",
     ]
     for name in workloads:
         values = [f"{results[engine][name]['median_ms']:.3f}" for engine in engines]
         lines.append("| " + _cell(name) + " | " + " | ".join(values) + " |")
     lines.extend(["", "## p95 latency (ms, lower is better)", "",
-                  "| Workload | " + " | ".join(engines) + " |",
+                  "| Workload | " + " | ".join(_cell(engine) for engine in engines) + " |",
                   "| --- | " + " | ".join("---:" for _ in engines) + " |"])
     for name in workloads:
         values = [f"{results[engine][name]['p95_ms']:.3f}" for engine in engines]
         lines.append("| " + _cell(name) + " | " + " | ".join(values) + " |")
     if competitors:
         lines.extend(["", "## RustSpark speed ratio (competitor median / RustSpark median)", "",
-                      "| Workload | " + " | ".join(f"vs {engine}" for engine in competitors) + " |",
+                      "| Workload | " + " | ".join(_cell(f"vs {engine}") for engine in competitors) + " |",
                       "| --- | " + " | ".join("---:" for _ in competitors) + " |"])
         for name in workloads:
             rustspark_ms = results["rustspark"][name]["median_ms"]
