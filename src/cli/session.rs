@@ -55,9 +55,7 @@ fn validate_spill_directory(
     Ok(())
 }
 
-fn custom_runtime(
-    args: &Args,
-) -> Result<Option<Arc<RuntimeEnv>>, Box<dyn std::error::Error>> {
+fn custom_runtime(args: &Args) -> Result<Option<Arc<RuntimeEnv>>, Box<dyn std::error::Error>> {
     if args.memory_limit_bytes.is_none() && args.spill_dir.is_none() {
         return Ok(None);
     }
