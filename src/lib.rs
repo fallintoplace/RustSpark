@@ -11,6 +11,8 @@ mod export;
 mod joins;
 mod set_operations;
 mod sources;
+#[path = "sql_compat/bin.rs"]
+mod sql_compat_bin;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
 
@@ -105,6 +107,7 @@ impl RustSparkSession {
     ///
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
+        context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_try_divide::udf());
         Self { context }
     }
