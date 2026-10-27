@@ -1844,6 +1844,27 @@ impl RustSparkSession {
         Self::sort_dataframe_with_nulls(self.table(table).await?, order)
     }
 
+    /// Return the most frequent distinct values from a registered column.
+    ///
+    /// Computes grouped counts lazily, sorts by descending frequency, and
+    /// applies a limit. NULL forms its own group. Ties are unordered.
+    /// A limit of zero produces an empty result.
+    pub async fn top_frequent_values(
+        &self,
+        table: &str,
+        column: &str,
+        limit: usize,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+
+        let counts = self.value_counts(table, column).await?;
+        counts
+            .sort(vec![
+                Expr::Column(Column::from_name("frequency")).sort(false, false),
+            ])?
+            .limit(0, Some(limit))
+    }
+
     // Plan independent SQL inputs concurrently, with bounded outstanding
     // work. buffered() returns results in input order, so UNION semantics and
     // the first reported planning error still follow query order.
