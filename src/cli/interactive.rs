@@ -164,7 +164,8 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await || handle_count_command(session, command).await {
+    if handle_schema_command(session, command).await || handle_count_command(session, command).await
+    {
         ShellAction::Continue
     } else {
         ShellAction::Sql
