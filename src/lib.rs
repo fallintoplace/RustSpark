@@ -194,12 +194,12 @@ impl RustSparkSession {
     ///
     /// The query is planned now but its rows are read when the view is queried.
     pub async fn register_sql_view(&self, name: &str, query: &str) -> Result<()> {
-        self.register_view_dataframe(name, self.sql(query).await?, false)
+        self.register_view_dataframe(name, self.sql_read_only(query).await?, false)
             .await
     }
 
     pub async fn register_materialized_sql_view(&self, name: &str, query: &str) -> Result<()> {
-        self.register_view_dataframe(name, self.sql(query).await?, true)
+        self.register_view_dataframe(name, self.sql_read_only(query).await?, true)
             .await
     }
 
@@ -213,8 +213,12 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        self.register_view_dataframe(name, self.sql_with_params(query, params).await?, false)
-            .await
+        self.register_view_dataframe(
+            name,
+            self.sql_read_only_with_params(query, params).await?,
+            false,
+        )
+        .await
     }
 
     /// Materialize a parameterized SQL query once and register its cached result.
@@ -224,8 +228,12 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        self.register_view_dataframe(name, self.sql_with_params(query, params).await?, true)
-            .await
+        self.register_view_dataframe(
+            name,
+            self.sql_read_only_with_params(query, params).await?,
+            true,
+        )
+        .await
     }
 
     /// Join two registered tables by their shared column names (SQL USING).
