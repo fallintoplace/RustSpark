@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -71,7 +72,30 @@ def reject_nonfinite(value: str):
     raise ValueError(f"invalid JSON numeric value: {value}")
 
 
-def result_signature(stdout: str) -> tuple[str, int]:
+def has_top_level_order_by(sql: str) -> bool:
+    # Ignore quoted values, identifiers, and SQL comments before scanning keywords.
+    masked = re.sub(
+        r"""'(?:''|[^'])*'|"(?:\"\"|[^"])*"|--[^\n]*|/\*.*?\*/""",
+        " ",
+        sql,
+        flags=re.DOTALL,
+    )
+    depth = 0
+    previous = ""
+    for token in re.findall(r"[A-Za-z_]+|[()]", masked):
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            word = token.upper()
+            if previous == "ORDER" and word == "BY":
+                return True
+            previous = word
+    return False
+
+
+def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
     rows = []
     for line in stdout.splitlines():
         if line.strip():
@@ -81,7 +105,8 @@ def result_signature(stdout: str) -> tuple[str, int]:
             if not isinstance(value, dict):
                 raise ValueError("expected a JSON object for each result row")
             rows.append(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
-    rows.sort()
+    if not ordered:
+        rows.sort()
     digest = hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
     return digest, len(rows)
 
@@ -104,7 +129,7 @@ def execute(binary: str, parquet: Path, sql: str, timeout: float) -> dict:
     if process.returncode:
         return {"error": f"Exit {process.returncode}: {process.stderr.strip()[:4096]}", "elapsed_ms": elapsed}
     try:
-        digest, count = result_signature(process.stdout)
+        digest, count = result_signature(process.stdout, ordered=has_top_level_order_by(sql))
     except (json.JSONDecodeError, ValueError) as error:
         return {"error": f"Invalid JSON result: {error}", "elapsed_ms": elapsed}
     return {"elapsed_ms": elapsed, "sha256": digest, "result_rows": count}

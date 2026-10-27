@@ -54,6 +54,33 @@ class QueryRunnerTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 runner.result_signature(value)
 
+    def test_ordered_result_signatures_check_row_order(self):
+        first = '{"n":1}\n{"n":2}\n'
+        reversed_rows = '{"n":2}\n{"n":1}\n'
+        self.assertEqual(runner.result_signature(first), runner.result_signature(reversed_rows))
+        self.assertNotEqual(
+            runner.result_signature(first, ordered=True),
+            runner.result_signature(reversed_rows, ordered=True),
+        )
+
+    def test_order_by_detection_ignores_quoted_and_nested_keywords(self):
+        self.assertTrue(runner.has_top_level_order_by("SELECT n FROM t ORDER /* comment */ BY n"))
+        self.assertTrue(runner.has_top_level_order_by("SELECT n FROM t order by n DESC"))
+        self.assertFalse(runner.has_top_level_order_by("SELECT 'ORDER BY' AS label"))
+        self.assertFalse(runner.has_top_level_order_by(
+            'SELECT n FROM (SELECT n FROM t ORDER BY n) AS nested'
+        ))
+        self.assertFalse(runner.has_top_level_order_by('SELECT "ORDER BY" FROM t'))
+
+    def test_ordered_queries_reject_changed_row_order(self):
+        first = subprocess.CompletedProcess([], 0, '{"n":1}\n{"n":2}\n', "")
+        second = subprocess.CompletedProcess([], 0, '{"n":2}\n{"n":1}\n', "")
+        with mock.patch.object(runner.subprocess, "run", side_effect=[first, second]):
+            result = runner.measure_query(
+                "bin", pathlib.Path("input"), 1, "SELECT n FROM hits ORDER BY n;", 2, 0, 10,
+            )
+        self.assertEqual(result["status"], "nondeterministic")
+
     def test_measure_query_collects_warmup_and_measured_samples(self):
         completed = subprocess.CompletedProcess([], 0, '{"n":1}\n', "")
         with mock.patch.object(runner.subprocess, "run", return_value=completed) as run:
