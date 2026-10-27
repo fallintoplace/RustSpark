@@ -41,18 +41,23 @@ def command(binary, format_name, file, sql):
     return [binary, *inputs, "--sql", sql, "--stdout-format", "json"]
 
 
+def _run_verified_query(binary, kind, file, sql, expected_hash, timeout):
+    started = time.perf_counter()
+    output = subprocess.run(
+        command(binary, kind, file, sql), capture_output=True,
+        text=True, timeout=timeout, check=True,
+    )
+    elapsed = (time.perf_counter() - started) * 1000
+    digest, _ = output_signature(output.stdout)
+    if digest != expected_hash:
+        raise ValueError(f"Wrong SQL result for {kind} input")
+    return elapsed
+
+
 def measure(binary, kind, file, sql, expected_hash, repeat, warmup, timeout):
     values = []
     for index in range(repeat + warmup):
-        started = time.perf_counter()
-        output = subprocess.run(
-            command(binary, kind, file, sql), capture_output=True,
-            text=True, timeout=timeout, check=True,
-        )
-        elapsed = (time.perf_counter() - started) * 1000
-        digest, _ = output_signature(output.stdout)
-        if digest != expected_hash:
-            raise ValueError(f"Wrong SQL result for {kind} input")
+        elapsed = _run_verified_query(binary, kind, file, sql, expected_hash, timeout)
         if index >= warmup:
             values.append(elapsed)
     return {**summarize_samples(values), "result_sha256": expected_hash}

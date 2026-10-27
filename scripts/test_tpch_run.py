@@ -106,6 +106,26 @@ class QueryRunnerTests(unittest.TestCase):
                 [True, False],
             )
 
+    def test_tpch_tuning_options_are_forwarded(self):
+        args = runner.command_for(
+            "rs", ["--parquet-table", "customer=file"], "01.sql", 4,
+            batch_size=8192, memory_limit_mb=2048, pushdown_filters=True,
+        )
+        self.assertIn("--batch-size", args)
+        self.assertEqual(args[args.index("--batch-size") + 1], "8192")
+        self.assertEqual(args[args.index("--memory-limit-mb") + 1], "2048")
+        self.assertIn("--parquet-pushdown-filters", args)
+        defaults = runner.command_for("rs", [], "01.sql", 2)
+        self.assertNotIn("--batch-size", defaults)
+        self.assertNotIn("--memory-limit-mb", defaults)
+        self.assertNotIn("--parquet-pushdown-filters", defaults)
+
+    def test_tpch_rejects_invalid_execution_settings(self):
+        for settings in ({"batch_size": 0}, {"memory_limit_mb": -1},
+                         {"batch_size": True}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                runner.benchmark("rs", [], Path("."), **settings)
+
     def test_query_errors_do_not_skip_later_queries(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

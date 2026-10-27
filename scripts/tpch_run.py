@@ -104,20 +104,34 @@ def measure(command, repeat, warmup, timeout, ordered=False):
     }
 
 
-def command_for(binary, input_args, sql_file, partitions):
-    return [
+def command_for(binary, input_args, sql_file, partitions, *,
+                batch_size=None, memory_limit_mb=None, pushdown_filters=False):
+    command = [
         str(binary), *input_args, "--sql-file", str(sql_file),
         "--stdout-format", "json", "--target-partitions", str(partitions),
     ]
+    if batch_size is not None:
+        command.extend(["--batch-size", str(batch_size)])
+    if memory_limit_mb is not None:
+        command.extend(["--memory-limit-mb", str(memory_limit_mb)])
+    if pushdown_filters:
+        command.append("--parquet-pushdown-filters")
+    return command
 
 
-def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partitions=2):
+def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partitions=2,
+              *, batch_size=None, memory_limit_mb=None, pushdown_filters=False):
     if repeat < 1 or warmup < 0 or timeout < 1 or partitions < 1:
         raise ValueError("Invalid repeat, warmup, timeout or partitions")
+    if any(type(value) is not int or value < 1
+           for value in (batch_size, memory_limit_mb) if value is not None):
+        raise ValueError("Batch size and memory limit must be positive integers")
     args = input_arguments(parquet)
     reports = []
     for number, path in queries:
-        command = command_for(binary, args, path, partitions)
+        command = command_for(binary, args, path, partitions,
+                              batch_size=batch_size, memory_limit_mb=memory_limit_mb,
+                              pushdown_filters=pushdown_filters)
         entry = {"id": number, "sql_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         try:
             sql = path.read_text(encoding="utf-8")
@@ -138,6 +152,9 @@ def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partiti
         "timeout_seconds": timeout,
         "repeat": repeat,
         "warmup": warmup,
+        "batch_size": batch_size,
+        "memory_limit_mb": memory_limit_mb,
+        "parquet_pushdown_filters": pushdown_filters,
         "results": reports,
     }
 
@@ -154,6 +171,9 @@ def main(argv=None):
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--target-partitions", type=int, default=2)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--memory-limit-mb", type=int)
+    parser.add_argument("--parquet-pushdown-filters", action="store_true")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -161,6 +181,8 @@ def main(argv=None):
             args.binary, query_paths(args.queries_dir, args.query_ids),
             args.parquet_dir, args.repeat, args.warmup,
             args.timeout, args.target_partitions,
+            batch_size=args.batch_size, memory_limit_mb=args.memory_limit_mb,
+            pushdown_filters=args.parquet_pushdown_filters,
         )
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")

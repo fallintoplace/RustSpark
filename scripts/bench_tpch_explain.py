@@ -2,6 +2,7 @@
 """Capture logical/physical EXPLAIN plans for numbered TPC-H SQL files."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -16,6 +17,18 @@ def command(binary, table_arguments, sql_file, partitions):
             "--target-partitions", str(partitions), "--explain"]
 
 
+def run_explain(binary, tables, sql_file, partitions, timeout):
+    process = subprocess.run(
+        command(binary, tables, sql_file, partitions),
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+    if process.returncode:
+        raise RuntimeError(f"Exit {process.returncode}: {process.stderr[-500:]}")
+    if not process.stdout.strip():
+        raise ValueError("Empty EXPLAIN result")
+    return process.stdout
+
+
 def capture(binary, parquet, queries, output, timeout=120, partitions=2):
     if timeout < 1 or output.exists():
         raise ValueError("Timeout must be positive; output directory must not exist")
@@ -26,15 +39,11 @@ def capture(binary, parquet, queries, output, timeout=120, partitions=2):
         destination = output / f"{number:02}.txt"
         entry = {"id": number, "plan_file": destination.name}
         try:
-            process = subprocess.run(
-                command(binary, tables, file, partitions),
-                capture_output=True, text=True, timeout=timeout, check=False,
-            )
-            if process.returncode:
-                raise RuntimeError(f"Exit {process.returncode}: {process.stderr[-500:]}")
-            if not process.stdout.strip():
-                raise ValueError("Empty EXPLAIN result")
-            destination.write_text(process.stdout, encoding="utf-8")
+            plan = run_explain(binary, tables, file, partitions, timeout)
+            destination.write_text(plan, encoding="utf-8")
+            plan_bytes = plan.encode("utf-8")
+            entry["plan_sha256"] = hashlib.sha256(plan_bytes).hexdigest()
+            entry["plan_bytes"] = len(plan_bytes)
             entry["status"] = "ok"
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             entry.update({"status": "error", "error": str(error)[-500:]})

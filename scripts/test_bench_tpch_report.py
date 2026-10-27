@@ -19,6 +19,16 @@ class ReportTests(unittest.TestCase):
         items = [{"id": i, "status": "ok", "median_ms": 1.0, "p95_ms": 1.0} for i in range(1, 23)]
         self.assertIn("Complete 22-query run:** yes", report.render({"results": items}))
 
+    def test_complete_report_shows_top_query_shares(self):
+        rows = [{"id": n, "status": "ok", "median_ms": n, "p95_ms": n}
+                for n in range(1, 23)]
+        markdown = report.render({"results": rows})
+        self.assertIn("## Latency concentration", markdown)
+        self.assertIn("- Q22:", markdown)
+        self.assertIn("- Q21:", markdown)
+        self.assertIn("- Q20:", markdown)
+        self.assertLess(markdown.index("Q22:"), markdown.index("Q21:"))
+
     def test_rejects_invalid_times_and_ids(self):
         row = {"id": 1, "status": "ok", "median_ms": -1, "p95_ms": 2}
         with self.assertRaises(ValueError):
