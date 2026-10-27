@@ -88,6 +88,8 @@ mod sql_compat_url_encode;
 mod sql_compat_url_decode;
 #[path = "sql_compat/width_bucket.rs"]
 mod sql_compat_width_bucket;
+#[path = "sql_compat/soundex.rs"]
+mod sql_compat_soundex;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -209,6 +211,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_url_encode::udf());
         context.register_udf(sql_compat_url_decode::udf());
         context.register_udf(sql_compat_width_bucket::udf());
+        context.register_udf(sql_compat_soundex::udf());
         Self { context }
     }
 
