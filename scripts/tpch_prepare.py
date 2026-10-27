@@ -42,6 +42,7 @@ def prepare(connection, destination, scale):
     sql_dir.mkdir(parents=True, exist_ok=True)
     connection.execute(f"CALL dbgen(sf={scale:g})")
     counts = {}
+    table_sha256 = {}
     for table in TABLES:
         parquet_path = parquet_dir / f"{table}.parquet"
         escaped = str(parquet_path).replace("'", "''")
@@ -51,6 +52,7 @@ def prepare(connection, destination, scale):
         counts[table] = connection.execute(
             f"SELECT COUNT(*) FROM {table}"
         ).fetchone()[0]
+        table_sha256[table] = hashlib.sha256(parquet_path.read_bytes()).hexdigest()
     queries = connection.execute(
         "SELECT query_nr, query FROM tpch_queries() ORDER BY query_nr"
     ).fetchall()
@@ -59,6 +61,7 @@ def prepare(connection, destination, scale):
         "scale_factor": scale,
         "tables": {table: f"data/{table}.parquet" for table in TABLES},
         "rows": counts,
+        "table_sha256": table_sha256,
         "queries": entries,
     }
     (output / "manifest.json").write_text(

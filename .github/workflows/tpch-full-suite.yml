@@ -1,0 +1,69 @@
+name: TPC-H full 22-query smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale_factor:
+        description: "Small TPC-H scale factor"
+        required: true
+        default: "0.01"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  tpch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install "duckdb>=1.3,<2"
+      - run: cargo build --release --locked
+      - name: Generate TPC-H data and SQL
+        env:
+          SCALE_FACTOR: ${{ inputs.scale_factor }}
+        run: python3 scripts/tpch_prepare.py --scale-factor "$SCALE_FACTOR" --output "$RUNNER_TEMP/tpch"
+      - name: Run all TPC-H queries
+        run: |
+          python3 scripts/tpch_run.py --binary target/release/rustspark \
+            --queries-dir "$RUNNER_TEMP/tpch/queries" \
+            --parquet-dir "$RUNNER_TEMP/tpch/data" \
+            --repeat 1 --warmup 0 --timeout 180 \
+            --json-out "$RUNNER_TEMP/tpch-results.json" > "$RUNNER_TEMP/tpch-run.log"
+      - name: Require all 22 queries to succeed
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads((Path(os.environ['RUNNER_TEMP']) / 'tpch-results.json').read_text())
+          results = report.get('results', [])
+          successes = {entry.get('id') for entry in results if entry.get('status') == 'ok'}
+          if len(results) != 22 or successes != set(range(1, 23)):
+              raise SystemExit(f'TPC-H failed: {len(successes)}/22 queries successful')
+          print('TPC-H: 22/22 queries successful')
+          PY
+      - name: Verify output values with DuckDB
+        run: |
+          python3 scripts/bench_tpch_verify.py --binary target/release/rustspark \
+            --queries-dir "$RUNNER_TEMP/tpch/queries" \
+            --parquet-dir "$RUNNER_TEMP/tpch/data" \
+            --timeout 180 --target-partitions 2 \
+            --json-out "$RUNNER_TEMP/tpch-verification.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tpch-results
+          path: |
+            ${{ runner.temp }}/tpch-results.json
+            ${{ runner.temp }}/tpch-run.log
+            ${{ runner.temp }}/tpch-verification.json
+          if-no-files-found: warn
