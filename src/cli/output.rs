@@ -167,6 +167,9 @@ async fn write_arrow_stream<W: Write>(
 
 fn escape_markdown_cell(value: &str) -> String {
     value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
         .replace('\\', "\\\\")
         .replace('|', "\\|")
         .replace('\r', " ")
