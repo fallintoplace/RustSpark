@@ -126,7 +126,14 @@ fn display_cell(
     }
 }
 
-fn escape_vertical_value(value: &str) -> String {
+fn escape_vertical_value(value: &str) -> std::borrow::Cow<'_, str> {
+    // Most cells contain no control characters and need no allocation.
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'\\' | b'\r' | b'\n' | b'\t'))
+    {
+        return std::borrow::Cow::Borrowed(value);
+    }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -137,7 +144,7 @@ fn escape_vertical_value(value: &str) -> String {
             other => escaped.push(other),
         }
     }
-    escaped
+    std::borrow::Cow::Owned(escaped)
 }
 
 // Present one row at a time, even for batches with very wide schemas.
@@ -407,7 +414,14 @@ mod tests {
     #[test]
     fn escapes_vertical_controls_without_changing_unicode() {
         assert_eq!(escape_vertical_value("a\\b\r\n\té"), "a\\\\b\\r\\n\\té");
-        assert_eq!(escape_vertical_value("plain"), "plain");
+        assert!(matches!(
+            escape_vertical_value("plain"),
+            std::borrow::Cow::Borrowed("plain")
+        ));
+        assert!(matches!(
+            escape_vertical_value("a\\b"),
+            std::borrow::Cow::Owned(_)
+        ));
     }
 
     #[test]
