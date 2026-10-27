@@ -15,9 +15,7 @@ fn shell_lists_columns_and_handles_missing_tables() -> Result<(), Box<dyn std::e
         .stdin
         .take()
         .ok_or("missing stdin")?
-        .write_all(
-            b".columns data\n.columns missing\n.columns\nSELECT 19 AS answer;\n.quit\n",
-        )?;
+        .write_all(b".columns data\n.columns missing\n.columns\nSELECT 19 AS answer;\n.quit\n")?;
     let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
@@ -30,6 +28,9 @@ fn shell_lists_columns_and_handles_missing_tables() -> Result<(), Box<dyn std::e
     assert!(stdout.contains("19"), "{stdout}");
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("Shell error:"), "{stderr}");
-    assert!(stderr.contains(".columns requires exactly one table name"), "{stderr}");
+    assert!(
+        stderr.contains(".columns requires exactly one table name"),
+        "{stderr}"
+    );
     Ok(())
 }
