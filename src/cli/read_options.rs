@@ -1,4 +1,7 @@
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
+use datafusion::{
+    arrow::datatypes::DataType,
+    prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions},
+};
 
 use super::Args;
 
@@ -57,8 +60,8 @@ pub(super) fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
     }
 }
 
-pub(super) fn parquet_read_options(args: &Args) -> ParquetReadOptions<'_> {
-    let partitions = args
+fn parquet_partition_columns(args: &Args) -> Vec<(String, DataType)> {
+    args
         .parquet_partitions
         .as_ref()
         .map(|schema| {
@@ -68,10 +71,13 @@ pub(super) fn parquet_read_options(args: &Args) -> ParquetReadOptions<'_> {
                 .map(|field| (field.name().clone(), field.data_type().clone()))
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+pub(super) fn parquet_read_options(args: &Args) -> ParquetReadOptions<'_> {
     ParquetReadOptions::new()
         .file_extension(args.parquet_extension.as_deref().unwrap_or(".parquet"))
-        .table_partition_cols(partitions)
+        .table_partition_cols(parquet_partition_columns(args))
 }
 
 pub(super) fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
