@@ -156,9 +156,8 @@ impl RustSparkSession {
             .iter()
             .map(|field| field.name().as_str())
             .collect();
-        let columns: Vec<&str> = left_frame
-            .schema()
-            .fields()
+        let left_fields = left_frame.schema().fields().clone();
+        let columns: Vec<&str> = left_fields
             .iter()
             .map(|field| field.name().as_str())
             .filter(|column| right_columns.contains(column))
@@ -168,14 +167,14 @@ impl RustSparkSession {
                 "Tables {left} and {right} have no common join columns"
             )));
         }
-        // Keep the source schema alive across planning instead of allocating
-        // Strings for every shared column in a wide distributed join.
+        // Clone shared field references rather than all key strings or the
+        // complete DataFrame planning state.
         self.join_tables_using_inner(
             left,
             right,
             join_type,
             &columns,
-            Some((left_frame.clone(), right_frame)),
+            Some((left_frame, right_frame)),
         )
         .await
     }
