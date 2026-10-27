@@ -1,0 +1,13 @@
+user_id,event_name
+1,visit
+1,signup
+1,purchase
+2,visit
+2,signup
+3,visit
+4,visit
+4,signup
+4,purchase
+4,purchase
+5,visit
+6,signup
