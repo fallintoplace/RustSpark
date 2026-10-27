@@ -1575,6 +1575,23 @@ impl RustSparkSession {
         Self::sort_dataframe(dataframe, order)?.limit(0, Some(limit))
     }
 
+    /// Return up to the requested limit of randomly selected rows.
+    ///
+    /// DataFusion sorts by random() and applies LIMIT. The sample is
+    /// unseeded and may be expensive for large tables; use sample_rows
+    /// for lower-cost approximate sampling.
+    pub async fn take_random_rows(&self, table: &str, limit: usize) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        if limit == 0 {
+            return dataframe.limit(0, Some(0));
+        }
+        let source = quote_catalog_table(table, "take_random_rows requires a table path")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {source} ORDER BY random() LIMIT {limit}"
+        ))
+        .await
+    }
+
     /// Sort registered rows with explicit ascending and NULL placement.
     ///
     /// Each key is (column, ascending, nulls_first). Unlike sort_rows, NULL
