@@ -26,8 +26,13 @@ type TestResultOutput = std::process::Output;
 
 #[test]
 fn previews_registered_tables_and_continues() -> TestResult {
-    let output = shell(".preview data\n.preview datafusion.public.data 2\nSELECT 42 AS after;\n\\q\n");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output =
+        shell(".preview data\n.preview datafusion.public.data 2\nSELECT 42 AS after;\n\\q\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("city"), "{stdout}");
     assert!(stdout.contains("amount"), "{stdout}");
@@ -42,7 +47,11 @@ fn preview_rejects_invalid_limits_and_unknown_tables_without_exiting() -> TestRe
     let output = shell(
         ".preview\n.preview data 0\n.preview data 1001\n.preview data 1 extra\n.preview missing 2\nSELECT 17 AS after;\n\\q\n",
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.matches("Shell error:").count() >= 5, "{stderr}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("17"));
