@@ -883,19 +883,8 @@ impl RustSparkSession {
         self.union_tables_by_name(names).await?.distinct()
     }
 
-    /// Remove duplicate rows from a registered table, like Spark dropDuplicates.
-    ///
-    /// An empty subset compares all columns. A non-empty subset groups rows by
-    /// the selected columns and keeps an arbitrary row from each group. Use a
-    /// stable sort first if a particular representative row is required.
-    pub async fn drop_duplicates(&self, table: &str, subset: &[&str]) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr};
+    fn validate_dedup_subset(dataframe: &DataFrame, subset: &[&str]) -> Result<()> {
         use std::collections::HashSet;
-
-        let dataframe = self.table(table).await?;
-        if subset.is_empty() {
-            return dataframe.distinct();
-        }
 
         let available: HashSet<&str> = dataframe
             .schema()
@@ -916,6 +905,23 @@ impl RustSparkSession {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Remove duplicate rows from a registered table, like Spark dropDuplicates.
+    ///
+    /// An empty subset compares all columns. A non-empty subset groups rows by
+    /// the selected columns and keeps an arbitrary row from each group. Use a
+    /// stable sort first if a particular representative row is required.
+    pub async fn drop_duplicates(&self, table: &str, subset: &[&str]) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+
+        let dataframe = self.table(table).await?;
+        if subset.is_empty() {
+            return dataframe.distinct();
+        }
+
+        Self::validate_dedup_subset(&dataframe, subset)?;
 
         let keys = subset
             .iter()
