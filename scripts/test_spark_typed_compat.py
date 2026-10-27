@@ -27,7 +27,7 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
 
     def test_rustspark_description_preserves_column_tabs(self):
         names, types, nullables = mod.parse_rustspark_description(
-            "first\\tpart\tInt64\tNOT NULL\n"
+            "first\tpart\tInt64\tNOT NULL\n"
         )
         self.assertEqual((names, types, nullables), (["first\tpart"], ["bigint"], [False]))
 
