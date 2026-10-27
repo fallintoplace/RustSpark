@@ -138,12 +138,13 @@ impl RustSparkSession {
     ///
     /// The result is sorted, and missing catalogs or schemas return errors.
     pub fn list_tables_in_schema(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
-        let catalog_provider = self.context.catalog(catalog).ok_or_else(|| {
-            DataFusionError::Plan(format!("Unknown catalog: {catalog}"))
-        })?;
-        let schema_provider = catalog_provider.schema(schema).ok_or_else(|| {
-            DataFusionError::Plan(format!("Unknown schema: {catalog}.{schema}"))
-        })?;
+        let catalog_provider = self
+            .context
+            .catalog(catalog)
+            .ok_or_else(|| DataFusionError::Plan(format!("Unknown catalog: {catalog}")))?;
+        let schema_provider = catalog_provider
+            .schema(schema)
+            .ok_or_else(|| DataFusionError::Plan(format!("Unknown schema: {catalog}.{schema}")))?;
         let mut tables = schema_provider.table_names();
         tables.sort();
         Ok(tables)
