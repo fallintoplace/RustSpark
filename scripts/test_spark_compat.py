@@ -15,6 +15,12 @@ spec.loader.exec_module(mod)
 
 
 class SparkCompatibilityTests(unittest.TestCase):
+    def test_described_columns_preserve_quoted_tabs(self):
+        columns = mod.parse_rustspark_columns("first\tpart\tInt64\tNOT NULL\n")
+        self.assertEqual(columns, ["first\tpart"])
+        with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
+            mod.parse_rustspark_columns("missing_types\n")
+
     def test_unordered_results_are_multiset_compared(self):
         first = mod.QueryResult(["id"], [[2], [1], [1]])
         second = mod.QueryResult(["id"], [[1], [2], [1]])

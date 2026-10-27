@@ -55,16 +55,19 @@ def compare(left: QueryResult, right: QueryResult, ordered: bool = False):
     return None
 
 
+def parse_rustspark_columns(stdout: str) -> list[str]:
+    fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
+    if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
+        raise ValueError("Invalid RustSpark schema description")
+    return [parts[0] for parts in fields]
+
+
 def rustspark_query(binary: str, sql: str):
     common = [binary, "--sql", sql]
     described = subprocess.run(
         common + ["--describe"], capture_output=True, text=True, check=True, timeout=120
     )
-    columns = [
-        line.split("\t", 1)[0]
-        for line in described.stdout.splitlines()
-        if line.strip()
-    ]
+    columns = parse_rustspark_columns(described.stdout)
     result = subprocess.run(
         common + ["--stdout-format", "json"],
         capture_output=True, text=True, check=True, timeout=120
