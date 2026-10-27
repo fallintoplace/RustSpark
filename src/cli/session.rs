@@ -37,10 +37,10 @@ pub(super) fn new_session(
             )
             .into());
         }
-        if let Some(root) = args.database_dir.as_deref() {
-            if path.canonicalize()?.starts_with(root.canonicalize()?) {
-                return Err("--spill-dir must not be inside --database-dir".into());
-            }
+        if let Some(root) = args.database_dir.as_deref()
+            && path.canonicalize()?.starts_with(root.canonicalize()?)
+        {
+            return Err("--spill-dir must not be inside --database-dir".into());
         }
         runtime = runtime.with_temp_file_path(path.to_path_buf());
     }
