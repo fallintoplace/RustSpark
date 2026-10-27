@@ -7,7 +7,8 @@ import bench_tpch_compare_warm as compare
 
 def report(ms, name):
     return {"metric": f"warm {name} query execution", "results": [
-        {"id": number, "status": "ok", "median_ms": ms}
+        {"id": number, "status": "ok", "median_ms": ms,
+         "sql_sha256": "a" * 64}
         for number in range(1, 23)
     ]}
 
@@ -43,6 +44,13 @@ class CompareWarmTests(unittest.TestCase):
         dd["results"].pop()
         with self.assertRaises(ValueError):
             compare.compare(rs, dd, verification())
+
+    def test_rejects_changed_sql(self):
+        rustspark = report(10, "rs")
+        duckdb = report(20, "duckdb")
+        duckdb["results"][0]["sql_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "different SQL"):
+            compare.compare(rustspark, duckdb, verification())
 
     def test_no_cold_vs_warm_comparison(self):
         cold = report(20, "duckdb")

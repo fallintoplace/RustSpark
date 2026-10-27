@@ -27,6 +27,16 @@ def checked_medians(report):
     return out
 
 
+def checked_sql_hashes(report):
+    hashes = {}
+    for row in report["results"]:
+        digest = row.get("sql_sha256")
+        if type(digest) is not str or len(digest) != 64:
+            raise ValueError("Warm comparison requires per-query SQL SHA-256 hashes")
+        hashes[row["id"]] = digest
+    return hashes
+
+
 def verified_ids(report):
     results = report.get("results")
     if not isinstance(results, list) or len(results) != 22:
@@ -43,6 +53,8 @@ def compare(rustspark, duckdb, verified):
     rs, dd = checked_medians(rustspark), checked_medians(duckdb)
     if rs.keys() != dd.keys():
         raise ValueError("TPC-H query coverage differs")
+    if checked_sql_hashes(rustspark) != checked_sql_hashes(duckdb):
+        raise ValueError("Warm TPC-H reports use different SQL query files")
     rows = []
     for number in sorted(rs):
         ratio = dd[number] / rs[number]
