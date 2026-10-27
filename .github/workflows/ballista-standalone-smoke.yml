@@ -2,6 +2,12 @@ name: Ballista standalone SQL smoke
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'integrations/ballista/**'
+      - 'scripts/ballista_smoke.py'
+      - 'scripts/test_ballista_smoke.py'
+      - '.github/workflows/ballista-standalone-smoke.yml'
 
 permissions:
   contents: read
@@ -18,4 +24,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m unittest discover -s scripts -p test_ballista_smoke.py
+      - run: cargo test --manifest-path integrations/ballista/Cargo.toml
       - run: python3 scripts/ballista_smoke.py --mode standalone --timeout 900
