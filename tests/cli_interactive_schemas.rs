@@ -23,7 +23,10 @@ fn shell_lists_schemas_and_continues_running_sql() -> Result<(), Box<dyn std::er
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(stdout.lines().any(|line| line == "datafusion.public"), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "datafusion.public"),
+        "{stdout}"
+    );
     assert!(stdout.contains('9'), "{stdout}");
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains(".schemas"), "{stderr}");
