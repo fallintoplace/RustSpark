@@ -1,0 +1,35 @@
+{
+  "name": "topk_partitions",
+  "sql": "SELECT id, amount FROM data WHERE id % 3 = 0 ORDER BY amount DESC, id ASC LIMIT 20",
+  "rows": 100000,
+  "variants": [
+    {
+      "name": "parts_1",
+      "flags": [
+        "--target-partitions",
+        "1"
+      ]
+    },
+    {
+      "name": "parts_2",
+      "flags": [
+        "--target-partitions",
+        "2"
+      ]
+    },
+    {
+      "name": "parts_4",
+      "flags": [
+        "--target-partitions",
+        "4"
+      ]
+    },
+    {
+      "name": "parts_8",
+      "flags": [
+        "--target-partitions",
+        "8"
+      ]
+    }
+  ]
+}
