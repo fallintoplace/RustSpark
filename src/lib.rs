@@ -52,6 +52,19 @@ pub enum NullDropMode {
     All,
 }
 
+/// Which endpoints of a range should match during an interval join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeJoinBounds {
+    /// start < value < end
+    Open,
+    /// start <= value <= end
+    Closed,
+    /// start <= value < end
+    LeftClosed,
+    /// start < value <= end
+    RightClosed,
+}
+
 pub struct RustSparkSession {
     context: SessionContext,
 }
@@ -1480,6 +1493,57 @@ impl RustSparkSession {
                 right,
                 "Cross join table name must be a non-empty catalog path",
             )?
+        );
+        self.sql(&query).await
+    }
+
+    /// Join values to intervals containing them, with configurable boundaries.
+    ///
+    /// Values are taken from the left table; interval start/end columns come
+    /// from the right table. NULL endpoints do not match. The result is lazy.
+    /// INNER and LEFT joins are supported. Non-equality joins can be expensive
+    /// on large inputs without another selective predicate.
+    pub async fn join_tables_on_range(
+        &self,
+        values_table: &str,
+        intervals_table: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        value_column: &str,
+        interval_columns: (&str, &str),
+        bounds: RangeJoinBounds,
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+
+        if value_column.trim().is_empty()
+            || interval_columns.0.trim().is_empty()
+            || interval_columns.1.trim().is_empty()
+        {
+            return Err(DataFusionError::Plan(
+                "join_tables_on_range requires non-empty column names".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "join_tables_on_range supports inner and left joins only".into(),
+                ));
+            }
+        };
+        let (lower_cmp, upper_cmp) = match bounds {
+            RangeJoinBounds::Open => (">", "<"),
+            RangeJoinBounds::Closed => (">=", "<="),
+            RangeJoinBounds::LeftClosed => (">=", "<"),
+            RangeJoinBounds::RightClosed => (">", "<="),
+        };
+        let value = quote_join_identifier(value_column);
+        let lower = quote_join_identifier(interval_columns.0);
+        let upper = quote_join_identifier(interval_columns.1);
+        let query = format!(
+            "SELECT * FROM {} AS \"__rustspark_left\" {operator} JOIN {} AS \"__rustspark_right\" ON \"__rustspark_left\".{value} {lower_cmp} \"__rustspark_right\".{lower} AND \"__rustspark_left\".{value} {upper_cmp} \"__rustspark_right\".{upper}",
+            quote_join_table(values_table)?,
+            quote_join_table(intervals_table)?,
         );
         self.sql(&query).await
     }
