@@ -46,6 +46,23 @@ enum FileExport {
     Json,
 }
 
+fn requested_file_export(args: &Args) -> Option<(&Path, FileExport)> {
+    if let Some(path) = args.output_parquet.as_deref() {
+        let writer_options = args.parquet_compression.as_ref().map(|codec| {
+            let mut options = TableParquetOptions::default();
+            options.global.compression = Some(codec.clone());
+            options
+        });
+        Some((path, FileExport::Parquet(Box::new(writer_options))))
+    } else if let Some(path) = args.output_csv.as_deref() {
+        Some((path, FileExport::Csv))
+    } else {
+        args.output_json
+            .as_deref()
+            .map(|path| (path, FileExport::Json))
+    }
+}
+
 /// Keep the old destination untouched until the entire single-file export
 /// completes. The temporary directory is deleted on every error path.
 async fn write_file_export(
@@ -551,23 +568,8 @@ async fn present_query_result(
         dataframe.explain(false, false)?.show().await?;
     } else if args.explain_analyze {
         dataframe.explain(true, false)?.show().await?;
-    } else if let Some(path) = args.output_parquet.as_ref() {
-        let writer_options = args.parquet_compression.as_ref().map(|codec| {
-            let mut options = TableParquetOptions::default();
-            options.global.compression = Some(codec.clone());
-            options
-        });
-        write_file_export(
-            dataframe,
-            path,
-            FileExport::Parquet(Box::new(writer_options)),
-            args.output_single_file,
-        )
-        .await?;
-    } else if let Some(path) = args.output_csv.as_ref() {
-        write_file_export(dataframe, path, FileExport::Csv, args.output_single_file).await?;
-    } else if let Some(path) = args.output_json.as_ref() {
-        write_file_export(dataframe, path, FileExport::Json, args.output_single_file).await?;
+    } else if let Some((path, format)) = requested_file_export(args) {
+        write_file_export(dataframe, path, format, args.output_single_file).await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
         write_arrow_ipc(dataframe, path).await?;
     } else if let Some(format) = args.stdout_format {
