@@ -1,0 +1,35 @@
+{
+  "name": "predicate_batch",
+  "sql": "SELECT COUNT(*) AS n FROM data WHERE city = 'city_3' AND amount BETWEEN 25 AND 75",
+  "rows": 100000,
+  "variants": [
+    {
+      "name": "batch_512",
+      "flags": [
+        "--batch-size",
+        "512"
+      ]
+    },
+    {
+      "name": "batch_2048",
+      "flags": [
+        "--batch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "batch_8192",
+      "flags": [
+        "--batch-size",
+        "8192"
+      ]
+    },
+    {
+      "name": "batch_32768",
+      "flags": [
+        "--batch-size",
+        "32768"
+      ]
+    }
+  ]
+}
