@@ -162,12 +162,18 @@ enum ShellAction {
     Sql,
 }
 
-async fn dispatch_shell_command(session: &RustSparkSession, args: &Args, command: &str) -> ShellAction {
+async fn dispatch_shell_command(
+    session: &RustSparkSession,
+    args: &Args,
+    command: &str,
+) -> ShellAction {
     match command {
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .preview TABLE [ROWS], .quit.");
+            eprintln!(
+                "Shell commands: .tables, .schemas, .schema TABLE, .preview TABLE [ROWS], .quit."
+            );
             return ShellAction::Continue;
         }
         ".tables" => {
