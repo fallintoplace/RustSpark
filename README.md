@@ -46,6 +46,7 @@ The `--query-timeout` applies to each executed statement.
 Run `.tables` to list registered tables, `.schemas` to list available catalog
 schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
+Use `.count data` to print the number of rows in a registered table.
 
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
@@ -93,6 +94,14 @@ let joined = session
 let row_count = joined.count().await?;
 ```
 
+Get distinct values from one column without collecting all rows:
+
+```rust
+let cities = session.distinct_column_values("sales", "city").await?;
+```
+
+The result is lazy and includes at most one NULL. Sort it when ordering matters.
+
 Get a lazy row window from a registered table with `slice_rows`. Sort
 the table first when row order matters:
 
@@ -102,6 +111,15 @@ let rows = page.collect().await?;
 ```
 
 The call builds a DataFusion LIMIT/OFFSET plan, without collecting the source.
+
+Select the top N rows by one or more columns without collecting the source:
+
+```rust
+let top = session.top_rows("sales", &[("amount", false)], 5).await?;
+```
+
+Use `true` for ascending and `false` for descending order. Add a unique
+tie-breaker when values can be equal.
 
 Count NULL values per column with a lazy aggregate:
 
@@ -217,6 +235,15 @@ cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT * FROM data WHERE amou
 ```
 
 This counts the query result rows, not the rows in its source tables.
+
+For a fast row-existence check, use the Rust API instead of a full count:
+
+```rust
+let has_sales = session.table_has_rows("sales").await?;
+```
+
+This reads at most one row and works with registered tables and SQL views.
+
 
 Persist a query result as a Parquet-backed SQL table. Later processes automatically
 load the tables from the same directory:
@@ -386,6 +413,14 @@ cargo run -- --sql "SELECT 42 AS answer" --stdout-format markdown
 
 Markdown output streams by record batch, includes headers even for empty results,
 and prints SQL NULL values as `NULL`. Pipes and line breaks are escaped.
+
+For HTML reports, stream an embeddable table with escaped cell values:
+
+```sh
+cargo run -- --sql 'SELECT 42 AS answer' --stdout-format html
+```
+
+NULL cells receive a `null` CSS class. Column names and values are HTML-escaped.
 
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
