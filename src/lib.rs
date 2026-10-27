@@ -9,6 +9,8 @@ use datafusion::{
 
 mod export;
 mod joins;
+#[path = "features/regex_filter.rs"]
+mod feature_regex_filter;
 mod set_operations;
 mod sources;
 #[path = "sql_compat/bin.rs"]
