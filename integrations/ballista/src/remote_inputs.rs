@@ -18,6 +18,33 @@ struct Source {
     path: String,
 }
 
+impl Format {
+    fn parse(kind: &str) -> Result<Self, String> {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "csv" => Ok(Self::Csv),
+            "json" => Ok(Self::Json),
+            "parquet" => Ok(Self::Parquet),
+            other => Err(format!("Unsupported distributed input format: {other}")),
+        }
+    }
+}
+
+impl Source {
+    async fn register(&self, session: &RustSparkSession) -> datafusion::error::Result<()> {
+        match self.format {
+            Format::Csv => session.register_csv(&self.name, &self.path).await,
+            Format::Json => session.register_json(&self.name, &self.path).await,
+            Format::Parquet => session.register_parquet(&self.name, &self.path).await,
+        }
+    }
+}
+
+fn is_sql_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn parse_source(item: &str) -> Result<Source, String> {
     let (kind_and_name, path) = item
         .split_once('=')
@@ -25,18 +52,10 @@ fn parse_source(item: &str) -> Result<Source, String> {
     let (kind, name) = kind_and_name
         .split_once(':')
         .ok_or_else(|| format!("Expected format:table=path in RUSTSPARK_INPUTS: {item}"))?;
-    let format = match kind.trim().to_ascii_lowercase().as_str() {
-        "csv" => Format::Csv,
-        "json" => Format::Json,
-        "parquet" => Format::Parquet,
-        other => return Err(format!("Unsupported distributed input format: {other}")),
-    };
+    let format = Format::parse(kind)?;
     let name = name.trim();
     let path = path.trim();
-    let mut chars = name.chars();
-    if !matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !is_sql_identifier(name) {
         return Err(format!("Invalid SQL table identifier: {name}"));
     }
     if path.is_empty() {
@@ -123,11 +142,7 @@ pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::err
     }
 
     for source in sources {
-        match source.format {
-            Format::Csv => session.register_csv(&source.name, &source.path).await?,
-            Format::Json => session.register_json(&source.name, &source.path).await?,
-            Format::Parquet => session.register_parquet(&source.name, &source.path).await?,
-        }
+        source.register(session).await?;
     }
     Ok(())
 }
@@ -135,6 +150,16 @@ pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_identifier_validation_is_ascii_and_nonempty() {
+        assert!(is_sql_identifier("some_table_2"));
+        assert!(is_sql_identifier("_hidden"));
+        assert!(!is_sql_identifier(""));
+        assert!(!is_sql_identifier("2bad"));
+        assert!(!is_sql_identifier("bad-name"));
+        assert!(!is_sql_identifier("naïve"));
+    }
 
     #[test]
     fn parses_a_source_without_truncating_paths_with_equals_signs() {
