@@ -80,6 +80,8 @@ mod sql_compat_sec;
 mod sql_compat_csc;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
+#[path = "sql_compat/crc32.rs"]
+mod sql_compat_crc32;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -197,6 +199,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_sec::udf());
         context.register_udf(sql_compat_csc::udf());
         context.register_udf(sql_compat_hypot::udf());
+        context.register_udf(sql_compat_crc32::udf());
         Self { context }
     }
 
