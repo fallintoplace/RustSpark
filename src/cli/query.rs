@@ -91,23 +91,30 @@ async fn write_file_export(
     let output = path.to_str().ok_or("Output path must be valid UTF-8")?;
     write_export_contents(dataframe, output, format, single_file).await?;
     if single_file {
-        // Both paths are on the same filesystem. Sync the finished part
-        // before renaming it into place to avoid another full-size copy.
-        {
-            let completed = fs::OpenOptions::new().write(true).open(&path)?;
-            completed.sync_all()?;
+        publish_single_file_export(&path, destination, parent)?;
+    }
+    Ok(())
+}
+
+fn publish_single_file_export(
+    path: &Path,
+    destination: &Path,
+    parent: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Both paths are on the same filesystem. Sync the finished part
+    // before renaming it into place to avoid another full-size copy.
+    let completed = fs::OpenOptions::new().write(true).open(path)?;
+    completed.sync_all()?;
+    if let Err(rename_error) = fs::rename(path, destination) {
+        // Some platforms cannot rename over an existing destination.
+        // Preserve the previous cross-platform atomic replacement path.
+        if !destination.exists() {
+            return Err(rename_error.into());
         }
-        if let Err(rename_error) = fs::rename(&path, destination) {
-            // Some platforms cannot rename over an existing destination.
-            // Preserve the previous cross-platform atomic replacement path.
-            if !destination.exists() {
-                return Err(rename_error.into());
-            }
-            let mut completed = tempfile::NamedTempFile::new_in(parent)?;
-            io::copy(&mut fs::File::open(&path)?, completed.as_file_mut())?;
-            completed.as_file_mut().sync_all()?;
-            completed.persist(destination)?;
-        }
+        let mut completed = tempfile::NamedTempFile::new_in(parent)?;
+        io::copy(&mut fs::File::open(path)?, completed.as_file_mut())?;
+        completed.as_file_mut().sync_all()?;
+        completed.persist(destination)?;
     }
     Ok(())
 }
