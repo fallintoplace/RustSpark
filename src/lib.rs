@@ -785,6 +785,29 @@ impl RustSparkSession {
         self.table(table).await?.filter(predicate)
     }
 
+    /// Keep rows equal to a typed value, treating NULL as IS NULL.
+    ///
+    /// Unlike a SQL equality with NULL, this matches missing values when
+    /// the caller supplies a typed NULL. The query remains lazy.
+    pub async fn filter_rows_equal_value(
+        &self,
+        table: &str,
+        column: &str,
+        value: datafusion::common::ScalarValue,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let key = Expr::Column(Column::from_name(column));
+        let predicate = if value.is_null() {
+            key.is_null()
+        } else {
+            key.eq(lit(value))
+        };
+        dataframe.filter(predicate)
+    }
+
     /// Keep rows whose selected column is within an inclusive typed range.
     ///
     /// NULL rows are excluded by SQL comparison semantics. Invalid columns,
