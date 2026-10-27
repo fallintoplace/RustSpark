@@ -736,13 +736,13 @@ impl RustSparkSession {
         intervals_table: &str,
         join_type: datafusion::logical_expr::JoinType,
         keys: &[(&str, &str)],
-        value_column: &str,
-        interval_columns: (&str, &str),
+        range_columns: (&str, (&str, &str)),
         bounds: RangeJoinBounds,
     ) -> Result<DataFrame> {
         use datafusion::logical_expr::JoinType;
         use std::fmt::Write as _;
 
+        let (value_column, interval_columns) = range_columns;
         validate_join_key_pairs(
             keys,
             "join_tables_on_keyed_range requires non-empty key pairs",
