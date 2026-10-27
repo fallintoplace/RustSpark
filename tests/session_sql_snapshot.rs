@@ -2,7 +2,8 @@ use datafusion::common::ScalarValue;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn cached_read_only_query_survives_source_removal() -> Result<(), Box<dyn std::error::Error>> {
+async fn cached_read_only_query_survives_source_removal() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     session
         .register_sql_view("source", "SELECT 7 AS value")
