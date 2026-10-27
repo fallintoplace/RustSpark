@@ -11,6 +11,8 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
+mod joins_existence;
+pub use joins_existence::{ExistenceFilter, ExistenceMode};
 mod joins_star;
 pub use joins_star::StarDimension;
 mod joins_many_using;
