@@ -5,42 +5,33 @@ use std::{
 
 use datafusion::error::{DataFusionError, Result};
 
-/// Parse an explicit list of Parquet parts; keep the data itself lazy.
-pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
-    let input =
-        fs::read_to_string(manifest).map_err(|error| DataFusionError::External(Box::new(error)))?;
-    let input = input.strip_prefix('\u{feff}').unwrap_or(&input);
-    let directory = manifest.parent().unwrap_or_else(|| Path::new("."));
-    // Preserve source line numbers for useful errors and input order for the scan.
-    let mut paths = Vec::new();
+fn parse_manifest_paths(input: &str, directory: &Path) -> Vec<(usize, PathBuf)> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    input
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let name = line.trim();
+            if name.is_empty() || name.starts_with('#') {
+                return None;
+            }
+            let candidate = Path::new(name);
+            let path = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                directory.join(candidate)
+            };
+            Some((index + 1, path))
+        })
+        .collect()
+}
 
-    for (index, line) in input.lines().enumerate() {
-        let name = line.trim();
-        if name.is_empty() || name.starts_with('#') {
-            continue;
-        }
-        let candidate = Path::new(name);
-        let path = if candidate.is_absolute() {
-            candidate.to_path_buf()
-        } else {
-            directory.join(candidate)
-        };
-        paths.push((index + 1, path));
-    }
-
-    if paths.is_empty() {
-        return Err(DataFusionError::Plan(format!(
-            "Parquet file list '{}' contains no files",
-            manifest.display()
-        )));
-    }
-
-    // Check large manifests in parallel. Remote mounts can make per-file
-    // metadata calls expensive; small manifests stay sequential.
+fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Option<usize> {
+    // Check large manifests in parallel while preserving the earliest error.
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
         .min(8);
-    let first_invalid = if workers > 1 && paths.len() >= 128 {
+    if workers > 1 && paths.len() >= 128 {
         let chunk_size = paths.len().div_ceil(workers);
         std::thread::scope(|scope| {
             let checks = paths
@@ -62,8 +53,24 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
         })
     } else {
         paths.iter().position(|(_, path)| !path.is_file())
-    };
-    if let Some(index) = first_invalid {
+    }
+}
+
+/// Parse an explicit list of Parquet parts; keep the data itself lazy.
+pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
+    let input =
+        fs::read_to_string(manifest).map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let directory = manifest.parent().unwrap_or_else(|| Path::new("."));
+    let paths = parse_manifest_paths(&input, directory);
+
+    if paths.is_empty() {
+        return Err(DataFusionError::Plan(format!(
+            "Parquet file list '{}' contains no files",
+            manifest.display()
+        )));
+    }
+
+    if let Some(index) = first_invalid_path(&paths) {
         let (line, path) = &paths[index];
         return Err(DataFusionError::Plan(format!(
             "Parquet file list '{}' line {} must name an existing file: {}",
@@ -78,8 +85,23 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::load_parquet_file_list;
-    use std::fs;
+    use super::{load_parquet_file_list, parse_manifest_paths};
+    use std::{fs, path::Path};
+
+    #[test]
+    fn parser_keeps_source_lines_and_relative_paths() {
+        let paths = parse_manifest_paths(
+            "\u{feff}# header\n\n part-1.parquet \n# skip\npart-2.parquet\n",
+            Path::new("data"),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                (3, Path::new("data").join("part-1.parquet")),
+                (5, Path::new("data").join("part-2.parquet")),
+            ]
+        );
+    }
 
     #[test]
     fn large_manifest_checks_paths_and_preserves_order() {
