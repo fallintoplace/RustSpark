@@ -816,7 +816,11 @@ impl RustSparkSession {
         use std::collections::HashSet;
 
         if values.len() <= 8 {
-            return values.iter().cloned().map(datafusion::prelude::lit).collect();
+            return values
+                .iter()
+                .cloned()
+                .map(datafusion::prelude::lit)
+                .collect();
         }
         let mut seen = HashSet::new();
         values
