@@ -1168,6 +1168,31 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Bernoulli-sample rows with an independent probability per source row.
+    ///
+    /// The fraction must be finite and in 0..=1. Zero and one avoid random
+    /// evaluation. Interior fractions use DataFusion's random() per row.
+    /// Samples are lazy, unseeded, and may contain any number of rows.
+    pub async fn sample_rows(&self, table: &str, fraction: f64) -> Result<DataFrame> {
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(DataFusionError::Plan(
+                "sample_rows fraction must be finite and between zero and one".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        if fraction == 1.0 {
+            return Ok(dataframe);
+        }
+        if fraction == 0.0 {
+            return dataframe.limit(0, Some(0));
+        }
+        let source = quote_catalog_table(table, "sample_rows requires a table path")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {source} WHERE random() < {fraction}"
+        ))
+        .await
+    }
+
     /// Read the first row of a registered table as typed scalar values.
     ///
     /// Returns None for an empty table. Use an ordered view when row order matters.
