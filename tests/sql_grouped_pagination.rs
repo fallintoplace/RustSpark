@@ -22,17 +22,31 @@ async fn grouped_sort_uses_offset_after_aggregation() -> TestResult {
                  ORDER BY total DESC, category
                  LIMIT 2 OFFSET 1";
     let batches = session.sql(query).await?.collect().await?;
-    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 2);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
 
     let mut actual = Vec::new();
     for batch in &batches {
-        let labels = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let totals = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let labels = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let totals = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         for row in 0..batch.num_rows() {
             actual.push((labels.value(row).to_owned(), totals.value(row)));
         }
     }
-    assert_eq!(actual, vec![("alpha".to_owned(), 10), ("beta".to_owned(), 8)]);
+    assert_eq!(
+        actual,
+        vec![("alpha".to_owned(), 10), ("beta".to_owned(), 8)]
+    );
 
     let empty = session
         .sql(
