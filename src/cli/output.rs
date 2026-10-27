@@ -126,13 +126,12 @@ async fn write_arrow_stream<W: Write>(
     Ok(())
 }
 
-
 fn escape_markdown_cell(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('|', "\\|")
-        .replace('\\r', " ")
-        .replace('\\n', "<br>")
+        .replace('\r', " ")
+        .replace('\n', "<br>")
 }
 
 // Keep only one record batch and the current cell in memory.
