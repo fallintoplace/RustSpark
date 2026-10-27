@@ -969,6 +969,23 @@ impl RustSparkSession {
         self.context.register_udf(udf);
     }
 
+    /// Filter text values with a case-insensitive SQL ILIKE pattern.
+    ///
+    /// Wildcards use SQL LIKE rules. NULL values do not match, and patterns
+    /// remain typed literals instead of being appended to SQL text.
+    pub async fn filter_rows_ilike(
+        &self,
+        table: &str,
+        column: &str,
+        pattern: &str,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        dataframe.filter(Expr::Column(Column::from_name(column)).ilike(lit(pattern)))
+    }
+
     /// Register an aggregate user-defined function for SQL queries.
     pub fn register_udaf(&self, udf: datafusion::logical_expr::AggregateUDF) {
         self.context.register_udaf(udf);
