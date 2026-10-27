@@ -22,7 +22,8 @@ def numeric(value):
         return None
     if isinstance(value, (int, float, Decimal)):
         try:
-            return Decimal(str(value))
+            converted = Decimal(str(value))
+            return converted if converted.is_finite() else None
         except InvalidOperation:
             return None
     return None
@@ -39,11 +40,15 @@ def same_value(actual, expected, tolerance):
     if a is None and isinstance(actual, str) and b is not None:
         try:
             a = Decimal(actual)
+            if not a.is_finite():
+                return False
         except InvalidOperation:
             pass
     if b is None and isinstance(expected, str) and a is not None:
         try:
             b = Decimal(expected)
+            if not b.is_finite():
+                return False
         except InvalidOperation:
             pass
     if a is not None and b is not None:
