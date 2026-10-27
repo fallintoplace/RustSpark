@@ -2,8 +2,7 @@ use datafusion::common::ScalarValue;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn reads_the_first_row_from_read_only_sql()
--> Result<(), Box<dyn std::error::Error>> {
+async fn reads_the_first_row_from_read_only_sql() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     assert_eq!(
         session
@@ -12,7 +11,9 @@ async fn reads_the_first_row_from_read_only_sql()
         Some(vec![ScalarValue::Int64(Some(5)), ScalarValue::Int64(None)])
     );
     assert_eq!(
-        session.sql_read_only_first_row("SELECT 1 WHERE FALSE").await?,
+        session
+            .sql_read_only_first_row("SELECT 1 WHERE FALSE")
+            .await?,
         None
     );
     assert!(
