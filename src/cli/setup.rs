@@ -48,17 +48,24 @@ fn union_definitions(args: &Args) -> impl Iterator<Item = (&str, bool)> {
         )
 }
 
+fn parsed_union_definitions(
+    args: &Args,
+) -> Result<Vec<(&str, Vec<&str>, bool)>, Box<dyn std::error::Error>> {
+    let mut names = HashSet::new();
+    union_definitions(args)
+        .map(|(declaration, distinct)| -> Result<_, Box<dyn std::error::Error>> {
+            let (name, sources) = parse_union_by_name(declaration)?;
+            ensure_unique_name(&mut names, name, "union destination")?;
+            Ok((name, sources, distinct))
+        })
+        .collect()
+}
+
 async fn register_unions_by_name(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut union_names = HashSet::new();
-    for (declaration, _) in union_definitions(args) {
-        let (name, _) = parse_union_by_name(declaration)?;
-        ensure_unique_name(&mut union_names, name, "union destination")?;
-    }
-    for (definition, distinct) in union_definitions(args) {
-        let (name, sources) = parse_union_by_name(definition)?;
+    for (name, sources, distinct) in parsed_union_definitions(args)? {
         let union = if distinct {
             session.union_tables_distinct_by_name(&sources).await?
         } else {
@@ -158,8 +165,41 @@ async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod view_validation_tests {
-    use super::{Args, validate_view_names};
+    use super::{Args, parsed_union_definitions, validate_view_names};
     use clap::Parser;
+
+    #[test]
+    fn validates_all_union_names_before_registration() {
+        let args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--union-by-name",
+            "combined=left,right",
+            "--union-distinct-by-name",
+            "COMBINED=other,table",
+        ])
+        .unwrap();
+        let error = parsed_union_definitions(&args).unwrap_err();
+        assert!(error.to_string().contains("Duplicate union destination"));
+    }
+
+    #[test]
+    fn preserves_union_order_and_distinct_mode() {
+        let args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--union-by-name",
+            "first=one,two",
+            "--union-distinct-by-name",
+            "second=three,four",
+        ])
+        .unwrap();
+        let parsed = parsed_union_definitions(&args).unwrap();
+        assert_eq!(parsed[0], ("first", vec!["one", "two"], false));
+        assert_eq!(parsed[1], ("second", vec!["three", "four"], true));
+    }
 
     #[test]
     fn rejects_duplicate_lazy_and_materialized_view_names() {

@@ -103,6 +103,15 @@ async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str,
     }
 }
 
+fn shell_arguments<'a>(command: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = command.strip_prefix(keyword)?;
+    if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
 // Execute SQL files in the current session without replacing pending input.
 async fn handle_read_command(
     session: &RustSparkSession,
@@ -110,10 +119,9 @@ async fn handle_read_command(
     command: &str,
     timer_on: bool,
 ) -> bool {
-    if command != ".read" && !command.starts_with(".read ") && !command.starts_with(".read\t") {
+    let Some(path) = shell_arguments(command, ".read") else {
         return false;
-    }
-    let path = command[".read".len()..].trim();
+    };
     if path.is_empty() {
         eprintln!("Shell error: .read requires a file path");
         return true;
@@ -132,13 +140,9 @@ async fn handle_read_command(
 
 // Print table column names without row scans or full type metadata.
 async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bool {
-    if command != ".columns"
-        && !command.starts_with(".columns ")
-        && !command.starts_with(".columns\t")
-    {
+    let Some(name) = shell_arguments(command, ".columns") else {
         return false;
-    }
-    let name = command.strip_prefix(".columns").unwrap_or_default().trim();
+    };
     if name.is_empty() || name.split_whitespace().count() != 1 {
         eprintln!("Shell error: .columns requires exactly one table name");
     } else {
@@ -156,11 +160,9 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
 
 // Handle the schema-specific shell command without changing pending SQL.
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
-    if command != ".schema" && !command.starts_with(".schema ") && !command.starts_with(".schema\t")
-    {
+    let Some(name) = shell_arguments(command, ".schema") else {
         return false;
-    }
-    let name = command.strip_prefix(".schema").unwrap_or_default().trim();
+    };
     if name.is_empty() || name.split_whitespace().count() != 1 {
         eprintln!("Shell error: .schema requires exactly one table name");
     } else {
@@ -179,10 +181,9 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
 
 // Count a registered table without requiring a SQL statement.
 async fn handle_count_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
-    if command != ".count" && !command.starts_with(".count ") && !command.starts_with(".count\t") {
+    let Some(name) = shell_arguments(command, ".count") else {
         return false;
-    }
-    let name = command.strip_prefix(".count").unwrap_or_default().trim();
+    };
     if name.is_empty() || name.split_whitespace().count() != 1 {
         eprintln!("Shell error: .count requires exactly one table name");
     } else {
@@ -201,14 +202,11 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
 
 // Use quoted identifiers so a shell table name cannot change the SQL plan.
 async fn handle_preview_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
-    if command != ".preview"
-        && !command.starts_with(".preview ")
-        && !command.starts_with(".preview\t")
-    {
+    let Some(arguments) = shell_arguments(command, ".preview") else {
         return false;
-    }
+    };
     let usage = "Shell error: .preview requires TABLE [ROWS] (ROWS must be 1..=1000)";
-    let parts: Vec<_> = command[".preview".len()..].split_whitespace().collect();
+    let parts: Vec<_> = arguments.split_whitespace().collect();
     let (table, rows) = match parts.as_slice() {
         [table] => (*table, 10),
         [table, count] => match count.parse::<usize>() {
@@ -267,14 +265,7 @@ async fn dispatch_shell_command(
             return ShellAction::Continue;
         }
         ".catalogs" => {
-            let mut catalogs: Vec<_> = session
-                .list_schemas()
-                .into_iter()
-                .filter_map(|schema| schema.split_once('.').map(|(name, _)| name.to_owned()))
-                .collect();
-            catalogs.sort();
-            catalogs.dedup();
-            for catalog in catalogs {
+            for catalog in session.list_catalogs() {
                 println!("{catalog}");
             }
             return ShellAction::Continue;
@@ -343,11 +334,8 @@ pub(super) async fn run_interactive(
         }
         if pending.trim().is_empty() {
             let command = line.trim();
-            if command == ".timer"
-                || command.starts_with(".timer ")
-                || command.starts_with(".timer\t")
-            {
-                match command[".timer".len()..].trim() {
+            if let Some(arguments) = shell_arguments(command, ".timer") {
+                match arguments {
                     "on" => timer_on = true,
                     "off" => timer_on = false,
                     "" => eprintln!("Timer: {}", if timer_on { "on" } else { "off" }),
@@ -388,7 +376,23 @@ pub(super) async fn run_interactive(
 
 #[cfg(test)]
 mod tests {
-    use super::SqlTerminatorScanner;
+    use super::{SqlTerminatorScanner, shell_arguments};
+
+    #[test]
+    fn shell_commands_require_an_exact_keyword_boundary() {
+        assert_eq!(shell_arguments(".read", ".read"), Some(""));
+        assert_eq!(
+            shell_arguments(".read query.sql", ".read"),
+            Some("query.sql")
+        );
+        assert_eq!(
+            shell_arguments(".read\tquery.sql", ".read"),
+            Some("query.sql")
+        );
+        assert_eq!(shell_arguments(".readme", ".read"), None);
+        assert_eq!(shell_arguments(".timer on", ".timer"), Some("on"));
+        assert_eq!(shell_arguments(".previewer x", ".preview"), None);
+    }
 
     #[test]
     fn incremental_scan_keeps_quote_and_comment_state_between_lines() {

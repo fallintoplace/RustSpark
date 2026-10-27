@@ -28,22 +28,26 @@ def read_queries(path: Path) -> list[str]:
     return queries
 
 
-def choose_queries(queries: list[str], only: str | None) -> list[tuple[int, str]]:
-    if not only:
-        return list(enumerate(queries, 1))
-    selected = []
+def parse_query_numbers(only: str, query_count: int) -> list[int]:
+    numbers = []
     seen = set()
     for entry in only.split(","):
         if not entry.strip().isdigit():
             raise ValueError("--only needs comma-separated positive query numbers")
         number = int(entry.strip())
-        if number < 1 or number > len(queries):
+        if number < 1 or number > query_count:
             raise ValueError(f"query number out of range: {number}")
         if number in seen:
             raise ValueError(f"duplicate query number: {number}")
         seen.add(number)
-        selected.append((number, queries[number - 1]))
-    return selected
+        numbers.append(number)
+    return numbers
+
+
+def choose_queries(queries: list[str], only: str | None) -> list[tuple[int, str]]:
+    if not only:
+        return list(enumerate(queries, 1))
+    return [(number, queries[number - 1]) for number in parse_query_numbers(only, len(queries))]
 
 
 def command(binary: str, parquet: Path, sql: str) -> list[str]:
@@ -98,7 +102,7 @@ def execute(binary: str, parquet: Path, sql: str, timeout: float) -> dict:
         )
     except subprocess.TimeoutExpired:
         return {"error": f"Timed out after {timeout:g} seconds", "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         return {"error": str(error), "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
     elapsed = round((time.perf_counter() - started) * 1000, 3)
     if process.returncode:

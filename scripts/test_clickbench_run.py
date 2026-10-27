@@ -24,6 +24,12 @@ class QueryRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.choose_queries(queries, only)
 
+    def test_query_number_parser_preserves_order_and_rejects_duplicates(self):
+        self.assertEqual(runner.parse_query_numbers("3, 1,2", 3), [3, 1, 2])
+        for value in ["0", "4", "1,1", "1,", ",1", "1,x"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.parse_query_numbers(value, 3)
+
     def test_rejects_unsafe_or_multiline_queries(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "queries.sql"
@@ -75,6 +81,13 @@ class QueryRunnerTests(unittest.TestCase):
         ):
             result = runner.measure_query("bin", pathlib.Path("data"), 2, "SELECT 1;", 1, 0, 1)
         self.assertIn("Timed out", result["error"])
+
+    def test_invalid_utf8_output_is_a_query_error(self):
+        decode_error = UnicodeDecodeError("utf-8", bytes([0xff]), 0, 1, "invalid start byte")
+        with mock.patch.object(runner.subprocess, "run", side_effect=decode_error):
+            result = runner.measure_query("bin", pathlib.Path("data"), 4, "SELECT 1;", 1, 0, 10)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("decode", result["error"])
 
     def test_continues_after_failed_query_and_writes_failure_report(self):
         with tempfile.TemporaryDirectory() as directory:

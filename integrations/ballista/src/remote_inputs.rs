@@ -53,10 +53,13 @@ fn parse_sources(input: &str) -> Result<Vec<Source>, String> {
     if input.trim().is_empty() {
         return Err("RUSTSPARK_INPUTS must not be empty".into());
     }
+    parse_source_items(input.split(';'))
+}
 
+fn parse_source_items<'a>(items: impl IntoIterator<Item = &'a str>) -> Result<Vec<Source>, String> {
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
-    for item in input.split(';') {
+    for item in items {
         let source = parse_source(item)?;
         if !seen.insert(source.name.to_ascii_lowercase()) {
             return Err(format!("Duplicate distributed table name: {}", source.name));
@@ -68,15 +71,16 @@ fn parse_sources(input: &str) -> Result<Vec<Source>, String> {
 
 fn parse_manifest(input: &str) -> Result<Vec<Source>, String> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-    let entries: Vec<_> = input
+    let mut entries = input
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect();
-    if entries.is_empty() {
+        .flat_map(|line| line.split(';'))
+        .peekable();
+    if entries.peek().is_none() {
         return Err("RUSTSPARK_INPUTS_FILE must contain at least one table".into());
     }
-    parse_sources(&entries.join(";"))
+    parse_source_items(entries)
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
@@ -168,6 +172,21 @@ mod tests {
         assert_eq!(sources[0].name, "Orders");
         assert_eq!(sources[1].format, Format::Csv);
         assert_eq!(sources[2].path, "s3://bucket/data?version=2");
+    }
+
+    #[test]
+    fn manifest_keeps_large_input_order_and_semicolon_syntax() {
+        let manifest = (0..512)
+            .map(|index| format!("csv:t{index}=/shared/{index}.csv"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sources = parse_manifest(&manifest).unwrap();
+        assert_eq!(sources.len(), 512);
+        assert_eq!(sources[0].name, "t0");
+        assert_eq!(sources[511].name, "t511");
+        let combined = parse_manifest("csv:left=/shared/left;parquet:right=/shared/right").unwrap();
+        assert_eq!(combined.len(), 2);
+        assert_eq!(combined[1].format, Format::Parquet);
     }
 
     #[test]

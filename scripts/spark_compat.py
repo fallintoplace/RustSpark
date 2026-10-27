@@ -68,8 +68,24 @@ def parse_rustspark_columns(stdout: str) -> list[str]:
     return [parts[0] for parts in parse_rustspark_schema_fields(stdout)]
 
 
+def _unique_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate RustSpark JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value):
+    raise ValueError(f"Non-finite RustSpark JSON value: {value}")
+
+
 def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
-    objects = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    objects = [
+        json.loads(line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite)
+        for line in stdout.splitlines() if line.strip()
+    ]
     expected = set(columns)
     if len(expected) != len(columns) or any(
         not isinstance(obj, dict) or set(obj) != expected for obj in objects

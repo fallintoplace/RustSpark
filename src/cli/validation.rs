@@ -119,6 +119,20 @@ fn reject_missing_format_inputs(
     Ok(())
 }
 
+fn validate_input_selection(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let single_inputs = u8::from(args.csv.is_some())
+        + u8::from(args.parquet.is_some())
+        + u8::from(args.json.is_some())
+        + u8::from(args.parquet_file_list.is_some());
+    let has_named = !args.csv_tables.is_empty()
+        || !args.parquet_tables.is_empty()
+        || !args.json_tables.is_empty();
+    if single_inputs > 1 || (single_inputs > 0 && has_named) {
+        return Err("Use one unnamed input or one or more named tables".into());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.parquet_compression.is_some()
         && args.output_parquet.is_none()
@@ -134,19 +148,10 @@ pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Err
     {
         return Err("--output-rows-per-file requires a file export or --database-dir".into());
     }
-    let single_inputs = u8::from(args.csv.is_some())
-        + u8::from(args.parquet.is_some())
-        + u8::from(args.json.is_some())
-        + u8::from(args.parquet_file_list.is_some());
-    let has_named = !args.csv_tables.is_empty()
-        || !args.parquet_tables.is_empty()
-        || !args.json_tables.is_empty();
     if args.output_single_file && selected_output_path(args).is_none() {
         return Err("--output-single-file requires an output format".into());
     }
-    if single_inputs > 1 || (single_inputs > 0 && has_named) {
-        return Err("Use one unnamed input or one or more named tables".into());
-    }
+    validate_input_selection(args)?;
     reject_output_input_collision(args)?;
     if args.parquet_pushdown_filters && !InputAvailability::from_args(args).parquet {
         return Err("--parquet-pushdown-filters requires a Parquet input".into());
@@ -308,5 +313,29 @@ mod path_collision_tests {
                 .join("output.csv")
         );
         assert!(!overlaps_input_path(&source, &normalized));
+    }
+}
+
+#[cfg(test)]
+mod input_selection_tests {
+    use super::{Args, validate_input_selection};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn separates_named_and_unnamed_input_modes() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.csv = Some(PathBuf::from("a.csv"));
+        assert!(validate_input_selection(&args).is_ok());
+
+        args.json = Some(PathBuf::from("b.json"));
+        assert!(validate_input_selection(&args).is_err());
+
+        args.json = None;
+        args.csv_tables.push("events=c.csv".to_owned());
+        assert!(validate_input_selection(&args).is_err());
+
+        args.csv = None;
+        assert!(validate_input_selection(&args).is_ok());
     }
 }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use datafusion::{execution::runtime_env::RuntimeEnvBuilder, prelude::SessionConfig};
 use rustspark::RustSparkSession;
@@ -33,6 +33,25 @@ fn build_session_config(args: &Args) -> SessionConfig {
     config
 }
 
+fn validate_spill_directory(
+    path: &Path,
+    database_root: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.is_dir() {
+        return Err(format!(
+            "--spill-dir must name an existing directory: {}",
+            path.display()
+        )
+        .into());
+    }
+    if let Some(root) = database_root
+        && path.canonicalize()?.starts_with(root.canonicalize()?)
+    {
+        return Err("--spill-dir must not be inside --database-dir".into());
+    }
+    Ok(())
+}
+
 pub(super) fn new_session(
     args: &Args,
 ) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
@@ -42,18 +61,7 @@ pub(super) fn new_session(
         runtime = runtime.with_memory_limit(limit, 1.0);
     }
     if let Some(path) = args.spill_dir.as_deref() {
-        if !path.is_dir() {
-            return Err(format!(
-                "--spill-dir must name an existing directory: {}",
-                path.display()
-            )
-            .into());
-        }
-        if let Some(root) = args.database_dir.as_deref()
-            && path.canonicalize()?.starts_with(root.canonicalize()?)
-        {
-            return Err("--spill-dir must not be inside --database-dir".into());
-        }
+        validate_spill_directory(path, args.database_dir.as_deref())?;
         runtime = runtime.with_temp_file_path(path.to_path_buf());
     }
     let session = if args.memory_limit_bytes.is_some() || args.spill_dir.is_some() {
@@ -62,4 +70,25 @@ pub(super) fn new_session(
         RustSparkSession::with_config(config)
     };
     Ok(Arc::new(session))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_spill_directory;
+    use std::fs;
+
+    #[test]
+    fn validates_spill_paths_without_changing_runtime_setup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("db");
+        let nested = database.join("spill");
+        let separate = directory.path().join("spill");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(&separate).unwrap();
+
+        assert!(validate_spill_directory(&separate, Some(&database)).is_ok());
+        assert!(validate_spill_directory(&nested, Some(&database)).is_err());
+        assert!(validate_spill_directory(&database, Some(&database)).is_err());
+        assert!(validate_spill_directory(&directory.path().join("missing"), None).is_err());
+    }
 }
