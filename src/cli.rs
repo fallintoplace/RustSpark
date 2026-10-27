@@ -292,16 +292,21 @@ fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>>
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
         .ok_or("--input needs a .csv, .json, .jsonl, .ndjson or .parquet extension")?;
-    match extension.as_str() {
-        "csv" => args.csv = Some(path.clone()),
-        "json" => args.json = Some(path.clone()),
-        "jsonl" | "ndjson" => {
-            args.json = Some(path.clone());
-            args.json_extension.get_or_insert(format!(".{extension}"));
+    let actual_extension = format!(".{extension}");
+    match extension.to_ascii_lowercase().as_str() {
+        "csv" => {
+            args.csv = Some(path.clone());
+            args.csv_extension.get_or_insert(actual_extension);
         }
-        "parquet" => args.parquet = Some(path.clone()),
+        "json" | "jsonl" | "ndjson" => {
+            args.json = Some(path.clone());
+            args.json_extension.get_or_insert(actual_extension);
+        }
+        "parquet" => {
+            args.parquet = Some(path.clone());
+            args.parquet_extension.get_or_insert(actual_extension);
+        }
         _ => return Err(format!("Unsupported --input extension: .{extension}").into()),
     }
     Ok(())
