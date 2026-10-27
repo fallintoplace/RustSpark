@@ -49,10 +49,7 @@ fn markdown_escapes_pipes_and_prints_null_explicitly() -> TestResult {
 fn markdown_empty_result_has_column_headers() -> TestResult {
     let output = run("SELECT 42 AS answer WHERE FALSE", &[])?;
     assert_success(&output);
-    assert_eq!(
-        String::from_utf8(output.stdout)?,
-        "| answer |\n| --- |\n"
-    );
+    assert_eq!(String::from_utf8(output.stdout)?, "| answer |\n| --- |\n");
     Ok(())
 }
 
