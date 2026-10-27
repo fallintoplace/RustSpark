@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Int64Array, }datatypes::DataType},
+    arrow::{array::Int64Array, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -30,7 +30,8 @@ pub(crate) fn udf() -> ScalarUDF {
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| {
-                    left.zip(right).and_then(|(left, right)| Some(((left as u64).wrapping_shr(right as u32)) as i64))
+                    left.zip(right)
+                        .map(|(left, right)| (left as u64).wrapping_shr(right as u32) as i64)
                 })
                 .collect();
             if scalar {
