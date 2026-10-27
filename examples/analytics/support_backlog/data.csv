@@ -1,0 +1,7 @@
+ticket_id,team,opened_day,closed_day
+1,billing,1,3
+2,billing,2,0
+3,billing,5,0
+4,infra,1,8
+5,infra,7,0
+6,infra,9,0
