@@ -107,6 +107,25 @@ async fn write_delimited<W: Write>(
     Ok(())
 }
 
+async fn write_arrow_stream<W: Write>(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+    output: &mut W,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    broken_pipe: &AtomicBool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = datafusion::arrow::ipc::writer::StreamWriter::try_new(output, schema)
+        .map_err(|error| preserve_writer_pipe_error(error, broken_pipe))?;
+    while let Some(batch) = stream.next().await {
+        writer
+            .write(&batch?)
+            .map_err(|error| preserve_writer_pipe_error(error, broken_pipe))?;
+    }
+    writer
+        .finish()
+        .map_err(|error| preserve_writer_pipe_error(error, broken_pipe))?;
+    Ok(())
+}
+
 // Write one record batch at a time so stdout never requires collecting all results.
 pub(super) async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
@@ -168,17 +187,7 @@ pub(super) async fn write_stdout(
                 .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
         }
         StdoutFormat::Arrow => {
-            let mut writer =
-                datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut tracked, &schema)
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-            while let Some(batch) = stream.next().await {
-                writer
-                    .write(&batch?)
-                    .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
-            }
-            writer
-                .finish()
-                .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
+            write_arrow_stream(&mut stream, &mut tracked, &schema, &broken_pipe).await?;
         }
     }
     drop(tracked);
