@@ -1,10 +1,13 @@
+import json
 import pathlib
+import tempfile
 import sys
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import bench_compare
+import sql_report_compare
 
 
 class ComparisonTests(unittest.TestCase):
@@ -93,6 +96,79 @@ class ComparisonTests(unittest.TestCase):
             if name != "scan_count":
                 self.assertEqual(ratios[name], 2.0)
         self.assertNotIn("rustspark_median_over_competitor_median", result)
+
+
+def sample_query_report(medians=(10.0, 4.0)):
+    return {
+        "query_file_sha256": "f" * 64,
+        "queries_attempted": 2,
+        "results": [
+            {"id": 1, "sql": "SELECT 1;", "status": "executed",
+             "median_ms": medians[0], "result_sha256": "a" * 64, "result_rows": 1},
+            {"id": 2, "sql": "SELECT 2;", "status": "executed",
+             "median_ms": medians[1], "result_sha256": "b" * 64, "result_rows": 2},
+        ],
+    }
+
+
+class SQLLatencyComparisonTests(unittest.TestCase):
+    def test_matching_results_produce_latency_ratios(self):
+        reference = sample_query_report()
+        candidate = sample_query_report((20.0, 2.0))
+        candidate["results"].reverse()
+        result = sql_report_compare.compare_reports(reference, candidate)
+        self.assertEqual(result["queries_compared"], 2)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([row["slowdown"] for row in result["timings"]], [2.0, 0.5])
+
+    def test_reports_result_mismatch_before_speed_ratio(self):
+        reference = sample_query_report()
+        candidate = sample_query_report()
+        candidate["results"][0]["result_sha256"] = "c" * 64
+        result = sql_report_compare.compare_reports(reference, candidate)
+        self.assertEqual(result["queries_compared"], 1)
+        self.assertIn("result differs", result["errors"][0])
+
+    def test_threshold_and_zero_baseline(self):
+        reference = sample_query_report((0.0, 10.0))
+        candidate = sample_query_report((0.0, 13.0))
+        result = sql_report_compare.compare_reports(reference, candidate, 1.25)
+        self.assertEqual(result["slowdown_query_ids"], [2])
+        self.assertIsNone(result["timings"][0]["slowdown"])
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            sql_report_compare.compare_reports(reference, candidate, 0.5)
+
+    def test_rejects_missing_queries_and_invalid_latencies(self):
+        reference = sample_query_report()
+        candidate = sample_query_report()
+        candidate["results"][0]["median_ms"] = float("nan")
+        self.assertIn("invalid latency", sql_report_compare.compare_reports(
+            reference, candidate,
+        )["errors"][0])
+        candidate = sample_query_report()
+        candidate["results"].pop()
+        candidate["queries_attempted"] = 1
+        self.assertIn("missing in one report", sql_report_compare.compare_reports(
+            reference, candidate,
+        )["errors"][0])
+
+    def test_cli_output_and_strict_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            reference = root / "reference.json"
+            candidate = root / "candidate.json"
+            output = root / "comparison.json"
+            reference.write_text(json.dumps(sample_query_report()), encoding="utf-8")
+            candidate.write_text(json.dumps(sample_query_report((12.0, 4.0))), encoding="utf-8")
+            self.assertEqual(sql_report_compare.main([
+                str(reference), str(candidate), "--max-slowdown", "1.1",
+                "--json-out", str(output),
+            ]), 1)
+            self.assertEqual(json.loads(output.read_text())["slowdown_query_ids"], [1])
+            candidate.write_text('{"results": [], "results": []}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Duplicate JSON key"):
+                sql_report_compare.load_report(candidate)
+
 
 if __name__ == "__main__":
     unittest.main()
