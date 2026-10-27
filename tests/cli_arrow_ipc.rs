@@ -120,7 +120,9 @@ fn compressed_arrow_files_round_trip_and_reduce_size() -> TestResult {
 
     let mut uncompressed_size = 0;
     for codec in [None, Some("lz4"), Some("zstd")] {
-        let destination = dir.path().join(format!("{}.arrow", codec.unwrap_or("plain")));
+        let destination = dir
+            .path()
+            .join(format!("{}.arrow", codec.unwrap_or("plain")));
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustspark"));
         command
             .arg("--csv")
@@ -148,13 +150,15 @@ fn compressed_arrow_files_round_trip_and_reduce_size() -> TestResult {
         }
 
         let mut row_count = 0;
-        let reader = datafusion::arrow::ipc::reader::FileReader::try_new(
-            File::open(destination)?,
-            None,
-        )?;
+        let reader =
+            datafusion::arrow::ipc::reader::FileReader::try_new(File::open(destination)?, None)?;
         for batch in reader {
             let batch = batch?;
-            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
             for row in 0..batch.num_rows() {
                 assert_eq!(values.value(row), payload);
             }
@@ -171,9 +175,7 @@ fn arrow_compression_requires_an_ipc_file_and_known_codec() -> TestResult {
         .args(["--sql", "SELECT 1", "--arrow-compression", "zstd"])
         .output()?;
     assert!(!missing_output.status.success());
-    assert!(
-        String::from_utf8_lossy(&missing_output.stderr).contains("--output-arrow")
-    );
+    assert!(String::from_utf8_lossy(&missing_output.stderr).contains("--output-arrow"));
 
     let dir = tempfile::tempdir()?;
     let invalid = Command::new(env!("CARGO_BIN_EXE_rustspark"))
@@ -191,7 +193,11 @@ fn compressed_empty_arrow_file_keeps_schema() -> TestResult {
     let dir = tempfile::tempdir()?;
     let destination = dir.path().join("empty.arrow");
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
-        .args(["--sql", "SELECT CAST(1 AS INT) AS id WHERE FALSE", "--output-arrow"])
+        .args([
+            "--sql",
+            "SELECT CAST(1 AS INT) AS id WHERE FALSE",
+            "--output-arrow",
+        ])
         .arg(&destination)
         .args(["--arrow-compression", "lz4"])
         .output()?;
@@ -200,10 +206,8 @@ fn compressed_empty_arrow_file_keeps_schema() -> TestResult {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut reader = datafusion::arrow::ipc::reader::FileReader::try_new(
-        File::open(destination)?,
-        None,
-    )?;
+    let mut reader =
+        datafusion::arrow::ipc::reader::FileReader::try_new(File::open(destination)?, None)?;
     assert_eq!(reader.schema().field(0).name(), "id");
     assert!(reader.next().is_none());
     Ok(())
