@@ -15,6 +15,12 @@ spec.loader.exec_module(mod)
 
 
 class SparkCompatibilityTests(unittest.TestCase):
+    def test_described_columns_preserve_quoted_tabs(self):
+        columns = mod.parse_rustspark_columns("first\tpart\tInt64\tNOT NULL\n")
+        self.assertEqual(columns, ["first\tpart"])
+        with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
+            mod.parse_rustspark_columns("missing_types\n")
+
     def test_unordered_results_are_multiset_compared(self):
         first = mod.QueryResult(["id"], [[2], [1], [1]])
         second = mod.QueryResult(["id"], [[1], [2], [1]])
@@ -82,6 +88,33 @@ class SparkCompatibilityTests(unittest.TestCase):
         self.assertIn("PASS ok", output.getvalue())
         self.assertIn("DIFF diff", output.getvalue())
         self.assertIn("ERROR error: simulated failure", output.getvalue())
+
+    def test_spark_session_uses_utc_timezone(self):
+        class FakeBuilder:
+            def __init__(self):
+                self.options = {}
+
+            def master(self, value):
+                self.options["master"] = value
+                return self
+
+            def appName(self, value):
+                self.options["app_name"] = value
+                return self
+
+            def config(self, key, value):
+                self.options[key] = value
+                return self
+
+            def getOrCreate(self):
+                return self.options
+
+        class FakeSession:
+            builder = FakeBuilder()
+
+        config = mod.build_spark_session(FakeSession, "local[2]")
+        self.assertEqual(config["master"], "local[2]")
+        self.assertEqual(config["spark.sql.session.timeZone"], "UTC")
 
     def test_corpus_is_valid(self):
         cases = mod.load_cases(mod.DEFAULT_CASES)

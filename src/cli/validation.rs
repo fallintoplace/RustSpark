@@ -125,14 +125,14 @@ fn validate_csv_character_options(
     args: &Args,
     has_csv: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if args.csv_quote == Some(args.csv_delimiter.unwrap_or(b',')) {
+    let delimiter = args.csv_delimiter.unwrap_or(b',');
+    let quote = args.csv_quote.unwrap_or(b'"');
+    if delimiter == quote {
         return Err("--csv-quote must differ from the CSV delimiter".into());
     }
     if args.csv_escape.is_some() && !has_csv {
         return Err("--csv-escape requires a CSV input".into());
     }
-    let delimiter = args.csv_delimiter.unwrap_or(b',');
-    let quote = args.csv_quote.unwrap_or(b'"');
     if args
         .csv_comment
         .is_some_and(|comment| comment == delimiter || comment == quote)
