@@ -701,6 +701,20 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    /// Count rows with NULL values in the selected columns.
+    ///
+    /// Any counts rows with at least one selected NULL and All requires
+    /// every selected field to be NULL. Empty columns select the full schema.
+    /// The source rows are not collected or modified.
+    pub async fn count_null_rows(
+        &self,
+        table: &str,
+        columns: &[&str],
+        mode: NullDropMode,
+    ) -> Result<usize> {
+        self.filter_null_rows(table, columns, mode).await?.count().await
+    }
+
     /// Keep rows containing NULLs in selected columns.
     ///
     /// An empty column list examines every column. Any matches a row when
