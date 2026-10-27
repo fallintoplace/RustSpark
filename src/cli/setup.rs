@@ -173,7 +173,7 @@ mod view_validation_tests {
             "EVENTS=SELECT 2",
         ])
         .unwrap();
-        let error = validate_view_names(&args).err().expect("duplicate views");
+        let error = validate_view_names(&args).expect_err("duplicate views");
         assert!(error.to_string().contains("Duplicate SQL view"), "{error}");
     }
 }
