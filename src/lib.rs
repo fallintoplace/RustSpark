@@ -832,6 +832,29 @@ impl RustSparkSession {
         dataframe.filter(key.clone().gt_eq(lit(lower)).and(key.lt_eq(lit(upper))))
     }
 
+    /// Keep rows unequal to a typed value, treating NULL as IS NOT NULL.
+    ///
+    /// For non-NULL values, SQL three-valued inequality semantics apply,
+    /// so source NULLs do not match. No SQL strings are constructed.
+    pub async fn filter_rows_not_equal_value(
+        &self,
+        table: &str,
+        column: &str,
+        value: datafusion::common::ScalarValue,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let key = Expr::Column(Column::from_name(column));
+        let predicate = if value.is_null() {
+            key.is_not_null()
+        } else {
+            key.not_eq(lit(value))
+        };
+        dataframe.filter(predicate)
+    }
+
     /// Filter rows against typed values without SQL string interpolation.
     ///
     /// A NULL entry follows SQL IN semantics. An empty set matches no rows.
