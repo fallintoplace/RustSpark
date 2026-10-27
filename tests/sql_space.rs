@@ -37,9 +37,8 @@ async fn space_supports_rows_and_nulls() -> Result<(), Box<dyn std::error::Error
 #[tokio::test]
 async fn space_rejects_unbounded_padding() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
-    match session.sql("SELECT SPACE(1048577)").await {
-        Ok(dataframe) => assert!(dataframe.collect().await.is_err()),
-        Err(_) => {}
+    if let Ok(dataframe) = session.sql("SELECT SPACE(1048577)").await {
+        assert!(dataframe.collect().await.is_err());
     }
     Ok(())
 }
