@@ -949,8 +949,7 @@ impl RustSparkSession {
         column: &str,
         pattern: &str,
     ) -> Result<DataFrame> {
-        self.filter_rows_pattern(table, column, pattern, true)
-            .await
+        self.filter_rows_pattern(table, column, pattern, true).await
     }
 
     /// Register an aggregate user-defined function for SQL queries.
