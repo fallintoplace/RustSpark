@@ -37,7 +37,7 @@ async fn plan_view_query(
     Ok(dataframe)
 }
 
-pub(super) async fn register_derived_tables(
+async fn register_unions_by_name(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +68,13 @@ pub(super) async fn register_derived_tables(
         };
         session.register_dataframe(name, union)?;
     }
+    Ok(())
+}
+
+async fn register_sql_views(
+    session: &RustSparkSession,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut view_names = HashSet::new();
     let definitions = args
         .sql_views
@@ -90,6 +97,14 @@ pub(super) async fn register_derived_tables(
         session.register_dataframe(name, dataframe)?;
     }
     Ok(())
+}
+
+pub(super) async fn register_derived_tables(
+    session: &RustSparkSession,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    register_unions_by_name(session, args).await?;
+    register_sql_views(session, args).await
 }
 
 pub(super) async fn read_query(

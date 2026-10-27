@@ -76,6 +76,18 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         )
         self.assertIsNone(mod.compare_typed(ours, reference, True))
 
+    def test_temporal_helpers_keep_utc_and_date_values(self):
+        import datetime
+        self.assertEqual(
+            mod.normalize_timestamp("2024-01-02T03:00:00+03:00"),
+            "2024-01-02T00:00:00.000000",
+        )
+        self.assertEqual(
+            mod.normalize_date(datetime.datetime(2024, 1, 2, 9)),
+            "2024-01-02",
+        )
+        self.assertIsNone(mod.normalized_typed_value(None, "timestamp"))
+
     def test_nullability_is_opt_in_and_reports_mismatch(self):
         ours = mod.TypedResult(mod.QueryResult(["n"], [[1]]), ["bigint"], [True])
         reference = mod.TypedResult(mod.QueryResult(["n"], [[1]]), ["bigint"], [False])

@@ -30,13 +30,20 @@ def expect_rows(binary: pathlib.Path, expected: list[dict], *args: str) -> None:
 
 
 def check_catalog_lifecycle(binary: pathlib.Path) -> None:
+    steps = [
+        ("CREATE TABLE items (id BIGINT)", None),
+        ("INSERT INTO items VALUES (1), (2)", None),
+        ("SELECT SUM(id) AS total FROM items", [{"total": 3}]),
+        ("ALTER TABLE items RENAME TO entries", None),
+        ("SELECT COUNT(*) AS n FROM entries", [{"n": 2}]),
+    ]
     with tempfile.TemporaryDirectory() as directory:
-        root = ["--database-dir", directory]
-        execute(binary, *root, "--sql", "CREATE TABLE items (id BIGINT)")
-        execute(binary, *root, "--sql", "INSERT INTO items VALUES (1), (2)")
-        expect_rows(binary, [{"total": 3}], *root, "--sql", "SELECT SUM(id) AS total FROM items")
-        execute(binary, *root, "--sql", "ALTER TABLE items RENAME TO entries")
-        expect_rows(binary, [{"n": 2}], *root, "--sql", "SELECT COUNT(*) AS n FROM entries")
+        for sql, expected in steps:
+            command = ("--database-dir", directory, "--sql", sql)
+            if expected is None:
+                execute(binary, *command)
+            else:
+                expect_rows(binary, expected, *command)
 
 
 def main() -> None:

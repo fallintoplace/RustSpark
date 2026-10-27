@@ -520,14 +520,18 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
-    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
+    fn validate_named_columns(
+        dataframe: &DataFrame,
+        columns: &[&str],
+        operation: &str,
+    ) -> Result<()> {
         use std::collections::HashSet;
 
         let mut seen = HashSet::new();
         for &name in columns {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate selected column: {name}"
+                    "Duplicate {operation} column: {name}"
                 )));
             }
             if !dataframe
@@ -537,11 +541,15 @@ impl RustSparkSession {
                 .any(|field| field.name().as_str() == name)
             {
                 return Err(DataFusionError::Plan(format!(
-                    "Unknown selected column: {name}"
+                    "Unknown {operation} column: {name}"
                 )));
             }
         }
         Ok(())
+    }
+
+    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
+        Self::validate_named_columns(dataframe, columns, "selected")
     }
 
     /// Select and reorder columns from a registered table without reading its rows.
@@ -581,29 +589,25 @@ impl RustSparkSession {
         dataframe.select_columns(columns)?.distinct()
     }
 
-    fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
-        use std::collections::HashSet;
-
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in selected {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropna column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropna column: {name}"
-                )));
-            }
+    /// Project typed DataFusion expressions from a registered table.
+    ///
+    /// Computed expressions and aliases are planned lazily. At least one
+    /// expression is required and the source table remains unchanged.
+    pub async fn select_expressions(
+        &self,
+        table: &str,
+        expressions: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        if expressions.is_empty() {
+            return Err(DataFusionError::Plan(
+                "select_expressions requires at least one expression".into(),
+            ));
         }
-        Ok(())
+        self.table(table).await?.select(expressions.to_vec())
+    }
+
+    fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
+        Self::validate_named_columns(dataframe, selected, "dropna")
     }
 
     /// Drop rows containing NULL values, like Spark DataFrame.na.drop.
@@ -1140,8 +1144,7 @@ impl RustSparkSession {
     /// The plan remains lazy. Use a sorted view for deterministic page order.
     /// The limit must be positive, and offset plus limit must not overflow.
     pub async fn table_page(&self, table: &str, offset: usize, limit: usize) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.table(table).await?.limit(offset, Some(limit))
+        Self::paginate(self.table(table), offset, limit).await
     }
 
     /// Join two registered tables on one or more pairs of equality keys.
@@ -1228,28 +1231,7 @@ impl RustSparkSession {
     }
 
     fn validate_dedup_subset(dataframe: &DataFrame, subset: &[&str]) -> Result<()> {
-        use std::collections::HashSet;
-
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in subset {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropDuplicates column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropDuplicates column: {name}"
-                )));
-            }
-        }
-        Ok(())
+        Self::validate_named_columns(dataframe, subset, "dropDuplicates")
     }
 
     /// Remove duplicate rows from a registered table, like Spark dropDuplicates.
@@ -1304,13 +1286,16 @@ impl RustSparkSession {
         self.table(table).await?.distinct()?.count().await
     }
 
-    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
+    fn sort_dataframe_with_nulls(
+        dataframe: DataFrame,
+        order: &[(&str, bool, bool)],
+    ) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
         let mut seen = HashSet::new();
-        let mut sort_exprs = Vec::new();
-        for &(name, ascending) in order {
+        let mut expressions = Vec::with_capacity(order.len());
+        for &(name, ascending, nulls_first) in order {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate sort column: {name}"
@@ -1326,9 +1311,17 @@ impl RustSparkSession {
                     "Unknown sort column: {name}"
                 )));
             }
-            sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
+            expressions.push(Expr::Column(Column::from_name(name)).sort(ascending, nulls_first));
         }
-        dataframe.sort(sort_exprs)
+        dataframe.sort(expressions)
+    }
+
+    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
+        let keys = order
+            .iter()
+            .map(|&(name, ascending)| (name, ascending, ascending))
+            .collect::<Vec<_>>();
+        Self::sort_dataframe_with_nulls(dataframe, &keys)
     }
 
     /// Sort rows by multiple named columns using Spark-like NULL ordering.
@@ -1376,38 +1369,12 @@ impl RustSparkSession {
         table: &str,
         order: &[(&str, bool, bool)],
     ) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr};
-        use std::collections::HashSet;
-
         if order.is_empty() {
             return Err(DataFusionError::Plan(
                 "sort_rows_with_nulls requires at least one key".into(),
             ));
         }
-
-        let dataframe = self.table(table).await?;
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        let mut expressions = Vec::with_capacity(order.len());
-        for &(name, ascending, nulls_first) in order {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate sort column: {name}"
-                )));
-            }
-            if !available.contains(name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown sort column: {name}"
-                )));
-            }
-            expressions.push(Expr::Column(Column::from_name(name)).sort(ascending, nulls_first));
-        }
-        dataframe.sort(expressions)
+        Self::sort_dataframe_with_nulls(self.table(table).await?, order)
     }
 
     // Plan independent SQL inputs concurrently, with bounded outstanding
