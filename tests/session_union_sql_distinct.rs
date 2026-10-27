@@ -15,7 +15,7 @@ async fn sql_union_distinct_deduplicates_rows_including_nulls() -> TestResult {
             "SELECT CAST(NULL AS BIGINT) AS value",
         ])
         .await?;
-    assert_eq!(combined.count().await?, 3);
+    assert_eq!(combined.clone().count().await?, 3);
 
     session.register_dataframe("unique_values", combined)?;
     assert_eq!(
