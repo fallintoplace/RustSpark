@@ -188,12 +188,21 @@ mod named_input_validation_tests {
     #[test]
     fn rejects_duplicate_names_across_input_formats_before_registration() {
         let args = Args::try_parse_from([
-            "rustspark", "--sql", "SELECT 1",
-            "--csv-table", "events=a.csv",
-            "--json-table", "EVENTS=b.json",
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--csv-table",
+            "events=a.csv",
+            "--json-table",
+            "EVENTS=b.json",
         ])
         .unwrap();
-        let error = parsed_named_inputs(&args).err().expect("duplicate named inputs");
-        assert!(error.to_string().contains("Duplicate table name"), "{error}");
+        let error = parsed_named_inputs(&args)
+            .err()
+            .expect("duplicate named inputs");
+        assert!(
+            error.to_string().contains("Duplicate table name"),
+            "{error}"
+        );
     }
 }
