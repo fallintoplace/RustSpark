@@ -51,30 +51,35 @@ def verify_output(stdout: str) -> None:
     if table_rows != [EXPECTED_COLUMNS, EXPECTED_VALUES]:
         raise RuntimeError("Ballista join/aggregate expected one row (2, 80):\n" + stdout)
 
+def smoke_environment(orders: pathlib.Path, rates: pathlib.Path) -> dict[str, str]:
+    env = os.environ.copy()
+    # A developer's local query settings must not change the smoke workload.
+    for name in (
+        "RUSTSPARK_PARQUET",
+        "RUSTSPARK_MAX_ROWS",
+        "RUSTSPARK_QUERY_TIMEOUT_SECS",
+        "RUSTSPARK_INPUTS_FILE",
+        "RUSTSPARK_SCHEDULER_URLS",
+        "RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS",
+        "RUSTSPARK_OUTPUT_ARROW",
+    ):
+        env.pop(name, None)
+    env.update({
+        "RUSTSPARK_INPUTS": f"csv:orders={orders};csv:rates={rates}",
+        "RUSTSPARK_SQL": QUERY,
+        "RUSTSPARK_TARGET_PARTITIONS": "4",
+        "RUSTSPARK_STANDALONE_PARALLELISM": "4",
+    })
+    return env
+
+
 def run_smoke(mode: str, client: str | None = None, timeout: int = 300) -> None:
     command = command_for(mode, client)
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     with tempfile.TemporaryDirectory(prefix="rustspark-ballista-smoke-") as temp:
         orders, rates = write_fixtures(pathlib.Path(temp))
-        env = os.environ.copy()
-        # A developer's local query settings must not change the smoke workload.
-        for name in (
-            "RUSTSPARK_PARQUET",
-            "RUSTSPARK_MAX_ROWS",
-            "RUSTSPARK_QUERY_TIMEOUT_SECS",
-            "RUSTSPARK_INPUTS_FILE",
-            "RUSTSPARK_SCHEDULER_URLS",
-            "RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS",
-            "RUSTSPARK_OUTPUT_ARROW",
-        ):
-            env.pop(name, None)
-        env.update({
-            "RUSTSPARK_INPUTS": f"csv:orders={orders};csv:rates={rates}",
-            "RUSTSPARK_SQL": QUERY,
-            "RUSTSPARK_TARGET_PARTITIONS": "4",
-            "RUSTSPARK_STANDALONE_PARALLELISM": "4",
-        })
+        env = smoke_environment(orders, rates)
         result = subprocess.run(
             command, cwd=ROOT if mode == "standalone" else None,
             env=env, capture_output=True, text=True,
