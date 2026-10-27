@@ -1,0 +1,7 @@
+service,request_id,latency_ms,status
+api,1,100,success
+api,2,900,success
+api,3,2000,error
+worker,4,500,success
+worker,5,1500,error
+worker,6,700,success

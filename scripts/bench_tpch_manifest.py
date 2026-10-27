@@ -30,13 +30,19 @@ def check(root):
         raise ValueError("Invalid TPC-H scale factor")
     if set(manifest.get("tables", {})) != TABLES:
         raise ValueError("Expected exactly eight TPC-H tables")
+    hashes = manifest.get("table_sha256")
+    if not isinstance(hashes, dict) or set(hashes) != TABLES:
+        raise ValueError("Missing TPC-H Parquet checksums")
     if set(manifest.get("rows", {})) != TABLES:
         raise ValueError("Missing TPC-H row counts")
     for table in sorted(TABLES):
         path = f"data/{table}.parquet"
         if manifest["tables"][table] != path:
             raise ValueError(f"Unexpected Parquet path for {table}")
-        inside(root, path)
+        actual = hashlib.sha256(inside(root, path).read_bytes()).hexdigest()
+        expected = hashes[table]
+        if not isinstance(expected, str) or actual != expected:
+            raise ValueError(f"Parquet checksum mismatch for {table}")
         count = manifest["rows"][table]
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ValueError(f"Invalid row count for {table}")

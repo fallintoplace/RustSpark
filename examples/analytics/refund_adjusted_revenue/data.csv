@@ -1,0 +1,7 @@
+month,order_id,status,amount
+2026-01,1,paid,100
+2026-01,2,refunded,50
+2026-01,3,paid,20
+2026-02,4,paid,90
+2026-02,5,chargeback,40
+2026-02,6,paid,30

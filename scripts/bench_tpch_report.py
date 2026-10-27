@@ -42,6 +42,14 @@ def render(report):
         else:
             raise ValueError(f"Unknown query status: {status}")
         lines.append(f"| {row['id']:02} | {status} | {cells[0]} | {cells[1]} |")
+    if len(ok) == 22 and len(results) == 22:
+        total_ms = sum(checked_time(row["median_ms"], "median") for row in ok)
+        if total_ms > 0:
+            slowest = sorted(ok, key=lambda row: row["median_ms"], reverse=True)[:3]
+            lines.extend(["", "## Latency concentration", ""])
+            for row in slowest:
+                share = checked_time(row["median_ms"], "median") / total_ms * 100
+                lines.append(f"- Q{row['id']:02}: {share:.1f}% of summed query medians")
     failures = [row for row in results if row.get("status") != "ok"]
     if failures:
         lines.extend(["", "## Failures", ""])

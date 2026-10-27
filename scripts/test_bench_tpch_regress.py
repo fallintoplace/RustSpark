@@ -21,6 +21,19 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "coverage"):
             regress.compare(report((1, 10)), report((2, 10)))
 
+    def test_rejects_changed_queries_or_results(self):
+        old = report((1, 10))
+        new = report((1, 5))
+        old["results"][0]["sql_sha256"] = "a" * 64
+        new["results"][0]["sql_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "sql_sha256 mismatch"):
+            regress.compare(old, new)
+        new["results"][0]["sql_sha256"] = "a" * 64
+        old["results"][0]["result_sha256"] = "c" * 64
+        new["results"][0]["result_sha256"] = "d" * 64
+        with self.assertRaisesRegex(ValueError, "result_sha256 mismatch"):
+            regress.compare(old, new)
+
     def test_full_suite_reports_geometric_mean_speedup(self):
         baseline = report(*[(i, 100.0) for i in range(1, 23)])
         candidate = report(*[(i, 50.0) for i in range(1, 23)])
