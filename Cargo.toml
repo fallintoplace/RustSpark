@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 description = "Experimental Spark-inspired SQL engine in Rust"
 repository = "https://github.com/fallintoplace/RustSpark"
+license = "Apache-2.0"
 publish = false
 
 [dependencies]
