@@ -1,0 +1,35 @@
+{
+  "name": "self_join_partitions",
+  "sql": "SELECT SUM(l.amount) AS total FROM data l INNER JOIN data r ON l.id = r.id WHERE l.id < 15000",
+  "rows": 100000,
+  "variants": [
+    {
+      "name": "parts_1",
+      "flags": [
+        "--target-partitions",
+        "1"
+      ]
+    },
+    {
+      "name": "parts_2",
+      "flags": [
+        "--target-partitions",
+        "2"
+      ]
+    },
+    {
+      "name": "parts_4",
+      "flags": [
+        "--target-partitions",
+        "4"
+      ]
+    },
+    {
+      "name": "parts_8",
+      "flags": [
+        "--target-partitions",
+        "8"
+      ]
+    }
+  ]
+}
