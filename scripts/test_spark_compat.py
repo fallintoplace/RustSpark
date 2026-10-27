@@ -28,6 +28,21 @@ class SparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.columns, ["b", "a"])
         self.assertEqual(result.rows, [[None, 1]])
 
+    def test_rejects_empty_and_duplicate_schema_fields(self):
+        for schema in (
+            "\tInt64\tNULL\n",
+            "name\t\tNULL\n",
+            "name\tInt64\tNULL\nname\tUtf8\tNULL\n",
+        ):
+            with self.assertRaisesRegex(ValueError, "Invalid RustSpark schema description"):
+                mod.parse_rustspark_schema_fields(schema)
+
+    def test_json_rows_must_match_described_columns(self):
+        for output in ('[1]\n', '{"a":1,"other":2}\n', '{"a":1,"b":2}\n'):
+            with self.assertRaisesRegex(ValueError, "must match described columns"):
+                mod.parse_rustspark_json(output, ["a"])
+        self.assertEqual(mod.parse_rustspark_json("", ["a"]).rows, [])
+
     def test_unordered_results_are_multiset_compared(self):
         first = mod.QueryResult(["id"], [[2], [1], [1]])
         second = mod.QueryResult(["id"], [[1], [2], [1]])
