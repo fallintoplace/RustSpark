@@ -83,6 +83,23 @@ async fn probe_reachable(endpoint: &str, limit: Duration) -> Result<(), String> 
     }
 }
 
+async fn connect_endpoint(
+    endpoint: &str,
+    partitions: Option<usize>,
+) -> Result<SessionContext, String> {
+    let mut config = SessionConfig::new_with_ballista();
+    if let Some(partitions) = partitions {
+        config = config.with_target_partitions(partitions);
+    }
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features()
+        .build();
+    SessionContext::remote_with_state(endpoint, state)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Error>> {
     let partitions = match env::var("RUSTSPARK_TARGET_PARTITIONS") {
         Ok(value) => Some(parse_partitions(&value)?),
@@ -106,17 +123,7 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
                 continue;
             }
         }
-        let mut config = SessionConfig::new_with_ballista();
-        if let Some(partitions) = partitions {
-            config = config.with_target_partitions(partitions);
-        }
-        let state = SessionStateBuilder::new()
-            .with_config(config)
-            .with_default_features()
-            .build();
-        let result = SessionContext::remote_with_state(endpoint, state)
-            .await
-            .map_err(|error| error.to_string());
+        let result = connect_endpoint(endpoint, partitions).await;
         match result {
             Ok(context) => {
                 if index > 0 {
