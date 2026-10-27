@@ -637,7 +637,10 @@ mod setup;
 use setup::{cache_tables, read_query, register_derived_tables};
 
 fn database_root(args: &Args) -> Result<&std::path::Path, Box<dyn std::error::Error>> {
-    Ok(args.database_dir.as_deref().ok_or("Missing database directory")?)
+    Ok(args
+        .database_dir
+        .as_deref()
+        .ok_or("Missing database directory")?)
 }
 
 fn normalized_export_path(
