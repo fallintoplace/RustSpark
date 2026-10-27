@@ -55,7 +55,7 @@ class ReleaseBackupSmokeTests(unittest.TestCase):
             Path("/bin/rustspark"), Path("/db"), Path("/db/nested")
         )
         self.assertEqual(command.call_args.args[0][-2:], [
-            "--backup-database", "/db/nested",
+            "--backup-database", str(Path("/db/nested")),
         ])
 
 
