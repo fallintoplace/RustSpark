@@ -51,7 +51,7 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         columns: &[&str],
     ) -> Result<DataFrame> {
-        self.join_tables_using_inner(left, right, join_type, columns, None)
+        self.join_tables_using_inner(left, right, join_type, columns, None, false)
             .await
     }
 
@@ -62,6 +62,7 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         columns: &[&str],
         preloaded: Option<(DataFrame, DataFrame)>,
+        null_safe: bool,
     ) -> Result<DataFrame> {
         use std::collections::HashSet;
 
@@ -117,6 +118,7 @@ impl RustSparkSession {
             left_frame.schema().fields().len() + right_frame.schema().fields().len();
         let mut projection = String::with_capacity(projected_fields * 32);
         let mut predicates = String::with_capacity(columns.len() * 64);
+        let comparison = if null_safe { "IS NOT DISTINCT FROM" } else { "=" };
         for column in columns {
             let key = quote_join_identifier(column);
             if !projection.is_empty() {
@@ -130,7 +132,7 @@ impl RustSparkSession {
             if !predicates.is_empty() {
                 predicates.push_str(" AND ");
             }
-            write!(&mut predicates, "{left_alias}.{key} = {right_alias}.{key}")
+            write!(&mut predicates, "{left_alias}.{key} {comparison} {right_alias}.{key}")
                 .expect("writing to a String cannot fail");
         }
         for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
@@ -151,6 +153,22 @@ impl RustSparkSession {
             quote_join_table(right)?,
         );
         self.sql(&query).await
+    }
+
+    /// Join tables on shared key columns, including matches between NULL keys.
+    ///
+    /// Keys appear only once in the result, as with USING. SQL NULL-safe
+    /// equality is applied to every key, and FULL joins coalesce the keys
+    /// from either side. Non-key columns remain unchanged.
+    pub async fn join_tables_using_null_safe(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        columns: &[&str],
+    ) -> Result<DataFrame> {
+        self.join_tables_using_inner(left, right, join_type, columns, None, true)
+            .await
     }
 
     /// Join on every column name that both registered tables share.
@@ -193,6 +211,7 @@ impl RustSparkSession {
             join_type,
             &columns,
             Some((left_frame, right_frame)),
+            false,
         )
         .await
     }
