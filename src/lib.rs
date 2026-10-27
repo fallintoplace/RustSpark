@@ -405,7 +405,8 @@ impl RustSparkSession {
             .collect::<Vec<_>>()
             .join(", ");
         let source = quote_catalog_table(table, "null_counts requires a table name")?;
-        self.sql(&format!("SELECT {expressions} FROM {source}")).await
+        self.sql(&format!("SELECT {expressions} FROM {source}"))
+            .await
     }
 
     /// Inspect the names, types and nullability of a read-only SQL query.
