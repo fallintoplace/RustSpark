@@ -30,6 +30,9 @@ def load_experiment(path):
         raise ValueError("Experiment must be a JSON object")
     name, sql, variants = data.get("name"), data.get("sql"), data.get("variants")
     rows = data.get("rows", 100_000)
+    ordered = data.get("ordered", False)
+    if type(ordered) is not bool:
+        raise ValueError("ordered must be a boolean")
     if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", name):
         raise ValueError("Experiment name must be a safe identifier")
     if not isinstance(sql, str) or not sql.lstrip().lower().startswith(("select ", "with ")):
@@ -58,7 +61,7 @@ def load_experiment(path):
         for option, raw in zip(options, flags[1::2]):
             if not raw.isdecimal() or int(raw) < 1:
                 raise ValueError(f"{option} needs a positive integer")
-    return {"name": name, "sql": sql, "rows": rows, "variants": variants}
+    return {"name": name, "sql": sql, "rows": rows, "ordered": ordered, "variants": variants}
 
 
 def sqlite_reference(sql, rows):
@@ -80,7 +83,7 @@ def sqlite_reference(sql, rows):
         connection.close()
 
 
-def run_variant(binary, csv, sql, flags, expected_digest, expected_rows, repeat, warmup, timeout):
+def run_variant(binary, csv, sql, flags, expected_digest, expected_rows, repeat, warmup, timeout, ordered_values=None):
     command = [
         str(binary), "--csv", str(csv), "--csv-schema", SCHEMA,
         "--sql", sql, "--stdout-format", "json", *flags,
@@ -93,7 +96,8 @@ def run_variant(binary, csv, sql, flags, expected_digest, expected_rows, repeat,
         )
         elapsed = (time.perf_counter() - started) * 1000
         digest, values = output_signature(result.stdout)
-        if digest != expected_digest or len(values) != expected_rows:
+        if (digest != expected_digest or len(values) != expected_rows
+                or (ordered_values is not None and values != ordered_values)):
             raise ValueError("RustSpark result differs from SQLite reference")
         if not math.isfinite(elapsed) or elapsed < 0:
             raise ValueError("Invalid elapsed time")
@@ -123,14 +127,16 @@ def benchmark(binary, experiment, repeat=3, warmup=1, timeout=120):
         for variant in experiment["variants"]:
             metrics = run_variant(
                 binary, csv, sql, variant["flags"], expected_digest,
-                len(expected_values), repeat, warmup, timeout
+                len(expected_values), repeat, warmup, timeout,
+                ordered_values=expected_values if experiment.get("ordered", False) else None,
             )
             measurements.append({"name": variant["name"], "flags": variant["flags"], **metrics})
         return {
             "name": experiment["name"], "sql": sql, "rows": rows,
+            "ordered": experiment.get("ordered", False),
             "binary": str(binary), "csv_sha256": csv_hash,
             "metric": "Cold CLI startup + typed CSV registration + SQL + JSON output",
-            "reference": "SQLite exact result values (unordered rows)",
+            "reference": "SQLite exact values; order checked when ordered=true",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "repeat": repeat, "warmup": warmup, "results": measurements,
         }
