@@ -45,6 +45,21 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertIn("No competing engine was measured", rendered)
         self.assertNotIn("speed ratio", rendered)
 
+    def test_escapes_untrusted_engine_headers_and_metadata(self):
+        sample = report()
+        sample["results"]["Duck|DB<test>"] = sample["results"].pop("duckdb")
+        sample["metric"] = "Cold \\| <script>"
+        rendered = bench_report.render_report(sample)
+        self.assertIn("Duck\\\\|DB&lt;test&gt;", rendered)
+        self.assertIn("Cold \\\\\\\| &lt;script&gt;", rendered)
+
+    def test_rejects_invalid_warmup_metadata(self):
+        for value in (-1, True, "1", 1.5):
+            sample = report()
+            sample["warmup"] = value
+            with self.assertRaisesRegex(ValueError, "warmup"):
+                bench_report.render_report(sample)
+
     def test_rejects_mismatched_workloads(self):
         sample = report()
         del sample["results"]["spark"]["group_by"]
