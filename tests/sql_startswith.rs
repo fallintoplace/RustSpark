@@ -23,7 +23,10 @@ async fn startswith_supports_rows_and_nulls() -> Result<(), Box<dyn std::error::
             .unwrap();
         result.extend(column.iter());
     }
-    assert_eq!(result, vec![Some(true), Some(false), Some(true), None, None]);
+    assert_eq!(
+        result,
+        vec![Some(true), Some(false), Some(true), None, None]
+    );
     Ok(())
 }
 
