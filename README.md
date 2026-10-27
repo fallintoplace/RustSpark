@@ -34,6 +34,10 @@ SQL statements can be read from a file:
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
 
+In interactive mode, use `.read path/to/queries.sql` to run SQL from a
+file in the current session. The path may contain spaces. Query errors do
+not close the shell.
+
 Start an interactive SQL shell to run multiple statements in the same session:
 
 ```sh
@@ -47,6 +51,10 @@ Run `.tables` to list registered tables, `.schemas` to list available catalog
 schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
 Use `.count data` to print the number of rows in a registered table.
+
+Use `.preview data` to display up to 10 rows from a table or
+`.preview data 3` to set a limit of 3 rows (maximum 1000).
+Qualified names such as `.preview datafusion.public.data 3` also work.
 
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
@@ -120,6 +128,15 @@ let top = session.top_rows("sales", &[("amount", false)], 5).await?;
 
 Use `true` for ascending and `false` for descending order. Add a unique
 tie-breaker when values can be equal.
+
+Count NULL values per column with a lazy aggregate:
+
+```rust
+let missing = session.null_counts("sales", &["city", "amount"]).await?;
+```
+
+Pass an empty column slice to count NULLs across every column.
+
 
 Use multiple key pairs for compound equality joins. Supported types include
 INNER, LEFT, RIGHT, FULL, SEMI, and ANTI. Unmatched outer rows contain NULLs;
@@ -484,3 +501,7 @@ part can reduce scan parallelism and requires enough free disk space for both
 versions. Keep other programs from mutating the table's files and use external
 backups for important data. The database lock prevents simultaneous RustSpark
 operations but does not protect against external writers.
+
+## License
+
+RustSpark is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

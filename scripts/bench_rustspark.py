@@ -23,6 +23,11 @@ WORKLOADS = {
 }
 
 
+# The city and amount sequences repeat after their least common multiple.
+ROW_PATTERN_PERIOD = math.lcm(16, 100)
+CSV_BUFFER_ROWS = 4096
+
+
 def benchmark_row(index: int) -> tuple[str, int]:
     return f"city_{index % 16}", (index * 37) % 100
 
@@ -30,14 +35,14 @@ def benchmark_row(index: int) -> tuple[str, int]:
 def write_csv(path: pathlib.Path, rows: int):
     # Reuse the repeating non-ID columns and amortize writes over 4096 rows.
     suffixes = [
-        f"{city},{amount}\n" for city, amount in (benchmark_row(i) for i in range(400))
+        f"{city},{amount}\n" for city, amount in (benchmark_row(i) for i in range(ROW_PATTERN_PERIOD))
     ]
     with path.open("w", encoding="utf-8", newline="") as file:
         file.write("id,city,amount\n")
         pending = []
         for index in range(rows):
-            pending.append(f"{index},{suffixes[index % 400]}")
-            if len(pending) == 4096:
+            pending.append(f"{index},{suffixes[index % ROW_PATTERN_PERIOD]}")
+            if len(pending) == CSV_BUFFER_ROWS:
                 file.write("".join(pending))
                 pending.clear()
         if pending:
@@ -65,10 +70,9 @@ def expected_results(rows: int):
     totals = {}
     filtered_total = 0
     filtered_rows = 0
-    # City and amount repeat every lcm(16, 100) = 400 rows.
-    # Count full cycles rather than iterating over every benchmark row.
-    cycles, remainder = divmod(rows, 400)
-    for index in range(min(rows, 400)):
+    # Count full row-pattern cycles instead of iterating over every input row.
+    cycles, remainder = divmod(rows, ROW_PATTERN_PERIOD)
+    for index in range(min(rows, ROW_PATTERN_PERIOD)):
         occurrences = cycles + (index < remainder)
         city, amount = benchmark_row(index)
         counts[city] = counts.get(city, 0) + occurrences

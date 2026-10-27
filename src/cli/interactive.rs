@@ -81,7 +81,7 @@ async fn execute_interactive_statement(
     super::with_query_timeout(args.query_timeout, execute_script(session, query, args)).await
 }
 
-async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str) {
+async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str, timer_on: bool) {
     // Invalid SQL is reported without terminating the interactive session.
     let statements = match DFParser::parse_sql(sql) {
         Ok(statements) => statements,
@@ -92,10 +92,63 @@ async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str)
     };
     for statement in statements {
         let query = statement.to_string();
-        if let Err(error) = execute_interactive_statement(session, args, &query).await {
+        let started = std::time::Instant::now();
+        let result = execute_interactive_statement(session, args, &query).await;
+        if timer_on {
+            eprintln!("Time: {:.3} ms", started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        if let Err(error) = result {
             eprintln!("SQL error: {error}");
         }
     }
+}
+
+// Execute SQL files in the current session without replacing pending input.
+async fn handle_read_command(
+    session: &RustSparkSession,
+    args: &Args,
+    command: &str,
+    timer_on: bool,
+) -> bool {
+    if command != ".read" && !command.starts_with(".read ") && !command.starts_with(".read\t") {
+        return false;
+    }
+    let path = command[".read".len()..].trim();
+    if path.is_empty() {
+        eprintln!("Shell error: .read requires a file path");
+        return true;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let script = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+            if !script.trim().is_empty() {
+                execute_pending_sql(session, args, script, timer_on).await;
+            }
+        }
+        Err(error) => eprintln!("Shell error: Cannot read {path}: {error}"),
+    }
+    true
+}
+
+// Print table column names without row scans or full type metadata.
+async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bool {
+    if command != ".columns" && !command.starts_with(".columns ") {
+        return false;
+    }
+    let name = command.strip_prefix(".columns").unwrap_or_default().trim();
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("Shell error: .columns requires exactly one table name");
+    } else {
+        match session.describe_table(name).await {
+            Ok(columns) => {
+                for (column, _, _) in columns {
+                    println!("{column}");
+                }
+            }
+            Err(error) => eprintln!("Shell error: {error}"),
+        }
+    }
+    true
 }
 
 // Handle the schema-specific shell command without changing pending SQL.
@@ -142,6 +195,46 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
     true
 }
 
+// Use quoted identifiers so a shell table name cannot change the SQL plan.
+async fn handle_preview_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
+    if command != ".preview"
+        && !command.starts_with(".preview ")
+        && !command.starts_with(".preview\t")
+    {
+        return false;
+    }
+    let usage = "Shell error: .preview requires TABLE [ROWS] (ROWS must be 1..=1000)";
+    let parts: Vec<_> = command[".preview".len()..].split_whitespace().collect();
+    let (table, rows) = match parts.as_slice() {
+        [table] => (*table, 10),
+        [table, count] => match count.parse::<usize>() {
+            Ok(rows) if (1..=1000).contains(&rows) => (*table, rows),
+            _ => {
+                eprintln!("{usage}");
+                return true;
+            }
+        },
+        _ => {
+            eprintln!("{usage}");
+            return true;
+        }
+    };
+    if table.split('.').any(str::is_empty) {
+        eprintln!("Shell error: .preview requires a valid table name");
+        return true;
+    }
+    let source = table
+        .split('.')
+        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(".");
+    let query = format!("SELECT * FROM {source} LIMIT {rows}");
+    if let Err(error) = execute_interactive_statement(session, args, &query).await {
+        eprintln!("Shell error: {error}");
+    }
+    true
+}
+
 enum ShellAction {
     Continue,
     Exit,
@@ -157,7 +250,10 @@ async fn dispatch_shell_command(
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-            eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .quit.");
+            eprintln!("Read SQL from a file with .read PATH.");
+            eprintln!(
+                "Shell commands: .tables, .schemas, .schema TABLE, .count TABLE, .preview TABLE [ROWS], .quit."
+            );
             return ShellAction::Continue;
         }
         ".tables" => {
@@ -187,7 +283,9 @@ async fn dispatch_shell_command(
         }
         _ => {}
     }
-    if handle_schema_command(session, command).await
+    if handle_preview_command(session, args, command).await
+        || handle_columns_command(session, command).await
+        || handle_schema_command(session, command).await
         || handle_count_command(session, args, command).await
     {
         ShellAction::Continue
@@ -210,6 +308,7 @@ pub(super) async fn run_interactive(
     let mut pending = String::new();
     let mut line = String::new();
     let mut terminator = SqlTerminatorScanner::default();
+    let mut timer_on = false;
 
     loop {
         if show_prompt {
@@ -239,7 +338,20 @@ pub(super) async fn run_interactive(
             continue;
         }
         if pending.trim().is_empty() {
-            match dispatch_shell_command(session, args, line.trim()).await {
+            let command = line.trim();
+            if command == ".timer" || command.starts_with(".timer ") {
+                match command {
+                    ".timer on" => timer_on = true,
+                    ".timer off" => timer_on = false,
+                    ".timer" => eprintln!("Timer: {}", if timer_on { "on" } else { "off" }),
+                    _ => eprintln!("Shell error: use .timer on or .timer off"),
+                }
+                continue;
+            }
+            if handle_read_command(session, args, command, timer_on).await {
+                continue;
+            }
+            match dispatch_shell_command(session, args, command).await {
                 ShellAction::Exit => break,
                 ShellAction::Continue => continue,
                 ShellAction::Sql => {}
@@ -258,7 +370,7 @@ pub(super) async fn run_interactive(
 
         let query = std::mem::take(&mut pending);
         terminator = SqlTerminatorScanner::default();
-        execute_pending_sql(session, args, &query).await;
+        execute_pending_sql(session, args, &query, timer_on).await;
     }
 
     if !pending.trim().is_empty() {

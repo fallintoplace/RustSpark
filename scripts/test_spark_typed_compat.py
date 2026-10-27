@@ -31,6 +31,11 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual((names, types, nullables), (["first\tpart"], ["bigint"], [False]))
 
+    def test_unsigned_types_are_not_mangled_by_signed_aliases(self):
+        for type_name in ("UInt8", "UInt16", "UInt32", "UInt64"):
+            self.assertEqual(mod.canonical_type(type_name), type_name.lower())
+        self.assertEqual(mod.canonical_type("List(Int64)"), "list(bigint)")
+
     def test_parse_rustspark_description_rejects_incomplete_fields(self):
         self.assertEqual(
             mod.parse_rustspark_description("count\tInt64\tNULL\n"),
@@ -70,6 +75,18 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
             ["timestamp", "decimal(10,2)"],
         )
         self.assertIsNone(mod.compare_typed(ours, reference, True))
+
+    def test_temporal_helpers_keep_utc_and_date_values(self):
+        import datetime
+        self.assertEqual(
+            mod.normalize_timestamp("2024-01-02T03:00:00+03:00"),
+            "2024-01-02T00:00:00.000000",
+        )
+        self.assertEqual(
+            mod.normalize_date(datetime.datetime(2024, 1, 2, 9)),
+            "2024-01-02",
+        )
+        self.assertIsNone(mod.normalized_typed_value(None, "timestamp"))
 
     def test_nullability_is_opt_in_and_reports_mismatch(self):
         ours = mod.TypedResult(mod.QueryResult(["n"], [[1]]), ["bigint"], [True])

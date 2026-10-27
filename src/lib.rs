@@ -159,6 +159,19 @@ impl RustSparkSession {
         Ok(tables)
     }
 
+    /// List schema names within a catalog, sorted for stable inspection.
+    ///
+    /// Unknown catalogs return an error instead of an empty list.
+    pub fn list_schemas_in_catalog(&self, catalog_name: &str) -> Result<Vec<String>> {
+        let catalog = self
+            .context
+            .catalog(catalog_name)
+            .ok_or_else(|| DataFusionError::Plan(format!("Unknown catalog: {catalog_name}")))?;
+        let mut schemas = catalog.schema_names();
+        schemas.sort();
+        Ok(schemas)
+    }
+
     /// Create a lazy DataFrame from in-memory Arrow record batches.
     pub fn read_batches(
         &self,
@@ -448,6 +461,42 @@ impl RustSparkSession {
             .collect())
     }
 
+    /// Count NULL values in selected table columns without collecting rows.
+    ///
+    /// An empty column list includes all columns. The result is a lazy
+    /// one-row DataFrame with one Int64 count per selected column.
+    pub async fn null_counts(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        let selected: Vec<&str> = if columns.is_empty() {
+            dataframe
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect()
+        } else {
+            columns.to_vec()
+        };
+        if selected.is_empty() {
+            return Err(DataFusionError::Plan(
+                "null_counts requires at least one column".into(),
+            ));
+        }
+        Self::validate_selected_columns(&dataframe, &selected)?;
+
+        let expressions = selected
+            .iter()
+            .map(|name| {
+                let quoted = quote_join_identifier(name);
+                format!("COUNT(*) - COUNT({quoted}) AS {quoted}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = quote_catalog_table(table, "null_counts requires a table name")?;
+        self.sql(&format!("SELECT {expressions} FROM {source}"))
+            .await
+    }
+
     /// Inspect the names, types and nullability of a read-only SQL query.
     ///
     /// Query results are not executed or collected.
@@ -471,14 +520,18 @@ impl RustSparkSession {
         Ok(Self::describe_columns(&dataframe))
     }
 
-    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
+    fn validate_named_columns(
+        dataframe: &DataFrame,
+        columns: &[&str],
+        operation: &str,
+    ) -> Result<()> {
         use std::collections::HashSet;
 
         let mut seen = HashSet::new();
         for &name in columns {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate selected column: {name}"
+                    "Duplicate {operation} column: {name}"
                 )));
             }
             if !dataframe
@@ -488,11 +541,15 @@ impl RustSparkSession {
                 .any(|field| field.name().as_str() == name)
             {
                 return Err(DataFusionError::Plan(format!(
-                    "Unknown selected column: {name}"
+                    "Unknown {operation} column: {name}"
                 )));
             }
         }
         Ok(())
+    }
+
+    fn validate_selected_columns(dataframe: &DataFrame, columns: &[&str]) -> Result<()> {
+        Self::validate_named_columns(dataframe, columns, "selected")
     }
 
     /// Select and reorder columns from a registered table without reading its rows.
@@ -517,29 +574,40 @@ impl RustSparkSession {
         self.select_columns(table, &[column]).await?.distinct()
     }
 
-    fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
-        use std::collections::HashSet;
-
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in selected {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropna column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropna column: {name}"
-                )));
-            }
+    /// Select distinct combinations of the named columns from a table.
+    ///
+    /// Column order follows the caller's list. The operation is lazy and
+    /// does not alter the registered table.
+    pub async fn distinct_columns(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        if columns.is_empty() {
+            return Err(DataFusionError::Plan(
+                "distinct_columns requires at least one column".into(),
+            ));
         }
-        Ok(())
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, columns)?;
+        dataframe.select_columns(columns)?.distinct()
+    }
+
+    /// Project typed DataFusion expressions from a registered table.
+    ///
+    /// Computed expressions and aliases are planned lazily. At least one
+    /// expression is required and the source table remains unchanged.
+    pub async fn select_expressions(
+        &self,
+        table: &str,
+        expressions: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        if expressions.is_empty() {
+            return Err(DataFusionError::Plan(
+                "select_expressions requires at least one expression".into(),
+            ));
+        }
+        self.table(table).await?.select(expressions.to_vec())
+    }
+
+    fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
+        Self::validate_named_columns(dataframe, selected, "dropna")
     }
 
     /// Drop rows containing NULL values, like Spark DataFrame.na.drop.
@@ -658,6 +726,30 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, &[column])?;
         let key = Expr::Column(Column::from_name(column));
         dataframe.filter(key.clone().gt_eq(lit(lower)).and(key.lt_eq(lit(upper))))
+    }
+
+    /// Filter rows against typed values without SQL string interpolation.
+    ///
+    /// A NULL entry follows SQL IN semantics. An empty set matches no rows.
+    /// The source table is left unchanged.
+    pub async fn filter_rows_in_values(
+        &self,
+        table: &str,
+        column: &str,
+        values: &[datafusion::common::ScalarValue],
+    ) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        if values.is_empty() {
+            return dataframe.filter(datafusion::prelude::lit(false));
+        }
+        use datafusion::{common::Column, logical_expr::Expr};
+        let list = values
+            .iter()
+            .cloned()
+            .map(datafusion::prelude::lit)
+            .collect();
+        dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, false))
     }
 
     /// Register a scalar user-defined function for SQL queries in this session.
@@ -996,6 +1088,26 @@ impl RustSparkSession {
         .await
     }
 
+    /// Aggregate a registered table by typed grouping and aggregate expressions.
+    ///
+    /// An empty group list produces a single global aggregation. At least one
+    /// aggregate is required. The result is lazy and does not change the table.
+    pub async fn group_rows(
+        &self,
+        table: &str,
+        groups: &[datafusion::logical_expr::Expr],
+        aggregates: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        if aggregates.is_empty() {
+            return Err(DataFusionError::Plan(
+                "group_rows requires at least one aggregate".into(),
+            ));
+        }
+        self.table(table)
+            .await?
+            .aggregate(groups.to_vec(), aggregates.to_vec())
+    }
+
     pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
         let dataframe = self.table(source).await?;
         self.register_dataframe(alias, dataframe)
@@ -1032,8 +1144,7 @@ impl RustSparkSession {
     /// The plan remains lazy. Use a sorted view for deterministic page order.
     /// The limit must be positive, and offset plus limit must not overflow.
     pub async fn table_page(&self, table: &str, offset: usize, limit: usize) -> Result<DataFrame> {
-        Self::validate_page_window(offset, limit)?;
-        self.table(table).await?.limit(offset, Some(limit))
+        Self::paginate(self.table(table), offset, limit).await
     }
 
     /// Join two registered tables on one or more pairs of equality keys.
@@ -1120,28 +1231,7 @@ impl RustSparkSession {
     }
 
     fn validate_dedup_subset(dataframe: &DataFrame, subset: &[&str]) -> Result<()> {
-        use std::collections::HashSet;
-
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        for name in subset {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate dropDuplicates column: {name}"
-                )));
-            }
-            if !available.contains(*name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown dropDuplicates column: {name}"
-                )));
-            }
-        }
-        Ok(())
+        Self::validate_named_columns(dataframe, subset, "dropDuplicates")
     }
 
     /// Remove duplicate rows from a registered table, like Spark dropDuplicates.
@@ -1189,13 +1279,23 @@ impl RustSparkSession {
         .await
     }
 
-    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
+    /// Count unique whole rows, treating repeated NULL rows as duplicates.
+    ///
+    /// Unlike row counts, this requires a distinct aggregation over the input.
+    pub async fn distinct_row_count(&self, table: &str) -> Result<usize> {
+        self.table(table).await?.distinct()?.count().await
+    }
+
+    fn sort_dataframe_with_nulls(
+        dataframe: DataFrame,
+        order: &[(&str, bool, bool)],
+    ) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
         let mut seen = HashSet::new();
-        let mut sort_exprs = Vec::new();
-        for &(name, ascending) in order {
+        let mut expressions = Vec::with_capacity(order.len());
+        for &(name, ascending, nulls_first) in order {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate sort column: {name}"
@@ -1211,9 +1311,17 @@ impl RustSparkSession {
                     "Unknown sort column: {name}"
                 )));
             }
-            sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
+            expressions.push(Expr::Column(Column::from_name(name)).sort(ascending, nulls_first));
         }
-        dataframe.sort(sort_exprs)
+        dataframe.sort(expressions)
+    }
+
+    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
+        let keys = order
+            .iter()
+            .map(|&(name, ascending)| (name, ascending, ascending))
+            .collect::<Vec<_>>();
+        Self::sort_dataframe_with_nulls(dataframe, &keys)
     }
 
     /// Sort rows by multiple named columns using Spark-like NULL ordering.
@@ -1249,6 +1357,24 @@ impl RustSparkSession {
         }
         let dataframe = self.table(table).await?;
         Self::sort_dataframe(dataframe, order)?.limit(0, Some(limit))
+    }
+
+    /// Sort registered rows with explicit ascending and NULL placement.
+    ///
+    /// Each key is (column, ascending, nulls_first). Unlike sort_rows, NULL
+    /// placement is independent of sort direction. Rows remain lazy and
+    /// equal-key ties have no guaranteed order.
+    pub async fn sort_rows_with_nulls(
+        &self,
+        table: &str,
+        order: &[(&str, bool, bool)],
+    ) -> Result<DataFrame> {
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "sort_rows_with_nulls requires at least one key".into(),
+            ));
+        }
+        Self::sort_dataframe_with_nulls(self.table(table).await?, order)
     }
 
     // Plan independent SQL inputs concurrently, with bounded outstanding
