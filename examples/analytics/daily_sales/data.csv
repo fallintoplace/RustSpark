@@ -1,0 +1,7 @@
+day,order_id,status,amount
+2026-10-01,1,paid,50
+2026-10-01,2,refunded,20
+2026-10-01,3,paid,30
+2026-10-02,4,paid,40
+2026-10-02,5,pending,90
+2026-10-03,6,paid,70

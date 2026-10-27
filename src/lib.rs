@@ -52,6 +52,24 @@ mod sql_compat_try_divide;
 mod sql_compat_try_mod;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "sql_compat/try_add.rs"]
+mod sql_compat_try_add;
+#[path = "sql_compat/try_subtract.rs"]
+mod sql_compat_try_subtract;
+#[path = "sql_compat/try_multiply.rs"]
+mod sql_compat_try_multiply;
+#[path = "sql_compat/try_negate.rs"]
+mod sql_compat_try_negate;
+#[path = "sql_compat/try_abs.rs"]
+mod sql_compat_try_abs;
+#[path = "sql_compat/bit_count.rs"]
+mod sql_compat_bit_count;
+#[path = "sql_compat/shiftleft.rs"]
+mod sql_compat_shiftleft;
+#[path = "sql_compat/shiftright.rs"]
+mod sql_compat_shiftright;
+#[path = "sql_compat/bit_get.rs"]
+mod sql_compat_bit_get;
 #[path = "sql_compat/shiftrightunsigned.rs"]
 mod sql_compat_shiftrightunsigned;
 mod sql_results;
@@ -157,6 +175,15 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_try_divide::udf());
+        context.register_udf(sql_compat_try_add::udf());
+        context.register_udf(sql_compat_try_subtract::udf());
+        context.register_udf(sql_compat_try_multiply::udf());
+        context.register_udf(sql_compat_try_negate::udf());
+        context.register_udf(sql_compat_try_abs::udf());
+        context.register_udf(sql_compat_bit_count::udf());
+        context.register_udf(sql_compat_shiftleft::udf());
+        context.register_udf(sql_compat_shiftright::udf());
+        context.register_udf(sql_compat_bit_get::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         Self { context }
     }
