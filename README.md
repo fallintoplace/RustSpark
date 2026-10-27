@@ -300,6 +300,19 @@ cargo run -- --database-dir /tmp/rustspark-db \\
   --sql 'SELECT * FROM sales_summary ORDER BY city'
 ```
 
+To choose the compression codec for a saved Parquet table, combine
+`--parquet-compression` with `--save-table`:
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv --database-dir /tmp/rustspark-db \
+  --save-table compressed_sales --parquet-compression 'zstd(3)' \
+  --sql 'SELECT * FROM data'
+```
+
+An omitted codec retains DataFusion's default. The flag also continues to
+work with `--output-parquet`. It does not change the writer settings for
+SQL `CREATE TABLE`, `INSERT INTO`, or `--compact-table`.
+
 Saved tables are written to a staging directory and published after the export
 succeeds. Existing table names are rejected, and unfinished staging directories
 are ignored at startup. With `--database-dir`, SQL `CREATE TABLE AS SELECT`
@@ -502,6 +515,19 @@ cargo run -- --csv tests/fixtures/sales.csv \\
 The Arrow output is always one file. It preserves Arrow column types and
 supports empty results. Like other exports, a failed or timed-out query can
 leave a partial output file.
+
+Arrow IPC files can optionally compress record-batch buffers with LZ4 (lower
+CPU cost) or ZSTD (often smaller files):
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'SELECT * FROM data' --output-arrow /tmp/sales.arrow \
+  --arrow-compression zstd
+```
+
+`--arrow-compression` applies only to `--output-arrow` files, not Arrow
+streams written to stdout. Omitting it preserves the previous uncompressed
+file format.
 
 For wide queries, print one column per line instead of a horizontal table:
 

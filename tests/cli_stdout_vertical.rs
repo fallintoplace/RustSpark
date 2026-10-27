@@ -57,3 +57,17 @@ fn vertical_output_rejects_headerless_csv_switch() -> TestResult {
     assert!(String::from_utf8_lossy(&output.stderr).contains("CSV or TSV"));
     Ok(())
 }
+
+#[test]
+fn vertical_escapes_column_names_consistently_across_rows() -> TestResult {
+    let output = run(
+        "SELECT id AS \"a\\b\" FROM (VALUES (1), (2)) AS t(id) ORDER BY id",
+        &["--batch-size", "1"],
+    )?;
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "--- Row 1 ---\na\\\\b: 1\n--- Row 2 ---\na\\\\b: 2\n"
+    );
+    Ok(())
+}

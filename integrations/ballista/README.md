@@ -19,6 +19,31 @@ RUSTSPARK_SQL='SELECT SUM(id) FROM (VALUES (1), (2), (3)) AS t(id)' \
 cargo run --manifest-path integrations/ballista/Cargo.toml --features standalone --example standalone
 ```
 
+
+The standalone example also supports `RUSTSPARK_INPUTS` with named CSV, JSON,
+and Parquet sources, using the same registration logic as the remote client.
+This allows testing distributed joins without a separate scheduler installation.
+
+To validate a real join plus aggregation through Ballista, run this opt-in
+smoke test after Rust is installed:
+
+```sh
+python3 scripts/ballista_smoke.py --mode standalone
+```
+
+For an existing remote scheduler and executor, first build the remote client,
+then run the same query against the external services:
+
+```sh
+cargo build --manifest-path integrations/ballista/Cargo.toml
+python3 scripts/ballista_smoke.py --mode remote \
+  --client integrations/ballista/target/debug/rustspark-ballista-remote
+```
+
+The remote test requires all executors to see the same fixture directory
+(the script uses a temporary local directory). It is suitable for shared-host
+smoke checks, not as proof of multi-host storage or recovery correctness.
+
 The default standalone parallelism is two. `RUSTSPARK_PARQUET` can point to
 a dataset visible to the process. Standalone mode does **not** validate
 multi-host scheduling, worker failure handling, or shared-storage access.
