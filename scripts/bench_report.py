@@ -12,6 +12,25 @@ import pathlib
 import statistics
 
 
+def _unique_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value):
+    raise ValueError(f"Non-finite JSON constant: {value}")
+
+
+def parse_report(text):
+    return json.loads(
+        text, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite,
+    )
+
+
 def _number(value, field):
     if isinstance(value, bool) or not isinstance(value, (float, int)):
         raise ValueError(f"{field} must be a nonnegative finite number")
@@ -130,7 +149,7 @@ def main(argv=None):
     parser.add_argument("--output", type=pathlib.Path, help="Write Markdown report to this path")
     args = parser.parse_args(argv)
     try:
-        report = json.loads(args.input.read_text(encoding="utf-8"))
+        report = parse_report(args.input.read_text(encoding="utf-8"))
         rendered = render_report(report)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
