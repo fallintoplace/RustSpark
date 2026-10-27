@@ -11,8 +11,6 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
-mod joins_existence;
-pub use joins_existence::{ExistenceFilter, ExistenceMode};
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
 mod set_operations;
@@ -66,6 +64,8 @@ mod sql_compat_try_negate;
 mod sql_compat_try_abs;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+mod joins_existence;
+pub use joins_existence::{ExistenceFilter, ExistenceMode};
 #[path = "sql_compat/shiftleft.rs"]
 mod sql_compat_shiftleft;
 #[path = "sql_compat/shiftright.rs"]
