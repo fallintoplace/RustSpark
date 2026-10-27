@@ -724,6 +724,30 @@ impl RustSparkSession {
         dataframe.filter(key.clone().gt_eq(lit(lower)).and(key.lt_eq(lit(upper))))
     }
 
+    /// Filter rows against typed values without SQL string interpolation.
+    ///
+    /// A NULL entry follows SQL IN semantics. An empty set matches no rows.
+    /// The source table is left unchanged.
+    pub async fn filter_rows_in_values(
+        &self,
+        table: &str,
+        column: &str,
+        values: &[datafusion::common::ScalarValue],
+    ) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        if values.is_empty() {
+            return dataframe.filter(datafusion::prelude::lit(false));
+        }
+        use datafusion::{common::Column, logical_expr::Expr};
+        let list = values
+            .iter()
+            .cloned()
+            .map(datafusion::prelude::lit)
+            .collect();
+        dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, false))
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
