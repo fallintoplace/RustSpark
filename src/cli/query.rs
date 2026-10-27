@@ -473,7 +473,7 @@ async fn persist_created_table(
     if create.if_not_exists && directory.join(&name).exists() {
         return Ok(());
     }
-    super::persistence::save_table(session.table(&name).await?, directory, &name).await?;
+    super::persistence::save_table(session.table(&name).await?, directory, &name, None).await?;
     if !session.deregister_table(&name)? {
         return Err(format!("Created table '{name}' disappeared before registration").into());
     }
@@ -550,7 +550,13 @@ async fn present_query_result(
             .database_dir
             .as_deref()
             .ok_or("--save-table requires --database-dir")?;
-        super::persistence::save_table(dataframe, directory, name).await?;
+        super::persistence::save_table(
+            dataframe,
+            directory,
+            name,
+            args.parquet_compression.as_deref(),
+        )
+        .await?;
         return Ok(());
     }
     if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
