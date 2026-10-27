@@ -139,6 +139,8 @@ def main(argv=None):
     parser.add_argument("--queries-dir", type=Path, required=True)
     parser.add_argument("--parquet-dir", type=Path, required=True)
     parser.add_argument("--query-ids", nargs="+", type=int)
+    parser.add_argument("--require-all", action="store_true",
+                        help="Fail unless all 22 numbered TPC-H queries run successfully")
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=120)
@@ -158,6 +160,12 @@ def main(argv=None):
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
+    successful = {row["id"] for row in report["results"] if row["status"] == "ok"}
+    attempted = [row["id"] for row in report["results"]]
+    if len(successful) != len(attempted):
+        return 1
+    if args.require_all and successful != set(range(1, 23)):
+        return 1
     return 0
 
 
