@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 arrow-ipc = { version = "59.3.1", features = ["lz4", "zstd"] }
 clap = { version = "4.5", features = ["derive"] }
-datafusion = { version = "55.1.0", default-features = false, features = ["sql", "parquet"] }
+datafusion = { version = "55.1.0", default-features = false, features = ["datetime_expressions", "parquet", "regex_expressions", "sql", "string_expressions", "unicode_expressions"] }
 futures = "0.3"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
