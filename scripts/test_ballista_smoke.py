@@ -31,6 +31,15 @@ class BallistaSmokeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "expected|did not return"):
                 ballista_smoke.verify_output(bad)
 
+    def test_rejects_disconnected_headers_and_extra_data_rows(self):
+        for output in (
+            "matches weighted_total\n| 2 | 80 |\n",
+            "| matches | weighted_total |\n| 2 | 80 |\n| 9 | 99 |\n",
+            "| weighted_total | matches |\n| 80 | 2 |\n",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "expected"):
+                ballista_smoke.verify_output(output)
+
     def test_fixture_values_match_expected_aggregate(self):
         with __import__("tempfile").TemporaryDirectory() as tmp:
             orders, rates = ballista_smoke.write_fixtures(pathlib.Path(tmp))
