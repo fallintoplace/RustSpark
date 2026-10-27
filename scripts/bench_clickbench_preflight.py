@@ -17,11 +17,7 @@ def digest(path):
     return result.hexdigest()
 
 
-def inspect(parquet, sql_file):
-    parquet, sql_file = Path(parquet), Path(sql_file)
-    queries = read_queries(sql_file)
-    if len(queries) != 43:
-        raise ValueError(f"Expected all 43 ClickBench queries, found {len(queries)}")
+def validate_parquet_magic(parquet):
     if not parquet.is_file() or parquet.stat().st_size < 8:
         raise ValueError("Parquet input is missing or truncated")
     with parquet.open("rb") as stream:
@@ -30,6 +26,14 @@ def inspect(parquet, sql_file):
         footer = stream.read(4)
     if header != b"PAR1" or footer != b"PAR1":
         raise ValueError("Parquet input is missing its PAR1 magic bytes")
+
+
+def inspect(parquet, sql_file):
+    parquet, sql_file = Path(parquet), Path(sql_file)
+    queries = read_queries(sql_file)
+    if len(queries) != 43:
+        raise ValueError(f"Expected all 43 ClickBench queries, found {len(queries)}")
+    validate_parquet_magic(parquet)
     return {
         "queries": len(queries),
         "query_sha256": digest(sql_file),
