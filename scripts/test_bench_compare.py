@@ -41,6 +41,16 @@ class ComparisonTests(unittest.TestCase):
                          [25.0, 25.0])
         self.assertEqual(report["rustspark_median_over_competitor_median"], {})
 
+    def test_measurement_checks_warmups_and_retains_samples(self):
+        values = [(1.0, "ok", []), (2.0, "ok", []), (3.0, "ok", [])]
+        with mock.patch.object(bench_compare, "execute", side_effect=values) as execute:
+            result = bench_compare.measure_engine_workload(
+                "rustspark", "scan_count", ["binary"], "ok", 2, 1, 10
+            )
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(result["samples_ms"], [2.0, 3.0])
+        self.assertEqual(result["median_ms"], 2.5)
+
     def test_invalid_sample_config(self):
         for config in [(0, 1, 0, 1), (1, 0, 0, 1), (1, 1, -1, 1), (1, 1, 0, 0)]:
             with self.assertRaises(ValueError):

@@ -14,7 +14,12 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from spark_compat import QueryResult, compare
+from spark_compat import (
+    QueryResult,
+    compare,
+    parse_rustspark_json,
+    parse_rustspark_schema_fields,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests/compatibility/spark_typed_sql.json"
@@ -52,19 +57,12 @@ def canonical_type(value: str) -> str:
 
 
 def parse_rustspark_description(stdout: str) -> tuple[list[str], list[str], list[bool]]:
-    fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
-    if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
-        raise ValueError("Invalid RustSpark schema description")
+    fields = parse_rustspark_schema_fields(stdout)
     return (
         [parts[0] for parts in fields],
         [canonical_type(parts[1]) for parts in fields],
         [parts[2] == "NULL" for parts in fields],
     )
-
-
-def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
-    objects = [json.loads(line) for line in stdout.splitlines() if line.strip()]
-    return QueryResult(columns, [[obj[column] for column in columns] for obj in objects])
 
 
 def rustspark_query(binary: str, sql: str) -> TypedResult:
@@ -93,24 +91,30 @@ def spark_query(session, sql: str) -> TypedResult:
     )
 
 
+def normalize_timestamp(value) -> str:
+    if isinstance(value, datetime.datetime):
+        timestamp = value
+    else:
+        timestamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return timestamp.isoformat(timespec="microseconds")
+
+
+def normalize_date(value) -> str:
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.date().isoformat() if isinstance(value, datetime.datetime) else value.isoformat()
+    return datetime.date.fromisoformat(str(value)).isoformat()
+
+
 def normalized_typed_value(value, logical_type: str):
     """Normalize physical encodings while preserving SQL logical types."""
     if value is None:
         return None
     if logical_type == "timestamp":
-        if isinstance(value, datetime.datetime):
-            timestamp = value
-        else:
-            timestamp = datetime.datetime.fromisoformat(
-                str(value).replace("Z", "+00:00")
-            )
-        if timestamp.tzinfo is not None:
-            timestamp = timestamp.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-        return timestamp.isoformat(timespec="microseconds")
+        return normalize_timestamp(value)
     if logical_type == "date":
-        if isinstance(value, (datetime.date, datetime.datetime)):
-            return value.date().isoformat() if isinstance(value, datetime.datetime) else value.isoformat()
-        return datetime.date.fromisoformat(str(value)).isoformat()
+        return normalize_date(value)
     if logical_type.startswith("decimal("):
         # The schema checks precision and scale. Values can be represented as
         # JSON strings (RustSpark) or decimal.Decimal (PySpark).
