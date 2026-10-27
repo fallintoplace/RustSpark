@@ -43,7 +43,7 @@ def fetch_queries() -> bytes:
 
 
 def write_queries(path: Path, data: bytes, overwrite: bool = False) -> None:
-    if path.exists() and not overwrite:
+    if (path.exists() or path.is_symlink()) and not overwrite:
         raise FileExistsError(f"Refusing to replace existing file: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
