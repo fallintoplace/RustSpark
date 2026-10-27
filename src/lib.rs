@@ -134,6 +134,18 @@ impl RustSparkSession {
         self.sorted_catalog_entries(false)
     }
 
+    /// List schema names within a catalog, sorted for stable inspection.
+    ///
+    /// Unknown catalogs return an error instead of an empty list.
+    pub fn list_schemas_in_catalog(&self, catalog_name: &str) -> Result<Vec<String>> {
+        let catalog = self.context.catalog(catalog_name).ok_or_else(|| {
+            DataFusionError::Plan(format!("Unknown catalog: {catalog_name}"))
+        })?;
+        let mut schemas = catalog.schema_names();
+        schemas.sort();
+        Ok(schemas)
+    }
+
     /// Create a lazy DataFrame from in-memory Arrow record batches.
     pub fn read_batches(
         &self,
