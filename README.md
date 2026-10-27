@@ -388,6 +388,14 @@ cargo run -- --sql "SELECT 42 AS answer" --stdout-format markdown
 Markdown output streams by record batch, includes headers even for empty results,
 and prints SQL NULL values as `NULL`. Pipes and line breaks are escaped.
 
+For HTML reports, stream an embeddable table with escaped cell values:
+
+```sh
+cargo run -- --sql 'SELECT 42 AS answer' --stdout-format html
+```
+
+NULL cells receive a `null` CSS class. Column names and values are HTML-escaped.
+
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
 

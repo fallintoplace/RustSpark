@@ -207,6 +207,56 @@ async fn write_markdown<W: Write>(
     Ok(())
 }
 
+fn escape_html_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+// Stream an embeddable HTML table, escaping all column names and cell values.
+async fn write_html<W: Write>(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+    output: &mut W,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(output, "<table>")?;
+    write!(output, "<thead><tr>")?;
+    for field in schema.fields() {
+        write!(output, "<th>{}</th>", escape_html_cell(field.name()))?;
+    }
+    writeln!(output, "</tr></thead>")?;
+    writeln!(output, "<tbody>")?;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        for row in 0..batch.num_rows() {
+            write!(output, "<tr>")?;
+            for column in batch.columns() {
+                if column.is_null(row) {
+                    write!(output, "<td class=\"null\">NULL</td>")?;
+                } else {
+                    let value = datafusion::arrow::util::display::array_value_to_string(
+                        column.as_ref(),
+                        row,
+                    )?;
+                    write!(output, "<td>{}</td>", escape_html_cell(&value))?;
+                }
+            }
+            writeln!(output, "</tr>")?;
+        }
+    }
+    writeln!(output, "</tbody></table>")?;
+    Ok(())
+}
+
 // Write one record batch at a time so stdout never requires collecting all results.
 pub(super) async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
@@ -272,6 +322,9 @@ pub(super) async fn write_stdout(
         }
         StdoutFormat::Markdown => {
             write_markdown(&mut stream, &mut tracked, &schema).await?;
+        }
+        StdoutFormat::Html => {
+            write_html(&mut stream, &mut tracked, &schema).await?;
         }
         StdoutFormat::Arrow => {
             write_arrow_stream(&mut stream, &mut tracked, &schema, &broken_pipe).await?;
