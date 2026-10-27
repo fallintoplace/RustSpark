@@ -1,7 +1,6 @@
 use std::{
     error::Error,
     io::{self, BufRead, IsTerminal, Write},
-    time::Duration,
 };
 
 use datafusion::sql::parser::DFParser;
@@ -75,19 +74,7 @@ async fn execute_interactive_statement(
     args: &Args,
     query: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let execution = execute_script(session, query, args);
-    if let Some(seconds) = args.query_timeout {
-        match tokio::time::timeout(Duration::from_secs(seconds), execution).await {
-            Ok(result) => result,
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("SQL query timed out after {seconds} seconds"),
-            )
-            .into()),
-        }
-    } else {
-        execution.await
-    }
+    super::with_query_timeout(args.query_timeout, execute_script(session, query, args)).await
 }
 
 async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str) {

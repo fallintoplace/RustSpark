@@ -660,6 +660,27 @@ fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+async fn with_query_timeout<F>(
+    timeout_seconds: Option<u64>,
+    work: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: std::future::Future<Output = Result<(), Box<dyn std::error::Error>>>,
+{
+    if let Some(seconds) = timeout_seconds {
+        match tokio::time::timeout(std::time::Duration::from_secs(seconds), work).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("SQL query timed out after {seconds} seconds"),
+            )
+            .into()),
+        }
+    } else {
+        work.await
+    }
+}
+
 pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut parsed = Args::parse();
     resolve_auto_input(&mut parsed)?;
@@ -700,19 +721,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.interactive {
         return run_interactive(&session, &args).await;
     }
-    let execution = execute_registered_query(&session, &args);
-    if let Some(seconds) = args.query_timeout {
-        tokio::time::timeout(std::time::Duration::from_secs(seconds), execution)
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("SQL query timed out after {seconds} seconds"),
-                )
-            })?
-    } else {
-        execution.await
-    }
+    with_query_timeout(
+        args.query_timeout,
+        execute_registered_query(&session, &args),
+    )
+    .await
 }
 
 async fn execute_registered_query(
