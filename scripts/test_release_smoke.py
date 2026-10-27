@@ -40,10 +40,14 @@ class ReleaseSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             (pathlib.Path(directory) / "entries").mkdir()
-            with patch.object(release_smoke.tempfile, "TemporaryDirectory",
-                              return_value=contextlib.nullcontext(directory)), \\
-                    patch.object(release_smoke, "execute"), \\
-                    patch.object(release_smoke, "expect_rows"):
+            with (
+                patch.object(
+                    release_smoke.tempfile, "TemporaryDirectory",
+                    return_value=contextlib.nullcontext(directory),
+                ),
+                patch.object(release_smoke, "execute"),
+                patch.object(release_smoke, "expect_rows"),
+            ):
                 with self.assertRaisesRegex(AssertionError, "left the entries directory"):
                     release_smoke.check_catalog_lifecycle(pathlib.Path("/unused/binary"))
 
