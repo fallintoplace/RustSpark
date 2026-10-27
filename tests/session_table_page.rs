@@ -2,8 +2,8 @@ use datafusion::common::ScalarValue;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn pages_registered_table_rows_with_checked_limits()
--> Result<(), Box<dyn std::error::Error>> {
+async fn pages_registered_table_rows_with_checked_limits() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     session
         .register_sql_view(
@@ -15,7 +15,10 @@ async fn pages_registered_table_rows_with_checked_limits()
     session.register_dataframe("sorted", sorted)?;
 
     let batches = session.table_page("sorted", 1, 1).await?.collect().await?;
-    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
     assert_eq!(
         ScalarValue::try_from_array(batches[0].column(0).as_ref(), 0)?,
         ScalarValue::Int64(Some(2))
