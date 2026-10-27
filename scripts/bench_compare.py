@@ -125,9 +125,11 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
             for engine in engines:
                 if engine != "rustspark":
                     ratios[engine] = {
-                        workload: round(
-                            results["rustspark"][workload]["median_ms"]
-                            / max(measured["median_ms"], 0.001), 3)
+                        workload: (
+                            round(measured["median_ms"]
+                                  / results["rustspark"][workload]["median_ms"], 3)
+                            if results["rustspark"][workload]["median_ms"] > 0 else None
+                        )
                         for workload, measured in results[engine].items()
                     }
         return {
@@ -137,7 +139,7 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
             "warmup": warmup, "repeat": repeat,
             "platform": platform.platform(), "python": platform.python_version(),
             "engines": engines, "workloads": WORKLOADS, "results": results,
-            "rustspark_median_over_competitor_median": ratios,
+            "competitor_median_over_rustspark_median": ratios,
         }
 
 
