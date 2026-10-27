@@ -11,6 +11,21 @@ TABLES = ("customer", "lineitem", "nation", "orders",
           "part", "partsupp", "region", "supplier")
 
 
+def write_queries(sql_dir, queries):
+    if len(queries) != 22 or [n for n, _ in queries] != list(range(1, 23)):
+        raise ValueError("Expected exactly 22 numbered SQL queries")
+    entries = []
+    for number, sql in queries:
+        path = sql_dir / f"{number:02}.sql"
+        path.write_text(sql.rstrip() + "\n", encoding="utf-8")
+        entries.append({
+            "id": number,
+            "path": f"queries/{number:02}.sql",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    return entries
+
+
 def prepare(connection, destination, scale):
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("Scale factor must be a finite positive number")
@@ -35,17 +50,7 @@ def prepare(connection, destination, scale):
     queries = connection.execute(
         "SELECT query_nr, query FROM tpch_queries() ORDER BY query_nr"
     ).fetchall()
-    if len(queries) != 22 or [n for n, _ in queries] != list(range(1, 23)):
-        raise ValueError("Expected exactly 22 numbered SQL queries")
-    entries = []
-    for number, sql in queries:
-        path = sql_dir / f"{number:02}.sql"
-        path.write_text(sql.rstrip() + "\n", encoding="utf-8")
-        entries.append({
-            "id": number,
-            "path": f"queries/{number:02}.sql",
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        })
+    entries = write_queries(sql_dir, queries)
     manifest = {
         "scale_factor": scale,
         "tables": {table: f"data/{table}.parquet" for table in TABLES},
