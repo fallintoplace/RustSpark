@@ -9,6 +9,7 @@ use datafusion::error::{DataFusionError, Result};
 pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
     let input =
         fs::read_to_string(manifest).map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let input = input.strip_prefix('\u{feff}').unwrap_or(&input);
     let directory = manifest.parent().unwrap_or_else(|| Path::new("."));
     // Preserve source line numbers for useful errors and input order for the scan.
     let mut paths = Vec::new();
@@ -104,4 +105,20 @@ mod tests {
         let error = load_parquet_file_list(&manifest).unwrap_err();
         assert!(error.to_string().contains("line 5"), "{error}");
     }
+    #[test]
+    fn accepts_utf8_bom_before_first_path_or_comment() {
+        let directory = tempfile::tempdir().unwrap();
+        let part = directory.path().join("part.parquet");
+        fs::write(&part, []).unwrap();
+        let manifest = directory.path().join("parts.txt");
+
+        for contents in [
+            "\u{feff}part.parquet\n",
+            "\u{feff}# generated file list\npart.parquet\n",
+        ] {
+            fs::write(&manifest, contents).unwrap();
+            assert_eq!(load_parquet_file_list(&manifest).unwrap(), vec![part.clone()]);
+        }
+    }
+
 }
