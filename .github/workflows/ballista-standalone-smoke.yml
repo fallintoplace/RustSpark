@@ -2,6 +2,12 @@ name: Ballista standalone SQL smoke
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'integrations/ballista/**'
+      - 'scripts/ballista_smoke.py'
+      - 'scripts/test_ballista_smoke.py'
+      - '.github/workflows/ballista-standalone-smoke.yml'
 
 permissions:
   contents: read
