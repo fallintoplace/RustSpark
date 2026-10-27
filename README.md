@@ -46,6 +46,10 @@ The `--query-timeout` applies to each executed statement.
 Run `.tables` to list registered tables, `.schemas` to list available catalog
 schemas, or `.schema data` to inspect a table's column types without scanning
 its rows. These commands work between SQL statements.
+Use `.preview data` to display up to 10 rows from a table or
+`.preview data 3` to set a limit of 3 rows (maximum 1000).
+Qualified names such as `.preview datafusion.public.data 3` also work.
+
 
 Run multiple SQL statements from `--sql` or `--sql-file`:
 
