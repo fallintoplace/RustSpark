@@ -905,6 +905,26 @@ impl RustSparkSession {
         self.context.register_udf(udf);
     }
 
+    async fn filter_rows_pattern(
+        &self,
+        table: &str,
+        column: &str,
+        pattern: &str,
+        case_insensitive: bool,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let column = Expr::Column(Column::from_name(column));
+        let predicate = if case_insensitive {
+            column.ilike(lit(pattern))
+        } else {
+            column.like(lit(pattern))
+        };
+        dataframe.filter(predicate)
+    }
+
     /// Filter text values with a case-sensitive SQL LIKE pattern.
     ///
     /// Percent and underscore retain SQL wildcard semantics. The pattern
@@ -915,11 +935,8 @@ impl RustSparkSession {
         column: &str,
         pattern: &str,
     ) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
-
-        let dataframe = self.table(table).await?;
-        Self::validate_selected_columns(&dataframe, &[column])?;
-        dataframe.filter(Expr::Column(Column::from_name(column)).like(lit(pattern)))
+        self.filter_rows_pattern(table, column, pattern, false)
+            .await
     }
 
     /// Filter text values with a case-insensitive SQL ILIKE pattern.
@@ -932,11 +949,8 @@ impl RustSparkSession {
         column: &str,
         pattern: &str,
     ) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
-
-        let dataframe = self.table(table).await?;
-        Self::validate_selected_columns(&dataframe, &[column])?;
-        dataframe.filter(Expr::Column(Column::from_name(column)).ilike(lit(pattern)))
+        self.filter_rows_pattern(table, column, pattern, true)
+            .await
     }
 
     /// Register an aggregate user-defined function for SQL queries.
