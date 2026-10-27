@@ -76,6 +76,13 @@ class QueryRunnerTests(unittest.TestCase):
             result = runner.measure_query("bin", pathlib.Path("data"), 2, "SELECT 1;", 1, 0, 1)
         self.assertIn("Timed out", result["error"])
 
+    def test_invalid_utf8_output_is_a_query_error(self):
+        decode_error = UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid start byte")
+        with mock.patch.object(runner.subprocess, "run", side_effect=decode_error):
+            result = runner.measure_query("bin", pathlib.Path("data"), 4, "SELECT 1;", 1, 0, 10)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("decode", result["error"])
+
     def test_continues_after_failed_query_and_writes_failure_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
