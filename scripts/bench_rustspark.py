@@ -70,8 +70,7 @@ def expected_results(rows: int):
     totals = {}
     filtered_total = 0
     filtered_rows = 0
-    # Count complete row-pattern cycles instead of iterating every input row.
-    # Count full cycles rather than iterating over every benchmark row.
+    # Count full row-pattern cycles instead of iterating over every input row.
     cycles, remainder = divmod(rows, ROW_PATTERN_PERIOD)
     for index in range(min(rows, ROW_PATTERN_PERIOD)):
         occurrences = cycles + (index < remainder)
