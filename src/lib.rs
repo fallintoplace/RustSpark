@@ -540,19 +540,17 @@ impl RustSparkSession {
         }
         let provider = self.context.table_provider(source).await?;
         self.context.register_table(destination, provider)?;
-        match self.context.deregister_table(source) {
+        let result = match self.context.deregister_table(source) {
             Ok(Some(_)) => Ok(()),
-            Ok(None) => {
-                let _ = self.context.deregister_table(destination);
-                Err(DataFusionError::Plan(format!(
-                    "Source table disappeared while renaming: {source}"
-                )))
-            }
-            Err(error) => {
-                let _ = self.context.deregister_table(destination);
-                Err(error)
-            }
+            Ok(None) => Err(DataFusionError::Plan(format!(
+                "Source table disappeared while renaming: {source}"
+            ))),
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            let _ = self.context.deregister_table(destination);
         }
+        result
     }
 
     /// Rename several columns atomically, like Spark withColumnsRenamed.
