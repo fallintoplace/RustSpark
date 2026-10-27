@@ -76,6 +76,18 @@ fn selected_output_path(args: &Args) -> Option<&Path> {
     .next()
 }
 
+fn selected_output_path(args: &Args) -> Option<&Path> {
+    [
+        args.output_arrow.as_deref(),
+        args.output_parquet.as_deref(),
+        args.output_csv.as_deref(),
+        args.output_json.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+}
+
 fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let Some(destination) = selected_output_path(args) else {
         return Ok(());
