@@ -34,6 +34,17 @@ def commands(scale, binary, output):
     return fixture, report, prepare, run
 
 
+def run_scale(prepare, run, report):
+    subprocess.run(prepare, check=True, timeout=1800)
+    process = subprocess.run(
+        run, check=False, capture_output=True, text=True, timeout=7200,
+    )
+    rows = json.loads(report.read_text())["results"]
+    ok = sum(row.get("status") == "ok" for row in rows)
+    return {"attempted": len(rows), "passed": ok,
+            "status": "ok" if len(rows) == 22 and ok == 22 and process.returncode == 0 else "error"}
+
+
 def measure(binary, output, factors):
     if output.exists():
         raise ValueError("Output directory must not exist")
@@ -43,13 +54,7 @@ def measure(binary, output, factors):
         fixture, report, prepare, run = commands(factor, binary, output)
         item = {"scale_factor": factor, "fixture": fixture.name, "report": report.name}
         try:
-            subprocess.run(prepare, check=True, timeout=1800)
-            process = subprocess.run(run, check=False, capture_output=True,
-                                     text=True, timeout=7200)
-            rows = json.loads(report.read_text())["results"]
-            ok = sum(row.get("status") == "ok" for row in rows)
-            item.update({"attempted": len(rows), "passed": ok,
-                         "status": "ok" if len(rows) == 22 and ok == 22 and process.returncode == 0 else "error"})
+            item.update(run_scale(prepare, run, report))
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             item.update({"status": "error", "error": str(error)[-500:]})
         results.append(item)

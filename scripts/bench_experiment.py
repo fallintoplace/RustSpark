@@ -24,6 +24,33 @@ OPTIONS = {
 MAX_ROWS = 2_000_000
 
 
+def _validate_variants(variants):
+    seen = set()
+    for variant in variants:
+        validate_variant(variant, seen)
+
+
+def validate_variant(variant, seen):
+    if not isinstance(variant, dict):
+        raise ValueError("Each variant must be an object")
+    label, flags = variant.get("name"), variant.get("flags")
+    if not isinstance(label, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", label):
+        raise ValueError("Variant names must be safe identifiers")
+    if label in seen:
+        raise ValueError(f"Duplicate variant name: {label}")
+    seen.add(label)
+    if not isinstance(flags, list) or len(flags) % 2:
+        raise ValueError("Variant flags must be option/value pairs")
+    if any(not isinstance(part, str) for part in flags):
+        raise ValueError("Variant flag values must be strings")
+    options = flags[::2]
+    if len(options) != len(set(options)) or any(option not in OPTIONS for option in options):
+        raise ValueError(f"Unsupported or repeated flag in {label}")
+    for option, raw in zip(options, flags[1::2]):
+        if not raw.isdecimal() or int(raw) < 1:
+            raise ValueError(f"{option} needs a positive integer")
+
+
 def load_experiment(path):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -41,26 +68,7 @@ def load_experiment(path):
         raise ValueError("Experiments require 2 to 20 variants")
     if type(rows) is not int or not 1 <= rows <= MAX_ROWS:
         raise ValueError(f"rows must be between 1 and {MAX_ROWS}")
-    seen = set()
-    for variant in variants:
-        if not isinstance(variant, dict):
-            raise ValueError("Each variant must be an object")
-        label, flags = variant.get("name"), variant.get("flags")
-        if not isinstance(label, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", label):
-            raise ValueError("Variant names must be safe identifiers")
-        if label in seen:
-            raise ValueError(f"Duplicate variant name: {label}")
-        seen.add(label)
-        if not isinstance(flags, list) or len(flags) % 2:
-            raise ValueError("Variant flags must be option/value pairs")
-        if any(not isinstance(part, str) for part in flags):
-            raise ValueError("Variant flag values must be strings")
-        options = flags[::2]
-        if len(options) != len(set(options)) or any(option not in OPTIONS for option in options):
-            raise ValueError(f"Unsupported or repeated flag in {label}")
-        for option, raw in zip(options, flags[1::2]):
-            if not raw.isdecimal() or int(raw) < 1:
-                raise ValueError(f"{option} needs a positive integer")
+    _validate_variants(variants)
     return {"name": name, "sql": sql, "rows": rows, "ordered": ordered, "variants": variants}
 
 

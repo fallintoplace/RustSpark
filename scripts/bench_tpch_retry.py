@@ -32,6 +32,13 @@ def retry_command(binary, queries, parquet, ids, report, repeat=1, timeout=120):
             "--warmup", "0", "--timeout", str(timeout), "--json-out", str(report)]
 
 
+def retry_completed(replay, ids):
+    new = replay.get("results", [])
+    return ({row.get("id") for row in new} == set(ids)
+            and len(new) == len(ids)
+            and all(row.get("status") == "ok" for row in new))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("previous", type=Path)
@@ -53,10 +60,7 @@ def main(argv=None):
         result = subprocess.run(cmd, check=False)
         # Original runner versions can exit 0 even if some queries failed.
         replay = json.loads(args.json_out.read_text(encoding="utf-8"))
-        new = replay.get("results", [])
-        completed = ({row.get("id") for row in new} == set(ids)
-                     and len(new) == len(ids)
-                     and all(row.get("status") == "ok" for row in new))
+        completed = retry_completed(replay, ids)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"retry failed: {error}\n")
     return 0 if completed and result.returncode == 0 else 1
