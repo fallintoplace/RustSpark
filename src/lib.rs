@@ -11,6 +11,8 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
+mod joins_star;
+pub use joins_star::StarDimension;
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
 mod set_operations;
