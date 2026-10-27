@@ -98,17 +98,17 @@ def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
     return QueryResult(columns=columns, rows=rows)
 
 
+def _rustspark_cli_stdout(command: list[str], arguments: list[str]) -> str:
+    return subprocess.run(
+        command + arguments, capture_output=True, text=True, check=True, timeout=120,
+    ).stdout
+
+
 def rustspark_query(binary: str, sql: str):
     common = [binary, "--sql", sql]
-    described = subprocess.run(
-        common + ["--describe"], capture_output=True, text=True, check=True, timeout=120
-    )
-    columns = parse_rustspark_columns(described.stdout)
-    result = subprocess.run(
-        common + ["--stdout-format", "json"],
-        capture_output=True, text=True, check=True, timeout=120
-    )
-    return parse_rustspark_json(result.stdout, columns)
+    columns = parse_rustspark_columns(_rustspark_cli_stdout(common, ["--describe"]))
+    rows = _rustspark_cli_stdout(common, ["--stdout-format", "json"])
+    return parse_rustspark_json(rows, columns)
 
 
 def spark_query(session, sql: str):
