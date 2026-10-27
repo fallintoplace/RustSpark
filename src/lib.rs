@@ -1297,6 +1297,13 @@ impl RustSparkSession {
         .await
     }
 
+    /// Count unique whole rows, treating repeated NULL rows as duplicates.
+    ///
+    /// Unlike row counts, this requires a distinct aggregation over the input.
+    pub async fn distinct_row_count(&self, table: &str) -> Result<usize> {
+        self.table(table).await?.distinct()?.count().await
+    }
+
     fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
