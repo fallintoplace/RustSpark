@@ -1335,6 +1335,50 @@ impl RustSparkSession {
         Self::sort_dataframe(dataframe, order)?.limit(0, Some(limit))
     }
 
+    /// Sort registered rows with explicit ascending and NULL placement.
+    ///
+    /// Each key is (column, ascending, nulls_first). Unlike sort_rows, NULL
+    /// placement is independent of sort direction. Rows remain lazy and
+    /// equal-key ties have no guaranteed order.
+    pub async fn sort_rows_with_nulls(
+        &self,
+        table: &str,
+        order: &[(&str, bool, bool)],
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr};
+        use std::collections::HashSet;
+
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "sort_rows_with_nulls requires at least one key".into(),
+            ));
+        }
+
+        let dataframe = self.table(table).await?;
+        let available: HashSet<&str> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut expressions = Vec::with_capacity(order.len());
+        for &(name, ascending, nulls_first) in order {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate sort column: {name}"
+                )));
+            }
+            if !available.contains(name) {
+                return Err(DataFusionError::Plan(format!(
+                    "Unknown sort column: {name}"
+                )));
+            }
+            expressions.push(Expr::Column(Column::from_name(name)).sort(ascending, nulls_first));
+        }
+        dataframe.sort(expressions)
+    }
+
     // Plan independent SQL inputs concurrently, with bounded outstanding
     // work. buffered() returns results in input order, so UNION semantics and
     // the first reported planning error still follow query order.
