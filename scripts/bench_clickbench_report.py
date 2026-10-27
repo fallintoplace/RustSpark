@@ -13,6 +13,24 @@ def timing(value, label):
     return float(value)
 
 
+def format_result(row):
+    state = row.get("status")
+    failure = None
+    if state == "executed":
+        median = timing(row.get("median_ms"), "median")
+        p95 = timing(row.get("p95_ms"), "p95")
+        if p95 + .001 < median:
+            raise ValueError(f"Invalid p95 for query {row['id']}")
+        a, b = f"{median:.3f}", f"{p95:.3f}"
+    elif state in ("error", "nondeterministic"):
+        a, b = "-", "-"
+        message = str(row.get("error", state)).replace("\n", " ").replace("|", "/")
+        failure = f"- Q{row['id']:02}: {message[:250]}"
+    else:
+        raise ValueError(f"Unknown query status: {state}")
+    return f"| {row['id']:02} | {state} | {a} | {b} |", failure
+
+
 def render(report):
     entries = report.get("results")
     if not isinstance(entries, list) or not entries:
@@ -31,20 +49,10 @@ def render(report):
     ]
     failures = []
     for row in sorted(entries, key=lambda item: item["id"]):
-        state = row.get("status")
-        if state == "executed":
-            median = timing(row.get("median_ms"), "median")
-            p95 = timing(row.get("p95_ms"), "p95")
-            if p95 + .001 < median:
-                raise ValueError(f"Invalid p95 for query {row['id']}")
-            a, b = f"{median:.3f}", f"{p95:.3f}"
-        elif state in ("error", "nondeterministic"):
-            a, b = "-", "-"
-            message = str(row.get("error", state)).replace("\n", " ").replace("|", "/")
-            failures.append(f"- Q{row['id']:02}: {message[:250]}")
-        else:
-            raise ValueError(f"Unknown query status: {state}")
-        lines.append(f"| {row['id']:02} | {state} | {a} | {b} |")
+        line, failure = format_result(row)
+        lines.append(line)
+        if failure is not None:
+            failures.append(failure)
     if failures:
         lines.extend(["", "## Failures", "", *failures])
     lines.extend(["", "Results are execution timings, not proof of correctness or official ClickBench scores.", ""])
