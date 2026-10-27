@@ -69,23 +69,33 @@ async fn register_unions_by_name(
     Ok(())
 }
 
+fn view_definitions(args: &Args) -> impl Iterator<Item = (&str, bool)> {
+    args.sql_views
+        .iter()
+        .map(|definition| (definition.as_str(), false))
+        .chain(
+            args.materialized_sql_views
+                .iter()
+                .map(|definition| (definition.as_str(), true)),
+        )
+}
+
+fn validate_view_names(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let mut names = HashSet::new();
+    for (definition, _) in view_definitions(args) {
+        let (name, _) = parse_named_view(definition)?;
+        ensure_unique_name(&mut names, name, "SQL view")?;
+    }
+    Ok(())
+}
+
 async fn register_sql_views(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut view_names = HashSet::new();
-    let definitions = args
-        .sql_views
-        .iter()
-        .map(|definition| (definition, false))
-        .chain(
-            args.materialized_sql_views
-                .iter()
-                .map(|definition| (definition, true)),
-        );
-    for (definition, materialized) in definitions {
+    validate_view_names(args)?;
+    for (definition, materialized) in view_definitions(args) {
         let (name, sql) = parse_named_view(definition)?;
-        ensure_unique_name(&mut view_names, name, "SQL view")?;
         let dataframe = plan_view_query(session, sql, args).await?;
         let dataframe = if materialized {
             dataframe.cache().await?
@@ -144,4 +154,22 @@ async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
         let _ = sender.send(result);
     });
     Ok(receiver.await??)
+}
+
+#[cfg(test)]
+mod view_validation_tests {
+    use super::{Args, validate_view_names};
+    use clap::Parser;
+
+    #[test]
+    fn rejects_duplicate_lazy_and_materialized_view_names() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1",
+            "--sql-view", "events=SELECT 1",
+            "--materialized-sql-view", "EVENTS=SELECT 2",
+        ])
+        .unwrap();
+        let error = validate_view_names(&args).err().expect("duplicate views");
+        assert!(error.to_string().contains("Duplicate SQL view"), "{error}");
+    }
 }
