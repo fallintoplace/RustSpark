@@ -11,6 +11,8 @@ mod export;
 mod joins;
 mod set_operations;
 mod sources;
+#[path = "features/top_rows_per_group.rs"]
+mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/endswith.rs"]
