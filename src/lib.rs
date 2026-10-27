@@ -514,6 +514,30 @@ impl RustSparkSession {
         self.table(table).await?.filter(predicate)
     }
 
+    /// Keep rows whose selected column is within an inclusive typed range.
+    ///
+    /// NULL rows are excluded by SQL comparison semantics. Invalid columns,
+    /// incompatible types, and NULL bounds are rejected during planning.
+    pub async fn filter_rows_between(
+        &self,
+        table: &str,
+        column: &str,
+        lower: datafusion::common::ScalarValue,
+        upper: datafusion::common::ScalarValue,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        if lower.is_null() || upper.is_null() {
+            return Err(DataFusionError::Plan(
+                "filter_rows_between requires non-NULL bounds".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let key = Expr::Column(Column::from_name(column));
+        dataframe.filter(key.clone().gt_eq(lit(lower)).and(key.lt_eq(lit(upper))))
+    }
+
     /// Register a scalar user-defined function for SQL queries in this session.
     pub fn register_udf(&self, udf: datafusion::logical_expr::ScalarUDF) {
         self.context.register_udf(udf);
