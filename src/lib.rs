@@ -1674,6 +1674,38 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
+    /// Count occurrences of distinct combinations of several columns.
+    ///
+    /// Results retain the original grouping column names, plus frequency.
+    /// NULLs form groups, and row order is unspecified. The plan is lazy.
+    pub async fn group_value_counts(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        if columns.is_empty() {
+            return Err(DataFusionError::Plan(
+                "group_value_counts requires at least one column".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, columns)?;
+        if columns
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("frequency"))
+        {
+            return Err(DataFusionError::Plan(
+                "group_value_counts reserves the frequency column name".into(),
+            ));
+        }
+        let groups = columns
+            .iter()
+            .map(|name| quote_join_identifier(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = quote_catalog_table(table, "group_value_counts requires a table path")?;
+        self.sql_read_only(&format!(
+            "SELECT {groups}, COUNT(*) AS frequency FROM {source} GROUP BY {groups}"
+        ))
+        .await
+    }
+
     /// Count occurrences of each distinct value in a registered table column.
     ///
     /// Returns a lazy DataFrame with columns named value and frequency. NULL
