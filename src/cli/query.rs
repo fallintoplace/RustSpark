@@ -171,6 +171,14 @@ async fn execute_script_statement(
     persist_dropped_table(dropped, args)
 }
 
+// Extract DataFusion's SQL AST once for persistent DDL and INSERT handling.
+fn sql_statement(statement: &DFStatement) -> Option<&SqlStatement> {
+    let DFStatement::Statement(statement) = statement else {
+        return None;
+    };
+    Some(statement.as_ref())
+}
+
 /// Route a persistent INSERT to a staged copy, never the visible table files.
 /// Unquoted, local table names only. External registrations keep DataFusion's
 /// normal INSERT behavior.
@@ -181,10 +189,7 @@ fn persistent_insert_table(
     let Some(root) = args.database_dir.as_deref() else {
         return Ok(None);
     };
-    let DFStatement::Statement(statement) = statement else {
-        return Ok(None);
-    };
-    let SqlStatement::Insert(insert) = statement.as_ref() else {
+    let Some(SqlStatement::Insert(insert)) = sql_statement(statement) else {
         return Ok(None);
     };
     let name = insert.table.to_string().to_ascii_lowercase();
@@ -327,10 +332,7 @@ fn persistent_create_table<'a>(
     args: &Args,
 ) -> Option<&'a datafusion::logical_expr::sqlparser::ast::CreateTable> {
     args.database_dir.as_ref()?;
-    let DFStatement::Statement(statement) = statement else {
-        return None;
-    };
-    let SqlStatement::CreateTable(create) = statement.as_ref() else {
+    let SqlStatement::CreateTable(create) = sql_statement(statement)? else {
         return None;
     };
     Some(create)
@@ -361,10 +363,7 @@ fn persistent_rename_table(
     let Some(root) = args.database_dir.as_deref() else {
         return Ok(None);
     };
-    let DFStatement::Statement(statement) = statement else {
-        return Ok(None);
-    };
-    let SqlStatement::AlterTable(alter) = statement.as_ref() else {
+    let Some(SqlStatement::AlterTable(alter)) = sql_statement(statement) else {
         return Ok(None);
     };
     let [AlterTableOperation::RenameTable { table_name }] = alter.operations.as_slice() else {
@@ -394,14 +393,11 @@ fn persistent_drop_table(
     let Some(root) = args.database_dir.as_deref() else {
         return Ok(None);
     };
-    let DFStatement::Statement(statement) = statement else {
-        return Ok(None);
-    };
-    let SqlStatement::Drop {
+    let Some(SqlStatement::Drop {
         object_type: ObjectType::Table,
         names,
         ..
-    } = statement.as_ref()
+    }) = sql_statement(statement)
     else {
         return Ok(None);
     };
