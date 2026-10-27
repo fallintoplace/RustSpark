@@ -12,14 +12,19 @@ async fn all_predicates_are_applied_without_mutating_source()
         )
         .await?;
     let filtered = session
-        .filter_rows_all("scores", &[col("score").gt(lit(1)), col("score").lt(lit(3))])
+        .filter_rows_all(
+            "scores",
+            &[col("score").gt(lit(1)), col("score").lt(lit(3))],
+        )
         .await?;
     assert_eq!(filtered.count().await?, 1);
     assert_eq!(session.table_row_count("scores").await?, 4);
     assert!(session.filter_rows_all("scores", &[]).await.is_err());
-    assert!(session
-        .filter_rows_all("scores", &[col("missing").eq(lit(1))])
-        .await
-        .is_err());
+    assert!(
+        session
+            .filter_rows_all("scores", &[col("missing").eq(lit(1))])
+            .await
+            .is_err()
+    );
     Ok(())
 }
