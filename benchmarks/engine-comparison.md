@@ -39,3 +39,25 @@ deterministic expected results, including multi-row GROUP BY output.
 The workload uses typed CSV and local Spark `local[2]`; it is **not**
 a distributed, Parquet lake, or fault-tolerance benchmark.
 The manual `Compare warm local SQL sessions` workflow uploads raw timings.
+
+## Reading benchmark results
+
+The optional cold and warm comparison workflows upload measured JSON **and**
+a readable Markdown report. The summary includes per-workload median and p95
+latencies, verified cross-engine result fingerprints, and speed ratios.
+For a ratio of competitor median / RustSpark median, **above 1x** means
+RustSpark ran faster in that workload on that machine.
+
+Generate a report locally after either harness completes:
+
+```sh
+python3 scripts/bench_report.py benchmarks/engine-comparison.json \
+  --output benchmarks/reports/cold.md
+python3 scripts/bench_report.py benchmarks/warm-comparison.json \
+  --output benchmarks/reports/warm.md
+```
+
+The renderer rejects missing workloads, unequal result fingerprints, invalid
+timings, or summaries that disagree with their timing samples. Neither these
+reports nor the harness establish distributed performance or statistically
+significant speedups. Keep cold-start and warm-session results separate.

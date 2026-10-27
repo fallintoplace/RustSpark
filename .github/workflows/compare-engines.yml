@@ -40,9 +40,15 @@ jobs:
             --engines rustspark duckdb spark \
             --rows "${{ inputs.rows }}" --repeat "${{ inputs.repeats }}" \
             --warmup 1 --json-out benchmarks/engine-comparison.json
+      - name: Render checked Markdown comparison
+        run: |
+          python3 scripts/bench_report.py benchmarks/engine-comparison.json --output benchmarks/reports/cold.md
+          cat benchmarks/reports/cold.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: engine-comparison
-          path: benchmarks/engine-comparison.json
+          path: |
+            benchmarks/engine-comparison.json
+            benchmarks/reports/cold.md
           if-no-files-found: warn

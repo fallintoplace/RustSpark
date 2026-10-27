@@ -40,9 +40,15 @@ jobs:
             --engines rustspark spark --rows "${{ inputs.rows }}" \
             --repeat "${{ inputs.repeats }}" --warmup 1 --target-partitions 2 \
             --json-out benchmarks/warm-comparison.json
+      - name: Render checked Markdown comparison
+        run: |
+          python3 scripts/bench_report.py benchmarks/warm-comparison.json --output benchmarks/reports/warm.md
+          cat benchmarks/reports/warm.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: warm-comparison
-          path: benchmarks/warm-comparison.json
+          path: |
+            benchmarks/warm-comparison.json
+            benchmarks/reports/warm.md
           if-no-files-found: warn
