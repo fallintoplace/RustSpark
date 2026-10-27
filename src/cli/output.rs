@@ -1,5 +1,5 @@
 use std::{
-    io::Write,
+    io::{BufWriter, Write},
     path::Path,
     sync::{
         Arc,
@@ -7,10 +7,16 @@ use std::{
     },
 };
 
-use datafusion::{arrow::ipc::writer::FileWriter, prelude::DataFrame};
+use datafusion::{
+    arrow::ipc::{
+        CompressionType,
+        writer::{FileWriter, IpcWriteOptions},
+    },
+    prelude::DataFrame,
+};
 use futures::StreamExt;
 
-use super::StdoutFormat;
+use super::{ArrowCompression, StdoutFormat};
 
 pub(super) fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(error);
@@ -367,6 +373,7 @@ pub(super) async fn write_stdout(
 pub(super) async fn write_arrow_ipc(
     dataframe: DataFrame,
     path: &Path,
+    compression: Option<ArrowCompression>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
@@ -375,7 +382,13 @@ pub(super) async fn write_arrow_ipc(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::NamedTempFile::new_in(directory)?;
-    let mut writer = FileWriter::try_new_buffered(temporary.reopen()?, &schema)?;
+    let codec = compression.map(|compression| match compression {
+        ArrowCompression::Lz4 => CompressionType::LZ4_FRAME,
+        ArrowCompression::Zstd => CompressionType::ZSTD,
+    });
+    let options = IpcWriteOptions::default().try_with_compression(codec)?;
+    let mut writer =
+        FileWriter::try_new_with_options(BufWriter::new(temporary.reopen()?), &schema, options)?;
     while let Some(batch) = stream.next().await {
         writer.write(&batch?)?;
     }

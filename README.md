@@ -503,6 +503,19 @@ The Arrow output is always one file. It preserves Arrow column types and
 supports empty results. Like other exports, a failed or timed-out query can
 leave a partial output file.
 
+Arrow IPC files can optionally compress record-batch buffers with LZ4 (lower
+CPU cost) or ZSTD (often smaller files):
+
+```sh
+cargo run -- --csv tests/fixtures/sales.csv \
+  --sql 'SELECT * FROM data' --output-arrow /tmp/sales.arrow \
+  --arrow-compression zstd
+```
+
+`--arrow-compression` applies only to `--output-arrow` files, not Arrow
+streams written to stdout. Omitting it preserves the previous uncompressed
+file format.
+
 For wide queries, print one column per line instead of a horizontal table:
 
 ```sh

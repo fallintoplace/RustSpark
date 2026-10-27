@@ -572,7 +572,7 @@ async fn present_query_result(
     } else if let Some((path, format)) = requested_file_export(args) {
         write_file_export(dataframe, path, format, args.output_single_file).await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
-        write_arrow_ipc(dataframe, path).await?;
+        write_arrow_ipc(dataframe, path, args.arrow_compression).await?;
     } else if let Some(format) = args.stdout_format {
         let dataframe = if let Some(max_rows) = args.max_rows {
             limit_for_output(dataframe, args.offset.unwrap_or(0), max_rows)?

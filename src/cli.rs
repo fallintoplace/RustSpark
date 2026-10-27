@@ -17,6 +17,12 @@ enum StdoutFormat {
     Arrow,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ArrowCompression {
+    Lz4,
+    Zstd,
+}
+
 #[derive(Parser)]
 #[command(
     version,
@@ -289,6 +295,15 @@ struct Args {
         conflicts_with_all = ["max_rows", "output_parquet", "output_csv", "output_json"]
     )]
     output_arrow: Option<PathBuf>,
+
+    /// Compress Arrow IPC file buffers. Default is uncompressed.
+    #[arg(
+        long = "arrow-compression",
+        value_enum,
+        value_name = "CODEC",
+        requires = "output_arrow"
+    )]
+    arrow_compression: Option<ArrowCompression>,
 
     #[arg(long = "output-single-file")]
     output_single_file: bool,
