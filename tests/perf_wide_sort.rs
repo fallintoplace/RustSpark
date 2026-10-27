@@ -25,8 +25,7 @@ async fn wide_sort_preserves_validation_and_schema() -> Result<(), Box<dyn std::
     let error = session
         .sort_rows_with_nulls("wide", &unknown)
         .await
-        .err()
-        .expect("unknown sort key should fail");
+        .expect_err("unknown sort key should fail");
     assert!(error.to_string().contains("Unknown sort column: unknown"));
 
     let mut duplicated = unknown;
@@ -34,8 +33,7 @@ async fn wide_sort_preserves_validation_and_schema() -> Result<(), Box<dyn std::
     let error = session
         .sort_rows_with_nulls("wide", &duplicated)
         .await
-        .err()
-        .expect("duplicate sort key should fail");
+        .expect_err("duplicate sort key should fail");
     assert!(error.to_string().contains("Duplicate sort column: C0"));
     Ok(())
 }
