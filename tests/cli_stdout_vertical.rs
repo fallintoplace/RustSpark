@@ -26,7 +26,7 @@ fn vertical_output_streams_rows_across_batches() -> TestResult {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "--- Row 1 ---\\nid: 1\\nlabel: first\\n--- Row 2 ---\\nid: 2\\nlabel: second\\n"
+        "--- Row 1 ---\nid: 1\nlabel: first\n--- Row 2 ---\nid: 2\nlabel: second\n"
     );
     Ok(())
 }
@@ -37,7 +37,7 @@ fn vertical_output_renders_nulls_and_escapes_line_breaks() -> TestResult {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "--- Row 1 ---\\nempty: NULL\\nvalue: a\\n"
+        "--- Row 1 ---\nempty: NULL\nvalue: a\n"
     );
     Ok(())
 }
