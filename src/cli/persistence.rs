@@ -713,7 +713,10 @@ pub(super) async fn rename_saved_table(
     }
     let source = root.join(source_name);
     let destination = root.join(destination_name);
-    require_regular_directory(&source, "Persistent source table must be a regular directory")?;
+    require_regular_directory(
+        &source,
+        "Persistent source table must be a regular directory",
+    )?;
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(format!("Destination table already exists: {destination_name}").into());
     }
