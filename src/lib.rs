@@ -11,6 +11,7 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
+mod joins_many_using;
 mod joins_many;
 pub use joins_many::MultiJoinStep;
 #[path = "features/regex_filter.rs"]
