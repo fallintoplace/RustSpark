@@ -2,6 +2,8 @@
 //! Every location must be readable by the Ballista scheduler and executors.
 use std::{collections::HashSet, env, fs};
 
+use futures::{stream, StreamExt};
+
 use rustspark::RustSparkSession;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,6 +112,11 @@ fn load_sources(
     }
 }
 
+fn registration_parallelism(source_count: usize) -> usize {
+    let cpus = std::thread::available_parallelism().map_or(4, |cores| cores.get());
+    cpus.clamp(2, 8).min(source_count.max(1))
+}
+
 pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::error::Error>> {
     let inline = optional_env("RUSTSPARK_INPUTS")?;
     let manifest = optional_env("RUSTSPARK_INPUTS_FILE")?;
@@ -122,12 +129,19 @@ pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::err
         return Err("RUSTSPARK_INPUTS cannot redefine the legacy data table".into());
     }
 
-    for source in sources {
-        match source.format {
-            Format::Csv => session.register_csv(&source.name, &source.path).await?,
-            Format::Json => session.register_json(&source.name, &source.path).await?,
-            Format::Parquet => session.register_parquet(&source.name, &source.path).await?,
-        }
+    // Independent metadata and schema reads can overlap without unbounded fan-out.
+    let parallelism = registration_parallelism(sources.len());
+    let mut registrations = stream::iter(sources)
+        .map(|source| async move {
+            match source.format {
+                Format::Csv => session.register_csv(&source.name, &source.path).await,
+                Format::Json => session.register_json(&source.name, &source.path).await,
+                Format::Parquet => session.register_parquet(&source.name, &source.path).await,
+            }
+        })
+        .buffer_unordered(parallelism);
+    while let Some(result) = registrations.next().await {
+        result?;
     }
     Ok(())
 }
@@ -135,6 +149,15 @@ pub async fn register(session: &RustSparkSession) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distributed_registration_uses_bounded_parallelism() {
+        assert_eq!(registration_parallelism(0), 1);
+        assert_eq!(registration_parallelism(1), 1);
+        assert!(registration_parallelism(64) >= 2);
+        assert!(registration_parallelism(64) <= 8);
+        assert!(registration_parallelism(64) <= 64);
+    }
 
     #[test]
     fn parses_a_source_without_truncating_paths_with_equals_signs() {
