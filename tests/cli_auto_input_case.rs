@@ -35,7 +35,7 @@ fn auto_input_keeps_original_case_for_reader_extension() -> TestResult {
         assert_row_count(&path, "total\n3\n")?;
     }
 
-    let parquet = dir.path().join("saved.parquet");
+    let parquet = dir.path().join("saved.PARQUET");
     let export = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args(["--sql", "SELECT 42 AS value", "--output-parquet"])
         .arg(&parquet)
@@ -46,8 +46,6 @@ fn auto_input_keeps_original_case_for_reader_extension() -> TestResult {
         "{}",
         String::from_utf8_lossy(&export.stderr)
     );
-    let uppercase = dir.path().join("saved.PARQUET");
-    fs::copy(parquet, &uppercase)?;
-    assert_row_count(&uppercase, "total\n1\n")?;
+    assert_row_count(&parquet, "total\n1\n")?;
     Ok(())
 }
