@@ -7,6 +7,15 @@ import json
 import math
 from pathlib import Path
 
+def sha256_file(path):
+    """Hash input files using bounded memory at large TPC-H scale factors."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 TABLES = ("customer", "lineitem", "nation", "orders",
           "part", "partsupp", "region", "supplier")
 
@@ -52,7 +61,7 @@ def prepare(connection, destination, scale):
         counts[table] = connection.execute(
             f"SELECT COUNT(*) FROM {table}"
         ).fetchone()[0]
-        table_sha256[table] = hashlib.sha256(parquet_path.read_bytes()).hexdigest()
+        table_sha256[table] = sha256_file(parquet_path)
     queries = connection.execute(
         "SELECT query_nr, query FROM tpch_queries() ORDER BY query_nr"
     ).fetchall()

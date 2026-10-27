@@ -7,6 +7,8 @@ import json
 import math
 from pathlib import Path
 
+from tpch_prepare import sha256_file
+
 TABLES = frozenset(("customer", "lineitem", "nation", "orders",
                     "part", "partsupp", "region", "supplier"))
 
@@ -39,7 +41,7 @@ def check(root):
         path = f"data/{table}.parquet"
         if manifest["tables"][table] != path:
             raise ValueError(f"Unexpected Parquet path for {table}")
-        actual = hashlib.sha256(inside(root, path).read_bytes()).hexdigest()
+        actual = sha256_file(inside(root, path))
         expected = hashes[table]
         if not isinstance(expected, str) or actual != expected:
             raise ValueError(f"Parquet checksum mismatch for {table}")
