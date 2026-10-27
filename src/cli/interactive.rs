@@ -19,6 +19,10 @@ struct SqlTerminatorScanner {
 }
 
 impl SqlTerminatorScanner {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     fn push(&mut self, fragment: &str) -> bool {
         let mut chars = fragment.chars().peekable();
         while let Some(ch) = chars.next() {
@@ -112,6 +116,10 @@ fn shell_arguments<'a>(command: &'a str, keyword: &str) -> Option<&'a str> {
     }
 }
 
+fn is_single_table_argument(name: &str) -> bool {
+    !name.is_empty() && name.split_whitespace().count() == 1
+}
+
 // Execute SQL files in the current session without replacing pending input.
 async fn handle_read_command(
     session: &RustSparkSession,
@@ -143,7 +151,7 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
     let Some(name) = shell_arguments(command, ".columns") else {
         return false;
     };
-    if name.is_empty() || name.split_whitespace().count() != 1 {
+    if !is_single_table_argument(name) {
         eprintln!("Shell error: .columns requires exactly one table name");
     } else {
         match session.describe_table(name).await {
@@ -163,7 +171,7 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
     let Some(name) = shell_arguments(command, ".schema") else {
         return false;
     };
-    if name.is_empty() || name.split_whitespace().count() != 1 {
+    if !is_single_table_argument(name) {
         eprintln!("Shell error: .schema requires exactly one table name");
     } else {
         match session.describe_table(name).await {
@@ -184,7 +192,7 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
     let Some(name) = shell_arguments(command, ".count") else {
         return false;
     };
-    if name.is_empty() || name.split_whitespace().count() != 1 {
+    if !is_single_table_argument(name) {
         eprintln!("Shell error: .count requires exactly one table name");
     } else {
         let result = super::with_query_timeout(args.query_timeout, async {
@@ -327,7 +335,7 @@ pub(super) async fn run_interactive(
                 eprintln!("No pending SQL");
             } else {
                 pending.clear();
-                terminator = SqlTerminatorScanner::default();
+                terminator.reset();
                 eprintln!("Pending SQL cancelled");
             }
             continue;
@@ -358,13 +366,13 @@ pub(super) async fn run_interactive(
             // once all block comments are closed so shell commands still work.
             if terminator.outside_multiline_constructs() && terminator.last_significant.is_none() {
                 pending.clear();
-                terminator = SqlTerminatorScanner::default();
+                terminator.reset();
             }
             continue;
         }
 
         let query = std::mem::take(&mut pending);
-        terminator = SqlTerminatorScanner::default();
+        terminator.reset();
         execute_pending_sql(session, args, &query, timer_on).await;
     }
 
@@ -376,7 +384,7 @@ pub(super) async fn run_interactive(
 
 #[cfg(test)]
 mod tests {
-    use super::{SqlTerminatorScanner, shell_arguments};
+    use super::{SqlTerminatorScanner, is_single_table_argument, shell_arguments};
 
     #[test]
     fn shell_commands_require_an_exact_keyword_boundary() {
@@ -392,6 +400,14 @@ mod tests {
         assert_eq!(shell_arguments(".readme", ".read"), None);
         assert_eq!(shell_arguments(".timer on", ".timer"), Some("on"));
         assert_eq!(shell_arguments(".previewer x", ".preview"), None);
+    }
+
+    #[test]
+    fn single_table_commands_reject_missing_and_multiple_names() {
+        assert!(is_single_table_argument("events"));
+        assert!(!is_single_table_argument(""));
+        assert!(!is_single_table_argument("events logs"));
+        assert!(!is_single_table_argument("  "));
     }
 
     #[test]
@@ -417,7 +433,7 @@ mod tests {
             assert!(!scanner.push("SELECT 1\n"));
         }
         assert!(scanner.push(";\n"));
-        scanner = SqlTerminatorScanner::default();
+        scanner.reset();
         assert!(!scanner.push("SELECT 2\n"));
         assert!(scanner.push(";\n"));
     }
