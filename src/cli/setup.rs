@@ -164,9 +164,13 @@ mod view_validation_tests {
     #[test]
     fn rejects_duplicate_lazy_and_materialized_view_names() {
         let args = Args::try_parse_from([
-            "rustspark", "--sql", "SELECT 1",
-            "--sql-view", "events=SELECT 1",
-            "--materialized-sql-view", "EVENTS=SELECT 2",
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--sql-view",
+            "events=SELECT 1",
+            "--materialized-sql-view",
+            "EVENTS=SELECT 2",
         ])
         .unwrap();
         let error = validate_view_names(&args).err().expect("duplicate views");
