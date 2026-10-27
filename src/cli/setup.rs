@@ -18,7 +18,6 @@ fn ensure_unique_name(
     Ok(())
 }
 
-// A view is a read-only query, not an opportunity to execute SQL mutations.
 async fn plan_view_query(
     session: &RustSparkSession,
     sql: &str,
@@ -119,7 +118,6 @@ pub(super) async fn read_query(
     args: &Args,
 ) -> Result<std::borrow::Cow<'_, str>, Box<dyn std::error::Error>> {
     if let Some(sql) = args.sql.as_deref() {
-        // A potentially large --sql script already lives in Args.
         return Ok(std::borrow::Cow::Borrowed(sql));
     }
     if let Some(path) = args.sql_file.as_ref() {
@@ -145,7 +143,6 @@ pub(super) async fn cache_tables(
     Ok(())
 }
 
-// Use a detached reader thread so a blocked stdin read cannot stall the query timer.
 async fn read_sql_stdin() -> Result<String, Box<dyn std::error::Error>> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {

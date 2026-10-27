@@ -31,7 +31,6 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
         (JoinType::Right, 2),
         (JoinType::Full, 3),
     ] {
-        // "order" is a reserved SQL keyword, so it must be quoted by the API.
         let frame = session
             .join_tables_using("order", "lookup", kind, &["id"])
             .await?;
@@ -41,7 +40,6 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
             .iter()
             .map(|field| field.name().to_owned())
             .collect();
-        // DataFusion can place the merged key after other left columns.
         assert_eq!(column_names.len(), 3);
         assert_eq!(
             column_names
@@ -56,7 +54,6 @@ async fn using_merges_join_keys_for_inner_and_outer_joins() -> TestResult {
         assert_eq!(frame.count().await?, expected, "{kind:?}");
     }
 
-    // A full USING join must retain the right-only key value, not NULL.
     let frame = session
         .join_tables_using("order", "lookup", JoinType::Full, &["id"])
         .await?;

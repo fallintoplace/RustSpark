@@ -40,7 +40,6 @@ fn total(root: &Path) -> Result<i64, Box<dyn std::error::Error>> {
         return Err(String::from_utf8_lossy(&output.stderr).to_string().into());
     }
     let stdout = String::from_utf8(output.stdout)?;
-    // The CLI renders the single integer in a pretty table.
     let n = stdout
         .lines()
         .find_map(|line| line.trim().trim_matches('|').trim().parse::<i64>().ok())
@@ -69,7 +68,6 @@ fn sql_error_discards_private_insert_and_preserves_original() -> TestResult {
 
 #[test]
 fn interrupted_insert_recovers_old_or_published_version() -> TestResult {
-    // Each phase gets its own directory, so there is no test-order coupling.
     for (phase, expected) in [
         ("before_swap", 1_i64),
         ("after_old_moved", 1),
@@ -90,7 +88,6 @@ fn interrupted_insert_recovers_old_or_published_version() -> TestResult {
         assert!(staging.exists(), "{phase} should leave a recoverable stage");
         assert_eq!(db.path().join("items").exists(), phase != "after_old_moved");
 
-        // Opening a new process runs startup recovery while holding the lock.
         assert_eq!(total(db.path())?, expected, "phase {phase}");
         assert!(
             !staging.exists(),
@@ -149,7 +146,6 @@ fn interactive_timeout_restores_live_table_provider() -> TestResult {
             .any(|line| line.trim().trim_matches('|').trim() == "41"),
         "{stdout}"
     );
-    // A subsequent process discards the abandoned private stage.
     assert_eq!(total(db.path())?, 41);
     assert!(!db.path().join(".rustspark-insert-items").exists());
     Ok(())
@@ -222,8 +218,6 @@ fn corrupt_published_snapshot_restores_valid_backup() -> TestResult {
     );
     assert_eq!(interrupted.status.code(), Some(97));
 
-    // Only the newly appended part is independent of the previous snapshot.
-    // The older immutable parts may share an inode through hard links.
     let previous: std::collections::HashSet<_> =
         fs::read_dir(db.path().join(".rustspark-insert-items").join("old"))?
             .filter_map(Result::ok)

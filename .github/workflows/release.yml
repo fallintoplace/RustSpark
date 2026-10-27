@@ -6,7 +6,6 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - docs/releasing.md
   workflow_dispatch:
 
 permissions:
@@ -87,20 +86,20 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar -czf dist/rustspark-linux-x86_64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md
+          tar -czf dist/rustspark-linux-x86_64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" LICENSE
       - name: Package Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/rustspark.exe, README.md -DestinationPath dist/rustspark-windows-x86_64.zip -CompressionLevel Optimal
+          Compress-Archive -Path target/release/rustspark.exe, LICENSE -DestinationPath dist/rustspark-windows-x86_64.zip -CompressionLevel Optimal
       - name: Package macOS arm64 executable
         if: runner.os == 'macOS'
         shell: bash
         run: |
           test "$(uname -m)" = arm64
           mkdir -p dist
-          tar -czf dist/rustspark-macos-arm64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" README.md
+          tar -czf dist/rustspark-macos-arm64.tar.gz -C target/release rustspark -C "$GITHUB_WORKSPACE" LICENSE
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.id }}

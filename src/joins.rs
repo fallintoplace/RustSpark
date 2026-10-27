@@ -1,4 +1,3 @@
-//! Lazy join operations for registered DataFusion tables.
 
 use datafusion::{
     error::{DataFusionError, Result},
@@ -12,12 +11,6 @@ fn quote_join_table(path: &str) -> Result<String> {
 }
 
 impl RustSparkSession {
-    /// Join two registered tables by their shared column names (SQL USING).
-    ///
-    /// Each join key appears once in the output, unlike an ON join. FULL OUTER
-    /// JOIN coalesces the key from whichever side supplies the row. Other
-    /// non-key columns are left unchanged, even when their names collide.
-    /// The join is lazy and its key columns appear first in the output.
     pub async fn join_tables_using(
         &self,
         left: &str,
@@ -53,8 +46,6 @@ impl RustSparkSession {
             }
         };
 
-        // The two read-only table lookups are independent. Resolve them
-        // together, but keep the left/right schema order in the final plan.
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
         for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
             let field_names: HashSet<&str> = frame
@@ -72,13 +63,9 @@ impl RustSparkSession {
             }
         }
 
-        // Escape identifiers rather than interpolating arbitrary SQL text.
         let left_alias = "\"__rustspark_left\"";
         let right_alias = "\"__rustspark_right\"";
 
-        // DataFusion 55's SELECT * FULL JOIN USING may return a NULL join key
-        // for a row preserved only on the left. An explicit projection avoids
-        // that behavior and gives all join types the same output column order.
         use std::fmt::Write as _;
         let projected_fields =
             left_frame.schema().fields().len() + right_frame.schema().fields().len();
@@ -120,12 +107,6 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
-    /// Join on every column name that both registered tables share.
-    ///
-    /// Shared columns are selected in left-table schema order and appear once
-    /// in the output, as in a USING join. Columns are matched by exact name.
-    /// Unlike SQL NATURAL JOIN, this rejects a pair with no common columns
-    /// rather than producing an accidental Cartesian product.
     pub async fn join_tables_on_common_columns(
         &self,
         left: &str,
@@ -157,11 +138,6 @@ impl RustSparkSession {
             .await
     }
 
-    /// Join two tables and suffix columns whose names occur on both sides.
-    ///
-    /// Both copies of each join key are kept, as in an ON join. Shared names
-    /// receive the given left/right suffixes; unique names stay unchanged.
-    /// Rejects suffixes that would still create duplicate output names.
     pub async fn join_tables_with_suffixes(
         &self,
         left: &str,
@@ -267,12 +243,6 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
-    /// Join two registered tables on one or more pairs of equality keys.
-    ///
-    /// The result is a lazy DataFrame. Join types such as inner, left, right,
-    /// full, semi, and anti use DataFusion's planner and execution engine.
-    /// Both key lists must be non-empty; use SQL CROSS JOIN for a Cartesian
-    /// product. For self joins, use SQL aliases to disambiguate columns.
     pub async fn join_tables(
         &self,
         left: &str,
@@ -296,11 +266,6 @@ impl RustSparkSession {
         left_frame.join(right_frame, join_type, &left_keys, &right_keys, None)
     }
 
-    /// Join registered tables with NULL-safe equality on key pairs.
-    ///
-    /// Unlike ordinary equality joins, two NULL keys match. A NULL key does
-    /// not match a non-NULL key. Each side keeps its columns, like an ON join.
-    /// The returned DataFrame remains lazy.
     pub async fn join_tables_null_safe(
         &self,
         left: &str,
@@ -352,12 +317,6 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
-    /// Join registered tables using arbitrary DataFusion expressions.
-    ///
-    /// Unlike equality-key joins, predicates may be comparisons or multiple
-    /// conditions. Every expression is combined with AND. The returned plan is
-    /// lazy and supports outer, semi, and anti join types. Use qualified column
-    /// references if the two inputs have names in common.
     pub async fn join_tables_on(
         &self,
         left: &str,
@@ -371,16 +330,10 @@ impl RustSparkSession {
                 "join_tables_on requires at least one predicate; use SQL CROSS JOIN for Cartesian products".into(),
             ));
         }
-        // Provider discovery does not depend on the other join input.
         let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
         left_frame.join_on(right_frame, join_type, predicates)
     }
 
-    /// Join registered tables on equality keys and an extra ON predicate.
-    ///
-    /// The filter is part of the join condition, not a post-join WHERE clause.
-    /// This matters for outer joins because unmatched rows are preserved.
-    /// The result is lazy, and semi and anti joins are also supported.
     pub async fn join_tables_filtered(
         &self,
         left: &str,
@@ -410,10 +363,6 @@ impl RustSparkSession {
         )
     }
 
-    /// Cross join two registered tables, like Spark DataFrame.crossJoin.
-    ///
-    /// The result has left_rows * right_rows entries. This operation can
-    /// produce very large results and should be used deliberately.
     pub async fn cross_join_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
         let query = format!(
             "SELECT * FROM {} AS \"__rustspark_left\" CROSS JOIN {} AS \"__rustspark_right\"",
@@ -429,12 +378,6 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
-    /// Join values to intervals containing them, with configurable boundaries.
-    ///
-    /// Values are taken from the left table; interval start/end columns come
-    /// from the right table. NULL endpoints do not match. The result is lazy.
-    /// INNER and LEFT joins are supported. Non-equality joins can be expensive
-    /// on large inputs without another selective predicate.
     pub async fn join_tables_on_range(
         &self,
         values_table: &str,

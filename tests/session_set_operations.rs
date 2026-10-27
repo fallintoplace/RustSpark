@@ -22,7 +22,6 @@ async fn set_operations_apply_distinct_semantics() -> Result<()> {
     let difference = session.except_tables("left_rows", "right_rows").await?;
     assert_eq!(difference.count().await?, 1);
 
-    // Qualified paths behave like plain names.
     let qualified = session
         .intersect_tables(
             "datafusion.public.left_rows",

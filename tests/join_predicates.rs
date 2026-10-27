@@ -67,7 +67,6 @@ async fn multiple_predicates_are_conjoined() -> TestResult {
         .await?;
     assert_eq!(matches, 1);
 
-    // Equality expressions also work without requiring a separate API.
     let equality_matches = session
         .join_tables_on(
             "points",

@@ -162,8 +162,6 @@ pub(super) async fn register_inputs(
     }
     let inputs = parsed_named_inputs(args)?;
     let mut registration_jobs = tokio::task::JoinSet::new();
-    // Parallel metadata and CSV inference work scales with available cores,
-    // but bound outstanding jobs to avoid loading hundreds of schemas at once.
     let max_parallel =
         std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(4, 16));
     for (kind, name, path) in inputs {

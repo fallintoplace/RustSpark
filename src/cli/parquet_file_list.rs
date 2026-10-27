@@ -5,13 +5,11 @@ use std::{
 
 use datafusion::error::{DataFusionError, Result};
 
-/// Parse an explicit list of Parquet parts; keep the data itself lazy.
 pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
     let input =
         fs::read_to_string(manifest).map_err(|error| DataFusionError::External(Box::new(error)))?;
     let input = input.strip_prefix('\u{feff}').unwrap_or(&input);
     let directory = manifest.parent().unwrap_or_else(|| Path::new("."));
-    // Preserve source line numbers for useful errors and input order for the scan.
     let mut paths = Vec::new();
 
     for (index, line) in input.lines().enumerate() {
@@ -35,8 +33,6 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
         )));
     }
 
-    // Check large manifests in parallel. Remote mounts can make per-file
-    // metadata calls expensive; small manifests stay sequential.
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
         .min(8);
@@ -98,8 +94,6 @@ mod tests {
         assert_eq!(paths[0], directory.path().join("part-0.parquet"));
         assert_eq!(paths[129], directory.path().join("part-129.parquet"));
 
-        // Even when workers discover invalid paths out of order, the first
-        // invalid manifest line must win.
         fs::remove_file(directory.path().join("part-2.parquet")).unwrap();
         fs::remove_file(directory.path().join("part-100.parquet")).unwrap();
         let error = load_parquet_file_list(&manifest).unwrap_err();

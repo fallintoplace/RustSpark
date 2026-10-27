@@ -31,7 +31,6 @@ enum ArrowCompression {
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file", "interactive", "backup_database"]))
 )]
 struct Args {
-    /// Infer the input reader from a single file extension.
     #[arg(
         long = "input",
         value_name = "FILE",
@@ -47,7 +46,6 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     parquet: Option<PathBuf>,
 
-    /// Load Parquet parts listed one per line, relative to the manifest directory.
     #[arg(long = "parquet-file-list", value_name = "FILE", conflicts_with_all = [
         "csv", "parquet", "json", "auto_input", "csv_tables", "parquet_tables", "json_tables"
     ])]
@@ -143,11 +141,9 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     sql_file: Option<PathBuf>,
 
-    /// Load saved Parquet tables from this directory on each run.
     #[arg(long = "database-dir", value_name = "DIR")]
     database_dir: Option<PathBuf>,
 
-    /// Save the final SQL query as a new Parquet table in --database-dir.
     #[arg(
         long = "save-table",
         value_name = "NAME",
@@ -161,8 +157,6 @@ struct Args {
     )]
     save_table: Option<String>,
 
-    /// Compact one saved Parquet table into a single part before running SQL.
-    /// Uses a private replacement and the normal crash-recovery protocol.
     #[arg(
         long = "compact-table",
         value_name = "NAME",
@@ -172,8 +166,6 @@ struct Args {
     )]
     compact_table: Option<String>,
 
-    /// Copy a consistent snapshot of all saved Parquet tables to a new directory.
-    /// No SQL statement is required for this operation.
     #[arg(
         long = "backup-database",
         value_name = "DIR",
@@ -181,7 +173,6 @@ struct Args {
     )]
     backup_database: Option<PathBuf>,
 
-    /// Start a SQL shell that executes semicolon-terminated statements.
     #[arg(long)]
     interactive: bool,
 
@@ -234,7 +225,6 @@ struct Args {
     )]
     stdout_format: Option<StdoutFormat>,
 
-    /// Do not print CSV or TSV column names before result rows.
     #[arg(long = "stdout-no-header", requires = "stdout_format")]
     stdout_no_header: bool,
 
@@ -250,7 +240,6 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
-    /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
 
@@ -260,11 +249,9 @@ struct Args {
     #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
     target_partitions: Option<usize>,
 
-    /// Minimum total file-group size before DataFusion splits a scan across workers.
     #[arg(long = "scan-split-min-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
     scan_split_min_bytes: Option<usize>,
 
-    /// Maximum concurrent file metadata reads during schema and statistics discovery.
     #[arg(long = "metadata-fetch-concurrency", value_name = "FILES", value_parser = parse_positive_metadata_concurrency)]
     metadata_fetch_concurrency: Option<usize>,
 
@@ -296,7 +283,6 @@ struct Args {
     )]
     output_arrow: Option<PathBuf>,
 
-    /// Compress Arrow IPC file buffers. Default is uncompressed.
     #[arg(
         long = "arrow-compression",
         value_enum,
@@ -308,11 +294,9 @@ struct Args {
     #[arg(long = "output-single-file")]
     output_single_file: bool,
 
-    /// Soft row limit per file for partitioned CSV, JSON, and Parquet exports.
     #[arg(long = "output-rows-per-file", value_name = "ROWS", value_parser = parse_output_rows_per_file, conflicts_with = "output_single_file")]
     output_rows_per_file: Option<usize>,
 
-    /// Select the codec for --output-parquet or --save-table.
     #[arg(long = "parquet-compression", value_name = "CODEC")]
     parquet_compression: Option<String>,
 }
@@ -727,8 +711,6 @@ fn normalized_export_path(
     Ok(parent.canonicalize()?.join(name))
 }
 
-// The database catalog treats subdirectories as stored tables. Exporting a
-// CSV/JSON/Parquet directory there can make the next startup fail to load it.
 fn reject_database_export_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let Some(root) = args.database_dir.as_deref() else {
         return Ok(());
@@ -788,8 +770,6 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("--offset plus --max-rows exceeds the supported range")?;
     }
     validate_inputs(&args)?;
-    // Serialize local catalog reads and writes across RustSpark processes.
-    // Keep this file handle alive through interactive sessions and exports.
     let _database_lock = if let Some(root) = args.database_dir.as_deref() {
         Some(persistence::lock_database(root)?)
     } else {

@@ -8,8 +8,6 @@ use rustspark::RustSparkSession;
 
 use super::{Args, cache_tables, execute_script, register_derived_tables};
 
-// Scan only the newly read line. Re-scanning the accumulated SQL on every
-// line made large interactive statements quadratic in their line count.
 #[derive(Default)]
 struct SqlTerminatorScanner {
     quote: Option<char>,
@@ -82,7 +80,6 @@ async fn execute_interactive_statement(
 }
 
 async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str, timer_on: bool) {
-    // Invalid SQL is reported without terminating the interactive session.
     let statements = match DFParser::parse_sql(sql) {
         Ok(statements) => statements,
         Err(error) => {
@@ -103,7 +100,6 @@ async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str,
     }
 }
 
-// Execute SQL files in the current session without replacing pending input.
 async fn handle_read_command(
     session: &RustSparkSession,
     args: &Args,
@@ -130,7 +126,6 @@ async fn handle_read_command(
     true
 }
 
-// Print table column names without row scans or full type metadata.
 async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bool {
     if command != ".columns"
         && !command.starts_with(".columns ")
@@ -154,7 +149,6 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
     true
 }
 
-// Handle the schema-specific shell command without changing pending SQL.
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
     if command != ".schema" && !command.starts_with(".schema ") && !command.starts_with(".schema\t")
     {
@@ -177,7 +171,6 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
     true
 }
 
-// Count a registered table without requiring a SQL statement.
 async fn handle_count_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
     if command != ".count" && !command.starts_with(".count ") && !command.starts_with(".count\t") {
         return false;
@@ -199,7 +192,6 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
     true
 }
 
-// Use quoted identifiers so a shell table name cannot change the SQL plan.
 async fn handle_preview_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
     if command != ".preview"
         && !command.starts_with(".preview ")
@@ -298,7 +290,6 @@ async fn dispatch_shell_command(
     }
 }
 
-/// Run SQL statements in one session so views and DDL survive between prompts.
 pub(super) async fn run_interactive(
     session: &RustSparkSession,
     args: &Args,
@@ -366,8 +357,6 @@ pub(super) async fn run_interactive(
         }
         pending.push_str(&line);
         if !terminator.push(&line) {
-            // A standalone comment does not start a SQL statement. Clear it
-            // once all block comments are closed so shell commands still work.
             if terminator.outside_multiline_constructs() && terminator.last_significant.is_none() {
                 pending.clear();
                 terminator = SqlTerminatorScanner::default();

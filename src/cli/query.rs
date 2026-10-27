@@ -28,7 +28,6 @@ fn output_write_options(single_file: bool) -> DataFrameWriteOptions {
     }
 }
 
-// Keep pagination overflow checks identical for streamed and displayed results.
 fn limit_for_output(
     dataframe: DataFrame,
     offset: usize,
@@ -63,8 +62,6 @@ fn requested_file_export(args: &Args) -> Option<(&Path, FileExport)> {
     }
 }
 
-/// Keep the old destination untouched until the entire single-file export
-/// completes. The temporary directory is deleted on every error path.
 async fn write_file_export(
     dataframe: DataFrame,
     destination: &Path,
@@ -101,14 +98,10 @@ fn publish_single_file_export(
     destination: &Path,
     parent: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Both paths are on the same filesystem. Sync the finished part
-    // before renaming it into place to avoid another full-size copy.
     let completed = fs::OpenOptions::new().write(true).open(path)?;
     completed.sync_all()?;
     drop(completed);
     if let Err(rename_error) = fs::rename(path, destination) {
-        // Some platforms cannot rename over an existing destination.
-        // Preserve the previous cross-platform atomic replacement path.
         if !destination.exists() {
             return Err(rename_error.into());
         }
@@ -143,7 +136,6 @@ async fn write_export_contents(
     Ok(())
 }
 
-/// Fully execute intermediate SQL without buffering rows that the CLI discards.
 async fn drain_dataframe(dataframe: DataFrame) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = dataframe.execute_stream().await?;
     while let Some(batch) = stream.next().await {
@@ -152,8 +144,6 @@ async fn drain_dataframe(dataframe: DataFrame) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-// Parse with DataFusion's dialect to avoid splitting on semicolons in SQL literals
-// or comments. Execute setup statements before presenting the final result.
 pub(super) async fn execute_script(
     session: &RustSparkSession,
     script: &str,
@@ -165,8 +155,6 @@ pub(super) async fn execute_script(
         .pop_back()
         .ok_or("SQL script must contain at least one statement")?;
     if args.describe || args.explain || args.explain_analyze {
-        // Every statement in an inspection script must be read-only, not
-        // just the final statement whose schema or plan is printed.
         for statement in statements {
             drain_dataframe(plan_read_only_query(session, &statement.to_string(), args).await?)
                 .await?;
@@ -203,7 +191,6 @@ async fn execute_script_statement(
     persist_dropped_table(dropped, args)
 }
 
-// Extract DataFusion's SQL AST once for persistent DDL and INSERT handling.
 fn sql_statement(statement: &DFStatement) -> Option<&SqlStatement> {
     let DFStatement::Statement(statement) = statement else {
         return None;
@@ -215,9 +202,6 @@ fn persistent_table_is_directory(root: &Path, name: &str) -> bool {
     root.join(name).is_dir()
 }
 
-/// Route a persistent INSERT to a staged copy, never the visible table files.
-/// Unquoted, local table names only. External registrations keep DataFusion's
-/// normal INSERT behavior.
 fn persistent_insert_table(
     statement: &DFStatement,
     args: &Args,
@@ -246,8 +230,6 @@ fn persistent_insert_table(
     }
 }
 
-// Deterministically exercise task cancellation while a private INSERT
-// provider is registered. Only debug builds support this test hook.
 #[cfg(debug_assertions)]
 async fn debug_pause_staged_insert() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -270,8 +252,6 @@ async fn debug_pause_staged_insert() {
 #[cfg(not(debug_assertions))]
 async fn debug_pause_staged_insert() {}
 
-/// A dropped execution future (for example an interactive query timeout)
-/// must restore the original provider before another SQL statement starts.
 struct RestoreTableOnCancel<'a> {
     session: &'a RustSparkSession,
     table: &'a str,
@@ -317,12 +297,7 @@ async fn execute_staged_insert(
         return Err(error);
     }
 
-    // Keep the guard alive while awaiting SQL and re-registration. Cancellation
-    // cannot leave an interactive session pointed at an unpublished table.
     debug_pause_staged_insert().await;
-    // DataFusion INSERT produces a small DML result. Materialize that result
-    // before publishing, but do not display it until the storage commit has
-    // succeeded. This also avoids re-executing the write after publication.
     let execution: Result<Option<DataFrame>, Box<dyn std::error::Error>> = async {
         let dataframe = plan_query(session, sql, args).await?;
         if final_statement {
@@ -350,8 +325,6 @@ async fn execute_staged_insert(
             (Err(error), None)
         }
     };
-    // The original provider is restored on cancellation or re-registration
-    // error. The disk path remains valid before and after commit.
     super::persistence::register_saved_table(session, table, &root.join(table)).await?;
     guard.active = false;
     outcome?;
@@ -388,8 +361,6 @@ fn validate_persistent_table_name(
     Ok(())
 }
 
-/// Handle only simple, single-table renames owned by the on-disk database.
-/// Other ALTER TABLE operations keep DataFusion's normal unsupported behavior.
 fn persistent_rename_table(
     statement: &DFStatement,
     args: &Args,
@@ -418,8 +389,6 @@ fn persistent_rename_table(
     Ok(Some((old_name, new_name)))
 }
 
-/// Remember persistent DROP TABLE targets before DataFusion unregisters them.
-/// File deletion follows successful SQL execution, never SQL planning.
 fn persistent_drop_table(
     statement: &DFStatement,
     args: &Args,

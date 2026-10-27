@@ -1,11 +1,9 @@
-//! Client-side deadline covering connection, registration, execution, and output.
 use std::{env, time::Duration};
 
 fn parse_deadline(value: &str) -> Result<Duration, String> {
     let seconds = value.parse::<u64>().map_err(|_| {
         "RUSTSPARK_QUERY_TIMEOUT_SECS must be an integer number of seconds".to_owned()
     })?;
-    // Avoid meaningless zero deadlines and overflowing Tokio's internal Instant.
     if !(1..=86_400).contains(&seconds) {
         return Err("RUSTSPARK_QUERY_TIMEOUT_SECS must be between 1 and 86400".into());
     }

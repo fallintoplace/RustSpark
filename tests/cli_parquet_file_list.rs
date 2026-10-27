@@ -62,7 +62,6 @@ fn reads_parquet_files_from_a_relative_path_manifest() -> TestResult {
         r#"{"rows":10,"total":45}"#
     );
 
-    // Listed inputs are also protected against accidental export overwrites.
     let collision = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--parquet-file-list")
         .arg(&manifest)

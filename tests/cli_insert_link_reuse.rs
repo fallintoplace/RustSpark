@@ -73,8 +73,6 @@ fn staged_insert_hard_links_immutable_parts() -> TestResult {
     let original = parquet_part(&db.join("numbers"))?;
     let original_content = fs::read(&original)?;
 
-    // The stage is visible only under an exclusive database lock and before
-    // publication. The debug pause makes that boundary deterministic.
     let child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--database-dir")
         .arg(db)
@@ -103,8 +101,6 @@ fn staged_insert_hard_links_immutable_parts() -> TestResult {
     }
     let source = fs::metadata(&original)?;
     let linked = fs::metadata(&staged)?;
-    // Common local filesystems support hard links. Validate inode sharing
-    // when they do and still allow the safe copy fallback elsewhere.
     let probe = db.join("hardlink-probe");
     let supported = fs::hard_link(&original, &probe).is_ok();
     let _ = fs::remove_file(&probe);

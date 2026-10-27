@@ -23,7 +23,6 @@ WORKLOADS = {
 }
 
 
-# The city and amount sequences repeat after their least common multiple.
 ROW_PATTERN_PERIOD = math.lcm(16, 100)
 CSV_BUFFER_ROWS = 4096
 
@@ -33,7 +32,6 @@ def benchmark_row(index: int) -> tuple[str, int]:
 
 
 def write_csv(path: pathlib.Path, rows: int):
-    # Reuse the repeating non-ID columns and amortize writes over 4096 rows.
     suffixes = [
         f"{city},{amount}\n" for city, amount in (benchmark_row(i) for i in range(ROW_PATTERN_PERIOD))
     ]
@@ -59,7 +57,6 @@ def percentile(samples, fraction):
 
 
 def output_signature(stdout: str):
-    # Aggregate queries without ORDER BY may return rows in any order.
     rows = [json.loads(line) for line in stdout.splitlines() if line.strip()]
     normalized = sorted(json.dumps(row, sort_keys=True) for row in rows)
     digest = hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
@@ -72,7 +69,6 @@ def expected_results(rows: int):
     totals = {}
     filtered_total = 0
     filtered_rows = 0
-    # Count full row-pattern cycles instead of iterating over every input row.
     cycles, remainder = divmod(rows, ROW_PATTERN_PERIOD)
     for index in range(min(rows, ROW_PATTERN_PERIOD)):
         occurrences = cycles + (index < remainder)
@@ -106,7 +102,6 @@ def execute(binary: str, csv: pathlib.Path, sql: str, timeout: int):
     elapsed = (time.perf_counter() - started) * 1000
     digest, rows = output_signature(output.stdout)
     return elapsed, digest, rows
-
 
 
 def measure_workload(binary, csv, name, sql, expected_digest, repeat, warmup, timeout):

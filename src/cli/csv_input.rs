@@ -8,8 +8,6 @@ use datafusion::{
 };
 use rustspark::RustSparkSession;
 
-// DataFusion 55 uses null_regex for CSV inference but not for decoding rows.
-// Read as strings and normalize before casting to the inferred input types.
 fn raw_string_schema<'a>(names: impl IntoIterator<Item = &'a str>) -> Schema {
     Schema::new(
         names

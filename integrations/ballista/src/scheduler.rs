@@ -1,4 +1,3 @@
-//! Build a Ballista-aware remote session with an optional task partition count.
 use std::env;
 
 use ballista::prelude::*;

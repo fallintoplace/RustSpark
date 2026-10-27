@@ -1,5 +1,3 @@
-//! Run Ballista's scheduler and executor in one process for development.
-//! This uses the real Ballista distributed planner but does not span hosts.
 use ballista::prelude::*;
 use datafusion::{
     execution::SessionStateBuilder,
@@ -48,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_default_features()
         .build();
 
-    // Unlike remote(url), standalone starts Ballista in this same process.
     let context = SessionContext::standalone_with_state(state).await?;
     let session = RustSparkSession::from_context(context);
     match std::env::var("RUSTSPARK_PARQUET") {

@@ -13,8 +13,6 @@ use rustspark::RustSparkSession;
 
 use super::valid_identifier;
 
-// Debug builds support deterministic interruption at storage commit
-// boundaries. Release builds omit the injection entirely.
 #[cfg(debug_assertions)]
 fn crash_after(phase: &str) {
     if std::env::var("RUSTSPARK_TEST_INSERT_EXIT").as_deref() == Ok(phase) {
@@ -39,8 +37,6 @@ fn prepare_staged_insert_files(
 ) -> Result<(), Box<dyn Error>> {
     let new = staging.join("new");
     fs::create_dir(&new)?;
-    // The inventory already checked every entry. Reuse these paths after
-    // footer validation instead of scanning the source directory twice.
     let parts = parquet_part_inventory(original, table)?;
     validate_parquet_paths(&parts)?;
     for source in parts {
@@ -49,10 +45,6 @@ fn prepare_staged_insert_files(
                 .file_name()
                 .expect("validated Parquet parts always have a file name"),
         );
-        // ListingTable INSERT is append-only and writes fresh Parquet
-        // parts. Existing parts are immutable, so they can be linked
-        // into the private replacement snapshot without copying all
-        // their bytes. On filesystems without hard links, copy them.
         if let Err(link_error) = fs::hard_link(&source, &target) {
             fs::copy(&source, &target).map_err(|copy_error| {
                 format!(
@@ -65,15 +57,11 @@ fn prepare_staged_insert_files(
     Ok(())
 }
 
-/// A full, private copy of a persisted table. DataFusion INSERTs run against
-/// this directory, so an execution failure cannot touch the visible table.
 pub(super) struct StagedInsert {
     root: PathBuf,
     table: String,
     staging: PathBuf,
     data: PathBuf,
-    // Remove a private stage when its asynchronous writer is cancelled.
-    // Once publication starts, keep the backup for crash recovery instead.
     cleanup_on_drop: bool,
 }
 
@@ -84,8 +72,6 @@ impl StagedInsert {
         }
         let original = root.join(table);
         require_regular_directory(&original, "Persistent table must be a regular directory")?;
-        // Deterministic name makes crash recovery independent of ephemeral ids.
-        // The caller holds the exclusive database lock for this session.
         let staging = root.join(format!(".rustspark-insert-{table}"));
         fs::create_dir(&staging)?;
         if let Err(error) = prepare_staged_insert_files(&original, &staging, table) {
@@ -101,10 +87,6 @@ impl StagedInsert {
         })
     }
 
-    /// Stage a full replacement without linking existing Parquet parts.
-    ///
-    /// The caller writes complete new parts into data_path() before commit.
-    /// The existing table stays visible until the shared recovery-safe swap.
     pub(super) fn prepare_replacement(root: &Path, table: &str) -> Result<Self, Box<dyn Error>> {
         if !valid_identifier(table) {
             return Err("Persistent compaction requires a simple table name".into());
@@ -129,8 +111,6 @@ impl StagedInsert {
     }
 
     pub(super) fn data_path(&self) -> &Path {
-        // There is one staged data directory per persistent INSERT.
-        // The directory exists until commit or discard.
         &self.data
     }
 
@@ -142,20 +122,14 @@ impl StagedInsert {
     pub(super) fn commit(mut self) -> Result<(), Box<dyn Error>> {
         let new = self.staging.join("new");
         validate_table_files(&new, &self.table)?;
-        // Non-crashing failure injection checks that an INSERT never reports
-        // success before a durable publication. Release builds omit the hook.
         #[cfg(debug_assertions)]
         if std::env::var("RUSTSPARK_TEST_INSERT_COMMIT_ERROR").as_deref() == Ok("before_swap") {
             return Err("Injected pre-publication INSERT failure".into());
         }
         crash_after("before_swap");
-        // The lock excludes other RustSpark processes. Between renames the
-        // visible table may be absent, so recovery restores "old" on restart.
         let original = self.root.join(&self.table);
         let old = self.staging.join("old");
         fs::rename(&original, &old)?;
-        // The old data is now only present inside the stage. Never delete
-        // that backup on an error while publishing the replacement.
         self.cleanup_on_drop = false;
         crash_after("after_old_moved");
         if let Err(error) = fs::rename(&new, &original) {
@@ -170,8 +144,6 @@ impl StagedInsert {
             return Err(error.into());
         }
         crash_after("after_publish");
-        // The new table is already published. If deletion fails, startup
-        // recovery cleans up the old snapshot without rolling back the write.
         let _ = fs::remove_dir_all(&self.staging);
         Ok(())
     }
@@ -180,15 +152,11 @@ impl StagedInsert {
 impl Drop for StagedInsert {
     fn drop(&mut self) {
         if self.cleanup_on_drop {
-            // A cancelled query may drop the future without calling discard.
-            // Cleaning only an unpublished stage makes the next INSERT into
-            // this table possible in the same interactive session.
             let _ = fs::remove_dir_all(&self.staging);
         }
     }
 }
 
-/// Read the Parquet footer without materializing the table's rows.
 fn validate_parquet_part(path: &Path) -> Result<(), String> {
     let file = fs::File::open(path).map_err(|error| {
         format!(
@@ -205,7 +173,6 @@ fn validate_parquet_part(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Check the complete inventory before validating any footer.
 fn parquet_part_inventory(directory: &Path, name: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(directory)? {
@@ -227,8 +194,6 @@ fn parquet_part_inventory(directory: &Path, name: &str) -> Result<Vec<PathBuf>, 
     Ok(paths)
 }
 
-/// Reject unexpected entries and validate Parquet footers before exposure.
-/// Large part sets can validate independent file footers in parallel.
 fn validate_table_files(directory: &Path, name: &str) -> Result<(), Box<dyn Error>> {
     let paths = parquet_part_inventory(directory, name)?;
     validate_parquet_paths(&paths)
@@ -264,13 +229,6 @@ fn validate_parquet_paths(paths: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     validation.map_err(|message| -> Box<dyn Error> { message.into() })
 }
 
-/**
- * Hold an OS-owned lock for the entire lifetime of a local database session.
- *
- * The lock file is intentionally persistent: removing it could let a second
- * process lock a different inode while another process is still writing.
- * The OS releases the lock on process exit, including abnormal termination.
- */
 pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     fs::create_dir_all(root)?;
     let lock_path = root.join(".rustspark.lock");
@@ -294,7 +252,6 @@ pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     Ok(file)
 }
 
-// Preserve the valid backup while quarantining corrupt live table files.
 fn restore_corrupt_snapshot(
     root: &Path,
     live: &Path,
@@ -314,9 +271,6 @@ fn restore_corrupt_snapshot(
         )
     })?;
 
-    // Retain the corrupt snapshot outside the reserved stage.
-    // Startup skips this hidden directory. Keeping it also
-    // protects evidence if restoration fails halfway through.
     let quarantine = tempfile::Builder::new()
         .prefix(".rustspark-corrupt-")
         .tempdir_in(root)?
@@ -337,7 +291,6 @@ fn restore_corrupt_snapshot(
     Ok(())
 }
 
-/// Restore the old snapshot if a crash left no visible table.
 fn recover_interrupted_insert(
     root: &Path,
     table: &str,
@@ -347,16 +300,11 @@ fn recover_interrupted_insert(
     let old = staging.join("old");
     match fs::symlink_metadata(&live) {
         Ok(metadata) if metadata.file_type().is_dir() => {
-            // The new data has been published, or the old table is still
-            // live. Never discard a valid backup before verifying the live
-            // Parquet parts, or a failed publication could destroy recovery.
             if let Err(corruption) = validate_table_files(&live, table) {
                 restore_corrupt_snapshot(root, &live, &old, table, corruption.as_ref())?;
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // Interrupted between moving out the old snapshot and
-            // publishing the new one. Validate before restoring it.
             if !fs::symlink_metadata(&old)?.file_type().is_dir() {
                 return Err(format!("Missing INSERT backup for table '{table}'").into());
             }
@@ -372,8 +320,6 @@ fn recover_interrupted_insert(
     Ok(())
 }
 
-/// Remove reserved staging and drop tombstone directories after an interrupted
-/// session. The caller holds the exclusive database lock.
 fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -390,7 +336,6 @@ fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
         }
         let reserved =
             name.starts_with(".rustspark-stage-") || name.starts_with(".rustspark-drop-");
-        // Never follow symlinks or touch user-owned tables.
         if reserved && entry.file_type()?.is_dir() {
             fs::remove_dir_all(entry.path())?;
         }
@@ -398,8 +343,6 @@ fn recover_incomplete_operations(root: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Load only complete, valid table directories. Hidden staging directories and
-/// symlinks are not part of the on-disk catalog.
 pub(super) async fn register_database_tables(
     session: &RustSparkSession,
     root: &Path,
@@ -409,8 +352,6 @@ pub(super) async fn register_database_tables(
     let mut entries = fs::read_dir(root)?
         .map(|result| result.map(|entry| (entry.file_name(), entry)))
         .collect::<std::io::Result<Vec<_>>>()?;
-    // DirEntry::file_name allocates. Cache it once instead of allocating
-    // again for every comparison in a many-table catalog.
     entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
 
     let mut tables = Vec::new();
@@ -430,8 +371,6 @@ pub(super) async fn register_database_tables(
         tables.push((name.to_owned(), entry.path()));
     }
 
-    // Verify all tables before exposing any of them. Each directory has
-    // independent Parquet footers, so overlap the I/O for larger catalogs.
     let parallelism =
         std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(2, 16));
     if parallelism > 1 && tables.len() >= 4 {
@@ -458,7 +397,6 @@ pub(super) async fn register_database_tables(
         }
     }
 
-    // Registration still stays bounded after every table has passed validation.
     let mut registrations = stream::iter(
         tables
             .iter()
@@ -471,8 +409,6 @@ pub(super) async fn register_database_tables(
     Ok(())
 }
 
-/// Register a persistent table as a directory-backed ListingTable, not a single
-/// file. DataFusion can append to directory-backed tables with SQL INSERT.
 pub(super) async fn register_saved_table(
     session: &RustSparkSession,
     name: &str,
@@ -483,7 +419,6 @@ pub(super) async fn register_saved_table(
     Ok(())
 }
 
-// DataFusion may emit no part files for an empty result. Keep its schema on disk.
 fn write_empty_parquet_part(
     staging: &Path,
     schema: datafusion::arrow::datatypes::SchemaRef,
@@ -498,8 +433,6 @@ fn write_empty_parquet_part(
     Ok(())
 }
 
-/// Write a query to a staging directory and publish it only after the write
-/// succeeds. An existing table is never intentionally overwritten.
 pub(super) async fn save_table(
     dataframe: DataFrame,
     root: &Path,
@@ -528,8 +461,6 @@ pub(super) async fn save_table(
         .write_parquet(staged_path, DataFrameWriteOptions::new(), parquet_options)
         .await?;
     if !staged.exists() || fs::read_dir(&staged)?.next().is_none() {
-        // DataFusion emits no Parquet part for a zero-row result. Preserve
-        // the schema so the empty table can still be queried after restart.
         write_empty_parquet_part(&staged, schema)?;
     }
     fs::rename(&staged, &destination)?;
@@ -572,10 +503,7 @@ fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventor
     Ok(BackupInventory { tables, copies })
 }
 
-// Copy independent immutable Parquet parts with a bounded worker count.
 fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>> {
-    // Large backups can copy immutable parts independently. Bound the number
-    // of workers so fragmented tables do not spawn a thread per Parquet file.
     let workers = std::thread::available_parallelism()
         .map_or(1, |count| count.get())
         .min(8);
@@ -606,9 +534,6 @@ fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// Create an independent, consistent copy of a local database while its
-/// process lock is held. Copy rather than hard-link parts so later external
-/// edits to one snapshot cannot corrupt the other.
 pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
     let source = root.canonicalize()?;
     let parent = destination
@@ -639,14 +564,12 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     let BackupInventory { mut tables, copies } = collect_backup_parts(&source, &snapshot)?;
 
     copy_backup_parts(&copies)?;
-    // A backup is never published without validating every copied footer.
     for table in &tables {
         validate_table_files(&snapshot.join(table), table)?;
     }
     tables.sort();
     let manifest = format!("rustspark-backup-v1\n{}\n", tables.join("\n"));
     fs::write(snapshot.join(".rustspark-backup-manifest"), manifest)?;
-    // A second pre-publication check avoids overwriting a known destination.
     if fs::symlink_metadata(&normalized).is_ok() {
         return Err("Backup destination appeared during copy".into());
     }
@@ -654,11 +577,6 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     Ok(())
 }
 
-/// Rewrite a local Parquet table into one part without buffering the rows.
-///
-/// Query execution reads the original provider while the writer targets a
-/// private directory. Publication reuses the INSERT crash-recovery protocol.
-/// Call with the exclusive database lock held (as CLI.run does).
 pub(super) async fn compact_saved_table(
     session: &RustSparkSession,
     root: &Path,
@@ -677,8 +595,6 @@ pub(super) async fn compact_saved_table(
         )
         .await?;
     if !part.exists() {
-        // A zero-row DataFrame may not write a Parquet part. Persist its
-        // original schema so that it remains queryable after a restart.
         write_empty_parquet_part(stage.data_path(), schema)?;
     }
     stage.commit()?;
@@ -689,9 +605,6 @@ pub(super) async fn compact_saved_table(
     Ok(())
 }
 
-/// Move a dropped table out of the visible catalog before deleting its files.
-/// The hidden directory is ignored after a crash; we never delete the input
-/// file registrations or arbitrary paths outside the local database root.
 pub(super) fn drop_saved_table(root: &Path, name: &str) -> Result<(), Box<dyn Error>> {
     if !valid_identifier(name) {
         return Err("Persistent table name must be a SQL identifier".into());
@@ -707,8 +620,6 @@ pub(super) fn drop_saved_table(root: &Path, name: &str) -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// Move a saved table's Parquet directory and refresh the session registration.
-/// A failed refresh moves the directory back and restores the original table.
 pub(super) async fn rename_saved_table(
     session: &RustSparkSession,
     root: &Path,

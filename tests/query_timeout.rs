@@ -34,9 +34,7 @@ fn query_timeout_includes_waiting_for_sql_stdin() -> Result<(), Box<dyn std::err
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    // Keep the input stream open to prove the deadline covers loading SQL.
     let _held_stdin = child.stdin.take();
-    // Bound the regression test as well, so a timeout bug cannot hang CI.
     let started = std::time::Instant::now();
     while child.try_wait()?.is_none() {
         if started.elapsed() >= std::time::Duration::from_secs(10) {

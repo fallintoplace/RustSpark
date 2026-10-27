@@ -28,7 +28,6 @@ async fn writes_arrow_ipc_file_without_collecting_all_results() -> TestResult {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Validate with Arrow's native reader rather than a text search.
     let file = File::open(&output_file)?;
     let mut ipc = datafusion::arrow::ipc::reader::FileReader::try_new(file, None)?;
     let schema = ipc.schema();

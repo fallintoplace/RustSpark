@@ -112,8 +112,6 @@ fn backup_copies_many_independent_parquet_parts() -> TestResult {
     let snapshot = temp.path().join("snapshot");
     assert_ok(sql(&db, "CREATE TABLE events AS SELECT 7 AS value"))?;
 
-    // Multiple parts exercise the bounded parallel-copy path on multi-core
-    // machines. Each part is valid Parquet and must remain independently readable.
     let directory = db.join("events");
     let original = fs::read_dir(&directory)?
         .next()

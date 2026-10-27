@@ -37,8 +37,6 @@ def normalize(value):
 
 
 def fingerprint(result: QueryResult, ordered: bool = False):
-    # Preserve column names and value types. Compare row multisets by default:
-    # SQL without ORDER BY has no stable row order.
     encoded = [json.dumps(normalize(row), sort_keys=True, ensure_ascii=False) for row in result.rows]
     if not ordered:
         encoded.sort()
@@ -121,7 +119,6 @@ def load_cases(path: pathlib.Path):
     for case in cases:
         validate_case(case, ids)
     return cases
-
 
 
 def compare_case(case, rustspark_runner, spark_runner):

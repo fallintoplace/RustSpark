@@ -27,7 +27,6 @@ pub(super) fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool 
         {
             return true;
         }
-        // Arrow CSV/JSON writers may flatten I/O errors to string-only ArrowError values.
         if current
             .downcast_ref::<datafusion::arrow::error::ArrowError>()
             .is_some_and(|arrow| {
@@ -103,7 +102,6 @@ async fn write_delimited<W: Write>(
         wrote_batch = true;
     }
     if !wrote_batch && include_header {
-        // Include column headers even when the query returns no rows.
         writer
             .write(&datafusion::arrow::record_batch::RecordBatch::new_empty(
                 schema,
@@ -118,7 +116,6 @@ fn display_cell(
     row: usize,
 ) -> datafusion::arrow::error::Result<std::borrow::Cow<'static, str>> {
     if column.is_null(row) {
-        // NULL is repeated for every missing cell. Borrow the fixed label.
         Ok(std::borrow::Cow::Borrowed("NULL"))
     } else {
         datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)
@@ -140,13 +137,11 @@ fn escape_vertical_value(value: &str) -> String {
     escaped
 }
 
-// Present one row at a time, even for batches with very wide schemas.
 async fn write_vertical<W: Write>(
     stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
     output: &mut W,
     schema: &datafusion::arrow::datatypes::SchemaRef,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Column names are fixed for the stream; escape them once, not per row.
     let escaped_headers: Vec<_> = schema
         .fields()
         .iter()
@@ -188,7 +183,6 @@ async fn write_arrow_stream<W: Write>(
 }
 
 fn escape_markdown_cell(value: &str) -> String {
-    // One allocation instead of rebuilding the string for each escape kind.
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -205,7 +199,6 @@ fn escape_markdown_cell(value: &str) -> String {
     escaped
 }
 
-// Keep only one record batch and the current cell in memory.
 async fn write_markdown<W: Write>(
     stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
     output: &mut W,
@@ -236,7 +229,6 @@ async fn write_markdown<W: Write>(
 }
 
 fn escape_html_cell(value: &str) -> std::borrow::Cow<'_, str> {
-    // Plain text is the common case; it needs no copy or heap allocation.
     if !value
         .bytes()
         .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
@@ -257,7 +249,6 @@ fn escape_html_cell(value: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(escaped)
 }
 
-// Stream an embeddable HTML table, escaping all column names and cell values.
 async fn write_html<W: Write>(
     stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
     output: &mut W,
@@ -292,7 +283,6 @@ async fn write_html<W: Write>(
     Ok(())
 }
 
-// Write one record batch at a time so stdout never requires collecting all results.
 pub(super) async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
     format: StdoutFormat,
@@ -301,8 +291,6 @@ pub(super) async fn write_stdout(
     let mut stream = dataframe.execute_stream().await?;
     let schema = stream.schema();
     let stdout = std::io::stdout();
-    // Buffer large result streams without accumulating Arrow batches.
-    // Fewer writes to stdout improve CSV, JSON and IPC export throughput.
     let mut output = std::io::BufWriter::with_capacity(128 * 1024, stdout.lock());
     let broken_pipe = Arc::new(AtomicBool::new(false));
     let mut tracked = PipeTrackingWriter {
@@ -394,7 +382,6 @@ pub(super) async fn write_arrow_ipc(
     }
     writer.finish()?;
     drop(writer);
-    // Flush the completed IPC file before publishing its new name.
     temporary.as_file().sync_all()?;
     temporary.persist(path)?;
     Ok(())

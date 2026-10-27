@@ -1,5 +1,3 @@
-//! Optional Ballista client demo: uses real remote scheduler/executor processes.
-//! Run from the RustSpark repository root after starting Ballista 55.
 use rustspark::RustSparkSession;
 
 mod deadline;
@@ -40,8 +38,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let context = scheduler::connect(&url).await?;
     let session = RustSparkSession::from_context(context);
 
-    // The worker must be able to read the same path. Use shared object storage
-    // for real clusters; this optional path is intended for a single-host test.
     match std::env::var("RUSTSPARK_PARQUET") {
         Ok(path) => session.register_parquet("data", &path).await?,
         Err(std::env::VarError::NotPresent) => {}

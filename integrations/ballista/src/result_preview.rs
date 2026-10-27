@@ -1,4 +1,3 @@
-//! Bound the number of rows transferred back to the client for preview.
 use std::env;
 
 fn parse_rows(input: &str) -> Result<usize, String> {

@@ -28,7 +28,6 @@ async fn binds_positional_sql_parameters() -> TestResult {
         .unwrap();
     assert_eq!(counts.value(0), 1);
 
-    // A supplied value is treated as data, never as SQL syntax.
     let batches = session
         .sql_with_params(
             "SELECT COUNT(*) FROM sales WHERE city = $1",

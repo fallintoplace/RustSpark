@@ -1,5 +1,3 @@
-//! Named data sources for the optional distributed Ballista client.
-//! Every location must be readable by the Ballista scheduler and executors.
 use std::{collections::HashSet, env};
 
 use rustspark::RustSparkSession;

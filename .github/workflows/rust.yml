@@ -8,8 +8,6 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # A fast follow-up merge must not cancel the only running check for main.
-  # Keep canceling outdated PR runs; GitHub retains the newest pending main run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

@@ -15,8 +15,6 @@ async fn wide_schema_validates_many_requested_columns() -> Result<(), Box<dyn st
         .map(|index| format!("col_{index}"))
         .collect::<Vec<_>>();
     let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
-    // This is a planner regression test. Avoid materializing a deep
-    // 64-column plan, which exhausts the smaller Windows test-thread stack.
     let filtered = session
         .drop_null_rows("wide", &refs, NullDropMode::Any)
         .await?;

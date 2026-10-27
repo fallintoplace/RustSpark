@@ -113,8 +113,6 @@ def register_spark_sources(
         frame = (session.read.option("header", "true").schema(SPARK_SCHEMA)
                  .csv(str(FIXTURES / (name + ".csv"))))
         if input_format == "parquet":
-            # Write typed files once. Both engines then read the same Parquet
-            # directory instead of accidentally comparing CSV and Parquet.
             output = parquet_root / name
             frame.write.parquet(str(output))
             frame = session.read.parquet(str(output))
@@ -155,8 +153,6 @@ def normalized_typed_value(value, logical_type: str):
     if logical_type == "date":
         return normalize_date(value)
     if logical_type.startswith("decimal("):
-        # Values may use up to 38 digits, exceeding the default 28-digit
-        # Decimal context. Never round away differences during comparison.
         number = decimal.Decimal(str(value))
         with decimal.localcontext() as context:
             context.prec = max(context.prec, len(number.as_tuple().digits))

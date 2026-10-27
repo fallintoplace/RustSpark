@@ -39,17 +39,11 @@ impl RustSparkSession {
             .await
     }
 
-    /// Read several CSV files as one lazy DataFrame.
-    ///
-    /// All inputs must have compatible schemas.
     pub async fn read_csv_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
         self.read_csv_files_with_options(paths, CsvReadOptions::new())
             .await
     }
 
-    /// Read multiple CSV files with shared delimiter, schema and reader options.
-    ///
-    /// All inputs must have compatible schemas; no rows are collected here.
     pub async fn read_csv_files_with_options<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -59,13 +53,11 @@ impl RustSparkSession {
         self.context.read_csv(paths, options).await
     }
 
-    /// Register several CSV files as a single SQL table.
     pub async fn register_csv_files<P: AsRef<Path>>(&self, table: &str, paths: &[P]) -> Result<()> {
         self.register_csv_files_with_options(table, paths, CsvReadOptions::new())
             .await
     }
 
-    /// Register CSV files as one table with a shared explicit reader configuration.
     pub async fn register_csv_files_with_options<P: AsRef<Path>>(
         &self,
         table: &str,
@@ -75,7 +67,6 @@ impl RustSparkSession {
         let dataframe = self.read_csv_files_with_options(paths, options).await?;
         self.register_dataframe(table, dataframe)
     }
-    /// Registers newline-delimited JSON as a SQL table.
     pub async fn register_json(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
         self.register_json_with_options(table, path, JsonReadOptions::default())
             .await
@@ -92,7 +83,6 @@ impl RustSparkSession {
             .await
     }
 
-    /// Returns a lazy DataFrame over newline-delimited JSON.
     pub async fn read_json(&self, path: impl AsRef<Path>) -> Result<DataFrame> {
         self.read_json_with_options(path, JsonReadOptions::default())
             .await
@@ -108,17 +98,11 @@ impl RustSparkSession {
             .await
     }
 
-    /// Read several newline-delimited JSON files as one lazy DataFrame.
-    ///
-    /// All inputs must have compatible schemas.
     pub async fn read_json_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
         self.read_json_files_with_options(paths, JsonReadOptions::default())
             .await
     }
 
-    /// Read several JSON files with one shared schema and input format.
-    ///
-    /// Supports newline-delimited or JSON array input through read options.
     pub async fn read_json_files_with_options<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -128,7 +112,6 @@ impl RustSparkSession {
         self.context.read_json(paths, options).await
     }
 
-    /// Register several newline-delimited JSON files as one SQL table.
     pub async fn register_json_files<P: AsRef<Path>>(
         &self,
         table: &str,
@@ -138,7 +121,6 @@ impl RustSparkSession {
             .await
     }
 
-    /// Register several JSON files with one shared schema and input format.
     pub async fn register_json_files_with_options<P: AsRef<Path>>(
         &self,
         table: &str,
@@ -165,17 +147,11 @@ impl RustSparkSession {
             .await
     }
 
-    /// Read several Parquet files as one lazy DataFrame.
-    ///
-    /// All inputs must have compatible schemas.
     pub async fn read_parquet_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<DataFrame> {
         self.read_parquet_files_with_options(paths, ParquetReadOptions::new())
             .await
     }
 
-    /// Read several Parquet files with shared reader and partition options.
-    ///
-    /// All inputs must have compatible schemas.
     pub async fn read_parquet_files_with_options<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -185,7 +161,6 @@ impl RustSparkSession {
         self.context.read_parquet(paths, options).await
     }
 
-    /// Register several Parquet files as one SQL table.
     pub async fn register_parquet_files<P: AsRef<Path>>(
         &self,
         table: &str,
@@ -195,7 +170,6 @@ impl RustSparkSession {
             .await
     }
 
-    /// Register multiple Parquet files using shared reader and partition options.
     pub async fn register_parquet_files_with_options<P: AsRef<Path>>(
         &self,
         table: &str,

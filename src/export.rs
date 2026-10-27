@@ -8,7 +8,6 @@ use datafusion::{
 
 use crate::RustSparkSession;
 
-/// On-disk format for a partitioned SQL query export.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SqlExportFormat {
     Csv,
@@ -17,14 +16,6 @@ pub enum SqlExportFormat {
 }
 
 impl RustSparkSession {
-    /// Export a read-only SQL result into a new CSV, JSON or Parquet directory.
-    ///
-    /// The result is written to a temporary sibling first. An existing target
-    /// (including a symlink) is rejected, and a failed query removes the stage.
-    /// A successful directory rename publishes complete part files together.
-    ///
-    /// This protects against query errors and cancellation, but does not offer
-    /// power-loss durability or coordination with writers outside RustSpark.
     pub async fn export_sql(
         &self,
         query: &str,
@@ -40,7 +31,6 @@ impl RustSparkSession {
 
         let frame = self.sql_read_only(query).await?;
         write_export_dataframe(frame, staged_path, format).await?;
-        // A concurrent creator should not be overwritten after our query finishes.
         reject_existing_export(destination)?;
         fs::rename(&staged, destination).map_err(external_io)?;
         Ok(())
@@ -59,7 +49,6 @@ fn prepare_export_staging(destination: &Path) -> Result<tempfile::TempDir> {
     }
     reject_existing_export(destination)?;
 
-    // The stage and destination share a filesystem for the final rename.
     tempfile::Builder::new()
         .prefix(".rustspark-api-export-")
         .tempdir_in(parent)
