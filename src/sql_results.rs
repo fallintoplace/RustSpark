@@ -147,7 +147,7 @@ impl RustSparkSession {
         Ok(())
     }
 
-    async fn paginate<F>(frame: F, offset: usize, limit: usize) -> Result<DataFrame>
+    pub(super) async fn paginate<F>(frame: F, offset: usize, limit: usize) -> Result<DataFrame>
     where
         F: std::future::Future<Output = Result<DataFrame>>,
     {
@@ -201,7 +201,7 @@ impl RustSparkSession {
         Self::paginate(self.sql_with_params(query, params), offset, limit).await
     }
 
-    async fn extract_first_row(
+    pub(super) async fn extract_first_row(
         dataframe: DataFrame,
     ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
         use datafusion::common::ScalarValue;
