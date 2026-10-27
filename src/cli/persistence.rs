@@ -376,11 +376,15 @@ pub(super) async fn register_database_tables(
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(root)?;
     recover_incomplete_operations(root)?;
-    let mut entries = fs::read_dir(root)?.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
+    let mut entries = fs::read_dir(root)?
+        .map(|result| result.map(|entry| (entry.file_name(), entry)))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    // DirEntry::file_name allocates. Cache it once instead of allocating
+    // again for every comparison in a many-table catalog.
+    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
 
     let mut tables = Vec::new();
-    for entry in entries {
+    for (_, entry) in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
