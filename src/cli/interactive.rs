@@ -220,6 +220,15 @@ pub(super) async fn run_interactive(
         }
         pending.push_str(&line);
         if !terminator.push(&line) {
+            // A standalone comment does not start a SQL statement. Clear it
+            // once all block comments are closed so shell commands still work.
+            if terminator.quote.is_none()
+                && terminator.block_depth == 0
+                && terminator.last_significant.is_none()
+            {
+                pending.clear();
+                terminator = SqlTerminatorScanner::default();
+            }
             continue;
         }
 
