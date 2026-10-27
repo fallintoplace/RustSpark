@@ -58,9 +58,27 @@ def percentile(samples, fraction):
     return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
 
 
+def _reject_nonfinite_json(value):
+    raise ValueError(f"Non-finite JSON number in benchmark output: {value}")
+
+
+def _unique_json_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate JSON key in benchmark output: {key}")
+        value[key] = item
+    return value
+
+
 def output_signature(stdout: str):
+    # Reject ambiguous or invalid JSON instead of silently hashing truncated objects.
     # Aggregate queries without ORDER BY may return rows in any order.
-    rows = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    rows = [
+        json.loads(line, parse_constant=_reject_nonfinite_json,
+                   object_pairs_hook=_unique_json_keys)
+        for line in stdout.splitlines() if line.strip()
+    ]
     normalized = sorted(json.dumps(row, sort_keys=True) for row in rows)
     digest = hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
     return digest, rows

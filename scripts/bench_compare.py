@@ -102,8 +102,9 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
 def benchmark(binary, engines, rows, repeat, warmup, timeout):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
-    if not engines or len(engines) != len(set(engines)):
-        raise ValueError("Select at least one unique engine")
+    if (not engines or len(engines) != len(set(engines))
+            or any(engine not in ("rustspark", "duckdb", "spark") for engine in engines)):
+        raise ValueError("Select unique engines from rustspark, duckdb and spark")
     check_dependencies(engines)
     with tempfile.TemporaryDirectory(prefix="rustspark-compare-") as directory:
         csv = pathlib.Path(directory) / "input.csv"
@@ -125,9 +126,11 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
             for engine in engines:
                 if engine != "rustspark":
                     ratios[engine] = {
-                        workload: round(
-                            results["rustspark"][workload]["median_ms"]
-                            / max(measured["median_ms"], 0.001), 3)
+                        workload: (
+                            round(measured["median_ms"]
+                                  / results["rustspark"][workload]["median_ms"], 3)
+                            if results["rustspark"][workload]["median_ms"] > 0 else None
+                        )
                         for workload, measured in results[engine].items()
                     }
         return {
@@ -137,7 +140,7 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
             "warmup": warmup, "repeat": repeat,
             "platform": platform.platform(), "python": platform.python_version(),
             "engines": engines, "workloads": WORKLOADS, "results": results,
-            "rustspark_median_over_competitor_median": ratios,
+            "competitor_median_over_rustspark_median": ratios,
         }
 
 

@@ -52,5 +52,44 @@ class ReleaseSmokeTests(unittest.TestCase):
                     release_smoke.check_catalog_lifecycle(pathlib.Path("/unused/binary"))
 
 
+    def test_file_workflow_checks_join_parameters_and_parquet(self):
+        results = []
+        exports = []
+
+        def expect_rows(binary, expected, *args):
+            results.append((expected, args))
+            self.assertIn("--sql", args)
+
+        with patch.object(release_smoke, "expect_rows", side_effect=expect_rows), patch.object(
+            release_smoke, "execute", side_effect=lambda binary, *args: exports.append(args)
+        ):
+            release_smoke.check_file_workflows(pathlib.Path("/unused/binary"))
+
+        self.assertEqual(len(results), 3)
+        self.assertIn("--csv-table", results[0][1])
+        self.assertEqual(results[0][0][0]["weighted"], 9)
+        self.assertIn("int64:3", results[1][1])
+        self.assertEqual(results[1][0], [{"total": 10}])
+        self.assertEqual(len(exports), 1)
+        self.assertIn("--output-parquet", exports[0])
+        self.assertIn("--parquet", results[2][1])
+
+    def test_invalid_sql_must_fail_without_success_output(self):
+        from unittest.mock import Mock
+
+        bad = Mock(returncode=1, stdout="", stderr="missing table")
+        with patch.object(release_smoke.subprocess, "run", return_value=bad) as run:
+            release_smoke.check_query_errors(pathlib.Path("/unused/binary"))
+        self.assertIn("--stdout-format", run.call_args.args[0])
+
+        for response, message in (
+            (Mock(returncode=0, stdout="", stderr=""), "exit code"),
+            (Mock(returncode=1, stdout="success", stderr=""), "success output"),
+        ):
+            with patch.object(release_smoke.subprocess, "run", return_value=response):
+                with self.assertRaisesRegex(AssertionError, message):
+                    release_smoke.check_query_errors(pathlib.Path("/unused/binary"))
+
+
 if __name__ == "__main__":
     unittest.main()

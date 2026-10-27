@@ -89,5 +89,29 @@ class WarmComparisonTests(unittest.TestCase):
                 warm.benchmark("bin", ["rustspark"], *cfg, "local[2]")
 
 
+    def test_raw_ratio_matches_markdown_direction_and_zero_is_null(self):
+        def summarizer(samples, requests, rows, warmup, repeat):
+            median = 10.0 if len(calls) == 0 else 20.0
+            calls.append(median)
+            return {
+                name: {"median_ms": (0.0 if median == 10.0 and name == "scan_count"
+                                    else median)}
+                for name in WORKLOADS
+            }
+
+        calls = []
+        with mock.patch.object(warm, "run_rustspark", return_value=[]), mock.patch.object(
+            warm, "run_spark", return_value=[]
+        ), mock.patch.object(warm, "summarize", side_effect=summarizer):
+            report = warm.benchmark(
+                "fake", ["rustspark", "spark"], 2, 0, 1, 10, 2, "local[2]"
+            )
+        ratios = report["spark_median_over_rustspark_median"]
+        self.assertIsNone(ratios["scan_count"])
+        for name in WORKLOADS:
+            if name != "scan_count":
+                self.assertEqual(ratios[name], 2.0)
+        self.assertNotIn("rustspark_median_over_spark_median", report)
+
 if __name__ == "__main__":
     unittest.main()
