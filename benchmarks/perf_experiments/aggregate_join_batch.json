@@ -1,0 +1,35 @@
+{
+  "name": "aggregate_join_batch",
+  "sql": "WITH c AS (SELECT city, COUNT(*) AS n FROM data GROUP BY city) SELECT SUM(a.n * b.n) AS pairs FROM c a JOIN c b ON a.city = b.city",
+  "rows": 100000,
+  "variants": [
+    {
+      "name": "batch_512",
+      "flags": [
+        "--batch-size",
+        "512"
+      ]
+    },
+    {
+      "name": "batch_2048",
+      "flags": [
+        "--batch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "batch_8192",
+      "flags": [
+        "--batch-size",
+        "8192"
+      ]
+    },
+    {
+      "name": "batch_32768",
+      "flags": [
+        "--batch-size",
+        "32768"
+      ]
+    }
+  ]
+}
