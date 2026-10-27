@@ -136,6 +136,19 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
             }
             return ShellAction::Continue;
         }
+        ".catalogs" => {
+            let mut catalogs: Vec<_> = session
+                .list_schemas()
+                .into_iter()
+                .filter_map(|schema| schema.split_once('.').map(|(name, _)| name.to_owned()))
+                .collect();
+            catalogs.sort();
+            catalogs.dedup();
+            for catalog in catalogs {
+                println!("{catalog}");
+            }
+            return ShellAction::Continue;
+        }
         ".schemas" => {
             for schema in session.list_schemas() {
                 println!("{schema}");
