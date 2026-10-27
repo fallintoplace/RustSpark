@@ -47,6 +47,30 @@ finally:
     spark.stop()
 """
 
+DUCKDB_WORKER = """
+import json, sys, time
+import duckdb
+
+csv = sys.argv[1]
+requests = json.loads(sys.stdin.read())
+con = duckdb.connect(":memory:")
+escaped = csv.replace("'", "''")
+con.execute("CREATE VIEW data AS SELECT * FROM read_csv('" + escaped
+            + "', header=true, columns={'id':'BIGINT',"
+            + "'city':'VARCHAR','amount':'BIGINT'})")
+for request in requests:
+    started = time.perf_counter()
+    cursor = con.execute(request["sql"])
+    columns = [field[0] for field in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    encoded = json.dumps(rows, default=str)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    print(json.dumps({
+        "name": request["name"], "elapsed_ms": elapsed_ms,
+        "rows": json.loads(encoded),
+    }), flush=True)
+"""
+
 
 def parse_result_line(line):
     return json.loads(
@@ -113,6 +137,19 @@ def run_spark(csv, requests, timeout, master):
     return [parse_result_line(line) for line in output.stdout.splitlines() if line.strip()]
 
 
+def run_duckdb(csv, requests, timeout):
+    if importlib.util.find_spec("duckdb") is None:
+        raise RuntimeError("Install DuckDB: pip install 'duckdb>=1,<3'")
+    output = subprocess.run(
+        [sys.executable, "-c", DUCKDB_WORKER, str(csv)],
+        input=json.dumps(requests), capture_output=True, text=True,
+        check=False, timeout=timeout,
+    )
+    if output.returncode:
+        raise RuntimeError(f"DuckDB exit {output.returncode}: {output.stderr}")
+    return [parse_result_line(line) for line in output.stdout.splitlines() if line.strip()]
+
+
 def summarize(samples, requests, row_count, warmup, repeat):
     if len(samples) != len(requests):
         raise ValueError(f"Expected {len(requests)} results, got {len(samples)}")
@@ -153,8 +190,8 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
     if min(rows, repeat, timeout, partitions) < 1 or warmup < 0:
         raise ValueError("rows, repeat, timeout, partitions must be positive; warmup >= 0")
     if (not engines or len(engines) != len(set(engines))
-            or any(engine not in ("rustspark", "spark") for engine in engines)):
-        raise ValueError("Specify unique engines: rustspark and/or spark")
+            or any(engine not in ("rustspark", "spark", "duckdb") for engine in engines)):
+        raise ValueError("Specify unique engines: rustspark, spark and/or duckdb")
     with tempfile.TemporaryDirectory(prefix="rustspark-warm-") as directory:
         csv = pathlib.Path(directory) / "input.csv"
         write_csv(csv, rows)
@@ -163,14 +200,26 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
         for engine in engines:
             if engine == "rustspark":
                 samples = run_rustspark(binary, csv, requests, rows, timeout, partitions)
-            else:
+            elif engine == "spark":
                 samples = run_spark(csv, requests, timeout, master)
+            else:
+                samples = run_duckdb(csv, requests, timeout)
             reports[engine] = summarize(samples, requests, rows, warmup, repeat)
         ratios = {}
         if "rustspark" in reports and "spark" in reports:
             ratios = {
                 name: (
                     round(reports["spark"][name]["median_ms"]
+                          / reports["rustspark"][name]["median_ms"], 3)
+                    if reports["rustspark"][name]["median_ms"] > 0 else None
+                )
+                for name in WORKLOADS
+            }
+        duckdb_ratios = {}
+        if "rustspark" in reports and "duckdb" in reports:
+            duckdb_ratios = {
+                name: (
+                    round(reports["duckdb"][name]["median_ms"]
                           / reports["rustspark"][name]["median_ms"], 3)
                     if reports["rustspark"][name]["median_ms"] > 0 else None
                 )
@@ -184,13 +233,14 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
             "spark_master": master, "platform": platform.platform(),
             "workloads": WORKLOADS, "results": reports,
             "spark_median_over_rustspark_median": ratios,
+            "duckdb_median_over_rustspark_median": duckdb_ratios,
         }
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="./target/release/rustspark")
-    parser.add_argument("--engines", nargs="+", choices=("rustspark", "spark"),
+    parser.add_argument("--engines", nargs="+", choices=("rustspark", "spark", "duckdb"),
                         default=["rustspark", "spark"])
     parser.add_argument("--rows", type=int, default=100000)
     parser.add_argument("--warmup", type=int, default=1)
