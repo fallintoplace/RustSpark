@@ -21,7 +21,7 @@ enum StdoutFormat {
 #[command(
     version,
     about = "Run local SQL queries over CSV, JSON or Parquet files",
-    group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "csv_tables", "parquet_tables", "json_tables", "auto_input"])),
+    group(ArgGroup::new("input").required(false).multiple(true).args(["csv", "parquet", "json", "parquet_file_list", "csv_tables", "parquet_tables", "json_tables", "auto_input"])),
     group(ArgGroup::new("query").required(true).args(["sql", "sql_file", "interactive", "backup_database"]))
 )]
 struct Args {
@@ -40,6 +40,12 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     parquet: Option<PathBuf>,
+
+    /// Load Parquet parts listed one per line, relative to the manifest directory.
+    #[arg(long = "parquet-file-list", value_name = "FILE", conflicts_with_all = [
+        "csv", "parquet", "json", "auto_input", "csv_tables", "parquet_tables", "json_tables"
+    ])]
+    parquet_file_list: Option<PathBuf>,
 
     #[arg(long = "csv-table", value_name = "NAME=PATH")]
     csv_tables: Vec<String>,
@@ -620,6 +626,9 @@ use validation::{validate_format_options, validate_inputs};
 
 mod session;
 use session::new_session;
+
+mod parquet_file_list;
+use parquet_file_list::load_parquet_file_list;
 
 mod registration;
 use registration::register_inputs;

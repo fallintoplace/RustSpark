@@ -1,4 +1,4 @@
-use super::{Args, StdoutFormat, parse_named_table};
+use super::{Args, StdoutFormat, load_parquet_file_list, parse_named_table};
 
 use std::path::{Path, PathBuf};
 
@@ -26,15 +26,15 @@ fn has_csv_input(args: &Args) -> bool {
 }
 
 fn has_parquet_input(args: &Args) -> bool {
-    args.parquet.is_some() || !args.parquet_tables.is_empty()
+    args.parquet.is_some() || args.parquet_file_list.is_some() || !args.parquet_tables.is_empty()
 }
 
 fn has_json_input(args: &Args) -> bool {
     args.json.is_some() || !args.json_tables.is_empty()
 }
 
-fn input_paths(args: &Args) -> Result<Vec<&Path>, Box<dyn std::error::Error>> {
-    let mut sources: Vec<&std::path::Path> = Vec::new();
+fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut sources: Vec<PathBuf> = Vec::new();
     for path in [
         args.csv.as_ref(),
         args.parquet.as_ref(),
@@ -45,7 +45,7 @@ fn input_paths(args: &Args) -> Result<Vec<&Path>, Box<dyn std::error::Error>> {
     .flatten()
     {
         if path.as_os_str() != "-" {
-            sources.push(path.as_path());
+            sources.push(path.clone());
         }
     }
     for mapping in args
@@ -55,7 +55,11 @@ fn input_paths(args: &Args) -> Result<Vec<&Path>, Box<dyn std::error::Error>> {
         .chain(&args.json_tables)
     {
         let (_, path) = parse_named_table(mapping)?;
-        sources.push(std::path::Path::new(path));
+        sources.push(PathBuf::from(path));
+    }
+    if let Some(manifest) = args.parquet_file_list.as_deref() {
+        sources.push(manifest.to_path_buf());
+        sources.extend(load_parquet_file_list(manifest)?);
     }
     Ok(sources)
 }
@@ -78,7 +82,7 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
     let sources = input_paths(args)?;
     if sources
         .iter()
-        .any(|source| overlaps_input_path(source, &destination))
+        .any(|source| overlaps_input_path(source.as_path(), &destination))
     {
         return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
     }
@@ -99,7 +103,8 @@ fn reject_missing_format_inputs(
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
-        + u8::from(args.json.is_some());
+        + u8::from(args.json.is_some())
+        + u8::from(args.parquet_file_list.is_some());
     let has_named = !args.csv_tables.is_empty()
         || !args.parquet_tables.is_empty()
         || !args.json_tables.is_empty();
