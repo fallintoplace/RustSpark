@@ -75,6 +75,9 @@ fn html_handles_plain_and_escaped_values_together() -> TestResult {
     assert_success(&output);
     let html = String::from_utf8(output.stdout)?;
     assert!(html.contains("<th>simple</th><th>encoded</th>"), "{html}");
-    assert!(html.contains("<td>plain text</td><td>a&amp;b</td>"), "{html}");
+    assert!(
+        html.contains("<td>plain text</td><td>a&amp;b</td>"),
+        "{html}"
+    );
     Ok(())
 }
