@@ -2,18 +2,18 @@
 
 RustSpark V1 is an **experimental local SQL engine** built on Apache DataFusion.
 It is not a stable database, Spark API-compatible runtime, or production
-distributed SQL service. The current Cargo package version is \`0.1.0\`.
+distributed SQL service. The current Cargo package version is `0.1.0`.
 Treat the first public release as an experimental preview, not a promise of
-stable \`v1.0.0\` semantics.
+stable `v1.0.0` semantics.
 
 ## Release gates
 
-- The exact \`main\` commit to be tagged has completed, successful Rust CI:
+- The exact `main` commit to be tagged has completed, successful Rust CI:
   formatting, Clippy, all Rust tests, Rust 1.95 and Windows. A cancelled or
   pending run is **not** a passing release gate.
-- The release workflow's Linux and Windows \`storage-qualification\` tests
-  pass, including \`cli_insert_recovery\`, \`cli_database_lock\`,
-  \`cli_catalog_recovery\`, \`cli_database_backup\` and \`v1_workflows\`.
+- The release workflow's Linux and Windows `storage-qualification` tests
+  pass, including `cli_insert_recovery`, `cli_database_lock`,
+  `cli_catalog_recovery`, `cli_database_backup` and `v1_workflows`.
 - Core local CLI workflows work across fresh processes: persistent table
   create, INSERT, restart, rename and DROP; named CSV joins, typed SQL
   parameters, Parquet round trips and nonzero exit status on invalid SQL.
@@ -23,7 +23,7 @@ stable \`v1.0.0\` semantics.
 - The release workflow builds Linux x86-64, Windows x86-64 and macOS arm64
   binaries. Each final archive includes the executable, README and LICENSE,
   matches the checked build output, and passes smoke tests after extraction.
-- The tag matches \`Cargo.toml\`, is based on the verified \`main\` commit,
+- The tag matches `Cargo.toml`, is based on the verified `main` commit,
   and has not been moved after publication.
 - Record measured benchmark results and known Spark SQL differences before
   publishing comparative performance or compatibility claims. The optional
@@ -31,7 +31,7 @@ stable \`v1.0.0\` semantics.
 
 ## Run local checks
 
-\`\`\`sh
+```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
@@ -40,15 +40,15 @@ cargo test --locked --test cli_insert_recovery --test cli_database_lock \
   --test cli_catalog_recovery --test cli_database_backup
 python3 -m unittest discover -s scripts -p 'test_release_smoke.py'
 python3 -m unittest discover -s scripts -p 'test_verify_release_archive.py'
-\`\`\`
+```
 
 These tests exercise the actual CLI in separate processes. On GitHub, also
-run the release workflow through \`workflow_dispatch\` before tagging.
+run the release workflow through `workflow_dispatch` before tagging.
 A local pass does not replace the cross-platform checks or archive smoke tests.
 
 ## Known limitations to publish
 
-- Persistent \`INSERT INTO\` builds a private replacement and uses a recovery
+- Persistent `INSERT INTO` builds a private replacement and uses a recovery
   protocol. Tests cover SQL errors, cancellation and process exits at selected
   commit boundaries. On the next startup, RustSpark validates snapshots and
   recovers the old or published table where possible.
