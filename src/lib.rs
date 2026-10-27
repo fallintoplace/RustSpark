@@ -923,21 +923,10 @@ impl RustSparkSession {
         dataframe.distinct_on(keys, projection, None)
     }
 
-    /// Sort rows by multiple named columns using Spark-like NULL ordering.
-    ///
-    /// A true direction means ascending with NULLs first; false means
-    /// descending with NULLs last. Sorts are lazy and do not mutate the table.
-    /// Add a unique tie-breaker for deterministic order among equal keys.
-    pub async fn sort_rows(&self, table: &str, order: &[(&str, bool)]) -> Result<DataFrame> {
+    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
-        if order.is_empty() {
-            return Err(DataFusionError::Plan(
-                "sort_rows requires at least one key".into(),
-            ));
-        }
-        let dataframe = self.table(table).await?;
         let mut seen = HashSet::new();
         let mut sort_exprs = Vec::new();
         for &(name, ascending) in order {
@@ -959,6 +948,21 @@ impl RustSparkSession {
             sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
         }
         dataframe.sort(sort_exprs)
+    }
+
+    /// Sort rows by multiple named columns using Spark-like NULL ordering.
+    ///
+    /// A true direction means ascending with NULLs first; false means
+    /// descending with NULLs last. Sorts are lazy and do not mutate the table.
+    /// Add a unique tie-breaker for deterministic order among equal keys.
+    pub async fn sort_rows(&self, table: &str, order: &[(&str, bool)]) -> Result<DataFrame> {
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "sort_rows requires at least one key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::sort_dataframe(dataframe, order)
     }
 
     // Plan independent SQL inputs concurrently, with bounded outstanding
