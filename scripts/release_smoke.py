@@ -31,19 +31,24 @@ def reject_nonfinite(value):
     raise ValueError(f"Non-finite JSON result: {value}")
 
 
+def _parse_result_row(line: str) -> dict:
+    row = json.loads(
+        line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite,
+    )
+    if not isinstance(row, dict):
+        raise ValueError("Expected a JSON object for each SQL result row")
+    # json.loads also accepts out-of-range exponents such as 1e400 as infinity.
+    json.dumps(row, allow_nan=False)
+    return row
+
+
 def rows(binary: pathlib.Path, *args: str) -> list[dict]:
     data = execute(binary, *args, "--stdout-format", "json")
     results = []
     for line in data.splitlines():
         if not line.strip():
             continue
-        row = json.loads(
-            line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite,
-        )
-        if not isinstance(row, dict):
-            raise ValueError("Expected a JSON object for each SQL result row")
-        # json.loads also accepts out-of-range exponents such as 1e400 as infinity.
-        json.dumps(row, allow_nan=False)
+        row = _parse_result_row(line)
         results.append(row)
     return results
 

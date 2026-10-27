@@ -81,11 +81,7 @@ def _reject_nonfinite(value):
     raise ValueError(f"Non-finite RustSpark JSON value: {value}")
 
 
-def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
-    objects = [
-        json.loads(line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite)
-        for line in stdout.splitlines() if line.strip()
-    ]
+def _validate_json_row_shapes(objects, columns):
     # json.loads accepts a huge exponent (1e400) as infinity even when
     # parse_constant rejects the explicit Infinity token.
     json.dumps(objects, allow_nan=False)
@@ -94,6 +90,14 @@ def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
         not isinstance(obj, dict) or set(obj) != expected for obj in objects
     ):
         raise ValueError("RustSpark JSON rows must match described columns")
+
+
+def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
+    objects = [
+        json.loads(line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite)
+        for line in stdout.splitlines() if line.strip()
+    ]
+    _validate_json_row_shapes(objects, columns)
     rows = [[obj[column] for column in columns] for obj in objects]
     return QueryResult(columns=columns, rows=rows)
 

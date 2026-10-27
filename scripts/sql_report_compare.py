@@ -76,6 +76,26 @@ def result_mismatch(before: dict, after: dict) -> str | None:
     return None
 
 
+def _compare_query(number, before, after, max_slowdown):
+    if before is None or after is None:
+        return None, f"Query {number}: missing in one report", False
+    if mismatch := result_mismatch(before, after):
+        return None, f"Query {number}: {mismatch}", False
+    baseline_ms, candidate_ms = before.get("median_ms"), after.get("median_ms")
+    if not is_duration(baseline_ms) or not is_duration(candidate_ms):
+        return None, f"Query {number}: invalid latency", False
+    ratio = candidate_ms / baseline_ms if baseline_ms > 0 else None
+    timing = {
+        "id": number, "reference_ms": baseline_ms,
+        "candidate_ms": candidate_ms, "slowdown": ratio,
+    }
+    slowed = max_slowdown is not None and (
+        (baseline_ms == 0 and candidate_ms > 0)
+        or (ratio is not None and ratio > max_slowdown)
+    )
+    return timing, None, slowed
+
+
 def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None = None) -> dict:
     if max_slowdown is not None and (not is_duration(max_slowdown) or max_slowdown < 1):
         raise ValueError("--max-slowdown must be finite and at least 1")
@@ -88,26 +108,14 @@ def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None
     slowdowns = []
     timings = []
     for number in sorted(set(left) | set(right)):
-        before, after = left.get(number), right.get(number)
-        if before is None or after is None:
-            errors.append(f"Query {number}: missing in one report")
+        timing, error, slowed = _compare_query(
+            number, left.get(number), right.get(number), max_slowdown,
+        )
+        if error is not None:
+            errors.append(error)
             continue
-        if mismatch := result_mismatch(before, after):
-            errors.append(f"Query {number}: {mismatch}")
-            continue
-        baseline_ms, candidate_ms = before.get("median_ms"), after.get("median_ms")
-        if not is_duration(baseline_ms) or not is_duration(candidate_ms):
-            errors.append(f"Query {number}: invalid latency")
-            continue
-        ratio = candidate_ms / baseline_ms if baseline_ms > 0 else None
-        timings.append({
-            "id": number, "reference_ms": baseline_ms,
-            "candidate_ms": candidate_ms, "slowdown": ratio,
-        })
-        if max_slowdown is not None and (
-            (baseline_ms == 0 and candidate_ms > 0)
-            or (ratio is not None and ratio > max_slowdown)
-        ):
+        timings.append(timing)
+        if slowed:
             slowdowns.append(number)
     return {
         "queries_compared": len(timings),

@@ -11,6 +11,11 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
+mod joins_star;
+pub use joins_star::StarDimension;
+mod joins_many_using;
+mod joins_many;
+pub use joins_many::MultiJoinStep;
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
 mod set_operations;
@@ -36,8 +41,6 @@ mod feature_approx_distinct_count;
 mod sql_compat_oct;
 #[path = "features/approx_percentile.rs"]
 mod feature_approx_percentile;
-mod joins_star;
-pub use joins_star::StarDimension;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
 #[path = "features/substring_filter.rs"]

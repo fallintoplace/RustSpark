@@ -31,17 +31,22 @@ def expect_backup_rejected(binary: Path, database: Path, destination: Path) -> N
         raise AssertionError(f"Invalid backup destination accepted: {destination}")
 
 
+def _create_fixture_database(binary: Path, database: Path) -> None:
+    for sql in (
+        "CREATE TABLE first AS SELECT 1 AS n",
+        "CREATE TABLE second AS SELECT 20 AS n",
+        "INSERT INTO first VALUES (2)",
+    ):
+        execute(binary, "--database-dir", str(database), "--sql", sql)
+
+
+
 def check_backup(binary: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="rustspark-backup-release-") as root:
         database = Path(root) / "db"
         snapshot = Path(root) / "snapshot"
 
-        for sql in (
-            "CREATE TABLE first AS SELECT 1 AS n",
-            "CREATE TABLE second AS SELECT 20 AS n",
-            "INSERT INTO first VALUES (2)",
-        ):
-            execute(binary, "--database-dir", str(database), "--sql", sql)
+        _create_fixture_database(binary, database)
 
         execute(binary, "--database-dir", str(database),
                 "--backup-database", str(snapshot))
