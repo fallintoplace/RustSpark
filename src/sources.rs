@@ -246,7 +246,12 @@ mod file_path_tests {
 
     #[test]
     fn rejects_empty_single_and_multiple_file_paths() {
-        assert!(file_path(Path::new("")).unwrap_err().to_string().contains("empty"));
+        assert!(
+            file_path(Path::new(""))
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
         assert!(file_paths(&[Path::new("")], "CSV").is_err());
         assert!(file_paths::<&Path>(&[], "Parquet").is_err());
         assert_eq!(file_path(Path::new("data.csv")).unwrap(), "data.csv");
