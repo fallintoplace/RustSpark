@@ -1,0 +1,35 @@
+{
+  "name": "memory_grouped_distinct",
+  "sql": "SELECT city, COUNT(DISTINCT id) AS n FROM data GROUP BY city",
+  "rows": 250000,
+  "variants": [
+    {
+      "name": "memory_mb_128",
+      "flags": [
+        "--memory-limit-mb",
+        "128"
+      ]
+    },
+    {
+      "name": "memory_mb_256",
+      "flags": [
+        "--memory-limit-mb",
+        "256"
+      ]
+    },
+    {
+      "name": "memory_mb_512",
+      "flags": [
+        "--memory-limit-mb",
+        "512"
+      ]
+    },
+    {
+      "name": "memory_mb_1024",
+      "flags": [
+        "--memory-limit-mb",
+        "1024"
+      ]
+    }
+  ]
+}
