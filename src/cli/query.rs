@@ -72,20 +72,7 @@ async fn write_file_export(
         .map(|directory| directory.path().join("result"))
         .unwrap_or_else(|| destination.to_path_buf());
     let output = path.to_str().ok_or("Output path must be valid UTF-8")?;
-    let options = output_write_options(single_file);
-    match format {
-        FileExport::Parquet(parquet_options) => {
-            dataframe
-                .write_parquet(output, options, *parquet_options)
-                .await?;
-        }
-        FileExport::Csv => {
-            dataframe.write_csv(output, options, None).await?;
-        }
-        FileExport::Json => {
-            dataframe.write_json(output, options, None).await?;
-        }
-    }
+    write_export_contents(dataframe, output, format, single_file).await?;
     if single_file {
         // Both paths are on the same filesystem. Sync the finished part
         // before renaming it into place to avoid another full-size copy.
@@ -103,6 +90,29 @@ async fn write_file_export(
             io::copy(&mut fs::File::open(&path)?, completed.as_file_mut())?;
             completed.as_file_mut().sync_all()?;
             completed.persist(destination)?;
+        }
+    }
+    Ok(())
+}
+
+async fn write_export_contents(
+    dataframe: DataFrame,
+    output: &str,
+    format: FileExport,
+    single_file: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = output_write_options(single_file);
+    match format {
+        FileExport::Parquet(parquet_options) => {
+            dataframe
+                .write_parquet(output, options, *parquet_options)
+                .await?;
+        }
+        FileExport::Csv => {
+            dataframe.write_csv(output, options, None).await?;
+        }
+        FileExport::Json => {
+            dataframe.write_json(output, options, None).await?;
         }
     }
     Ok(())
