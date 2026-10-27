@@ -47,6 +47,22 @@ class ClickBenchFetchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Expected 43"):
                 fetch.verify_queries(short)
 
+    def test_dangling_symlink_needs_explicit_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "queries.sql"
+            missing = Path(directory) / "missing.sql"
+            try:
+                target.symlink_to(missing)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable")
+            with self.assertRaises(FileExistsError):
+                fetch.write_queries(target, self.corpus)
+            self.assertTrue(target.is_symlink())
+            fetch.write_queries(target, self.corpus, overwrite=True)
+            self.assertFalse(target.is_symlink())
+            self.assertFalse(missing.exists())
+            self.assertEqual(target.read_bytes(), self.corpus)
+
     def test_write_does_not_overwrite_unless_requested(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "queries" / "queries.sql"
