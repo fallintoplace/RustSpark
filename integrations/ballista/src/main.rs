@@ -5,6 +5,7 @@ use datafusion::prelude::SessionContext;
 use rustspark::RustSparkSession;
 
 mod deadline;
+mod remote_inputs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +34,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(path) = std::env::var("RUSTSPARK_PARQUET") {
         session.register_parquet("data", &path).await?;
     }
+    remote_inputs::register(&session).await?;
 
     session.sql(&query).await?.show().await?;
     Ok(())

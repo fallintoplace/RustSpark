@@ -18,6 +18,11 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }
+    if let Some(min_bytes) = args.scan_split_min_bytes {
+        config = config
+            .with_repartition_file_scans(true)
+            .with_repartition_file_min_size(min_bytes);
+    }
     if let Some(files) = args.metadata_fetch_concurrency {
         config = config.set_usize("datafusion.execution.meta_fetch_concurrency", files);
     }
@@ -28,11 +33,27 @@ pub(super) fn new_session(
     args: &Args,
 ) -> Result<Arc<RustSparkSession>, Box<dyn std::error::Error>> {
     let config = build_session_config(args);
-    let session = if let Some(limit) = args.memory_limit_bytes {
-        let runtime = RuntimeEnvBuilder::new()
-            .with_memory_limit(limit, 1.0)
-            .build_arc()?;
-        RustSparkSession::with_config_and_runtime(config, runtime)
+    let mut runtime = RuntimeEnvBuilder::new();
+    if let Some(limit) = args.memory_limit_bytes {
+        runtime = runtime.with_memory_limit(limit, 1.0);
+    }
+    if let Some(path) = args.spill_dir.as_deref() {
+        if !path.is_dir() {
+            return Err(format!(
+                "--spill-dir must name an existing directory: {}",
+                path.display()
+            )
+            .into());
+        }
+        if let Some(root) = args.database_dir.as_deref()
+            && path.canonicalize()?.starts_with(root.canonicalize()?)
+        {
+            return Err("--spill-dir must not be inside --database-dir".into());
+        }
+        runtime = runtime.with_temp_file_path(path.to_path_buf());
+    }
+    let session = if args.memory_limit_bytes.is_some() || args.spill_dir.is_some() {
+        RustSparkSession::with_config_and_runtime(config, runtime.build_arc()?)
     } else {
         RustSparkSession::with_config(config)
     };

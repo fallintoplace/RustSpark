@@ -185,6 +185,18 @@ This controls concurrent file schema and statistics reads. Higher settings can
 reduce metadata latency but use more memory and storage I/O. The default is
 unchanged when the flag is omitted.
 
+Tune scan splitting for large input files and many available CPU cores:
+
+```sh
+cargo run -- --csv /data/large.csv --target-partitions 8 \\
+  --scan-split-min-kb 256 --sql 'SELECT SUM(amount) FROM data'
+```
+
+The option sets the minimum file-group size that DataFusion considers for
+splitting a scan. Smaller values can help fill workers on moderate-size files
+but add scheduling and I/O overhead. The default stays unchanged unless the
+option is specified. Compressed or unsplittable formats may not benefit.
+
 Enable Parquet late materialization for selective filters:
 
 ```sh
@@ -378,6 +390,17 @@ Inspect logical and physical query plans without running the query:
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --sql 'SELECT city FROM data WHERE amount > 5' --explain
 ```
+
+Choose a disk with enough free space for large-query spill files (sorting and joining):
+
+```sh
+cargo run -- --spill-dir /fast-ssd/scratch --memory-limit-mb 512 \\
+  --csv /data/large.csv --sql 'SELECT * FROM data ORDER BY amount' --output-parquet /tmp/sorted
+```
+
+The spill directory must exist. RustSpark keeps default temporary-file behavior
+when the flag is absent and rejects spill directories inside `--database-dir`.
+A memory limit is optional, but a limit can trigger external spilling.
 
 Set an execution deadline (in seconds) for query planning, running, and exporting:
 
