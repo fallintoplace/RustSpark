@@ -18,17 +18,25 @@ fn quote_join_identifier(name: &str) -> String {
 }
 
 fn quote_catalog_table(path: &str, invalid_name_message: &str) -> Result<String> {
-    if path
-        .split('.')
-        .any(|part| part.is_empty() || part.trim() != part)
-    {
-        return Err(DataFusionError::Plan(invalid_name_message.into()));
+    // Avoid a Vec and an owned String for each path component.
+    let mut quoted = String::with_capacity(path.len() + 8);
+    for (index, part) in path.split('.').enumerate() {
+        if part.is_empty() || part.trim() != part {
+            return Err(DataFusionError::Plan(invalid_name_message.into()));
+        }
+        if index != 0 {
+            quoted.push('.');
+        }
+        quoted.push('"');
+        for character in part.chars() {
+            if character == '"' {
+                quoted.push('"');
+            }
+            quoted.push(character);
+        }
+        quoted.push('"');
     }
-    Ok(path
-        .split('.')
-        .map(quote_join_identifier)
-        .collect::<Vec<_>>()
-        .join("."))
+    Ok(quoted)
 }
 
 fn quote_join_table(path: &str) -> Result<String> {
