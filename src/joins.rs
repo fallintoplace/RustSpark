@@ -318,6 +318,61 @@ impl RustSparkSession {
         left_frame.join(right_frame, join_type, &left_keys, &right_keys, None)
     }
 
+    /// Return each unordered pair of distinct rows within matching groups.
+    ///
+    /// Identity values must be unique within each group for every pair to
+    /// appear exactly once. NULL group keys and NULL identities do not match.
+    /// The output keeps both copies of the columns and remains lazy.
+    pub async fn join_table_distinct_pairs(
+        &self,
+        table: &str,
+        group_columns: &[&str],
+        identity_column: &str,
+    ) -> Result<DataFrame> {
+        use std::{collections::HashSet, fmt::Write as _};
+
+        if group_columns.is_empty()
+            || identity_column.trim().is_empty()
+            || group_columns.iter().any(|column| column.trim().is_empty())
+        {
+            return Err(DataFusionError::Plan(
+                "join_table_distinct_pairs requires group columns and an identity column".into(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for column in group_columns {
+            if !seen.insert(column.to_ascii_lowercase()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Duplicate pair grouping column: {column}"
+                )));
+            }
+        }
+        if seen.contains(&identity_column.to_ascii_lowercase()) {
+            return Err(DataFusionError::Plan(
+                "The pair identity column must not also be a grouping column".into(),
+            ));
+        }
+        let left = "\"__rustspark_left\"";
+        let right = "\"__rustspark_right\"";
+        let mut on = String::new();
+        for column in group_columns {
+            let key = quote_join_identifier(column);
+            if !on.is_empty() {
+                on.push_str(" AND ");
+            }
+            write!(&mut on, "{left}.{key} = {right}.{key}")
+                .expect("writing to a String cannot fail");
+        }
+        let identity = quote_join_identifier(identity_column);
+        write!(&mut on, " AND {left}.{identity} < {right}.{identity}")
+            .expect("writing to a String cannot fail");
+        let name = quote_join_table(table)?;
+        self.sql(&format!(
+            "SELECT * FROM {name} AS {left} INNER JOIN {name} AS {right} ON {on}"
+        ))
+        .await
+    }
+
     /// Join registered tables with NULL-safe equality on key pairs.
     ///
     /// Unlike ordinary equality joins, two NULL keys match. A NULL key does
