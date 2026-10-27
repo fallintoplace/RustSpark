@@ -158,10 +158,7 @@ async fn write_markdown<W: Write>(
                 let value = if column.is_null(row) {
                     "NULL".to_owned()
                 } else {
-                    datafusion::arrow::util::display::array_value_to_string(
-                        column.as_ref(),
-                        row,
-                    )?
+                    datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)?
                 };
                 write!(output, " {} |", escape_markdown_cell(&value))?;
             }
