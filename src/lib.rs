@@ -809,6 +809,24 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    // Preserve first-seen literal order and avoid huge repeated IN lists.
+    fn distinct_membership_literals(
+        values: &[datafusion::common::ScalarValue],
+    ) -> Vec<datafusion::logical_expr::Expr> {
+        use std::collections::HashSet;
+
+        if values.len() <= 8 {
+            return values.iter().cloned().map(datafusion::prelude::lit).collect();
+        }
+        let mut seen = HashSet::new();
+        values
+            .iter()
+            .filter(|value| seen.insert(*value))
+            .cloned()
+            .map(datafusion::prelude::lit)
+            .collect()
+    }
+
     /// Filter rows against typed values without SQL string interpolation.
     ///
     /// A NULL entry follows SQL IN semantics. An empty set matches no rows.
@@ -825,11 +843,7 @@ impl RustSparkSession {
             return dataframe.filter(datafusion::prelude::lit(false));
         }
         use datafusion::{common::Column, logical_expr::Expr};
-        let list = values
-            .iter()
-            .cloned()
-            .map(datafusion::prelude::lit)
-            .collect();
+        let list = Self::distinct_membership_literals(values);
         dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, false))
     }
 
@@ -850,11 +864,7 @@ impl RustSparkSession {
             return Ok(dataframe);
         }
         use datafusion::{common::Column, logical_expr::Expr};
-        let list = values
-            .iter()
-            .cloned()
-            .map(datafusion::prelude::lit)
-            .collect();
+        let list = Self::distinct_membership_literals(values);
         dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, true))
     }
 
