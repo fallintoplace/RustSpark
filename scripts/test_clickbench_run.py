@@ -1,0 +1,111 @@
+import importlib.util
+import pathlib
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+MODULE = pathlib.Path(__file__).with_name("clickbench_run.py")
+spec = importlib.util.spec_from_file_location("clickbench_run", MODULE)
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+
+
+class QueryRunnerTests(unittest.TestCase):
+    def test_validates_queries_and_selects_original_query_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "queries.sql"
+            path.write_text("SELECT 1;\n\nSELECT 2;\n", encoding="utf-8")
+            queries = runner.read_queries(path)
+        self.assertEqual(runner.choose_queries(queries, "2,1"), [(2, "SELECT 2;"), (1, "SELECT 1;")])
+        for only in ["0", "3", "x", "1,1", ""]:
+            if only == "":
+                continue
+            with self.assertRaises(ValueError):
+                runner.choose_queries(queries, only)
+
+    def test_rejects_unsafe_or_multiline_queries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "queries.sql"
+            for contents in ["", "DELETE FROM hits;", "SELECT 1", "SELECT 1;\nDROP TABLE hits;", "SELECT 1; DROP TABLE hits;"]:
+                path.write_text(contents, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    runner.read_queries(path)
+
+    def test_command_uses_parquet_view_and_unquoted_shell_arguments(self):
+        args = runner.command("binary", pathlib.Path("hits.parquet"), "SELECT 1;")
+        self.assertEqual(args[0], "binary")
+        self.assertIn("--parquet-binary-as-string", args)
+        self.assertIn("--sql-view", args)
+        self.assertIn("FROM hits_raw", args[args.index("--sql-view") + 1])
+        self.assertEqual(args[args.index("--sql") + 1], "SELECT 1;")
+
+    def test_signature_preserves_multiplicity_but_ignores_row_order(self):
+        one = '{"a":1}\n{"a":2}\n{"a":1}\n'
+        two = '{"a":1}\n{"a":1}\n{"a":2}\n'
+        three = '{"a":1}\n{"a":2}\n'
+        self.assertEqual(runner.result_signature(one), runner.result_signature(two))
+        self.assertNotEqual(runner.result_signature(one), runner.result_signature(three))
+        with self.assertRaises(ValueError):
+            runner.result_signature('1\n')
+
+    def test_rejects_ambiguous_or_nonfinite_json_results(self):
+        for value in ['{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}']:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.result_signature(value)
+
+    def test_measure_query_collects_warmup_and_measured_samples(self):
+        completed = subprocess.CompletedProcess([], 0, '{"n":1}\n', "")
+        with mock.patch.object(runner.subprocess, "run", return_value=completed) as run:
+            result = runner.measure_query("bin", pathlib.Path("data"), 7, "SELECT 1;", 2, 1, 20)
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(len(result["samples_ms"]), 2)
+        self.assertEqual(result["result_rows"], 1)
+        self.assertEqual(run.call_count, 3)
+        self.assertTrue(all(item >= 0 for item in result["samples_ms"]))
+
+    def test_error_and_timeout_are_recorded_without_false_success(self):
+        failed = subprocess.CompletedProcess([], 2, "", "SQL failed")
+        with mock.patch.object(runner.subprocess, "run", return_value=failed):
+            result = runner.measure_query("bin", pathlib.Path("data"), 1, "SELECT 1;", 1, 0, 20)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("SQL failed", result["error"])
+        with mock.patch.object(
+            runner.subprocess, "run", side_effect=subprocess.TimeoutExpired(["bin"], 1),
+        ):
+            result = runner.measure_query("bin", pathlib.Path("data"), 2, "SELECT 1;", 1, 0, 1)
+        self.assertIn("Timed out", result["error"])
+
+    def test_continues_after_failed_query_and_writes_failure_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "hits.parquet"
+            source.write_bytes(b"test only")
+            queries = root / "queries.sql"
+            queries.write_text("SELECT 1;\nSELECT 2;\n", encoding="utf-8")
+            def measure(binary, parquet, number, sql, repeat, warmup, timeout):
+                return {"id": number, "status": "executed" if number == 1 else "error"}
+            with mock.patch.object(runner, "measure_query", side_effect=measure) as measured:
+                report = runner.benchmark("bin", source, queries, 1, 0, 1)
+            self.assertEqual(measured.call_count, 2)
+            self.assertEqual(report["queries_attempted"], 2)
+            self.assertEqual(report["queries_executed"], 1)
+
+    def test_nondeterministic_result_is_visible(self):
+        samples = [
+            {"elapsed_ms": 1.0, "sha256": "one", "result_rows": 1},
+            {"elapsed_ms": 2.0, "sha256": "two", "result_rows": 1},
+        ]
+        with mock.patch.object(runner, "execute", side_effect=samples):
+            result = runner.measure_query("bin", pathlib.Path("data"), 1, "SELECT 1;", 2, 0, 10)
+        self.assertEqual(result["status"], "nondeterministic")
+
+    def test_rejects_invalid_run_options(self):
+        with self.assertRaisesRegex(ValueError, "repeat"):
+            runner.benchmark("bin", pathlib.Path("missing"), pathlib.Path("missing"), 0, 0, 1)
+        with self.assertRaisesRegex(ValueError, "timeout"):
+            runner.benchmark("bin", pathlib.Path("missing"), pathlib.Path("missing"), 1, 0, float("nan"))
+
+
+if __name__ == "__main__":
+    unittest.main()
