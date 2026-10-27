@@ -228,6 +228,25 @@ impl RustSparkSession {
             .await
     }
 
+    /// Materialize read-only SQL results into an independent cached DataFrame.
+    ///
+    /// The snapshot stays available after the source table is deregistered.
+    pub async fn sql_snapshot(&self, query: &str) -> Result<DataFrame> {
+        self.sql_read_only(query).await?.cache().await
+    }
+
+    /// Materialize parameterized, read-only SQL with typed bindings.
+    pub async fn sql_snapshot_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<DataFrame> {
+        self.sql_read_only_with_params(query, params)
+            .await?
+            .cache()
+            .await
+    }
+
     /// Join two registered tables by their shared column names (SQL USING).
     ///
     /// Each join key appears once in the output, unlike an ON join. FULL OUTER
