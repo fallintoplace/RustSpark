@@ -515,6 +515,7 @@ cargo run -- --csv tests/fixtures/sales.csv \
 `--arrow-compression` applies only to `--output-arrow` files, not Arrow
 streams written to stdout. Omitting it preserves the previous uncompressed
 file format.
+
 For wide queries, print one column per line instead of a horizontal table:
 
 ```sh
