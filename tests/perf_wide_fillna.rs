@@ -1,4 +1,7 @@
-use datafusion::{arrow::{array::Int64Array, array::Array}, common::ScalarValue};
+use datafusion::{
+    arrow::{array::Array, array::Int64Array},
+    common::ScalarValue,
+};
 use rustspark::RustSparkSession;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -53,8 +56,16 @@ async fn sparse_fillna_on_wide_schema_preserves_other_columns() -> TestResult {
         .collect()
         .await?;
     assert_eq!(result[0].num_columns(), 64);
-    let first = result[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-    let last = result[0].column(63).as_any().downcast_ref::<Int64Array>().unwrap();
+    let first = result[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let last = result[0]
+        .column(63)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert!(first.is_null(0));
     assert_eq!(last.value(0), 7);
     Ok(())
