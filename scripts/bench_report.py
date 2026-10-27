@@ -45,6 +45,29 @@ def _cell(value):
             .replace("|", "\\|").replace("\n", " ").replace("\r", " "))
 
 
+def _validate_measurement(entry, engine, workload, repeat, rustspark):
+    if not isinstance(entry, dict):
+        raise ValueError(f"Invalid measurements for {engine}/{workload}")
+    median = _number(entry.get("median_ms"), f"{engine}/{workload} median")
+    p95 = _number(entry.get("p95_ms"), f"{engine}/{workload} p95")
+    if p95 + 0.001 < median:
+        raise ValueError(f"p95 is smaller than median for {engine}/{workload}")
+    samples = entry.get("samples_ms")
+    if not isinstance(samples, list) or len(samples) != repeat:
+        raise ValueError(f"Expected {repeat} samples for {engine}/{workload}")
+    for index, sample in enumerate(samples):
+        _number(sample, f"{engine}/{workload} sample {index}")
+    measured_median = round(statistics.median(samples), 3)
+    measured_p95 = round(sorted(samples)[math.ceil(len(samples) * 0.95) - 1], 3)
+    if abs(median - measured_median) > 0.001 or abs(p95 - measured_p95) > 0.001:
+        raise ValueError(f"Reported timings do not match samples for {engine}/{workload}")
+    digest = entry.get("result_sha256")
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError(f"Invalid result digest for {engine}/{workload}")
+    if digest != rustspark[workload].get("result_sha256"):
+        raise ValueError(f"Result digest mismatch for {engine}/{workload}")
+
+
 def _validate(report):
     if not isinstance(report, dict):
         raise ValueError("Benchmark report must be an object")
@@ -71,27 +94,7 @@ def _validate(report):
         if not isinstance(measurements, dict) or set(measurements) != set(workloads):
             raise ValueError(f"Workloads differ between RustSpark and {engine}")
         for workload in workloads:
-            entry = measurements[workload]
-            if not isinstance(entry, dict):
-                raise ValueError(f"Invalid measurements for {engine}/{workload}")
-            median = _number(entry.get("median_ms"), f"{engine}/{workload} median")
-            p95 = _number(entry.get("p95_ms"), f"{engine}/{workload} p95")
-            if p95 + 0.001 < median:
-                raise ValueError(f"p95 is smaller than median for {engine}/{workload}")
-            samples = entry.get("samples_ms")
-            if not isinstance(samples, list) or len(samples) != repeat:
-                raise ValueError(f"Expected {repeat} samples for {engine}/{workload}")
-            for index, sample in enumerate(samples):
-                _number(sample, f"{engine}/{workload} sample {index}")
-            measured_median = round(statistics.median(samples), 3)
-            measured_p95 = round(sorted(samples)[math.ceil(len(samples) * 0.95) - 1], 3)
-            if abs(median - measured_median) > 0.001 or abs(p95 - measured_p95) > 0.001:
-                raise ValueError(f"Reported timings do not match samples for {engine}/{workload}")
-            digest = entry.get("result_sha256")
-            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-                raise ValueError(f"Invalid result digest for {engine}/{workload}")
-            if digest != rustspark[workload].get("result_sha256"):
-                raise ValueError(f"Result digest mismatch for {engine}/{workload}")
+            _validate_measurement(measurements[workload], engine, workload, repeat, rustspark)
     return results, workloads
 
 
