@@ -315,10 +315,7 @@ fn parse_ascii_csv_char(value: &str) -> Option<u8> {
 
 fn parse_delimiter(value: &str) -> Result<u8, String> {
     parse_ascii_csv_char(value)
-        .filter(|byte| *byte != b'"')
-        .ok_or_else(|| {
-            "CSV delimiter must be one ASCII character other than a quote or newline".into()
-        })
+        .ok_or_else(|| "CSV delimiter must be one ASCII character other than newline".into())
 }
 
 fn parse_csv_char(value: &str) -> Result<u8, String> {
