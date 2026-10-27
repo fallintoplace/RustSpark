@@ -77,6 +77,16 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         )
         self.assertIsNone(mod.compare_typed(ours, reference, True))
 
+    def test_decimal38_comparison_does_not_round_significant_digits(self):
+        value = "123456789012345678901234567890123456.78"
+        self.assertEqual(
+            mod.normalized_typed_value(value, "decimal(38,2)"),
+            value,
+        )
+        self.assertEqual(
+            mod.normalized_typed_value("0.000", "decimal(38,3)"), "0",
+        )
+
     def test_temporal_helpers_keep_utc_and_date_values(self):
         import datetime
         self.assertEqual(
