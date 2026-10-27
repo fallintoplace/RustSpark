@@ -156,7 +156,7 @@ impl RustSparkSession {
             .iter()
             .map(|field| field.name().as_str())
             .collect();
-        let left_fields = left_frame.schema().fields().clone();
+        let left_fields = left_frame.schema().fields().iter().cloned().collect::<Vec<_>>();
         let columns: Vec<&str> = left_fields
             .iter()
             .map(|field| field.name().as_str())
