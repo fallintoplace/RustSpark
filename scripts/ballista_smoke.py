@@ -60,7 +60,7 @@ def run_smoke(mode: str, client: str | None = None, timeout: int = 300) -> None:
         env = os.environ.copy()
         # A developer's local query settings must not change the smoke workload.
         for name in ("RUSTSPARK_PARQUET", "RUSTSPARK_MAX_ROWS",
-                     "RUSTSPARK_QUERY_TIMEOUT_SECS"):
+                     "RUSTSPARK_QUERY_TIMEOUT_SECS", "RUSTSPARK_INPUTS_FILE"):
             env.pop(name, None)
         env.update({
             "RUSTSPARK_INPUTS": f"csv:orders={orders};csv:rates={rates}",
