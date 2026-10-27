@@ -13,6 +13,21 @@ def checked_time(value, label):
     return float(value)
 
 
+def render_query_row(row):
+    status = row.get("status")
+    if status == "ok":
+        median = checked_time(row.get("median_ms"), "median")
+        p95 = checked_time(row.get("p95_ms"), "p95")
+        if p95 + 0.001 < median:
+            raise ValueError(f"p95 smaller than median in query {row['id']}")
+        cells = [f"{median:.3f}", f"{p95:.3f}"]
+    elif status == "error":
+        cells = ["-", "-"]
+    else:
+        raise ValueError(f"Unknown query status: {status}")
+    return f"| {row['id']:02} | {status} | {cells[0]} | {cells[1]} |"
+
+
 def render(report):
     results = report.get("results")
     if not isinstance(results, list) or not results:
@@ -30,18 +45,7 @@ def render(report):
         "| ---: | --- | ---: | ---: |",
     ]
     for row in sorted(results, key=lambda item: item["id"]):
-        status = row.get("status")
-        if status == "ok":
-            median = checked_time(row.get("median_ms"), "median")
-            p95 = checked_time(row.get("p95_ms"), "p95")
-            if p95 + 0.001 < median:
-                raise ValueError(f"p95 smaller than median in query {row['id']}")
-            cells = [f"{median:.3f}", f"{p95:.3f}"]
-        elif status == "error":
-            cells = ["-", "-"]
-        else:
-            raise ValueError(f"Unknown query status: {status}")
-        lines.append(f"| {row['id']:02} | {status} | {cells[0]} | {cells[1]} |")
+        lines.append(render_query_row(row))
     if len(ok) == 22 and len(results) == 22:
         total_ms = sum(checked_time(row["median_ms"], "median") for row in ok)
         if total_ms > 0:

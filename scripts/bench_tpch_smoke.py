@@ -23,6 +23,12 @@ def commands(binary, fixture, report, scale, partitions, timeout):
     return prepare, run
 
 
+def complete_query_results(records):
+    return (isinstance(records, list) and len(records) == 22
+            and {entry.get("id") for entry in records} == set(range(1, 23))
+            and all(entry.get("status") == "ok" for entry in records))
+
+
 def run_smoke(binary, fixture, report, scale=0.01, partitions=2, timeout=120):
     if fixture.exists():
         raise ValueError("Fixture output must not already exist")
@@ -36,10 +42,7 @@ def run_smoke(binary, fixture, report, scale=0.01, partitions=2, timeout=120):
         raise RuntimeError(f"TPC-H runner did not produce {report} (exit {result.returncode})")
     data = json.loads(report.read_text(encoding="utf-8"))
     records = data.get("results", [])
-    complete = (isinstance(records, list) and len(records) == 22
-                and {entry.get("id") for entry in records} == set(range(1, 23))
-                and all(entry.get("status") == "ok" for entry in records))
-    return complete and result.returncode == 0
+    return complete_query_results(records) and result.returncode == 0
 
 
 def main(argv=None):

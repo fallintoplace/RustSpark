@@ -7,12 +7,7 @@ import math
 from pathlib import Path
 
 
-def summarize(report):
-    entries = report.get("results")
-    if not isinstance(entries, list) or len(entries) != 22:
-        raise ValueError("A summary requires exactly 22 TPC-H queries")
-    if {row.get("id") for row in entries} != set(range(1, 23)):
-        raise ValueError("Missing or duplicate TPC-H query ID")
+def checked_medians(entries):
     medians = []
     for row in entries:
         if row.get("status") != "ok":
@@ -21,6 +16,16 @@ def summarize(report):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"Invalid median for query {row['id']}")
         medians.append(float(value))
+    return medians
+
+
+def summarize(report):
+    entries = report.get("results")
+    if not isinstance(entries, list) or len(entries) != 22:
+        raise ValueError("A summary requires exactly 22 TPC-H queries")
+    if {row.get("id") for row in entries} != set(range(1, 23)):
+        raise ValueError("Missing or duplicate TPC-H query ID")
+    medians = checked_medians(entries)
     return {
         "queries_executed": 22,
         "metric": "sum and geometric mean of per-query cold CLI median wall times, not TPC throughput",
