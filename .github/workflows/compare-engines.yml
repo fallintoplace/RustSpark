@@ -1,6 +1,8 @@
 name: Compare local SQL engines
 
 on:
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
     inputs:
       rows:
@@ -42,7 +44,7 @@ jobs:
         run: |
           python3 scripts/bench_compare.py --binary ./target/release/rustspark \
             --engines rustspark duckdb spark \
-            --rows "${{ inputs.rows }}" --repeat "${{ inputs.repeats }}" \
+            --rows "${{ inputs.rows || '10000' }}" --repeat "${{ inputs.repeats || '3' }}" \
             --warmup 1 --json-out benchmarks/engine-comparison.json
       - name: Render checked Markdown comparison
         run: |
@@ -56,3 +58,4 @@ jobs:
             benchmarks/engine-comparison.json
             benchmarks/reports/cold.md
           if-no-files-found: warn
+          retention-days: 90
