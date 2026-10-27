@@ -46,7 +46,12 @@ async fn dropna_threshold_counts_non_null_values() -> TestResult {
             .await?,
         0
     );
-    assert!(session.drop_null_rows_with_threshold("items", &[], 4).await.is_err());
+    assert!(
+        session
+            .drop_null_rows_with_threshold("items", &[], 4)
+            .await
+            .is_err()
+    );
     assert!(
         session
             .drop_null_rows_with_threshold("items", &["missing"], 0)
