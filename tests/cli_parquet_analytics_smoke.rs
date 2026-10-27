@@ -1,9 +1,4 @@
-use std::{
-    fs::File,
-    path::Path,
-    process::Command,
-    sync::Arc,
-};
+use std::{fs::File, path::Path, process::Command, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -26,7 +21,10 @@ fn create_fixture(path: &Path) -> TestResult {
         Arc::clone(&schema),
         vec![
             Arc::new(BinaryArray::from(vec![
-                &b"alpha"[..], &b"alpha"[..], &b"beta"[..], &b""[..],
+                &b"alpha"[..],
+                &b"alpha"[..],
+                &b"beta"[..],
+                &b""[..],
             ])),
             Arc::new(Int64Array::from(vec![1, 2, 1, 3])),
             Arc::new(Int32Array::from(vec![15887, 15900, 15917, 15918])),
@@ -81,7 +79,10 @@ fn parquet_string_columns_and_date_view_support_analytics_queries() -> TestResul
     let grouped_rows: Vec<_> = grouped.lines().collect();
     assert_eq!(
         grouped_rows,
-        vec![r#"{"SearchPhrase":"alpha","n":2}"#, r#"{"SearchPhrase":"beta","n":1}"#]
+        vec![
+            r#"{"SearchPhrase":"alpha","n":2}"#,
+            r#"{"SearchPhrase":"beta","n":1}"#
+        ]
     );
 
     let dates = query(
