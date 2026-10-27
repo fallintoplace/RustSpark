@@ -48,16 +48,20 @@ fn union_definitions(args: &Args) -> impl Iterator<Item = (&str, bool)> {
         )
 }
 
+type ParsedUnionDefinition<'a> = (&'a str, Vec<&'a str>, bool);
+
 fn parsed_union_definitions(
     args: &Args,
-) -> Result<Vec<(&str, Vec<&str>, bool)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<ParsedUnionDefinition<'_>>, Box<dyn std::error::Error>> {
     let mut names = HashSet::new();
     union_definitions(args)
-        .map(|(declaration, distinct)| -> Result<_, Box<dyn std::error::Error>> {
-            let (name, sources) = parse_union_by_name(declaration)?;
-            ensure_unique_name(&mut names, name, "union destination")?;
-            Ok((name, sources, distinct))
-        })
+        .map(
+            |(declaration, distinct)| -> Result<_, Box<dyn std::error::Error>> {
+                let (name, sources) = parse_union_by_name(declaration)?;
+                ensure_unique_name(&mut names, name, "union destination")?;
+                Ok((name, sources, distinct))
+            },
+        )
         .collect()
 }
 
