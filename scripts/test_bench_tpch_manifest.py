@@ -19,13 +19,16 @@ class ManifestTests(unittest.TestCase):
             tables[table] = f"data/{table}.parquet"
             (root / tables[table]).write_bytes(b"PAR1")
             rows[table] = 2
+        hashes = {table: hashlib.sha256((root / tables[table]).read_bytes()).hexdigest()
+                  for table in audit.TABLES}
         queries = []
         for number in range(1, 23):
             path = f"queries/{number:02}.sql"
             contents = f"SELECT {number};\n".encode()
             (root / path).write_bytes(contents)
             queries.append({"id": number, "path": path, "sha256": hashlib.sha256(contents).hexdigest()})
-        manifest = {"scale_factor": 0.01, "tables": tables, "rows": rows, "queries": queries}
+        manifest = {"scale_factor": 0.01, "tables": tables, "rows": rows,
+                    "table_sha256": hashes, "queries": queries}
         (root / "manifest.json").write_text(json.dumps(manifest))
         return manifest
 
@@ -49,6 +52,14 @@ class ManifestTests(unittest.TestCase):
             self.fixture(root)
             (root / "data/customer.parquet").unlink()
             with self.assertRaisesRegex(ValueError, "Missing fixture"):
+                audit.check(root)
+
+    def test_rejects_modified_parquet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root)
+            (root / "data/lineitem.parquet").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 audit.check(root)
 
     def test_rejects_duplicates(self):
