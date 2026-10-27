@@ -12,17 +12,23 @@ async fn counts_only_matching_rows_without_collecting_them()
         )
         .await?;
     assert_eq!(
-        session.count_filtered_rows("scores", col("score").gt(lit(1))).await?,
+        session
+            .count_filtered_rows("scores", col("score").gt(lit(1)))
+            .await?,
         2
     );
     assert_eq!(
-        session.count_filtered_rows("scores", col("score").gt(lit(10))).await?,
+        session
+            .count_filtered_rows("scores", col("score").gt(lit(10)))
+            .await?,
         0
     );
-    assert!(session
-        .count_filtered_rows("scores", col("missing").eq(lit(1)))
-        .await
-        .is_err());
+    assert!(
+        session
+            .count_filtered_rows("scores", col("missing").eq(lit(1)))
+            .await
+            .is_err()
+    );
     assert_eq!(session.table_row_count("scores").await?, 4);
     Ok(())
 }
