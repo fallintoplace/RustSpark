@@ -159,7 +159,10 @@ mod numbered_input_tests {
 
     #[test]
     fn set_table_quoting_keeps_qualified_identifiers() {
-        assert_eq!(quote_set_table("catalog.events").unwrap(), "\"catalog\".\"events\"");
+        assert_eq!(
+            quote_set_table("catalog.events").unwrap(),
+            "\"catalog\".\"events\""
+        );
         assert!(quote_set_table("").is_err());
         assert!(quote_set_table("catalog..events").is_err());
     }
