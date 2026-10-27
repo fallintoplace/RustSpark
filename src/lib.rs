@@ -11,7 +11,6 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
-mod joins_many_using;
 mod joins_many;
 pub use joins_many::MultiJoinStep;
 #[path = "features/regex_filter.rs"]
@@ -25,6 +24,7 @@ mod sources;
 mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
+mod joins_many_using;
 #[path = "features/unpivot_columns.rs"]
 mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
