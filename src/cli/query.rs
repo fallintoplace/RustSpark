@@ -189,6 +189,10 @@ fn sql_statement(statement: &DFStatement) -> Option<&SqlStatement> {
     Some(statement.as_ref())
 }
 
+fn persistent_table_is_directory(root: &Path, name: &str) -> bool {
+    root.join(name).is_dir()
+}
+
 /// Route a persistent INSERT to a staged copy, never the visible table files.
 /// Unquoted, local table names only. External registrations keep DataFusion's
 /// normal INSERT behavior.
@@ -206,10 +210,11 @@ fn persistent_insert_table(
     if !super::valid_identifier(&name) {
         return Err("Persistent INSERT requires a simple unquoted table name".into());
     }
-    if insert.overwrite && root.join(&name).is_dir() {
+    let persisted = persistent_table_is_directory(root, &name);
+    if insert.overwrite && persisted {
         return Err("Persistent INSERT OVERWRITE is unsupported".into());
     }
-    if root.join(&name).is_dir() {
+    if persisted {
         if args.save_table.is_some() {
             return Err("--save-table cannot be used with persistent INSERT".into());
         }
@@ -388,7 +393,7 @@ fn persistent_rename_table(
     if !super::valid_identifier(&old_name) || !super::valid_identifier(&new_name) {
         return Err("Persistent ALTER TABLE RENAME requires simple SQL table names".into());
     }
-    if !root.join(&old_name).is_dir() {
+    if !persistent_table_is_directory(root, &old_name) {
         return Ok(None);
     }
     Ok(Some((old_name, new_name)))
@@ -418,7 +423,7 @@ fn persistent_drop_table(
     if !super::valid_identifier(&name) {
         return Err(format!("Persistent DROP TABLE requires a simple table name: {name}").into());
     }
-    if root.join(&name).is_dir() {
+    if persistent_table_is_directory(root, &name) {
         Ok(Some(name))
     } else {
         Ok(None)
