@@ -24,6 +24,12 @@ class QueryRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.choose_queries(queries, only)
 
+    def test_query_number_parser_preserves_order_and_rejects_duplicates(self):
+        self.assertEqual(runner.parse_query_numbers("3, 1,2", 3), [3, 1, 2])
+        for value in ["0", "4", "1,1", "1,", ",1", "1,x"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.parse_query_numbers(value, 3)
+
     def test_rejects_unsafe_or_multiline_queries(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "queries.sql"
