@@ -1,0 +1,35 @@
+{
+  "name": "window_rank_partitions",
+  "sql": "SELECT COUNT(*) AS n FROM (SELECT ROW_NUMBER() OVER (PARTITION BY city ORDER BY amount DESC, id ASC) AS rn FROM data) WHERE rn <= 3",
+  "rows": 100000,
+  "variants": [
+    {
+      "name": "parts_1",
+      "flags": [
+        "--target-partitions",
+        "1"
+      ]
+    },
+    {
+      "name": "parts_2",
+      "flags": [
+        "--target-partitions",
+        "2"
+      ]
+    },
+    {
+      "name": "parts_4",
+      "flags": [
+        "--target-partitions",
+        "4"
+      ]
+    },
+    {
+      "name": "parts_8",
+      "flags": [
+        "--target-partitions",
+        "8"
+      ]
+    }
+  ]
+}
