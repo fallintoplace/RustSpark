@@ -27,3 +27,6 @@ shared runners introduce too much noise. Its stdlib unit tests run in CI.
 A later distributed Ballista or Apache Spark comparison needs separate jobs
 and workloads that account for scheduler startup and network costs. Do not
 treat the runtime numbers of this harness as Spark-versus-RustSpark results.
+
+To view the verified RustSpark vs DuckDB/Spark benchmark results as Markdown,
+see [Reading benchmark results](engine-comparison.md#reading-benchmark-results).
