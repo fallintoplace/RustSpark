@@ -32,22 +32,7 @@ impl RustSparkSession {
         format: SqlExportFormat,
     ) -> Result<()> {
         let destination = destination.as_ref();
-        let parent = destination
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        if destination.file_name().is_none() {
-            return Err(DataFusionError::Plan(
-                "Output path must name a new directory".into(),
-            ));
-        }
-        reject_existing_export(destination)?;
-
-        // Build on the same filesystem so the final directory rename is atomic.
-        let temporary = tempfile::Builder::new()
-            .prefix(".rustspark-api-export-")
-            .tempdir_in(parent)
-            .map_err(external_io)?;
+        let temporary = prepare_export_staging(destination)?;
         let staged = temporary.path().join("result");
         let staged_path = staged
             .to_str()
@@ -60,6 +45,25 @@ impl RustSparkSession {
         fs::rename(&staged, destination).map_err(external_io)?;
         Ok(())
     }
+}
+
+fn prepare_export_staging(destination: &Path) -> Result<tempfile::TempDir> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if destination.file_name().is_none() {
+        return Err(DataFusionError::Plan(
+            "Output path must name a new directory".into(),
+        ));
+    }
+    reject_existing_export(destination)?;
+
+    // The stage and destination share a filesystem for the final rename.
+    tempfile::Builder::new()
+        .prefix(".rustspark-api-export-")
+        .tempdir_in(parent)
+        .map_err(external_io)
 }
 
 async fn write_export_dataframe(
