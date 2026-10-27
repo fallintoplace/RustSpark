@@ -440,6 +440,22 @@ fn parse_integer_param<T: std::str::FromStr>(
         .map_err(|_| message.to_owned())
 }
 
+fn parse_finite_float_param<T>(
+    raw: &str,
+    invalid_message: &str,
+    non_finite_message: &str,
+    wrap: fn(Option<T>) -> ScalarValue,
+) -> Result<ScalarValue, String>
+where
+    T: std::str::FromStr + Copy + Into<f64>,
+{
+    let number = raw.parse::<T>().map_err(|_| invalid_message.to_owned())?;
+    if !number.into().is_finite() {
+        return Err(non_finite_message.to_owned());
+    }
+    Ok(wrap(Some(number)))
+}
+
 fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
     let (kind, raw) = value
         .split_once(':')
@@ -485,24 +501,18 @@ fn parse_sql_param(value: &str) -> Result<ScalarValue, String> {
             "--param uint64 needs an unsigned 64-bit integer",
             ScalarValue::UInt64,
         ),
-        "float32" | "real" => {
-            let number = raw
-                .parse::<f32>()
-                .map_err(|_| "--param float32 needs a number".to_owned())?;
-            if !number.is_finite() {
-                return Err("--param float32 must be finite".into());
-            }
-            Ok(ScalarValue::Float32(Some(number)))
-        }
-        "float64" | "double" => {
-            let number = raw
-                .parse::<f64>()
-                .map_err(|_| "--param float64 needs a number".to_owned())?;
-            if !number.is_finite() {
-                return Err("--param float64 must be finite".into());
-            }
-            Ok(ScalarValue::Float64(Some(number)))
-        }
+        "float32" | "real" => parse_finite_float_param::<f32>(
+            raw,
+            "--param float32 needs a number",
+            "--param float32 must be finite",
+            ScalarValue::Float32,
+        ),
+        "float64" | "double" => parse_finite_float_param::<f64>(
+            raw,
+            "--param float64 needs a number",
+            "--param float64 must be finite",
+            ScalarValue::Float64,
+        ),
         "bool" | "boolean" => {
             if raw.eq_ignore_ascii_case("true") {
                 Ok(ScalarValue::Boolean(Some(true)))
