@@ -20,6 +20,27 @@ class QueryRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.result_signature(bad)
 
+    def test_ordered_signature_detects_row_reordering(self):
+        first = '{"n":1}\n{"n":2}\n'
+        reversed_rows = '{"n":2}\n{"n":1}\n'
+        self.assertEqual(runner.result_signature(first), runner.result_signature(reversed_rows))
+        self.assertNotEqual(
+            runner.result_signature(first, ordered=True),
+            runner.result_signature(reversed_rows, ordered=True),
+        )
+
+    def test_signature_rejects_scalar_and_overflowed_json(self):
+        for payload in ('1', '[1]', '{"x":1e400}', '{"nested":{"x":-1e400}}'):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                runner.result_signature(payload)
+
+    def test_ordered_sql_uses_order_sensitive_repetition_check(self):
+        first = mock.Mock(returncode=0, stdout='{"n":1}\n{"n":2}\n', stderr="")
+        second = mock.Mock(returncode=0, stdout='{"n":2}\n{"n":1}\n', stderr="")
+        with mock.patch.object(runner.subprocess, "run", side_effect=[first, second]):
+            with self.assertRaisesRegex(ValueError, "Nondeterministic"):
+                runner.measure(["rustspark"], 2, 0, 30, ordered=True)
+
     def test_warmup_is_not_measured(self):
         fake = mock.Mock(returncode=0, stdout='{"n":3}\n', stderr="")
         with mock.patch.object(runner.subprocess, "run", return_value=fake) as call:
@@ -28,6 +49,30 @@ class QueryRunnerTests(unittest.TestCase):
         self.assertEqual(len(result["samples_ms"]), 3)
         self.assertEqual(result["result_rows"], 1)
         self.assertGreaterEqual(result["p95_ms"], result["median_ms"])
+
+    def test_benchmark_detects_top_level_order_by(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = root / "data"
+            queries = root / "queries"
+            data.mkdir()
+            queries.mkdir()
+            for name in runner.TABLES:
+                (data / f"{name}.parquet").touch()
+            (queries / "01.sql").write_text(
+                "SELECT n FROM (SELECT 1 AS n) ORDER BY n;", encoding="utf-8"
+            )
+            (queries / "02.sql").write_text(
+                "SELECT n FROM (SELECT 1 AS n ORDER BY n);", encoding="utf-8"
+            )
+            with mock.patch.object(runner, "measure", return_value={
+                "status": "ok", "median_ms": 1,
+            }) as measure:
+                runner.benchmark("rustspark", runner.query_paths(queries), data, 1, 0, 10, 2)
+            self.assertEqual(
+                [call.kwargs["ordered"] for call in measure.call_args_list],
+                [True, False],
+            )
 
     def test_query_errors_do_not_skip_later_queries(self):
         with tempfile.TemporaryDirectory() as folder:
