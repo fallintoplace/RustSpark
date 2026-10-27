@@ -92,16 +92,20 @@ def measure(command, repeat, warmup, timeout):
     }
 
 
+def command_for(binary, input_args, sql_file, partitions):
+    return [
+        str(binary), *input_args, "--sql-file", str(sql_file),
+        "--stdout-format", "json", "--target-partitions", str(partitions),
+    ]
+
+
 def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partitions=2):
     if repeat < 1 or warmup < 0 or timeout < 1 or partitions < 1:
         raise ValueError("Invalid repeat, warmup, timeout or partitions")
     args = input_arguments(parquet)
     reports = []
     for number, path in queries:
-        command = [
-            str(binary), *args, "--sql-file", str(path),
-            "--stdout-format", "json", "--target-partitions", str(partitions),
-        ]
+        command = command_for(binary, args, path, partitions)
         entry = {"id": number, "sql_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         try:
             entry.update(measure(command, repeat, warmup, timeout))
