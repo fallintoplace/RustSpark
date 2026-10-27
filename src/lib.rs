@@ -1667,9 +1667,8 @@ impl RustSparkSession {
     /// unseeded and may be expensive for large tables; use sample_rows
     /// for lower-cost approximate sampling.
     pub async fn take_random_rows(&self, table: &str, limit: usize) -> Result<DataFrame> {
-        let dataframe = self.table(table).await?;
         if limit == 0 {
-            return dataframe.limit(0, Some(0));
+            return self.table(table).await?.limit(0, Some(0));
         }
         let source = quote_catalog_table(table, "take_random_rows requires a table path")?;
         self.sql_read_only(&format!(
