@@ -21,11 +21,10 @@ async fn wide_selection_preserves_names_and_validation_errors() -> TestResult {
 
     let mut unknown = selected.clone();
     unknown[31] = "missing";
-    let error = session
-        .select_columns("wide", &unknown)
-        .await
-        .err()
-        .expect("unknown column should fail");
+    let error = match session.select_columns("wide", &unknown).await {
+        Ok(_) => panic!("unknown column should fail"),
+        Err(error) => error,
+    };
     assert!(
         error
             .to_string()
@@ -34,11 +33,10 @@ async fn wide_selection_preserves_names_and_validation_errors() -> TestResult {
 
     let mut duplicate = selected.clone();
     duplicate[31] = "C0";
-    let error = session
-        .select_columns("wide", &duplicate)
-        .await
-        .err()
-        .expect("case-insensitive duplicate should fail");
+    let error = match session.select_columns("wide", &duplicate).await {
+        Ok(_) => panic!("case-insensitive duplicate should fail"),
+        Err(error) => error,
+    };
     assert!(error.to_string().contains("Duplicate selected column: C0"));
 
     assert!(session.select_columns("wide", &["missing"]).await.is_err());
