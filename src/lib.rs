@@ -1590,6 +1590,14 @@ impl RustSparkSession {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
+        let fields = dataframe.schema().fields();
+        // Repeated full-schema searches scale poorly with many sort keys.
+        let indexed = (order.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         let mut seen = HashSet::new();
         let mut expressions = Vec::with_capacity(order.len());
         for &(name, ascending, nulls_first) in order {
@@ -1598,12 +1606,11 @@ impl RustSparkSession {
                     "Duplicate sort column: {name}"
                 )));
             }
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name().as_str() == name)
-            {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(name),
+                None => fields.iter().any(|field| field.name().as_str() == name),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown sort column: {name}"
                 )));
