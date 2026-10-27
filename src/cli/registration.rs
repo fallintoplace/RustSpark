@@ -139,6 +139,20 @@ async fn register_unnamed_input(
     Ok(true)
 }
 
+type NamedInput = (NamedInputKind, String, String);
+
+fn parsed_named_inputs(args: &Args) -> Result<Vec<NamedInput>, Box<dyn std::error::Error>> {
+    let mut names = HashSet::new();
+    let mut inputs = Vec::new();
+    for kind in INPUT_KINDS {
+        for mapping in kind.named_tables(args) {
+            let (name, path) = parse_unique_named_table(mapping, &mut names)?;
+            inputs.push((kind, name.to_owned(), path.to_owned()));
+        }
+    }
+    Ok(inputs)
+}
+
 pub(super) async fn register_inputs(
     session: &Arc<RustSparkSession>,
     args: &Arc<Args>,
@@ -146,27 +160,49 @@ pub(super) async fn register_inputs(
     if register_unnamed_input(session, args).await? {
         return Ok(());
     }
-    let mut names = HashSet::new();
+    let inputs = parsed_named_inputs(args)?;
     let mut registration_jobs = tokio::task::JoinSet::new();
     // Parallel metadata and CSV inference work scales with available cores,
     // but bound outstanding jobs to avoid loading hundreds of schemas at once.
     let max_parallel =
         std::thread::available_parallelism().map_or(4, |cores| cores.get().clamp(4, 16));
-    for kind in INPUT_KINDS {
-        for mapping in kind.named_tables(args) {
-            let (name, path) = parse_unique_named_table(mapping, &mut names)?;
-            let session = Arc::clone(session);
-            let args = Arc::clone(args);
-            let name = name.to_owned();
-            let path = path.to_owned();
-            registration_jobs.spawn(async move {
-                register_named_input(&session, &args, &name, Path::new(&path), kind).await
-            });
-            finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
-        }
+    for (kind, name, path) in inputs {
+        let session = Arc::clone(session);
+        let args = Arc::clone(args);
+        registration_jobs.spawn(async move {
+            register_named_input(&session, &args, &name, Path::new(&path), kind).await
+        });
+        finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
     }
     while let Some(result) = registration_jobs.join_next().await {
         result??;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod named_input_validation_tests {
+    use super::{Args, parsed_named_inputs};
+    use clap::Parser;
+
+    #[test]
+    fn rejects_duplicate_names_across_input_formats_before_registration() {
+        let args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--csv-table",
+            "events=a.csv",
+            "--json-table",
+            "EVENTS=b.json",
+        ])
+        .unwrap();
+        let error = parsed_named_inputs(&args)
+            .err()
+            .expect("duplicate named inputs");
+        assert!(
+            error.to_string().contains("Duplicate table name"),
+            "{error}"
+        );
+    }
 }
