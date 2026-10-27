@@ -130,7 +130,7 @@ fn escape_vertical_value(value: &str) -> std::borrow::Cow<'_, str> {
     // Most cells contain no control characters and need no allocation.
     if !value
         .bytes()
-        .any(|byte| matches!(byte, b'\\' | b'\r' | b'\n' | b'\t'))
+        .any(|byte| byte == b'\\' || byte.is_ascii_control())
     {
         return std::borrow::Cow::Borrowed(value);
     }
@@ -141,6 +141,11 @@ fn escape_vertical_value(value: &str) -> std::borrow::Cow<'_, str> {
             '\r' => escaped.push_str("\\r"),
             '\n' => escaped.push_str("\\n"),
             '\t' => escaped.push_str("\\t"),
+            other if other.is_ascii_control() => {
+                use std::fmt::Write as _;
+                write!(&mut escaped, "\\x{:02x}", other as u32)
+                    .expect("writing to a String cannot fail");
+            }
             other => escaped.push(other),
         }
     }
@@ -420,6 +425,10 @@ mod tests {
     #[test]
     fn escapes_vertical_controls_without_changing_unicode() {
         assert_eq!(escape_vertical_value("a\\b\r\n\té"), "a\\\\b\\r\\n\\té");
+        assert_eq!(
+            escape_vertical_value("a\0b\u{1b}\u{7f}é"),
+            r"a\x00b\x1b\x7fé"
+        );
         assert!(matches!(
             escape_vertical_value("plain"),
             std::borrow::Cow::Borrowed("plain")
