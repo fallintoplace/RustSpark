@@ -113,6 +113,14 @@ class BenchmarkReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RustSpark engine"):
             bench_report.render_report(sample)
 
+    def test_rejects_duplicate_keys_and_nonfinite_constants_in_report_json(self):
+        payload = json.dumps(report())
+        self.assertEqual(bench_report.parse_report(payload), report())
+        with self.assertRaisesRegex(ValueError, "Duplicate JSON key"):
+            bench_report.parse_report('{"rows": 1, ' + payload[1:])
+        with self.assertRaisesRegex(ValueError, "Non-finite"):
+            bench_report.parse_report(payload.replace('"platform": "test OS"', '"platform": NaN'))
+
     def test_cli_writes_valid_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = pathlib.Path(tmp) / "bench.json"
