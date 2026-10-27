@@ -94,6 +94,28 @@ async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str)
     }
 }
 
+// Execute SQL files in the current session without replacing pending input.
+async fn handle_read_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
+    if command != ".read" && !command.starts_with(".read ") && !command.starts_with(".read\t") {
+        return false;
+    }
+    let path = command[".read".len()..].trim();
+    if path.is_empty() {
+        eprintln!("Shell error: .read requires a file path");
+        return true;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let script = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+            if !script.trim().is_empty() {
+                execute_pending_sql(session, args, script).await;
+            }
+        }
+        Err(error) => eprintln!("Shell error: Cannot read {path}: {error}"),
+    }
+    true
+}
+
 // Handle the schema-specific shell command without changing pending SQL.
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
     if command != ".schema" && !command.starts_with(".schema ") {
@@ -127,6 +149,7 @@ async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> Sh
         "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
         "\\h" | ".help" => {
             eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
+            eprintln!("Read SQL from a file with .read PATH.");
             eprintln!("Shell commands: .tables, .schemas, .schema TABLE, .quit.");
             return ShellAction::Continue;
         }
@@ -184,6 +207,9 @@ pub(super) async fn run_interactive(
             line = line.trim_start_matches('\u{feff}').to_owned();
         }
         if pending.trim().is_empty() {
+            if handle_read_command(session, args, line.trim()).await {
+                continue;
+            }
             match dispatch_shell_command(session, line.trim()).await {
                 ShellAction::Exit => break,
                 ShellAction::Continue => continue,
