@@ -1,6 +1,6 @@
 //! Named data sources for the optional distributed Ballista client.
 //! Every location must be readable by the Ballista scheduler and executors.
-use std::{collections::HashSet, env, fs};
+use std::{collections::HashSet, env, fs, io::{BufRead, BufReader, Cursor}};
 
 use rustspark::RustSparkSession;
 
@@ -88,18 +88,36 @@ fn parse_source_items<'a>(items: impl IntoIterator<Item = &'a str>) -> Result<Ve
     Ok(sources)
 }
 
-fn parse_manifest(input: &str) -> Result<Vec<Source>, String> {
-    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-    let mut entries = input
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .flat_map(|line| line.split(';'))
-        .peekable();
-    if entries.peek().is_none() {
+fn parse_manifest_reader(reader: impl BufRead) -> Result<Vec<Source>, String> {
+    let mut seen = HashSet::new();
+    let mut sources = Vec::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| format!("Cannot read input manifest: {error}"))?;
+        let line = if index == 0 {
+            line.strip_prefix('\u{feff}').unwrap_or(&line)
+        } else {
+            &line
+        };
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        for item in line.split(';') {
+            let source = parse_source(item)?;
+            if !seen.insert(source.name.to_ascii_lowercase()) {
+                return Err(format!("Duplicate distributed table name: {}", source.name));
+            }
+            sources.push(source);
+        }
+    }
+    if sources.is_empty() {
         return Err("RUSTSPARK_INPUTS_FILE must contain at least one table".into());
     }
-    parse_source_items(entries)
+    Ok(sources)
+}
+
+fn parse_manifest(input: &str) -> Result<Vec<Source>, String> {
+    parse_manifest_reader(Cursor::new(input))
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
@@ -123,7 +141,7 @@ fn load_sources(
             if path.trim().is_empty() {
                 return Err("RUSTSPARK_INPUTS_FILE must name a file".into());
             }
-            Ok(Some(parse_manifest(&fs::read_to_string(path)?)?))
+            Ok(Some(parse_manifest_reader(BufReader::new(fs::File::open(path)?))?))
         }
         (None, None) => Ok(None),
     }
@@ -197,6 +215,14 @@ mod tests {
         assert_eq!(sources[0].name, "Orders");
         assert_eq!(sources[1].format, Format::Csv);
         assert_eq!(sources[2].path, "s3://bucket/data?version=2");
+    }
+
+    #[test]
+    fn streamed_manifest_matches_in_memory_parsing() {
+        let content = "\u{feff}# comment\r\n\r\ncsv:left=/a;parquet:right=/b\r\njson:logs=/c\r\n";
+        let from_reader = parse_manifest_reader(BufReader::new(Cursor::new(content))).unwrap();
+        assert_eq!(from_reader, parse_manifest(content).unwrap());
+        assert_eq!(from_reader.len(), 3);
     }
 
     #[test]
