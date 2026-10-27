@@ -817,6 +817,30 @@ impl RustSparkSession {
         self.context.register_udwf(udf);
     }
 
+    /// Keep rows strictly outside an inclusive typed range.
+    ///
+    /// NULL source values are excluded by SQL comparison semantics.
+    /// Bounds must be non-NULL, and the source table is left unchanged.
+    pub async fn filter_rows_outside_range(
+        &self,
+        table: &str,
+        column: &str,
+        lower: datafusion::common::ScalarValue,
+        upper: datafusion::common::ScalarValue,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        if lower.is_null() || upper.is_null() {
+            return Err(DataFusionError::Plan(
+                "filter_rows_outside_range requires non-NULL bounds".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let key = Expr::Column(Column::from_name(column));
+        dataframe.filter(key.clone().lt(lit(lower)).or(key.gt(lit(upper))))
+    }
+
     /// Unregister a table or view, returning whether it existed.
     pub fn deregister_table(&self, name: &str) -> Result<bool> {
         Ok(self.context.deregister_table(name)?.is_some())
