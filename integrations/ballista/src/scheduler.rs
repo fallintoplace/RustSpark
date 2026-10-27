@@ -3,7 +3,7 @@ use std::{collections::HashSet, env, time::Duration};
 
 use ballista::prelude::*;
 use datafusion::{
-    execution::SessionStateBuilder,
+    execution::{session_state::SessionState, SessionStateBuilder},
     prelude::{SessionConfig, SessionContext},
 };
 
@@ -83,18 +83,18 @@ async fn probe_reachable(endpoint: &str, limit: Duration) -> Result<(), String> 
     }
 }
 
-async fn connect_endpoint(
-    endpoint: &str,
-    partitions: Option<usize>,
-) -> Result<SessionContext, String> {
+fn connection_state(partitions: Option<usize>) -> SessionState {
     let mut config = SessionConfig::new_with_ballista();
     if let Some(partitions) = partitions {
         config = config.with_target_partitions(partitions);
     }
-    let state = SessionStateBuilder::new()
+    SessionStateBuilder::new()
         .with_config(config)
         .with_default_features()
-        .build();
+        .build()
+}
+
+async fn connect_endpoint(endpoint: &str, state: SessionState) -> Result<SessionContext, String> {
     SessionContext::remote_with_state(endpoint, state)
         .await
         .map_err(|error| error.to_string())
@@ -110,6 +110,9 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
     let endpoints = parse_endpoints(url, configured.as_deref())?;
     let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
     let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
+    // Building DataFusion's function registry and planner is independent of the
+    // chosen scheduler. Reuse it when trying fallback endpoints.
+    let state = connection_state(partitions);
     let mut failures = Vec::new();
 
     for (index, endpoint) in endpoints.iter().enumerate() {
@@ -123,7 +126,7 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
                 continue;
             }
         }
-        let result = connect_endpoint(endpoint, partitions).await;
+        let result = connect_endpoint(endpoint, state.clone()).await;
         match result {
             Ok(context) => {
                 if index > 0 {
@@ -194,6 +197,13 @@ mod tests {
         assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_ok());
         drop(listener);
         assert!(probe_reachable(&endpoint, Duration::from_secs(1)).await.is_err());
+    }
+
+    #[test]
+    fn cloned_connection_state_keeps_partition_config() {
+        let state = connection_state(Some(7));
+        assert_eq!(state.config().target_partitions(), 7);
+        assert_eq!(state.clone().config().target_partitions(), 7);
     }
 
     #[test]
