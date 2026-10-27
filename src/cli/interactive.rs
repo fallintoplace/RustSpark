@@ -388,8 +388,14 @@ mod tests {
     #[test]
     fn shell_commands_require_an_exact_keyword_boundary() {
         assert_eq!(shell_arguments(".read", ".read"), Some(""));
-        assert_eq!(shell_arguments(".read query.sql", ".read"), Some("query.sql"));
-        assert_eq!(shell_arguments(".read\tquery.sql", ".read"), Some("query.sql"));
+        assert_eq!(
+            shell_arguments(".read query.sql", ".read"),
+            Some("query.sql")
+        );
+        assert_eq!(
+            shell_arguments(".read\tquery.sql", ".read"),
+            Some("query.sql")
+        );
         assert_eq!(shell_arguments(".readme", ".read"), None);
         assert_eq!(shell_arguments(".timer on", ".timer"), Some("on"));
         assert_eq!(shell_arguments(".previewer x", ".preview"), None);
