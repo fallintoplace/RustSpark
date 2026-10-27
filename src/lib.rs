@@ -1229,8 +1229,7 @@ impl RustSparkSession {
                     .get(&normalized)
                     .is_some_and(|original| original != name),
                 None => fields.iter().any(|field| {
-                    field.name().as_str() != *name
-                        && field.name().eq_ignore_ascii_case(name)
+                    field.name().as_str() != *name && field.name().eq_ignore_ascii_case(name)
                 }),
             };
             if conflicting {
