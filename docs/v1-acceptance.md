@@ -20,6 +20,9 @@ stable `v1.0.0` semantics.
 - Storage tests verify that failed writes preserve previously committed data,
   and that interrupted insert publication recovers on restart at the tested
   process-exit boundaries. Backup tests verify independent copied Parquet parts.
+- The packaged release binaries complete a backup smoke check: independent
+  snapshots remain queryable after writes and drops to the original database,
+  and invalid backup destinations are rejected.
 - The release workflow builds Linux x86-64, Windows x86-64 and macOS arm64
   binaries. Each final archive includes the executable, README and LICENSE,
   matches the checked build output, and passes smoke tests after extraction.
