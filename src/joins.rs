@@ -118,7 +118,11 @@ impl RustSparkSession {
             left_frame.schema().fields().len() + right_frame.schema().fields().len();
         let mut projection = String::with_capacity(projected_fields * 32);
         let mut predicates = String::with_capacity(columns.len() * 64);
-        let comparison = if null_safe { "IS NOT DISTINCT FROM" } else { "=" };
+        let comparison = if null_safe {
+            "IS NOT DISTINCT FROM"
+        } else {
+            "="
+        };
         for column in columns {
             let key = quote_join_identifier(column);
             if !projection.is_empty() {
