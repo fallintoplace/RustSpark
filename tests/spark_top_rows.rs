@@ -72,6 +72,11 @@ async fn top_rows_handles_empty_limits_and_invalid_order() -> TestResult {
             .await
             .is_err()
     );
-    assert!(session.top_rows("missing", &[("id", true)], 1).await.is_err());
+    assert!(
+        session
+            .top_rows("missing", &[("id", true)], 1)
+            .await
+            .is_err()
+    );
     Ok(())
 }
