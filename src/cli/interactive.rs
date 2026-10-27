@@ -132,7 +132,10 @@ async fn handle_read_command(
 
 // Print table column names without row scans or full type metadata.
 async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bool {
-    if command != ".columns" && !command.starts_with(".columns ") {
+    if command != ".columns"
+        && !command.starts_with(".columns ")
+        && !command.starts_with(".columns\t")
+    {
         return false;
     }
     let name = command.strip_prefix(".columns").unwrap_or_default().trim();
@@ -153,7 +156,8 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
 
 // Handle the schema-specific shell command without changing pending SQL.
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
-    if command != ".schema" && !command.starts_with(".schema ") {
+    if command != ".schema" && !command.starts_with(".schema ") && !command.starts_with(".schema\t")
+    {
         return false;
     }
     let name = command.strip_prefix(".schema").unwrap_or_default().trim();
@@ -175,7 +179,7 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
 
 // Count a registered table without requiring a SQL statement.
 async fn handle_count_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
-    if command != ".count" && !command.starts_with(".count ") {
+    if command != ".count" && !command.starts_with(".count ") && !command.starts_with(".count\t") {
         return false;
     }
     let name = command.strip_prefix(".count").unwrap_or_default().trim();
