@@ -7,6 +7,9 @@ use datafusion::{
 };
 use rustspark::RustSparkSession;
 
+#[path = "../src/remote_inputs.rs"]
+mod remote_inputs;
+
 fn parse_parallelism(value: &str) -> Result<usize, String> {
     let count = value.parse::<usize>().map_err(|_| {
         "RUSTSPARK_STANDALONE_PARALLELISM must be a positive integer".to_owned()
@@ -38,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(path) = std::env::var("RUSTSPARK_PARQUET") {
         session.register_parquet("data", &path).await?;
     }
+    remote_inputs::register(&session).await?;
     let query = std::env::var("RUSTSPARK_SQL")
         .unwrap_or_else(|_| "SELECT SUM(id) AS total FROM (VALUES (1), (2), (3)) AS t(id)".into());
     session.sql(&query).await?.show().await?;
