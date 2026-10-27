@@ -31,7 +31,41 @@ def run_command(binary, queries, parquet, partitions, json_out, repeat, warmup):
 
 
 def run_configuration(binary, queries, parquet, output, n, repeat, warmup, fingerprints):
-    path = output / f"partitions-{n}.json"    if path.exists():        raise ValueError(f"Report already exists: {path}")    process = subprocess.run(run_command(binary, queries, parquet, n, path, repeat, warmup),                             capture_output=True, text=True, check=False)    if not path.is_file():        raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")    report = json.loads(path.read_text(encoding="utf-8"))    results = report.get("results", [])    ok = sum(row.get("status") == "ok" for row in results)    for row in results:        if row.get("status") != "ok":            continue        number = row.get("id")        digest = row.get("result_sha256")        if type(number) is not int or number not in range(1, 23):            raise ValueError("Invalid TPC-H query ID in partition report")        if not isinstance(digest, str) or len(digest) != 64:            raise ValueError(f"Missing result fingerprint for Q{number:02}")        if number in fingerprints and fingerprints[number] != digest:            raise ValueError(f"Query Q{number:02} changed answers across partitions")        fingerprints[number] = digest    complete = (len(results) == 22 and ok == 22 and process.returncode == 0                and {row.get("id") for row in results} == set(range(1, 23)))    total = None    if complete:        times = [row.get("median_ms") for row in results]        if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0               for value in times):            raise ValueError(f"Invalid median in {n}-partition full-suite report")        total = round(math.fsum(times), 3)    return {"partitions": n, "queries_attempted": len(results),                           "queries_ok": ok, "runner_exit": process.returncode,                           "sum_median_ms": total, "report": path.name}
+    path = output / f"partitions-{n}.json"
+    if path.exists():
+        raise ValueError(f"Report already exists: {path}")
+    process = subprocess.run(run_command(binary, queries, parquet, n, path, repeat, warmup),
+                             capture_output=True, text=True, check=False)
+    if not path.is_file():
+        raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    results = report.get("results", [])
+    ok = sum(row.get("status") == "ok" for row in results)
+    for row in results:
+        if row.get("status") != "ok":
+            continue
+        number = row.get("id")
+        digest = row.get("result_sha256")
+        if type(number) is not int or number not in range(1, 23):
+            raise ValueError("Invalid TPC-H query ID in partition report")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError(f"Missing result fingerprint for Q{number:02}")
+        if number in fingerprints and fingerprints[number] != digest:
+            raise ValueError(f"Query Q{number:02} changed answers across partitions")
+        fingerprints[number] = digest
+    complete = (len(results) == 22 and ok == 22 and process.returncode == 0
+                and {row.get("id") for row in results} == set(range(1, 23)))
+    total = None
+    if complete:
+        times = [row.get("median_ms") for row in results]
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+               for value in times):
+            raise ValueError(f"Invalid median in {n}-partition full-suite report")
+        total = round(math.fsum(times), 3)
+    return {"partitions": n, "queries_attempted": len(results),
+                           "queries_ok": ok, "runner_exit": process.returncode,
+                           "sum_median_ms": total, "report": path.name}
+
 
 def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
     if repeat < 1 or warmup < 0:
