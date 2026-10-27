@@ -29,7 +29,10 @@ fn splits_large_partitioned_exports_into_multiple_parquet_parts() -> TestResult 
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "parquet"))
         .count();
-    assert!(parquet_files >= 2, "expected multiple Parquet parts, found {parquet_files}");
+    assert!(
+        parquet_files >= 2,
+        "expected multiple Parquet parts, found {parquet_files}"
+    );
 
     let read = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--parquet")
@@ -62,9 +65,7 @@ fn validates_export_file_size_options() -> TestResult {
         .args(["--sql", "SELECT 1", "--output-rows-per-file", "2"])
         .output()?;
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("requires a file export")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a file export"));
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args([
             "--sql",
