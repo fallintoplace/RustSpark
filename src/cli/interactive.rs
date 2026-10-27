@@ -77,7 +77,7 @@ async fn execute_interactive_statement(
     super::with_query_timeout(args.query_timeout, execute_script(session, query, args)).await
 }
 
-async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str) {
+async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str, timer_on: bool) {
     // Invalid SQL is reported without terminating the interactive session.
     let statements = match DFParser::parse_sql(sql) {
         Ok(statements) => statements,
@@ -88,7 +88,12 @@ async fn execute_pending_sql(session: &RustSparkSession, args: &Args, sql: &str)
     };
     for statement in statements {
         let query = statement.to_string();
-        if let Err(error) = execute_interactive_statement(session, args, &query).await {
+        let started = std::time::Instant::now();
+        let result = execute_interactive_statement(session, args, &query).await;
+        if timer_on {
+            eprintln!("Time: {:.3} ms", started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        if let Err(error) = result {
             eprintln!("SQL error: {error}");
         }
     }
@@ -165,6 +170,7 @@ pub(super) async fn run_interactive(
     let mut pending = String::new();
     let mut line = String::new();
     let mut terminator = SqlTerminatorScanner::default();
+    let mut timer_on = false;
 
     loop {
         if show_prompt {
@@ -184,7 +190,17 @@ pub(super) async fn run_interactive(
             line = line.trim_start_matches('\u{feff}').to_owned();
         }
         if pending.trim().is_empty() {
-            match dispatch_shell_command(session, line.trim()).await {
+            let command = line.trim();
+            if command == ".timer" || command.starts_with(".timer ") {
+                match command {
+                    ".timer on" => timer_on = true,
+                    ".timer off" => timer_on = false,
+                    ".timer" => eprintln!("Timer: {}", if timer_on { "on" } else { "off" }),
+                    _ => eprintln!("Shell error: use .timer on or .timer off"),
+                }
+                continue;
+            }
+            match dispatch_shell_command(session, command).await {
                 ShellAction::Exit => break,
                 ShellAction::Continue => continue,
                 ShellAction::Sql => {}
@@ -197,7 +213,7 @@ pub(super) async fn run_interactive(
 
         let query = std::mem::take(&mut pending);
         terminator = SqlTerminatorScanner::default();
-        execute_pending_sql(session, args, &query).await;
+        execute_pending_sql(session, args, &query, timer_on).await;
     }
 
     if !pending.trim().is_empty() {
