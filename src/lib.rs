@@ -74,6 +74,8 @@ mod sql_compat_bit_get;
 mod sql_compat_shiftrightunsigned;
 #[path = "sql_compat/equal_null.rs"]
 mod sql_compat_equal_null;
+#[path = "sql_compat/sec.rs"]
+mod sql_compat_sec;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -188,6 +190,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_bit_get::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
+        context.register_udf(sql_compat_sec::udf());
         Self { context }
     }
 
