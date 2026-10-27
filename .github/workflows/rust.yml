@@ -28,6 +28,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   check:
+    needs: format
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -42,6 +43,7 @@ jobs:
       - run: cargo test --all-targets --locked
 
   compatibility:
+    needs: format
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
