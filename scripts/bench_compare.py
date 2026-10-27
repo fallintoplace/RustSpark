@@ -7,6 +7,7 @@ and writes NDJSON. The metrics do not measure warm engine throughput.
 import argparse
 import importlib.util
 import json
+import math
 import pathlib
 import platform
 import statistics
@@ -83,6 +84,9 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
     samples = []
     for iteration in range(warmup + repeat):
         elapsed, digest, actual = execute(command, timeout)
+        if (isinstance(elapsed, bool) or not isinstance(elapsed, (float, int))
+                or not math.isfinite(elapsed) or elapsed < 0):
+            raise ValueError(f"Invalid benchmark duration for {engine}/{workload}: {elapsed}")
         if digest != expected_digest:
             raise RuntimeError(f"Incorrect result for {engine}/{workload}: {actual!r}")
         if iteration >= warmup:
