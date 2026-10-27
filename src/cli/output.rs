@@ -107,13 +107,12 @@ async fn write_delimited<W: Write>(
     Ok(())
 }
 
-
 fn escape_vertical_value(value: &str) -> String {
     value
         .replace('\\', "\\\\")
-        .replace('\\r', "\\r")
-        .replace('\\n', "\\n")
-        .replace('\\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
 }
 
 // Present one row at a time, even for batches with very wide schemas.
