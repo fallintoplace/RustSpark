@@ -3,6 +3,7 @@
 import datetime
 from decimal import Decimal
 import unittest
+from unittest import mock
 
 import bench_tpch_verify as verify
 
@@ -13,6 +14,17 @@ class ComparisonTests(unittest.TestCase):
         b = [{"n": 2}, {"n": 2}, {"n": 1}]
         self.assertTrue(verify.equal_rows(a, b, Decimal("0"), ordered=False))
         self.assertFalse(verify.equal_rows(a, b, Decimal("0"), ordered=True))
+
+    def test_identical_large_multisets_avoid_pairwise_search(self):
+        expected = [{"n": i % 37, "text": str(i % 5)} for i in range(2000)]
+        actual = list(reversed(expected))
+        with mock.patch.object(verify, "same_row", side_effect=AssertionError("slow path")):
+            self.assertTrue(verify.equal_rows(actual, expected, Decimal("0.000001"), False))
+        actual[0] = {"n": -1, "text": "-1"}
+        self.assertFalse(verify.equal_rows(actual, expected, Decimal("0"), False))
+
+    def test_unhashable_values_use_tolerance_aware_path(self):
+        self.assertTrue(verify.equal_rows([{"a": [1, 2]}], [{"a": [1, 2]}], Decimal(0), False))
 
     def test_numeric_tolerance(self):
         self.assertTrue(verify.same_value(Decimal("1.000001"), 1, Decimal("0.000002")))
