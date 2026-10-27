@@ -531,6 +531,52 @@ impl RustSparkSession {
         left_frame.join_on(right_frame, join_type, predicates)
     }
 
+    /// Join numeric values that differ by no more than an absolute tolerance.
+    ///
+    /// Comparisons cast both inputs to DOUBLE and do not match NULLs. This
+    /// non-equality join can be expensive for large unfiltered inputs.
+    pub async fn join_tables_within_tolerance(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        left_value: &str,
+        right_value: &str,
+        tolerance: f64,
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+
+        if left_value.trim().is_empty() || right_value.trim().is_empty() {
+            return Err(DataFusionError::Plan(
+                "Tolerance joins require non-empty value columns".into(),
+            ));
+        }
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(DataFusionError::Plan(
+                "Tolerance must be finite and non-negative".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "Tolerance joins support inner and left joins only".into(),
+                ));
+            }
+        };
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let l = format!("CAST({left_alias}.{} AS DOUBLE)", quote_join_identifier(left_value));
+        let r = format!("CAST({right_alias}.{} AS DOUBLE)", quote_join_identifier(right_value));
+        let query = format!(
+            "SELECT * FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {l} >= {r} - {tolerance} AND {l} <= {r} + {tolerance}",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join registered tables on equality keys and an extra ON predicate.
     ///
     /// The filter is part of the join condition, not a post-join WHERE clause.
