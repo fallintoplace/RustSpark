@@ -179,14 +179,21 @@ async fn write_arrow_stream<W: Write>(
 }
 
 fn escape_markdown_cell(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('\r', " ")
-        .replace('\n', "<br>")
+    // One allocation instead of rebuilding the string for each escape kind.
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\\' => escaped.push_str("\\\\"),
+            '|' => escaped.push_str("\\|"),
+            '\r' => escaped.push(' '),
+            '\n' => escaped.push_str("<br>"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 // Keep only one record batch and the current cell in memory.
