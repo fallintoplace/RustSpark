@@ -80,6 +80,9 @@ struct Args {
     )]
     parquet_reorder_filters: bool,
 
+    #[arg(long = "parquet-binary-as-string")]
+    parquet_binary_as_string: bool,
+
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
 

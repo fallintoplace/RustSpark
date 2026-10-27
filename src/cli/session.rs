@@ -11,6 +11,7 @@ fn build_session_config(args: &Args) -> SessionConfig {
         let parquet = &mut config.options_mut().execution.parquet;
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
+        parquet.binary_as_string = args.parquet_binary_as_string;
     }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
