@@ -18,6 +18,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }
+    if let Some(files) = args.metadata_fetch_concurrency {
+        config = config.set_usize("datafusion.execution.meta_fetch_concurrency", files);
+    }
     config
 }
 
