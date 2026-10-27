@@ -572,6 +572,13 @@ fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventor
     Ok(BackupInventory { tables, copies })
 }
 
+fn copy_backup_chunk(copies: &[(PathBuf, PathBuf)]) -> std::io::Result<()> {
+    for (source, target) in copies {
+        fs::copy(source, target)?;
+    }
+    Ok(())
+}
+
 // Copy independent immutable Parquet parts with a bounded worker count.
 fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>> {
     // Large backups can copy immutable parts independently. Bound the number
@@ -580,21 +587,14 @@ fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>
         .map_or(1, |count| count.get())
         .min(8);
     if copies.len() < 8 || workers == 1 {
-        for (source, target) in copies {
-            fs::copy(source, target)?;
-        }
+        copy_backup_chunk(copies)?;
     } else {
         std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
             let chunk_size = copies.len().div_ceil(workers);
             let jobs = copies
                 .chunks(chunk_size)
                 .map(|chunk| {
-                    scope.spawn(move || -> std::io::Result<()> {
-                        for (source, target) in chunk {
-                            fs::copy(source, target)?;
-                        }
-                        Ok(())
-                    })
+                    scope.spawn(move || copy_backup_chunk(chunk))
                 })
                 .collect::<Vec<_>>();
             for job in jobs {

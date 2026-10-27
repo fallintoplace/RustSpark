@@ -7,7 +7,6 @@ import json
 import math
 from pathlib import Path
 import platform
-import re
 import statistics
 import subprocess
 import time
@@ -51,7 +50,7 @@ def choose_queries(queries: list[str], only: str | None) -> list[tuple[int, str]
     return [(number, queries[number - 1]) for number in parse_query_numbers(only, len(queries))]
 
 
-def command(binary: str, parquet: Path, sql: str) -> list[str]:
+def command(binary: str, parquet: Path, sql: str, engine_args: tuple[str, ...] = ()) -> list[str]:
     return [
         binary,
         "--parquet", str(parquet),
@@ -60,7 +59,7 @@ def command(binary: str, parquet: Path, sql: str) -> list[str]:
         "--sql-view", VIEW_SQL,
         "--sql", sql,
         "--stdout-format", "json",
-    ]
+    ] + list(engine_args)
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -77,27 +76,71 @@ def reject_nonfinite(value: str):
 
 
 def has_top_level_order_by(sql: str) -> bool:
-    # Ignore quoted values, identifiers, and SQL comments before scanning keywords.
-    masked = re.sub(
-        r"""'(?:''|[^'])*'|"(?:\"\"|[^"])*"|--[^\n]*|/\*.*?\*/""",
-        " ",
-        sql,
-        flags=re.DOTALL,
-    )
+    # Track nested SQL comments and quoted identifiers instead of matching
+    # ORDER BY text that is not a keyword in the outer query.
     depth = 0
+    comment_depth = 0
+    line_comment = False
+    quoted = None
     previous = ""
-    for token in re.findall(r"[A-Za-z_]+|[()]", masked):
-        if token == "(":
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if comment_depth:
+            if char == "/" and following == "*":
+                comment_depth += 1
+                index += 2
+            elif char == "*" and following == "/":
+                comment_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if quoted is not None:
+            if char == quoted:
+                if following == quoted:
+                    index += 2
+                    continue
+                quoted = None
+            index += 1
+            continue
+        if char == "-" and following == "-":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            comment_depth = 1
+            index += 2
+            continue
+        if char in ("'", '"', "`"):
+            quoted = char
+            index += 1
+            continue
+        if char == "(":
             depth += 1
-        elif token == ")":
+        elif char == ")":
             depth = max(0, depth - 1)
-        elif depth == 0:
-            word = token.upper()
-            if previous == "ORDER" and word == "BY":
-                return True
-            previous = word
+        elif char.isascii() and (char.isalpha() or char == "_"):
+            end = index + 1
+            while end < len(sql) and sql[end].isascii() and (
+                sql[end].isalnum() or sql[end] == "_"
+            ):
+                end += 1
+            if depth == 0:
+                word = sql[index:end].upper()
+                if previous == "ORDER" and word == "BY":
+                    return True
+                previous = word
+            index = end
+            continue
+        index += 1
     return False
-
 
 def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
     rows = []
@@ -115,21 +158,27 @@ def result_signature(stdout: str, ordered: bool = False) -> tuple[str, int]:
     return digest, len(rows)
 
 
-def execute(binary: str, parquet: Path, sql: str, timeout: float) -> dict:
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
+def execute(
+    binary: str, parquet: Path, sql: str, timeout: float, engine_args: tuple[str, ...] = (),
+) -> dict:
     started = time.perf_counter()
     try:
         process = subprocess.run(
-            command(binary, parquet, sql),
+            command(binary, parquet, sql, engine_args),
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return {"error": f"Timed out after {timeout:g} seconds", "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+        return {"error": f"Timed out after {timeout:g} seconds", "elapsed_ms": _elapsed_ms(started)}
     except (OSError, UnicodeError) as error:
-        return {"error": str(error), "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
-    elapsed = round((time.perf_counter() - started) * 1000, 3)
+        return {"error": str(error), "elapsed_ms": _elapsed_ms(started)}
+    elapsed = _elapsed_ms(started)
     if process.returncode:
         return {"error": f"Exit {process.returncode}: {process.stderr.strip()[:4096]}", "elapsed_ms": elapsed}
     try:
@@ -145,12 +194,13 @@ def percentile(samples: list[float], fraction: float) -> float:
 
 def measure_query(
     binary: str, parquet: Path, number: int, sql: str, repeat: int, warmup: int, timeout: float,
+    engine_args: tuple[str, ...] = (),
 ) -> dict:
     times = []
     signature = None
     result_rows = None
     for run in range(repeat + warmup):
-        result = execute(binary, parquet, sql, timeout)
+        result = execute(binary, parquet, sql, timeout, engine_args)
         if "error" in result:
             return {
                 "id": number, "sql": sql, "status": "error",
@@ -177,7 +227,7 @@ def measure_query(
 
 def benchmark(
     binary: str, parquet: Path, query_file: Path, repeat: int, warmup: int,
-    timeout: float, only: str | None = None,
+    timeout: float, only: str | None = None, engine_args: tuple[str, ...] = (),
 ) -> dict:
     if repeat < 1 or warmup < 0 or not (math.isfinite(timeout) and timeout > 0):
         raise ValueError("repeat and timeout must be positive; warmup cannot be negative")
@@ -186,11 +236,12 @@ def benchmark(
     queries = read_queries(query_file)
     selected = choose_queries(queries, only)
     results = [
-        measure_query(binary, parquet, number, sql, repeat, warmup, timeout)
+        measure_query(binary, parquet, number, sql, repeat, warmup, timeout, engine_args)
         for number, sql in selected
     ]
     return {
         "binary": binary,
+        "engine_args": list(engine_args),
         "parquet": str(parquet.resolve()),
         "query_file": str(query_file.resolve()),
         "query_file_sha256": hashlib.sha256(query_file.read_bytes()).hexdigest(),
@@ -206,6 +257,24 @@ def benchmark(
     }
 
 
+def build_engine_args(args: argparse.Namespace) -> tuple[str, ...]:
+    engine_args = []
+    for flag, value in [
+        ("--batch-size", args.batch_size),
+        ("--target-partitions", args.target_partitions),
+        ("--memory-limit-mb", args.memory_limit_mb),
+    ]:
+        if value is not None:
+            if value <= 0:
+                raise ValueError(f"{flag} must be positive")
+            engine_args.extend([flag, str(value)])
+    if args.spill_dir is not None:
+        if not args.spill_dir.is_dir():
+            raise ValueError("--spill-dir must name an existing directory")
+        engine_args.extend(["--spill-dir", str(args.spill_dir)])
+    return tuple(engine_args)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="./target/release/rustspark")
@@ -216,11 +285,16 @@ def main(argv=None) -> int:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--json-out", type=Path, required=True)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--target-partitions", type=int)
+    parser.add_argument("--memory-limit-mb", type=int)
+    parser.add_argument("--spill-dir", type=Path)
     args = parser.parse_args(argv)
     try:
+        engine_args = build_engine_args(args)
         report = benchmark(
             args.binary, args.parquet, args.queries, args.repeat, args.warmup,
-            args.timeout, args.only,
+            args.timeout, args.only, engine_args,
         )
     except (OSError, UnicodeError, ValueError) as error:
         parser.error(str(error))

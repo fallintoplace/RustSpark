@@ -93,26 +93,26 @@ impl NamedInputKind {
             Self::Json => &args.json_tables,
         }
     }
-}
 
-async fn register_named_input(
-    session: &RustSparkSession,
-    args: &Args,
-    name: &str,
-    path: &Path,
-    kind: NamedInputKind,
-) -> datafusion::error::Result<()> {
-    match kind {
-        NamedInputKind::Csv => register_csv_input(session, args, name, path).await,
-        NamedInputKind::Parquet => {
-            session
-                .register_parquet_with_options(name, path, parquet_read_options(args))
-                .await
-        }
-        NamedInputKind::Json => {
-            session
-                .register_json_with_options(name, path, json_read_options(args))
-                .await
+    async fn register(
+        self,
+        session: &RustSparkSession,
+        args: &Args,
+        name: &str,
+        path: &Path,
+    ) -> datafusion::error::Result<()> {
+        match self {
+            Self::Csv => register_csv_input(session, args, name, path).await,
+            Self::Parquet => {
+                session
+                    .register_parquet_with_options(name, path, parquet_read_options(args))
+                    .await
+            }
+            Self::Json => {
+                session
+                    .register_json_with_options(name, path, json_read_options(args))
+                    .await
+            }
         }
     }
 }
@@ -135,7 +135,7 @@ async fn register_unnamed_input(
     let Some((path, kind)) = input else {
         return Ok(false);
     };
-    register_named_input(session, args, &args.table, path, kind).await?;
+    kind.register(session, args, &args.table, path).await?;
     Ok(true)
 }
 
@@ -167,7 +167,8 @@ async fn register_named_inputs(
         let session = Arc::clone(session);
         let args = Arc::clone(args);
         registration_jobs.spawn(async move {
-            register_named_input(&session, &args, &name, Path::new(&path), kind).await
+            kind.register(&session, &args, &name, Path::new(&path))
+                .await
         });
         finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
     }

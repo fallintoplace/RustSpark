@@ -50,6 +50,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     remote_inputs::register(&session).await?;
 
+    present_result(&session, &query).await
+}
+
+async fn present_result(
+    session: &RustSparkSession,
+    query: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     match std::env::var("RUSTSPARK_OUTPUT_ARROW") {
         Ok(path) => {
             if result_preview::configured_rows()?.is_some() {

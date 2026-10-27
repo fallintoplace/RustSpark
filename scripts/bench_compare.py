@@ -10,13 +10,13 @@ import json
 import math
 import pathlib
 import platform
-import statistics
 import subprocess
 import sys
 import tempfile
 import time
 
-from bench_rustspark import WORKLOADS, expected_results, output_signature, percentile, write_csv
+from bench_rustspark import WORKLOADS, expected_results, output_signature, write_csv
+from bench_stats import summarize_samples
 
 
 DUCKDB_WORKER = """
@@ -91,11 +91,22 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
             raise RuntimeError(f"Incorrect result for {engine}/{workload}: {actual!r}")
         if iteration >= warmup:
             samples.append(round(elapsed, 3))
+    return {**summarize_samples(samples), "result_sha256": expected_digest}
+
+
+def competitor_median_ratios(results, engines):
+    if "rustspark" not in results:
+        return {}
     return {
-        "median_ms": round(statistics.median(samples), 3),
-        "p95_ms": round(percentile(samples, 0.95), 3),
-        "samples_ms": samples,
-        "result_sha256": expected_digest,
+        engine: {
+            workload: (
+                round(measured["median_ms"]
+                      / results["rustspark"][workload]["median_ms"], 3)
+                if results["rustspark"][workload]["median_ms"] > 0 else None
+            )
+            for workload, measured in results[engine].items()
+        }
+        for engine in engines if engine != "rustspark"
     }
 
 
@@ -121,18 +132,7 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
                     engine, workload, command_for(engine, binary, csv, query),
                     expected[workload], repeat, warmup, timeout
                 )
-        ratios = {}
-        if "rustspark" in results:
-            for engine in engines:
-                if engine != "rustspark":
-                    ratios[engine] = {
-                        workload: (
-                            round(measured["median_ms"]
-                                  / results["rustspark"][workload]["median_ms"], 3)
-                            if results["rustspark"][workload]["median_ms"] > 0 else None
-                        )
-                        for workload, measured in results[engine].items()
-                    }
+        ratios = competitor_median_ratios(results, engines)
         return {
             "metric": "cold process startup + typed CSV registration + SQL + JSON output",
             "warning": "Not warm engine or distributed Spark throughput",

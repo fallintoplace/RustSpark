@@ -47,6 +47,10 @@ class WarmComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             warm.parse_result_line('{"name": "x", "name": "x"}')
 
+    def test_worker_output_rejects_float_overflow(self):
+        with self.assertRaises(ValueError):
+            warm.parse_result_line('{"elapsed_ms": 1e999}')
+
     def test_rejects_missing_timers_and_sql_failures(self):
         requests, _ = fixture(2)
         with self.assertRaisesRegex(ValueError, "timers"):
@@ -87,6 +91,17 @@ class WarmComparisonTests(unittest.TestCase):
         self.assertIn(".timer on", run.call_args.kwargs["input"])
         self.assertIn(".quit", run.call_args.kwargs["input"])
 
+    def test_benchmark_rejects_nonfinite_timeouts_before_launch(self):
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0):
+            with self.subTest(timeout=timeout):
+                with mock.patch.object(warm, "run_rustspark") as run:
+                    with self.assertRaisesRegex(ValueError, "timeout"):
+                        warm.benchmark(
+                            "bin", ["rustspark"], 2, 0, 1,
+                            timeout, 2, "local[2]",
+                        )
+                    run.assert_not_called()
+
     @mock.patch.object(warm, "run_rustspark")
     def test_benchmark_rejects_incorrect_engine_output(self, run):
         requests, samples = fixture(2)
@@ -94,6 +109,37 @@ class WarmComparisonTests(unittest.TestCase):
         run.return_value = samples
         with self.assertRaisesRegex(RuntimeError, "Incorrect result"):
             warm.benchmark("bin", ["rustspark"], 2, 0, 1, 10, 2, "local[2]")
+
+
+    @mock.patch.object(warm.importlib.util, "find_spec", return_value=None)
+    def test_duckdb_dependency_error(self, _find_spec):
+        with self.assertRaisesRegex(RuntimeError, "DuckDB"):
+            warm.run_duckdb(pathlib.Path("/tmp/input.csv"), [], 10)
+
+    def test_duckdb_uses_one_session_and_checks_results(self):
+        requests, samples = fixture(16)
+        result = mock.Mock(
+            returncode=0, stdout="\n".join(json.dumps(s) for s in samples), stderr=""
+        )
+        with mock.patch.object(warm.importlib.util, "find_spec", return_value=object()), \
+             mock.patch.object(warm.subprocess, "run", return_value=result) as command:
+            values = warm.run_duckdb(pathlib.Path("/tmp/input.csv"), requests, 10)
+        self.assertEqual(values, samples)
+        self.assertEqual(command.call_count, 1)
+        self.assertIn("read_csv", command.call_args.args[0][2])
+        self.assertEqual(warm.summarize(values, requests, 16, 0, 1)["scan_count"]["median_ms"], 1.0)
+
+    def test_duckdb_ratio_direction(self):
+        measurements = []
+        def fake_summarize(samples, requests, rows, warmup, repeat):
+            value = 10.0 if not measurements else 15.0
+            measurements.append(value)
+            return {name: {"median_ms": value} for name in WORKLOADS}
+        with mock.patch.object(warm, "run_rustspark", return_value=[]), \
+             mock.patch.object(warm, "run_duckdb", return_value=[]), \
+             mock.patch.object(warm, "summarize", side_effect=fake_summarize):
+            report = warm.benchmark("bin", ["rustspark", "duckdb"], 2, 0, 1, 10, 2, "local[2]")
+        self.assertEqual(set(report["duckdb_median_over_rustspark_median"].values()), {1.5})
 
     def test_validation_rejects_bad_runs(self):
         for cfg in [(0, 0, 1, 10, 2), (2, -1, 1, 10, 2),

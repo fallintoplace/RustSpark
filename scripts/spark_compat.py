@@ -86,6 +86,9 @@ def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
         json.loads(line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite)
         for line in stdout.splitlines() if line.strip()
     ]
+    # json.loads accepts a huge exponent (1e400) as infinity even when
+    # parse_constant rejects the explicit Infinity token.
+    json.dumps(objects, allow_nan=False)
     expected = set(columns)
     if len(expected) != len(columns) or any(
         not isinstance(obj, dict) or set(obj) != expected for obj in objects
@@ -95,17 +98,17 @@ def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
     return QueryResult(columns=columns, rows=rows)
 
 
+def _rustspark_cli_stdout(command: list[str], arguments: list[str]) -> str:
+    return subprocess.run(
+        command + arguments, capture_output=True, text=True, check=True, timeout=120,
+    ).stdout
+
+
 def rustspark_query(binary: str, sql: str):
     common = [binary, "--sql", sql]
-    described = subprocess.run(
-        common + ["--describe"], capture_output=True, text=True, check=True, timeout=120
-    )
-    columns = parse_rustspark_columns(described.stdout)
-    result = subprocess.run(
-        common + ["--stdout-format", "json"],
-        capture_output=True, text=True, check=True, timeout=120
-    )
-    return parse_rustspark_json(result.stdout, columns)
+    columns = parse_rustspark_columns(_rustspark_cli_stdout(common, ["--describe"]))
+    rows = _rustspark_cli_stdout(common, ["--stdout-format", "json"])
+    return parse_rustspark_json(rows, columns)
 
 
 def spark_query(session, sql: str):

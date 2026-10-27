@@ -95,6 +95,14 @@ def _validate(report):
     return results, workloads
 
 
+def _latency_rows(results, workloads, engines, metric):
+    return [
+        "| " + _cell(name) + " | " +
+        " | ".join(f"{results[engine][name][metric]:.3f}" for engine in engines) + " |"
+        for name in workloads
+    ]
+
+
 def render_report(report):
     """Render only actual measured values, preserving the harness's caveats."""
     results, workloads = _validate(report)
@@ -116,15 +124,11 @@ def render_report(report):
         "| Workload | " + " | ".join(_cell(engine) for engine in engines) + " |",
         "| --- | " + " | ".join("---:" for _ in engines) + " |",
     ]
-    for name in workloads:
-        values = [f"{results[engine][name]['median_ms']:.3f}" for engine in engines]
-        lines.append("| " + _cell(name) + " | " + " | ".join(values) + " |")
+    lines.extend(_latency_rows(results, workloads, engines, "median_ms"))
     lines.extend(["", "## p95 latency (ms, lower is better)", "",
                   "| Workload | " + " | ".join(_cell(engine) for engine in engines) + " |",
                   "| --- | " + " | ".join("---:" for _ in engines) + " |"])
-    for name in workloads:
-        values = [f"{results[engine][name]['p95_ms']:.3f}" for engine in engines]
-        lines.append("| " + _cell(name) + " | " + " | ".join(values) + " |")
+    lines.extend(_latency_rows(results, workloads, engines, "p95_ms"))
     if competitors:
         lines.extend(["", "## RustSpark speed ratio (competitor median / RustSpark median)", "",
                       "| Workload | " + " | ".join(_cell(f"vs {engine}") for engine in competitors) + " |",

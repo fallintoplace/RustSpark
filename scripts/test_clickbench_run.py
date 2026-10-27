@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import pathlib
 import subprocess
@@ -77,6 +78,15 @@ class QueryRunnerTests(unittest.TestCase):
             'SELECT n FROM (SELECT n FROM t ORDER BY n) AS nested'
         ))
         self.assertFalse(runner.has_top_level_order_by('SELECT "ORDER BY" FROM t'))
+        self.assertFalse(runner.has_top_level_order_by("SELECT `ORDER BY` FROM t"))
+        self.assertFalse(runner.has_top_level_order_by("SELECT order2by FROM t"))
+        self.assertFalse(runner.has_top_level_order_by("SELECT `a``ORDER BY` FROM t"))
+        self.assertFalse(runner.has_top_level_order_by(
+            "SELECT 1 /* outer /* nested */ ORDER BY false */"
+        ))
+        self.assertTrue(runner.has_top_level_order_by(
+            "SELECT 1 /* outer /* ORDER BY */ still comment */ ORDER BY 1"
+        ))
 
     def test_ordered_queries_reject_changed_row_order(self):
         first = subprocess.CompletedProcess([], 0, '{"n":1}\n{"n":2}\n', "")
@@ -123,7 +133,7 @@ class QueryRunnerTests(unittest.TestCase):
             source.write_bytes(b"test only")
             queries = root / "queries.sql"
             queries.write_text("SELECT 1;\nSELECT 2;\n", encoding="utf-8")
-            def measure(binary, parquet, number, sql, repeat, warmup, timeout):
+            def measure(binary, parquet, number, sql, repeat, warmup, timeout, engine_args):
                 return {"id": number, "status": "executed" if number == 1 else "error"}
             with mock.patch.object(runner, "measure_query", side_effect=measure) as measured:
                 report = runner.benchmark("bin", source, queries, 1, 0, 1)
@@ -139,6 +149,56 @@ class QueryRunnerTests(unittest.TestCase):
         with mock.patch.object(runner, "execute", side_effect=samples):
             result = runner.measure_query("bin", pathlib.Path("data"), 1, "SELECT 1;", 2, 0, 10)
         self.assertEqual(result["status"], "nondeterministic")
+
+    def test_cli_engine_options_are_forwarded_without_shell_interpolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            options = argparse.Namespace(
+                batch_size=4096,
+                target_partitions=8,
+                memory_limit_mb=512,
+                spill_dir=pathlib.Path(directory),
+            )
+            extra = runner.build_engine_args(options)
+            args = runner.command("bin", pathlib.Path("input.parquet"), "SELECT 1;", extra)
+            self.assertEqual(extra[:6], (
+                "--batch-size", "4096", "--target-partitions", "8",
+                "--memory-limit-mb", "512",
+            ))
+            self.assertEqual(args[-len(extra):], list(extra))
+            self.assertEqual(args[args.index("--sql") + 1], "SELECT 1;")
+
+    def test_rejects_invalid_engine_limits(self):
+        options = argparse.Namespace(
+            batch_size=0, target_partitions=None, memory_limit_mb=None, spill_dir=None,
+        )
+        with self.assertRaisesRegex(ValueError, "--batch-size"):
+            runner.build_engine_args(options)
+        options.batch_size = None
+        options.target_partitions = -1
+        with self.assertRaisesRegex(ValueError, "--target-partitions"):
+            runner.build_engine_args(options)
+        options.target_partitions = None
+        options.spill_dir = pathlib.Path("/path/that/does/not/exist")
+        with self.assertRaisesRegex(ValueError, "--spill-dir"):
+            runner.build_engine_args(options)
+
+    def test_report_retains_engine_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            data = root / "input.parquet"
+            queries = root / "queries.sql"
+            data.write_bytes(b"test-only")
+            queries.write_text("SELECT 1;\n", encoding="utf-8")
+            with mock.patch.object(
+                runner, "measure_query",
+                return_value={"id": 1, "status": "executed"},
+            ) as measure:
+                report = runner.benchmark(
+                    "bin", data, queries, 1, 0, 5,
+                    engine_args=("--target-partitions", "4"),
+                )
+            self.assertEqual(report["engine_args"], ["--target-partitions", "4"])
+            self.assertEqual(measure.call_args.args[-1], ("--target-partitions", "4"))
 
     def test_rejects_invalid_run_options(self):
         with self.assertRaisesRegex(ValueError, "repeat"):

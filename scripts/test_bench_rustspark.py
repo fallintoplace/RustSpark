@@ -75,6 +75,11 @@ class BenchmarkHarnessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     bench.output_signature(output)
 
+    def test_signature_rejects_float_overflow(self):
+        for output in ('{"value": 1e999}', '{"nested": {"value": -1e999}}'):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                bench.output_signature(output)
+
     def test_measure_workload_keeps_only_measured_runs(self):
         values = [(1.0, "same", []), (2.0, "same", []), (3.0, "same", [])]
         with mock.patch.object(bench, "execute", side_effect=values) as execute:
@@ -86,6 +91,16 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(result["median_ms"], 2.5)
         self.assertEqual(result["p95_ms"], 3.0)
         self.assertEqual(result["result_sha256"], "same")
+
+    def test_measure_workload_rejects_invalid_measurements(self):
+        for elapsed in (float("nan"), float("inf"), -1.0, True, "1.0"):
+            with self.subTest(elapsed=elapsed):
+                with mock.patch.object(bench, "execute", return_value=(elapsed, "same", [])):
+                    with self.assertRaisesRegex(ValueError, "Invalid benchmark duration"):
+                        bench.measure_workload(
+                            "unused", pathlib.Path("unused"), "scan_count",
+                            "SELECT 1", "same", 1, 0, 20,
+                        )
 
     def test_measure_workload_rejects_mismatched_output(self):
         values = [(1.0, "first", []), (2.0, "second", [])]

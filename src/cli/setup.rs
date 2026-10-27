@@ -7,8 +7,6 @@ use rustspark::RustSparkSession;
 
 use super::{Args, parse_named_view, parse_union_by_name};
 
-type ParsedUnionDefinition<'a> = (&'a str, Vec<&'a str>, bool);
-
 fn ensure_unique_name(
     names: &mut HashSet<String>,
     name: &str,
@@ -49,6 +47,8 @@ fn union_definitions(args: &Args) -> impl Iterator<Item = (&str, bool)> {
                 .map(|definition| (definition.as_str(), true)),
         )
 }
+
+type ParsedUnionDefinition<'a> = (&'a str, Vec<&'a str>, bool);
 
 fn parsed_union_definitions(
     args: &Args,
