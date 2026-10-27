@@ -26,3 +26,4 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p 'test_bench_compare.py'
       - run: python3 -m unittest discover -s scripts -p 'test_bench_warm_compare.py'
       - run: python3 -m unittest discover -s scripts -p 'test_bench_report.py'
+      - run: python3 -m unittest discover -s scripts -p 'test_sql_result_verify.py'
