@@ -621,11 +621,7 @@ impl RustSparkSession {
     ///
     /// Unknown, repeated, or all-column exclusions are rejected. A zero-length
     /// exclusion list returns the original lazy table.
-    pub async fn select_columns_except(
-        &self,
-        table: &str,
-        excluded: &[&str],
-    ) -> Result<DataFrame> {
+    pub async fn select_columns_except(&self, table: &str, excluded: &[&str]) -> Result<DataFrame> {
         let dataframe = self.table(table).await?;
         if excluded.is_empty() {
             return Ok(dataframe);
