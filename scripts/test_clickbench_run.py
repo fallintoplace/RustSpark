@@ -79,6 +79,7 @@ class QueryRunnerTests(unittest.TestCase):
         ))
         self.assertFalse(runner.has_top_level_order_by('SELECT "ORDER BY" FROM t'))
         self.assertFalse(runner.has_top_level_order_by("SELECT `ORDER BY` FROM t"))
+        self.assertFalse(runner.has_top_level_order_by("SELECT order2by FROM t"))
         self.assertFalse(runner.has_top_level_order_by("SELECT `a``ORDER BY` FROM t"))
         self.assertFalse(runner.has_top_level_order_by(
             "SELECT 1 /* outer /* nested */ ORDER BY false */"
