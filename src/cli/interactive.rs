@@ -183,6 +183,19 @@ pub(super) async fn run_interactive(
         if pending.is_empty() && line.starts_with('\u{feff}') {
             line = line.trim_start_matches('\u{feff}').to_owned();
         }
+        if line.trim() == ".cancel"
+            && terminator.quote.is_none()
+            && terminator.block_depth == 0
+        {
+            if pending.trim().is_empty() {
+                eprintln!("No pending SQL");
+            } else {
+                pending.clear();
+                terminator = SqlTerminatorScanner::default();
+                eprintln!("Pending SQL cancelled");
+            }
+            continue;
+        }
         if pending.trim().is_empty() {
             match dispatch_shell_command(session, line.trim()).await {
                 ShellAction::Exit => break,
