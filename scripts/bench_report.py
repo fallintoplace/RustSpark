@@ -36,6 +36,9 @@ def _validate(report):
         raise ValueError("Benchmark metric is missing")
     if not isinstance(report.get("warning"), str) or not report["warning"].strip():
         raise ValueError("Benchmark warning is missing")
+    repeat = report.get("repeat")
+    if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
+        raise ValueError("Benchmark repeat must be a positive integer")
     rustspark = results["rustspark"]
     if not isinstance(rustspark, dict) or not rustspark:
         raise ValueError("RustSpark workloads are missing")
@@ -52,8 +55,8 @@ def _validate(report):
             if p95 + 0.001 < median:
                 raise ValueError(f"p95 is smaller than median for {engine}/{workload}")
             samples = entry.get("samples_ms")
-            if not isinstance(samples, list) or not samples:
-                raise ValueError(f"Missing samples for {engine}/{workload}")
+            if not isinstance(samples, list) or len(samples) != repeat:
+                raise ValueError(f"Expected {repeat} samples for {engine}/{workload}")
             for index, sample in enumerate(samples):
                 _number(sample, f"{engine}/{workload} sample {index}")
             measured_median = round(statistics.median(samples), 3)

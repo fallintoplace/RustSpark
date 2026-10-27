@@ -1,4 +1,3 @@
-import copy
 import json
 import pathlib
 import sys
@@ -50,6 +49,12 @@ class BenchmarkReportTests(unittest.TestCase):
         sample = report()
         del sample["results"]["spark"]["group_by"]
         with self.assertRaisesRegex(ValueError, "Workloads differ"):
+            bench_report.render_report(sample)
+
+    def test_rejects_short_sample_lists(self):
+        sample = report()
+        sample["results"]["spark"]["scan_count"]["samples_ms"].pop()
+        with self.assertRaisesRegex(ValueError, "Expected 2 samples"):
             bench_report.render_report(sample)
 
     def test_rejects_mismatched_result_hashes(self):
