@@ -297,11 +297,8 @@ struct Args {
     #[arg(long = "output-rows-per-file", value_name = "ROWS", value_parser = parse_output_rows_per_file, conflicts_with = "output_single_file")]
     output_rows_per_file: Option<usize>,
 
-    #[arg(
-        long = "parquet-compression",
-        value_name = "CODEC",
-        requires = "output_parquet"
-    )]
+    /// Select the codec for --output-parquet or --save-table.
+    #[arg(long = "parquet-compression", value_name = "CODEC")]
     parquet_compression: Option<String>,
 }
 
