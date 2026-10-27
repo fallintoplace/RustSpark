@@ -39,8 +39,9 @@ cargo run --manifest-path integrations/ballista/Cargo.toml
 
 - This is a separate, opt-in binary, not `rustspark --distributed`.
 - Local-only input paths do not work on remote executors without shared storage.
-- Distributed writes, cancellation, authentication, timeout propagation, and
-  scheduling policies are not exposed by this example.
+- Distributed writes, server-side cancellation, authentication, timeout
+  propagation, and scheduling policies are not exposed by this example.
+  Client deadlines are described in [query-deadline.md](docs/query-deadline.md).
 - A successful result does not establish that arbitrary SQL is compatible with
   Spark mainline, or that distributed performance is faster than local execution.
 - Run the isolated integration manually using the instructions above. The
