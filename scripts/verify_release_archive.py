@@ -55,14 +55,7 @@ def archive_contents(path: pathlib.Path, expected_sizes: dict[str, int] | None =
     return entries
 
 
-def verify_archive(archive: pathlib.Path, binary: pathlib.Path,
-                   repo_root: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
-    expected = {
-        "README.md": (repo_root / "README.md").read_bytes(),
-        "LICENSE": (repo_root / "LICENSE").read_bytes(),
-        binary.name: binary.read_bytes(),
-    }
-    entries = archive_contents(archive, {name: len(contents) for name, contents in expected.items()})
+def _validate_archive_entries(entries, expected, archive, binary):
     if set(entries) != set(expected):
         raise ValueError(
             f"Archive members differ: expected {sorted(expected)}, got {sorted(entries)}"
@@ -73,6 +66,18 @@ def verify_archive(archive: pathlib.Path, binary: pathlib.Path,
     mode = entries[binary.name][1]
     if archive.name.endswith(".tar.gz") and not mode & 0o111:
         raise ValueError("Packaged Unix binary lost its executable permissions")
+    return mode
+
+
+def verify_archive(archive: pathlib.Path, binary: pathlib.Path,
+                   repo_root: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
+    expected = {
+        "README.md": (repo_root / "README.md").read_bytes(),
+        "LICENSE": (repo_root / "LICENSE").read_bytes(),
+        binary.name: binary.read_bytes(),
+    }
+    entries = archive_contents(archive, {name: len(contents) for name, contents in expected.items()})
+    mode = _validate_archive_entries(entries, expected, archive, binary)
     unpacked = destination / binary.name
     unpacked.write_bytes(entries[binary.name][0])
     if archive.name.endswith(".tar.gz"):

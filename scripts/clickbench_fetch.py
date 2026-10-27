@@ -24,16 +24,21 @@ def git_blob_sha1(data: bytes) -> str:
     return hashlib.sha1(prefix + data).hexdigest()
 
 
-def verify_queries(data: bytes) -> None:
-    if len(data) > MAX_BYTES:
-        raise ValueError("ClickBench corpus exceeds the size limit")
-    if git_blob_sha1(data) != UPSTREAM_BLOB_SHA1:
-        raise ValueError("ClickBench query corpus hash does not match the pinned upstream blob")
+def _verify_query_statements(data: bytes) -> None:
     lines = [line.strip() for line in data.decode("utf-8").splitlines() if line.strip()]
     if len(lines) != QUERY_COUNT:
         raise ValueError(f"Expected {QUERY_COUNT} queries, found {len(lines)}")
     if any(not line.upper().startswith("SELECT ") or not line.endswith(";") for line in lines):
         raise ValueError("ClickBench corpus must contain one SELECT statement per line")
+
+
+
+def verify_queries(data: bytes) -> None:
+    if len(data) > MAX_BYTES:
+        raise ValueError("ClickBench corpus exceeds the size limit")
+    if git_blob_sha1(data) != UPSTREAM_BLOB_SHA1:
+        raise ValueError("ClickBench query corpus hash does not match the pinned upstream blob")
+    _verify_query_statements(data)
 
 
 def fetch_queries() -> bytes:
