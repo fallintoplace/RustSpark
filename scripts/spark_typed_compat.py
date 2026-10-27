@@ -14,7 +14,12 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from spark_compat import QueryResult, compare
+from spark_compat import (
+    QueryResult,
+    compare,
+    parse_rustspark_json,
+    parse_rustspark_schema_fields,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests/compatibility/spark_typed_sql.json"
@@ -52,19 +57,12 @@ def canonical_type(value: str) -> str:
 
 
 def parse_rustspark_description(stdout: str) -> tuple[list[str], list[str], list[bool]]:
-    fields = [line.rsplit("\t", 2) for line in stdout.splitlines() if line.strip()]
-    if any(len(parts) != 3 or parts[2] not in ("NULL", "NOT NULL") for parts in fields):
-        raise ValueError("Invalid RustSpark schema description")
+    fields = parse_rustspark_schema_fields(stdout)
     return (
         [parts[0] for parts in fields],
         [canonical_type(parts[1]) for parts in fields],
         [parts[2] == "NULL" for parts in fields],
     )
-
-
-def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
-    objects = [json.loads(line) for line in stdout.splitlines() if line.strip()]
-    return QueryResult(columns, [[obj[column] for column in columns] for obj in objects])
 
 
 def rustspark_query(binary: str, sql: str) -> TypedResult:
