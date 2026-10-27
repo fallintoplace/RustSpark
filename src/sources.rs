@@ -232,6 +232,23 @@ fn file_paths<'a, P: AsRef<Path>>(paths: &'a [P], kind: &str) -> Result<Vec<&'a 
 }
 
 fn file_path(path: &Path) -> Result<&str> {
+    if path.as_os_str().is_empty() {
+        return Err(DataFusionError::Plan("File path cannot be empty".into()));
+    }
     path.to_str()
         .ok_or_else(|| DataFusionError::Execution("File path must be valid UTF-8".into()))
+}
+
+#[cfg(test)]
+mod file_path_tests {
+    use super::{file_path, file_paths};
+    use std::path::Path;
+
+    #[test]
+    fn rejects_empty_single_and_multiple_file_paths() {
+        assert!(file_path(Path::new("")).unwrap_err().to_string().contains("empty"));
+        assert!(file_paths(&[Path::new("")], "CSV").is_err());
+        assert!(file_paths::<&Path>(&[], "Parquet").is_err());
+        assert_eq!(file_path(Path::new("data.csv")).unwrap(), "data.csv");
+    }
 }
