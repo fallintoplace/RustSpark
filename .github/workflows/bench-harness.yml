@@ -18,6 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m unittest discover -s scripts -p 'test_bench_rustspark.py'
+      - run: python3 -m unittest discover -s scripts -p 'test_clickbench_*.py'
       - run: python3 -m unittest discover -s scripts -p 'test_bench_compare.py'
       - run: python3 -m unittest discover -s scripts -p 'test_bench_warm_compare.py'
       - run: python3 -m unittest discover -s scripts -p 'test_bench_report.py'
