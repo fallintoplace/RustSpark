@@ -435,6 +435,13 @@ impl RustSparkSession {
         dataframe.select_columns(columns)
     }
 
+    /// Return the unique values from a registered column as a lazy DataFrame.
+    ///
+    /// SQL DISTINCT preserves one NULL value; result order is not guaranteed.
+    pub async fn distinct_column_values(&self, table: &str, column: &str) -> Result<DataFrame> {
+        self.select_columns(table, &[column]).await?.distinct()
+    }
+
     fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
         use std::collections::HashSet;
 
