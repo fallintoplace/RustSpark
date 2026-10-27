@@ -51,6 +51,15 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result["samples_ms"], [2.0, 3.0])
         self.assertEqual(result["median_ms"], 2.5)
 
+    def test_rejects_invalid_benchmark_durations(self):
+        for duration in (-1.0, float("nan"), float("inf"), True):
+            with mock.patch.object(bench_compare, "execute",
+                                   return_value=(duration, "ok", [])):
+                with self.assertRaisesRegex(ValueError, "Invalid benchmark duration"):
+                    bench_compare.measure_engine_workload(
+                        "rustspark", "scan_count", ["binary"], "ok", 1, 0, 10
+                    )
+
     def test_invalid_sample_config(self):
         for config in [(0, 1, 0, 1), (1, 0, 0, 1), (1, 1, -1, 1), (1, 1, 0, 0)]:
             with self.assertRaises(ValueError):
