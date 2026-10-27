@@ -7,7 +7,8 @@ async fn pmod_works_with_rows_and_nulls() -> Result<(), Box<dyn std::error::Erro
     let batches = session
         .sql(
             "SELECT PMOD(n, d) AS result FROM \
-             (VALUES (0, -7, 3), (1, 7, 3), (2, 4, 0), (3, NULL, 3)) AS t(idx, n, d) \
+             (VALUES (0, -7, 3), (1, 7, 3), (2, 4, 0), (3, NULL, 3), \
+                     (4, 7, -3), (5, -7, -3)) AS t(idx, n, d) \
              ORDER BY idx",
         )
         .await?
@@ -22,7 +23,7 @@ async fn pmod_works_with_rows_and_nulls() -> Result<(), Box<dyn std::error::Erro
             .unwrap();
         result.extend(column.iter());
     }
-    assert_eq!(result, vec![Some(2), Some(1), None, None]);
+    assert_eq!(result, vec![Some(2), Some(1), None, None, Some(1), Some(-1)]);
     Ok(())
 }
 
