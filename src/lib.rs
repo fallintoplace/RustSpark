@@ -1226,6 +1226,62 @@ impl RustSparkSession {
         left_frame.join(right_frame, join_type, &left_keys, &right_keys, None)
     }
 
+    /// Join registered tables with NULL-safe equality on key pairs.
+    ///
+    /// Unlike ordinary equality joins, two NULL keys match. A NULL key does
+    /// not match a non-NULL key. Each side keeps its columns, like an ON join.
+    /// The returned DataFrame remains lazy.
+    pub async fn join_tables_null_safe(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+        use std::fmt::Write as _;
+
+        if keys.is_empty()
+            || keys.iter().any(|(left_key, right_key)| {
+                left_key.trim().is_empty() || right_key.trim().is_empty()
+            })
+        {
+            return Err(DataFusionError::Plan(
+                "join_tables_null_safe requires one or more non-empty key pairs".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            JoinType::Right => "RIGHT",
+            JoinType::Full => "FULL OUTER",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "join_tables_null_safe supports inner and outer joins only".into(),
+                ));
+            }
+        };
+        let mut predicates = String::with_capacity(keys.len() * 96);
+        for (left_key, right_key) in keys {
+            if !predicates.is_empty() {
+                predicates.push_str(" AND ");
+            }
+            write!(
+                &mut predicates,
+                "\"__rustspark_left\".{} IS NOT DISTINCT FROM \"__rustspark_right\".{}",
+                quote_join_identifier(left_key),
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let query = format!(
+            "SELECT * FROM {} AS \"__rustspark_left\" {operator} JOIN {} AS \"__rustspark_right\" ON {predicates}",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     async fn union_registered_tables(&self, names: &[&str], by_name: bool) -> Result<DataFrame> {
         if names.is_empty() {
             let operation = if by_name {
