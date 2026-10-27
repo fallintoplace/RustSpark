@@ -790,6 +790,59 @@ impl RustSparkSession {
         dataframe.select(projection)
     }
 
+    /// Add a one-based row number column using a window function.
+    ///
+    /// The supplied sort order determines numbering, with NULLs first for
+    /// ascending keys and last for descending keys. Add a unique tie-breaker
+    /// for stable numbers. The output is lazy and the input is unchanged.
+    pub async fn with_row_numbers(
+        &self,
+        table: &str,
+        output_column: &str,
+        order: &[(&str, bool)],
+    ) -> Result<DataFrame> {
+        if output_column.is_empty() || output_column.trim() != output_column {
+            return Err(DataFusionError::Plan(
+                "with_row_numbers requires an unpadded output column name".into(),
+            ));
+        }
+        if order.is_empty() {
+            return Err(DataFusionError::Plan(
+                "with_row_numbers requires at least one sort key".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        if dataframe
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name().eq_ignore_ascii_case(output_column))
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Row number column already exists: {output_column}"
+            )));
+        }
+        // Reuse the same key and duplicate checks as sort_rows without
+        // executing the resulting plan.
+        Self::sort_dataframe(dataframe, order)?;
+        let ordering = order
+            .iter()
+            .map(|(name, ascending)| {
+                let direction = if *ascending { "ASC" } else { "DESC" };
+                let nulls = if *ascending { "FIRST" } else { "LAST" };
+                format!("{} {direction} NULLS {nulls}", quote_join_identifier(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source =
+            quote_catalog_table(table, "with_row_numbers requires a non-empty table path")?;
+        let alias = quote_join_identifier(output_column);
+        self.sql_read_only(&format!(
+            "SELECT *, ROW_NUMBER() OVER (ORDER BY {ordering}) AS {alias} FROM {source}"
+        ))
+        .await
+    }
+
     pub async fn register_table_alias(&self, alias: &str, source: &str) -> Result<()> {
         let dataframe = self.table(source).await?;
         self.register_dataframe(alias, dataframe)
