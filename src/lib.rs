@@ -52,6 +52,8 @@ mod sql_compat_try_divide;
 mod sql_compat_try_mod;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "sql_compat/sec.rs"]
+mod sql_compat_sec;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -155,6 +157,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_try_divide::udf());
+        context.register_udf(sql_compat_sec::udf());
         Self { context }
     }
 
