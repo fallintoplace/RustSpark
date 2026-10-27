@@ -59,8 +59,15 @@ def run_smoke(mode: str, client: str | None = None, timeout: int = 300) -> None:
         orders, rates = write_fixtures(pathlib.Path(temp))
         env = os.environ.copy()
         # A developer's local query settings must not change the smoke workload.
-        for name in ("RUSTSPARK_PARQUET", "RUSTSPARK_MAX_ROWS",
-                     "RUSTSPARK_QUERY_TIMEOUT_SECS", "RUSTSPARK_INPUTS_FILE"):
+        for name in (
+            "RUSTSPARK_PARQUET",
+            "RUSTSPARK_MAX_ROWS",
+            "RUSTSPARK_QUERY_TIMEOUT_SECS",
+            "RUSTSPARK_INPUTS_FILE",
+            "RUSTSPARK_SCHEDULER_URLS",
+            "RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS",
+            "RUSTSPARK_OUTPUT_ARROW",
+        ):
             env.pop(name, None)
         env.update({
             "RUSTSPARK_INPUTS": f"csv:orders={orders};csv:rates={rates}",
