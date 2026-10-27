@@ -312,6 +312,7 @@ cargo run -- --csv tests/fixtures/sales.csv --database-dir /tmp/rustspark-db \
 An omitted codec retains DataFusion's default. The flag also continues to
 work with `--output-parquet`. It does not change the writer settings for
 SQL `CREATE TABLE`, `INSERT INTO`, or `--compact-table`.
+
 Saved tables are written to a staging directory and published after the export
 succeeds. Existing table names are rejected, and unfinished staging directories
 are ignored at startup. With `--database-dir`, SQL `CREATE TABLE AS SELECT`
