@@ -21,6 +21,8 @@ mod sources;
 mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
+#[path = "features/unpivot_columns.rs"]
+mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
 #[path = "sql_compat/nullifzero.rs"]
