@@ -107,6 +107,17 @@ async fn write_delimited<W: Write>(
     Ok(())
 }
 
+fn display_cell(
+    column: &datafusion::arrow::array::ArrayRef,
+    row: usize,
+) -> datafusion::arrow::error::Result<String> {
+    if column.is_null(row) {
+        Ok("NULL".to_owned())
+    } else {
+        datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)
+    }
+}
+
 fn escape_vertical_value(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -129,11 +140,7 @@ async fn write_vertical<W: Write>(
             writeln!(output, "--- Row {row_number} ---")?;
             for (index, field) in schema.fields().iter().enumerate() {
                 let column = batch.column(index);
-                let value = if column.is_null(row) {
-                    "NULL".to_owned()
-                } else {
-                    datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)?
-                };
+                let value = display_cell(column, row)?;
                 writeln!(
                     output,
                     "{}: {}",
@@ -197,11 +204,7 @@ async fn write_markdown<W: Write>(
         for row in 0..batch.num_rows() {
             write!(output, "|")?;
             for column in batch.columns() {
-                let value = if column.is_null(row) {
-                    "NULL".to_owned()
-                } else {
-                    datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)?
-                };
+                let value = display_cell(column, row)?;
                 write!(output, " {} |", escape_markdown_cell(&value))?;
             }
             writeln!(output)?;

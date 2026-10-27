@@ -46,6 +46,23 @@ enum FileExport {
     Json,
 }
 
+fn requested_file_export(args: &Args) -> Option<(&Path, FileExport)> {
+    if let Some(path) = args.output_parquet.as_deref() {
+        let writer_options = args.parquet_compression.as_ref().map(|codec| {
+            let mut options = TableParquetOptions::default();
+            options.global.compression = Some(codec.clone());
+            options
+        });
+        Some((path, FileExport::Parquet(Box::new(writer_options))))
+    } else if let Some(path) = args.output_csv.as_deref() {
+        Some((path, FileExport::Csv))
+    } else {
+        args.output_json
+            .as_deref()
+            .map(|path| (path, FileExport::Json))
+    }
+}
+
 /// Keep the old destination untouched until the entire single-file export
 /// completes. The temporary directory is deleted on every error path.
 async fn write_file_export(
@@ -161,10 +178,7 @@ async fn execute_script_statement(
     final_statement: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some((source, destination)) = persistent_rename_table(statement, args)? {
-        let root = args
-            .database_dir
-            .as_deref()
-            .ok_or("Missing database directory")?;
+        let root = super::database_root(args)?;
         return super::persistence::rename_saved_table(session, root, &source, &destination).await;
     }
     validate_persistent_table_name(statement, args)?;
@@ -189,6 +203,10 @@ fn sql_statement(statement: &DFStatement) -> Option<&SqlStatement> {
     Some(statement.as_ref())
 }
 
+fn persistent_table_is_directory(root: &Path, name: &str) -> bool {
+    root.join(name).is_dir()
+}
+
 /// Route a persistent INSERT to a staged copy, never the visible table files.
 /// Unquoted, local table names only. External registrations keep DataFusion's
 /// normal INSERT behavior.
@@ -206,10 +224,11 @@ fn persistent_insert_table(
     if !super::valid_identifier(&name) {
         return Err("Persistent INSERT requires a simple unquoted table name".into());
     }
-    if insert.overwrite && root.join(&name).is_dir() {
+    let persisted = persistent_table_is_directory(root, &name);
+    if insert.overwrite && persisted {
         return Err("Persistent INSERT OVERWRITE is unsupported".into());
     }
-    if root.join(&name).is_dir() {
+    if persisted {
         if args.save_table.is_some() {
             return Err("--save-table cannot be used with persistent INSERT".into());
         }
@@ -270,10 +289,7 @@ async fn execute_staged_insert(
     table: &str,
     final_statement: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = args
-        .database_dir
-        .as_deref()
-        .ok_or("Missing database directory")?;
+    let root = super::database_root(args)?;
     let stage = super::persistence::StagedInsert::prepare(root, table)?;
     let original = session.table_provider(table).await?;
     let mut guard = RestoreTableOnCancel {
@@ -388,7 +404,7 @@ fn persistent_rename_table(
     if !super::valid_identifier(&old_name) || !super::valid_identifier(&new_name) {
         return Err("Persistent ALTER TABLE RENAME requires simple SQL table names".into());
     }
-    if !root.join(&old_name).is_dir() {
+    if !persistent_table_is_directory(root, &old_name) {
         return Ok(None);
     }
     Ok(Some((old_name, new_name)))
@@ -418,7 +434,7 @@ fn persistent_drop_table(
     if !super::valid_identifier(&name) {
         return Err(format!("Persistent DROP TABLE requires a simple table name: {name}").into());
     }
-    if root.join(&name).is_dir() {
+    if persistent_table_is_directory(root, &name) {
         Ok(Some(name))
     } else {
         Ok(None)
@@ -430,10 +446,7 @@ fn persist_dropped_table(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = name {
-        let root = args
-            .database_dir
-            .as_deref()
-            .ok_or("Missing database directory")?;
+        let root = super::database_root(args)?;
         super::persistence::drop_saved_table(root, &name)?;
     }
     Ok(())
@@ -447,10 +460,7 @@ async fn persist_created_table(
     let Some(create) = persistent_create_table(statement, args) else {
         return Ok(());
     };
-    let directory = args
-        .database_dir
-        .as_deref()
-        .ok_or("Missing database directory")?;
+    let directory = super::database_root(args)?;
     let name = create.name.to_string().to_ascii_lowercase();
     if create.if_not_exists && directory.join(&name).exists() {
         return Ok(());
@@ -551,23 +561,8 @@ async fn present_query_result(
         dataframe.explain(false, false)?.show().await?;
     } else if args.explain_analyze {
         dataframe.explain(true, false)?.show().await?;
-    } else if let Some(path) = args.output_parquet.as_ref() {
-        let writer_options = args.parquet_compression.as_ref().map(|codec| {
-            let mut options = TableParquetOptions::default();
-            options.global.compression = Some(codec.clone());
-            options
-        });
-        write_file_export(
-            dataframe,
-            path,
-            FileExport::Parquet(Box::new(writer_options)),
-            args.output_single_file,
-        )
-        .await?;
-    } else if let Some(path) = args.output_csv.as_ref() {
-        write_file_export(dataframe, path, FileExport::Csv, args.output_single_file).await?;
-    } else if let Some(path) = args.output_json.as_ref() {
-        write_file_export(dataframe, path, FileExport::Json, args.output_single_file).await?;
+    } else if let Some((path, format)) = requested_file_export(args) {
+        write_file_export(dataframe, path, format, args.output_single_file).await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
         write_arrow_ipc(dataframe, path).await?;
     } else if let Some(format) = args.stdout_format {

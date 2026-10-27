@@ -16,6 +16,14 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(bench.benchmark_row(16), ("city_0", 92))
         self.assertEqual(bench.benchmark_row(33), ("city_1", 21))
 
+    def test_pattern_period_repeats_city_and_amount(self):
+        self.assertEqual(bench.ROW_PATTERN_PERIOD, 400)
+        for offset in (0, 15, 37, 99, 399):
+            self.assertEqual(
+                bench.benchmark_row(offset),
+                bench.benchmark_row(offset + bench.ROW_PATTERN_PERIOD),
+            )
+
     def test_rows_and_deterministic_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             first = pathlib.Path(directory) / "first.csv"
