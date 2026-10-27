@@ -31,7 +31,11 @@ pub(super) fn new_session(
     }
     if let Some(path) = args.spill_dir.as_deref() {
         if !path.is_dir() {
-            return Err(format!("--spill-dir must name an existing directory: {}", path.display()).into());
+            return Err(format!(
+                "--spill-dir must name an existing directory: {}",
+                path.display()
+            )
+            .into());
         }
         if let Some(root) = args.database_dir.as_deref() {
             if path.canonicalize()?.starts_with(root.canonicalize()?) {
@@ -41,7 +45,10 @@ pub(super) fn new_session(
         runtime = runtime.with_temp_file_path(path.to_path_buf());
     }
     let session = if args.memory_limit_bytes.is_some() || args.spill_dir.is_some() {
-        Arc::new(RustSparkSession::with_config_and_runtime(config, runtime.build_arc()?))
+        Arc::new(RustSparkSession::with_config_and_runtime(
+            config,
+            runtime.build_arc()?,
+        ))
     } else {
         Arc::new(RustSparkSession::with_config(config))
     };
