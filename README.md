@@ -34,6 +34,10 @@ SQL statements can be read from a file:
 cargo run -- --csv tests/fixtures/sales.csv --sql-file tests/fixtures/count_sales.sql
 ```
 
+In interactive mode, use `.read path/to/queries.sql` to run SQL from a
+file in the current session. The path may contain spaces. Query errors do
+not close the shell.
+
 Start an interactive SQL shell to run multiple statements in the same session:
 
 ```sh
