@@ -210,6 +210,20 @@ estimated selectivity. They are opt-in because the benefit depends on file
 layout and filter cost. Row-group pruning and page-index reads remain on by
 default in DataFusion.
 
+Query many Parquet parts using a file manifest instead of a huge command line:
+
+```sh
+# /data/manifests/parts.txt contains one Parquet filename per line.
+cargo run -- --parquet-file-list /data/manifests/parts.txt \\
+  --sql 'SELECT COUNT(*) FROM data'
+```
+
+Each file path is resolved relative to the manifest's directory unless absolute.
+Blank lines and lines starting with `#` are ignored. The files must exist,
+and the list must contain at least one file. All files must have compatible
+schemas. Input files remain lazy; only the list of paths is loaded at startup.
+The selected manifest and all listed files are protected from output overwrite.
+
 Query Hive-style directory partitions as typed SQL columns:
 
 ```sh

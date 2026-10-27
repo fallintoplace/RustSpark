@@ -3,8 +3,8 @@ use std::{collections::HashSet, path::Path, sync::Arc};
 use rustspark::RustSparkSession;
 
 use super::{
-    Args, csv_read_options, json_read_options, parquet_read_options, parse_named_table,
-    register_csv_with_null_value,
+    Args, csv_read_options, json_read_options, load_parquet_file_list, parquet_read_options,
+    parse_named_table, register_csv_with_null_value,
 };
 
 async fn reject_duplicate_csv_headers(
@@ -121,6 +121,14 @@ async fn register_unnamed_input(
     session: &RustSparkSession,
     args: &Args,
 ) -> datafusion::error::Result<bool> {
+    if let Some(manifest) = args.parquet_file_list.as_deref() {
+        let paths = load_parquet_file_list(manifest)?;
+        let frame = session
+            .read_parquet_files_with_options(&paths, parquet_read_options(args))
+            .await?;
+        session.register_dataframe(&args.table, frame)?;
+        return Ok(true);
+    }
     let input = INPUT_KINDS
         .into_iter()
         .find_map(|kind| kind.unnamed_path(args).map(|path| (path, kind)));
