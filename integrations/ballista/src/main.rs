@@ -1,11 +1,11 @@
 //! Optional Ballista client demo: uses real remote scheduler/executor processes.
 //! Run from the RustSpark repository root after starting Ballista 55.
-use ballista::prelude::*;
-use datafusion::prelude::SessionContext;
 use rustspark::RustSparkSession;
 
 mod deadline;
 mod remote_inputs;
+mod result_preview;
+mod scheduler;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,8 +25,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let query = std::env::var("RUSTSPARK_SQL")
         .unwrap_or_else(|_| "SELECT COUNT(*) AS n FROM (VALUES (1), (2), (3)) AS input(id)".to_owned());
 
-    // SessionContext::remote is an extension supplied by the Ballista client.
-    let context = SessionContext::remote(url.as_str()).await?;
+    let context = scheduler::connect(&url).await?;
     let session = RustSparkSession::from_context(context);
 
     // The worker must be able to read the same path. Use shared object storage
@@ -36,6 +35,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     remote_inputs::register(&session).await?;
 
-    session.sql(&query).await?.show().await?;
+    let result = session.sql(&query).await?;
+    if let Some(rows) = result_preview::configured_rows()? {
+        result.show_limit(rows).await?;
+    } else {
+        result.show().await?;
+    }
     Ok(())
 }
