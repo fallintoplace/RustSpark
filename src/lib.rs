@@ -849,6 +849,24 @@ impl RustSparkSession {
             .filter(predicates.fold(first, |combined, predicate| combined.and(predicate)))
     }
 
+    /// Keep rows matching at least one typed filter expression.
+    ///
+    /// Predicates use SQL OR semantics, including the handling of NULL.
+    /// An empty list is rejected rather than selecting all rows.
+    pub async fn filter_rows_any(
+        &self,
+        table: &str,
+        predicates: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        let mut predicates = predicates.iter().cloned();
+        let first = predicates
+            .next()
+            .ok_or_else(|| DataFusionError::Plan("filter_rows_any requires a predicate".into()))?;
+        self.table(table)
+            .await?
+            .filter(predicates.fold(first, |combined, predicate| combined.or(predicate)))
+    }
+
     /// Filter a registered table with a typed DataFusion expression.
     ///
     /// SQL NULL predicates do not keep rows. The operation is lazy, and the
