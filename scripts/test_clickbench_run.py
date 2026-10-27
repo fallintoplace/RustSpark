@@ -27,7 +27,7 @@ class QueryRunnerTests(unittest.TestCase):
     def test_rejects_unsafe_or_multiline_queries(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "queries.sql"
-            for contents in ["", "DELETE FROM hits;", "SELECT 1", "SELECT 1;\nDROP TABLE hits;"]:
+            for contents in ["", "DELETE FROM hits;", "SELECT 1", "SELECT 1;\nDROP TABLE hits;", "SELECT 1; DROP TABLE hits;"]:
                 path.write_text(contents, encoding="utf-8")
                 with self.assertRaises(ValueError):
                     runner.read_queries(path)
@@ -49,11 +49,16 @@ class QueryRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.result_signature('1\n')
 
+    def test_rejects_ambiguous_or_nonfinite_json_results(self):
+        for value in ['{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}']:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.result_signature(value)
+
     def test_measure_query_collects_warmup_and_measured_samples(self):
         completed = subprocess.CompletedProcess([], 0, '{"n":1}\n', "")
         with mock.patch.object(runner.subprocess, "run", return_value=completed) as run:
             result = runner.measure_query("bin", pathlib.Path("data"), 7, "SELECT 1;", 2, 1, 20)
-        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["status"], "executed")
         self.assertEqual(len(result["samples_ms"]), 2)
         self.assertEqual(result["result_rows"], 1)
         self.assertEqual(run.call_count, 3)
@@ -79,12 +84,12 @@ class QueryRunnerTests(unittest.TestCase):
             queries = root / "queries.sql"
             queries.write_text("SELECT 1;\nSELECT 2;\n", encoding="utf-8")
             def measure(binary, parquet, number, sql, repeat, warmup, timeout):
-                return {"id": number, "status": "pass" if number == 1 else "error"}
+                return {"id": number, "status": "executed" if number == 1 else "error"}
             with mock.patch.object(runner, "measure_query", side_effect=measure) as measured:
                 report = runner.benchmark("bin", source, queries, 1, 0, 1)
             self.assertEqual(measured.call_count, 2)
             self.assertEqual(report["queries_attempted"], 2)
-            self.assertEqual(report["queries_passed"], 1)
+            self.assertEqual(report["queries_executed"], 1)
 
     def test_nondeterministic_result_is_visible(self):
         samples = [
