@@ -126,6 +126,48 @@ async fn write_arrow_stream<W: Write>(
     Ok(())
 }
 
+fn escape_markdown_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\r', " ")
+        .replace('\n', "<br>")
+}
+
+// Keep only one record batch and the current cell in memory.
+async fn write_markdown<W: Write>(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+    output: &mut W,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write!(output, "|")?;
+    for field in schema.fields() {
+        write!(output, " {} |", escape_markdown_cell(field.name()))?;
+    }
+    writeln!(output)?;
+    write!(output, "|")?;
+    for _ in schema.fields() {
+        write!(output, " --- |")?;
+    }
+    writeln!(output)?;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        for row in 0..batch.num_rows() {
+            write!(output, "|")?;
+            for column in batch.columns() {
+                let value = if column.is_null(row) {
+                    "NULL".to_owned()
+                } else {
+                    datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)?
+                };
+                write!(output, " {} |", escape_markdown_cell(&value))?;
+            }
+            writeln!(output)?;
+        }
+    }
+    Ok(())
+}
+
 // Write one record batch at a time so stdout never requires collecting all results.
 pub(super) async fn write_stdout(
     dataframe: datafusion::prelude::DataFrame,
@@ -185,6 +227,9 @@ pub(super) async fn write_stdout(
             writer
                 .finish()
                 .map_err(|error| preserve_writer_pipe_error(error, &broken_pipe))?;
+        }
+        StdoutFormat::Markdown => {
+            write_markdown(&mut stream, &mut tracked, &schema).await?;
         }
         StdoutFormat::Arrow => {
             write_arrow_stream(&mut stream, &mut tracked, &schema, &broken_pipe).await?;
