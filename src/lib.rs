@@ -1106,10 +1106,8 @@ impl RustSparkSession {
             })
             .collect::<Vec<_>>()
             .join(" + ");
-        let source = quote_catalog_table(
-            table,
-            "drop_null_rows_with_threshold requires a table path",
-        )?;
+        let source =
+            quote_catalog_table(table, "drop_null_rows_with_threshold requires a table path")?;
         self.sql_read_only(&format!(
             "SELECT * FROM {source} WHERE ({non_nulls}) >= {required}"
         ))
