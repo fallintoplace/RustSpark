@@ -93,6 +93,16 @@ let joined = session
 let row_count = joined.count().await?;
 ```
 
+Get a lazy row window from a registered table with `slice_rows`. Sort
+the table first when row order matters:
+
+```rust
+let page = session.slice_rows("sales", 10, 20).await?;
+let rows = page.collect().await?;
+```
+
+The call builds a DataFusion LIMIT/OFFSET plan, without collecting the source.
+
 Use multiple key pairs for compound equality joins. Supported types include
 INNER, LEFT, RIGHT, FULL, SEMI, and ANTI. Unmatched outer rows contain NULLs;
 NULL join keys do not match other NULL keys by default. A Cartesian product
