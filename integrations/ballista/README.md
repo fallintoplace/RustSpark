@@ -7,6 +7,23 @@ It demonstrates an **actual Ballista remote SessionContext** wrapped by the
 RustSpark session API. This is a feasibility spike, not a production distributed
 mode or a claim of Apache Spark SQL compatibility.
 
+## In-process distributed mode for local development
+
+Ballista can run an in-process scheduler with multiple executor slots. This
+exercises distributed plan execution without first installing separate
+scheduler and executor binaries:
+
+```sh
+RUSTSPARK_STANDALONE_PARALLELISM=4 \
+RUSTSPARK_SQL='SELECT SUM(id) FROM (VALUES (1), (2), (3)) AS t(id)' \
+cargo run --manifest-path integrations/ballista/Cargo.toml --features standalone --example standalone
+```
+
+The default standalone parallelism is two. `RUSTSPARK_PARQUET` can point to
+a dataset visible to the process. Standalone mode does **not** validate
+multi-host scheduling, worker failure handling, or shared-storage access.
+Use the remote client above for tests across machines.
+
 ## Run with a Ballista 55 scheduler and executor
 
 Install / start a compatible scheduler and executor on the same machine:
@@ -35,12 +52,33 @@ RUSTSPARK_SQL='SELECT COUNT(*) FROM data' \
 cargo run --manifest-path integrations/ballista/Cargo.toml
 ```
 
+### Register several distributed tables
+
+Use `RUSTSPARK_INPUTS` to register named Parquet, CSV, or newline-delimited
+JSON inputs on the remote session. This enables joins and aggregations across
+different sources without collecting them in the client:
+
+```sh
+BALLISTA_URL=df://scheduler:50050 \
+RUSTSPARK_INPUTS='parquet:orders=/shared/orders;csv:customers=/shared/customers.csv' \
+RUSTSPARK_SQL='SELECT COUNT(*) FROM orders JOIN customers USING (customer_id)' \
+cargo run --manifest-path integrations/ballista/Cargo.toml
+```
+
+Entries are separated by semicolons and use `format:table=path`. Table names
+must be simple SQL identifiers and are unique ignoring case. Paths must not
+contain semicolons. The older `RUSTSPARK_PARQUET` still registers `data`;
+`RUSTSPARK_INPUTS` cannot also use that name. All paths or object store
+locations must be accessible from the worker nodes. This example does not
+configure object store credentials.
+
 ### Limitations
 
 - This is a separate, opt-in binary, not `rustspark --distributed`.
 - Local-only input paths do not work on remote executors without shared storage.
-- Distributed writes, cancellation, authentication, timeout propagation, and
-  scheduling policies are not exposed by this example.
+- Distributed writes, server-side cancellation, authentication, timeout
+  propagation, and scheduling policies are not exposed by this example.
+  Client deadlines are described in [query-deadline.md](docs/query-deadline.md).
 - A successful result does not establish that arbitrary SQL is compatible with
   Spark mainline, or that distributed performance is faster than local execution.
 - Run the isolated integration manually using the instructions above. The

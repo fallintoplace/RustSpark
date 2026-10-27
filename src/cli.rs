@@ -238,11 +238,19 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
+    /// Put temporary spill files for large queries on a chosen disk.
+    #[arg(long = "spill-dir", value_name = "DIR")]
+    spill_dir: Option<PathBuf>,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
     #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
     target_partitions: Option<usize>,
+
+    /// Minimum total file-group size before DataFusion splits a scan across workers.
+    #[arg(long = "scan-split-min-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
+    scan_split_min_bytes: Option<usize>,
 
     /// Maximum concurrent file metadata reads during schema and statistics discovery.
     #[arg(long = "metadata-fetch-concurrency", value_name = "FILES", value_parser = parse_positive_metadata_concurrency)]
@@ -279,6 +287,10 @@ struct Args {
     #[arg(long = "output-single-file")]
     output_single_file: bool,
 
+    /// Soft row limit per file for partitioned CSV, JSON, and Parquet exports.
+    #[arg(long = "output-rows-per-file", value_name = "ROWS", value_parser = parse_output_rows_per_file, conflicts_with = "output_single_file")]
+    output_rows_per_file: Option<usize>,
+
     #[arg(
         long = "parquet-compression",
         value_name = "CODEC",
@@ -287,10 +299,15 @@ struct Args {
     parquet_compression: Option<String>,
 }
 
-fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(path) = args.auto_input.as_ref() else {
-        return Ok(());
-    };
+enum AutoInputKind {
+    Csv,
+    Json,
+    Parquet,
+}
+
+fn classify_auto_input(
+    path: &std::path::Path,
+) -> Result<(AutoInputKind, String), Box<dyn std::error::Error>> {
     if path.is_dir() {
         return Err("--input needs a file; use --csv, --json or --parquet for directories".into());
     }
@@ -298,21 +315,33 @@ fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>>
         .extension()
         .and_then(|extension| extension.to_str())
         .ok_or("--input needs a .csv, .json, .jsonl, .ndjson or .parquet extension")?;
-    let actual_extension = format!(".{extension}");
-    match extension.to_ascii_lowercase().as_str() {
-        "csv" => {
-            args.csv = Some(path.clone());
-            args.csv_extension.get_or_insert(actual_extension);
-        }
-        "json" | "jsonl" | "ndjson" => {
-            args.json = Some(path.clone());
-            args.json_extension.get_or_insert(actual_extension);
-        }
-        "parquet" => {
-            args.parquet = Some(path.clone());
-            args.parquet_extension.get_or_insert(actual_extension);
-        }
+    let kind = match extension.to_ascii_lowercase().as_str() {
+        "csv" => AutoInputKind::Csv,
+        "json" | "jsonl" | "ndjson" => AutoInputKind::Json,
+        "parquet" => AutoInputKind::Parquet,
         _ => return Err(format!("Unsupported --input extension: .{extension}").into()),
+    };
+    Ok((kind, format!(".{extension}")))
+}
+
+fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = args.auto_input.as_ref() else {
+        return Ok(());
+    };
+    let (kind, extension) = classify_auto_input(path)?;
+    match kind {
+        AutoInputKind::Csv => {
+            args.csv = Some(path.clone());
+            args.csv_extension.get_or_insert(extension);
+        }
+        AutoInputKind::Json => {
+            args.json = Some(path.clone());
+            args.json_extension.get_or_insert(extension);
+        }
+        AutoInputKind::Parquet => {
+            args.parquet = Some(path.clone());
+            args.parquet_extension.get_or_insert(extension);
+        }
     }
     Ok(())
 }
@@ -615,8 +644,18 @@ fn parse_target_partitions(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--target-partitions")
 }
 
+fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--scan-split-min-kb")?
+        .checked_mul(1024)
+        .ok_or_else(|| "--scan-split-min-kb exceeds the supported range".to_owned())
+}
+
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--output-rows-per-file")
 }
 
 fn parse_positive_rows(value: &str) -> Result<usize, String> {
@@ -776,3 +815,26 @@ async fn execute_registered_query(
 
 mod output;
 use output::{write_arrow_ipc, write_stdout};
+
+#[cfg(test)]
+mod auto_input_tests {
+    use super::{AutoInputKind, classify_auto_input};
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_extensions_case_insensitively() {
+        assert!(matches!(
+            classify_auto_input(Path::new("events.CSV")),
+            Ok((AutoInputKind::Csv, extension)) if extension == ".CSV"
+        ));
+        assert!(matches!(
+            classify_auto_input(Path::new("events.ndjson")),
+            Ok((AutoInputKind::Json, extension)) if extension == ".ndjson"
+        ));
+        assert!(matches!(
+            classify_auto_input(Path::new("events.PARQUET")),
+            Ok((AutoInputKind::Parquet, extension)) if extension == ".PARQUET"
+        ));
+        assert!(classify_auto_input(Path::new("events.txt")).is_err());
+    }
+}
