@@ -285,12 +285,28 @@ mod path_collision_tests {
         fs::create_dir(&source).unwrap();
         let nested = source.join("new/subdirectory/output.csv");
         let normalized = canonical_output_path(&nested).unwrap();
-        assert_eq!(normalized, nested);
+        assert_eq!(
+            normalized,
+            source
+                .canonicalize()
+                .unwrap()
+                .join("new")
+                .join("subdirectory")
+                .join("output.csv")
+        );
         assert!(overlaps_input_path(&source, &normalized));
 
         let unrelated = temp.path().join("other/subdirectory/output.csv");
         let normalized = canonical_output_path(&unrelated).unwrap();
-        assert_eq!(normalized, unrelated);
+        assert_eq!(
+            normalized,
+            temp.path()
+                .canonicalize()
+                .unwrap()
+                .join("other")
+                .join("subdirectory")
+                .join("output.csv")
+        );
         assert!(!overlaps_input_path(&source, &normalized));
     }
 }
