@@ -34,6 +34,19 @@ class WarmComparisonTests(unittest.TestCase):
         self.assertEqual(warm.parse_rustspark(stdout, stderr, requests, 35), samples)
         self.assertGreater(len(samples[2]["rows"]), 1)
 
+    def test_rejects_duplicate_and_nonfinite_warm_results(self):
+        requests, samples = fixture(3)
+        stdout = "\n".join(
+            json.dumps(row) for sample in samples for row in sample["rows"]
+        )
+        stderr = "\n".join("Time: 1.000 ms" for _ in requests)
+        for bad in ('{"n": 3, "n": 3}', '{"n": NaN}'):
+            invalid = stdout.replace('{"n": 3}', bad, 1)
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                warm.parse_rustspark(invalid, stderr, requests, 3)
+        with self.assertRaises(ValueError):
+            warm.parse_result_line('{"name": "x", "name": "x"}')
+
     def test_rejects_missing_timers_and_sql_failures(self):
         requests, _ = fixture(2)
         with self.assertRaisesRegex(ValueError, "timers"):
