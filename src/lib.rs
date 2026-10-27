@@ -1545,6 +1545,16 @@ impl RustSparkSession {
         Self::extract_first_row(self.sql(query).await?).await
     }
 
+    /// Fetch the first row of a read-only SQL query as typed scalar values.
+    ///
+    /// Returns None for no rows and rejects mutations before execution.
+    pub async fn sql_read_only_first_row(
+        &self,
+        query: &str,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        Self::extract_first_row(self.sql_read_only(query).await?).await
+    }
+
     /// Fetch the first result row from a parameterized SQL query.
     ///
     /// Returns None for an empty result and preserves typed NULL values.
