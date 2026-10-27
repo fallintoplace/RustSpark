@@ -1,0 +1,35 @@
+{
+  "name": "scan_splitting_group",
+  "sql": "SELECT city, SUM(amount) AS total FROM data GROUP BY city",
+  "rows": 500000,
+  "variants": [
+    {
+      "name": "split_kb_64",
+      "flags": [
+        "--scan-split-min-kb",
+        "64"
+      ]
+    },
+    {
+      "name": "split_kb_256",
+      "flags": [
+        "--scan-split-min-kb",
+        "256"
+      ]
+    },
+    {
+      "name": "split_kb_1024",
+      "flags": [
+        "--scan-split-min-kb",
+        "1024"
+      ]
+    },
+    {
+      "name": "split_kb_4096",
+      "flags": [
+        "--scan-split-min-kb",
+        "4096"
+      ]
+    }
+  ]
+}
