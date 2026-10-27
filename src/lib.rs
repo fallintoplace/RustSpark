@@ -76,6 +76,8 @@ mod sql_compat_shiftrightunsigned;
 mod sql_compat_equal_null;
 #[path = "sql_compat/sec.rs"]
 mod sql_compat_sec;
+#[path = "sql_compat/csc.rs"]
+mod sql_compat_csc;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -191,6 +193,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
         context.register_udf(sql_compat_sec::udf());
+        context.register_udf(sql_compat_csc::udf());
         Self { context }
     }
 
