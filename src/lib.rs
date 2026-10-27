@@ -1122,6 +1122,25 @@ impl RustSparkSession {
         Self::has_rows(self.sql_read_only_with_params(query, params).await?).await
     }
 
+    /// Count all rows produced by read-only SQL without collecting results.
+    ///
+    /// DDL, DML and session statements are rejected.
+    pub async fn sql_read_only_row_count(&self, query: &str) -> Result<usize> {
+        self.sql_read_only(query).await?.count().await
+    }
+
+    /// Count rows from parameterized read-only SQL with typed bindings.
+    pub async fn sql_read_only_row_count_with_params(
+        &self,
+        query: &str,
+        params: impl Into<datafusion::common::ParamValues>,
+    ) -> Result<usize> {
+        self.sql_read_only_with_params(query, params)
+            .await?
+            .count()
+            .await
+    }
+
     async fn extract_scalar(dataframe: DataFrame) -> Result<datafusion::common::ScalarValue> {
         use datafusion::common::ScalarValue;
 
