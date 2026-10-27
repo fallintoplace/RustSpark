@@ -725,6 +725,83 @@ impl RustSparkSession {
         )
     }
 
+    /// Join values to keyed interval records using equality and range bounds.
+    ///
+    /// Key pairs restrict candidate intervals before applying the range
+    /// predicate. INNER and LEFT joins are supported and retain normal NULL
+    /// semantics. The result is a lazy DataFrame.
+    pub async fn join_tables_on_keyed_range(
+        &self,
+        values_table: &str,
+        intervals_table: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+        value_column: &str,
+        interval_columns: (&str, &str),
+        bounds: RangeJoinBounds,
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+        use std::fmt::Write as _;
+
+        validate_join_key_pairs(
+            keys,
+            "join_tables_on_keyed_range requires non-empty key pairs",
+        )?;
+        if value_column.trim().is_empty()
+            || interval_columns.0.trim().is_empty()
+            || interval_columns.1.trim().is_empty()
+        {
+            return Err(DataFusionError::Plan(
+                "Keyed range join columns cannot be blank".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "Keyed range joins support inner and left joins only".into(),
+                ));
+            }
+        };
+        let (lower_cmp, upper_cmp) = match bounds {
+            RangeJoinBounds::Open => (">", "<"),
+            RangeJoinBounds::Closed => (">=", "<="),
+            RangeJoinBounds::LeftClosed => (">=", "<"),
+            RangeJoinBounds::RightClosed => (">", "<="),
+        };
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let mut predicates = String::new();
+        for (left_key, right_key) in keys {
+            if !predicates.is_empty() {
+                predicates.push_str(" AND ");
+            }
+            write!(
+                &mut predicates,
+                "{left_alias}.{} = {right_alias}.{}",
+                quote_join_identifier(left_key),
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
+        }
+        write!(
+            &mut predicates,
+            " AND {left_alias}.{} {lower_cmp} {right_alias}.{} AND {left_alias}.{} {upper_cmp} {right_alias}.{}",
+            quote_join_identifier(value_column),
+            quote_join_identifier(interval_columns.0),
+            quote_join_identifier(value_column),
+            quote_join_identifier(interval_columns.1),
+        )
+        .expect("writing to a String cannot fail");
+        let query = format!(
+            "SELECT * FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {predicates}",
+            quote_join_table(values_table)?,
+            quote_join_table(intervals_table)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Cross join two registered tables, like Spark DataFrame.crossJoin.
     ///
     /// The result has left_rows * right_rows entries. This operation can
