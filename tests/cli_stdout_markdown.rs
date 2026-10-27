@@ -74,3 +74,14 @@ fn markdown_displays_html_like_values_as_text() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn markdown_escapes_multiple_special_characters_in_one_cell() -> TestResult {
+    let output = run("SELECT 'a&b|<tag>' AS value", &[])?;
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "| value |\n| --- |\n| a&amp;b\\|&lt;tag&gt; |\n"
+    );
+    Ok(())
+}

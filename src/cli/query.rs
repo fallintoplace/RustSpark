@@ -473,7 +473,7 @@ async fn persist_created_table(
     if create.if_not_exists && directory.join(&name).exists() {
         return Ok(());
     }
-    super::persistence::save_table(session.table(&name).await?, directory, &name).await?;
+    super::persistence::save_table(session.table(&name).await?, directory, &name, None).await?;
     if !session.deregister_table(&name)? {
         return Err(format!("Created table '{name}' disappeared before registration").into());
     }
@@ -550,7 +550,13 @@ async fn present_query_result(
             .database_dir
             .as_deref()
             .ok_or("--save-table requires --database-dir")?;
-        super::persistence::save_table(dataframe, directory, name).await?;
+        super::persistence::save_table(
+            dataframe,
+            directory,
+            name,
+            args.parquet_compression.as_deref(),
+        )
+        .await?;
         return Ok(());
     }
     if args.stdout_format.is_some() || args.output_csv.is_some() || args.output_json.is_some() {
@@ -572,7 +578,7 @@ async fn present_query_result(
     } else if let Some((path, format)) = requested_file_export(args) {
         write_file_export(dataframe, path, format, args.output_single_file).await?;
     } else if let Some(path) = args.output_arrow.as_ref() {
-        write_arrow_ipc(dataframe, path).await?;
+        write_arrow_ipc(dataframe, path, args.arrow_compression).await?;
     } else if let Some(format) = args.stdout_format {
         let dataframe = if let Some(max_rows) = args.max_rows {
             limit_for_output(dataframe, args.offset.unwrap_or(0), max_rows)?

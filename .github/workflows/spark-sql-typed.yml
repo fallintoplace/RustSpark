@@ -12,6 +12,10 @@ jobs:
   compare-with-spark:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        input_format: [csv, parquet]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -26,10 +30,13 @@ jobs:
       - run: cargo build --locked
       - run: python3 -m pip install 'pyspark>=4,<5'
       - name: Compare typed table-backed SQL with real Spark
-        run: python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark --json-out reports/spark-typed.json --check-nullability
+        run: |
+          python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark \
+            --input-format "${{ matrix.input_format }}" --check-nullability \
+            --json-out "reports/spark-typed-${{ matrix.input_format }}.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: spark-typed-differential
-          path: reports/spark-typed.json
+          name: spark-typed-differential-${{ matrix.input_format }}
+          path: reports/spark-typed-${{ matrix.input_format }}.json
           if-no-files-found: warn
