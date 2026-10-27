@@ -100,6 +100,8 @@ mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
 mod sql_results;
+mod joins_multi_range;
+pub use joins_multi_range::RangeTableJoin;
 
 pub use export::SqlExportFormat;
 
