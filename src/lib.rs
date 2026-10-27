@@ -1004,6 +1004,23 @@ impl RustSparkSession {
         self.context.register_udf(udf);
     }
 
+    /// Filter text values with a case-sensitive SQL LIKE pattern.
+    ///
+    /// Percent and underscore retain SQL wildcard semantics. The pattern
+    /// stays a typed expression and is never interpolated into SQL.
+    pub async fn filter_rows_like(
+        &self,
+        table: &str,
+        column: &str,
+        pattern: &str,
+    ) -> Result<DataFrame> {
+        use datafusion::{common::Column, logical_expr::Expr, prelude::lit};
+
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        dataframe.filter(Expr::Column(Column::from_name(column)).like(lit(pattern)))
+    }
+
     /// Filter text values with a case-insensitive SQL ILIKE pattern.
     ///
     /// Wildcards use SQL LIKE rules. NULL values do not match, and patterns
