@@ -987,6 +987,16 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Read the first row of a registered table as typed scalar values.
+    ///
+    /// Returns None for an empty table. Use an ordered view when row order matters.
+    pub async fn table_first_row(
+        &self,
+        table: &str,
+    ) -> Result<Option<Vec<datafusion::common::ScalarValue>>> {
+        Self::extract_first_row(self.table(table).await?).await
+    }
+
     /// Return a lazy window of rows from a registered table.
     ///
     /// A length of zero produces an empty result. Sort the source before
