@@ -23,15 +23,29 @@ async fn distinct_column_values_are_lazy_and_unique() -> TestResult {
         .await?;
     let mut values = Vec::new();
     for batch in batches {
-        let column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         for index in 0..batch.num_rows() {
             values.push(column.value(index).to_owned());
         }
     }
     values.sort();
     assert_eq!(values, ["Berlin", "Munich"]);
-    assert!(session.distinct_column_values("sales", "missing").await.is_err());
-    assert!(session.distinct_column_values("missing", "city").await.is_err());
+    assert!(
+        session
+            .distinct_column_values("sales", "missing")
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .distinct_column_values("missing", "city")
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -41,7 +55,12 @@ async fn distinct_column_values_keep_only_one_null() -> TestResult {
     let schema = Arc::new(Schema::new(vec![Field::new("city", DataType::Utf8, true)]));
     let batch = RecordBatch::try_new(
         schema,
-        vec![Arc::new(StringArray::from(vec![Some("A"), None, Some("A"), None]))],
+        vec![Arc::new(StringArray::from(vec![
+            Some("A"),
+            None,
+            Some("A"),
+            None,
+        ]))],
     )?;
     session.register_batches("events", [batch])?;
 
@@ -53,7 +72,11 @@ async fn distinct_column_values_keep_only_one_null() -> TestResult {
     let mut values = Vec::new();
     let mut nulls = 0;
     for batch in batches {
-        let column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         for index in 0..batch.num_rows() {
             if column.is_null(index) {
                 nulls += 1;
