@@ -52,6 +52,11 @@ def query_paths(directory, ids=None):
     if not paths:
         raise ValueError(f"No numbered SQL files found in {directory}")
     selected = [(int(path.stem), path) for path in paths]
+    if any(number not in range(1, 23) for number, _ in selected):
+        raise ValueError("TPC-H SQL file number must be between 01 and 22")
+    if ids is not None and (len(ids) != len(set(ids))
+                            or any(type(n) is not int or n not in range(1, 23) for n in ids)):
+        raise ValueError("Requested TPC-H query IDs must be unique and between 1 and 22")
     if ids is not None:
         selected = [(n, path) for n, path in selected if n in ids]
         if {n for n, _ in selected} != set(ids):

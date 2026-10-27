@@ -34,6 +34,18 @@ class QueryRunnerTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 runner.result_signature(payload)
 
+    def test_rejects_out_of_range_or_duplicate_query_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "23.sql").write_text("SELECT 23", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "between 01 and 22"):
+                runner.query_paths(folder)
+            (folder / "23.sql").unlink()
+            (folder / "01.sql").write_text("SELECT 1", encoding="utf-8")
+            for ids in ([1, 1], [0], [23], [True]):
+                with self.subTest(ids=ids), self.assertRaises(ValueError):
+                    runner.query_paths(folder, ids)
+
     def test_ordered_sql_uses_order_sensitive_repetition_check(self):
         first = mock.Mock(returncode=0, stdout='{"n":1}\n{"n":2}\n', stderr="")
         second = mock.Mock(returncode=0, stdout='{"n":2}\n{"n":1}\n', stderr="")
