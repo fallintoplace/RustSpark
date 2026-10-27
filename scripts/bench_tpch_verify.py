@@ -6,6 +6,7 @@ not an official TPC-H certification.
 """
 
 import argparse
+from collections import Counter
 import datetime
 from decimal import Decimal, InvalidOperation
 import json
@@ -21,7 +22,8 @@ def numeric(value):
         return None
     if isinstance(value, (int, float, Decimal)):
         try:
-            return Decimal(str(value))
+            converted = Decimal(str(value))
+            return converted if converted.is_finite() else None
         except InvalidOperation:
             return None
     return None
@@ -38,11 +40,15 @@ def same_value(actual, expected, tolerance):
     if a is None and isinstance(actual, str) and b is not None:
         try:
             a = Decimal(actual)
+            if not a.is_finite():
+                return False
         except InvalidOperation:
             pass
     if b is None and isinstance(expected, str) and a is not None:
         try:
             b = Decimal(expected)
+            if not b.is_finite():
+                return False
         except InvalidOperation:
             pass
     if a is not None and b is not None:
@@ -62,6 +68,16 @@ def equal_rows(actual, expected, tolerance, ordered):
         return False
     if ordered:
         return all(same_row(a, b, tolerance) for a, b in zip(actual, expected))
+    # Most benchmark result sets contain identical scalar values. A multiset
+    # check avoids quadratic matching for this common case. Fall back to the
+    # tolerance-aware matcher for differing representations or nested values.
+    try:
+        actual_counts = Counter(tuple(sorted(row.items())) for row in actual)
+        expected_counts = Counter(tuple(sorted(row.items())) for row in expected)
+        if actual_counts == expected_counts:
+            return True
+    except TypeError:
+        pass
     remaining = list(expected)
     for row in actual:
         matching = next((i for i, candidate in enumerate(remaining)

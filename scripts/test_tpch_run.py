@@ -34,6 +34,18 @@ class QueryRunnerTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 runner.result_signature(payload)
 
+    def test_rejects_out_of_range_or_duplicate_query_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "23.sql").write_text("SELECT 23", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "between 01 and 22"):
+                runner.query_paths(folder)
+            (folder / "23.sql").unlink()
+            (folder / "01.sql").write_text("SELECT 1", encoding="utf-8")
+            for ids in ([1, 1], [0], [23], [True]):
+                with self.subTest(ids=ids), self.assertRaises(ValueError):
+                    runner.query_paths(folder, ids)
+
     def test_ordered_sql_uses_order_sensitive_repetition_check(self):
         first = mock.Mock(returncode=0, stdout='{"n":1}\n{"n":2}\n', stderr="")
         second = mock.Mock(returncode=0, stdout='{"n":2}\n{"n":1}\n', stderr="")
@@ -49,6 +61,26 @@ class QueryRunnerTests(unittest.TestCase):
         self.assertEqual(len(result["samples_ms"]), 3)
         self.assertEqual(result["result_rows"], 1)
         self.assertGreaterEqual(result["p95_ms"], result["median_ms"])
+
+    def test_benchmark_records_binary_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "queries").mkdir()
+            (root / "data").mkdir()
+            binary = root / "rustspark"
+            binary.write_bytes(b"test-rustspark-build")
+            (root / "queries/01.sql").write_text("SELECT 1")
+            for table in runner.TABLES:
+                (root / "data" / f"{table}.parquet").touch()
+            with mock.patch.object(runner, "measure", return_value={"status": "ok"}):
+                report = runner.benchmark(
+                    binary, runner.query_paths(root / "queries"), root / "data",
+                    repeat=1, warmup=0, timeout=60, partitions=4,
+                )
+            import hashlib
+            self.assertEqual(report["binary_sha256"], hashlib.sha256(binary.read_bytes()).hexdigest())
+            self.assertEqual(report["target_partitions"], 4)
+            self.assertEqual(report["timeout_seconds"], 60)
 
     def test_benchmark_detects_top_level_order_by(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -73,6 +105,26 @@ class QueryRunnerTests(unittest.TestCase):
                 [call.kwargs["ordered"] for call in measure.call_args_list],
                 [True, False],
             )
+
+    def test_tpch_tuning_options_are_forwarded(self):
+        args = runner.command_for(
+            "rs", ["--parquet-table", "customer=file"], "01.sql", 4,
+            batch_size=8192, memory_limit_mb=2048, pushdown_filters=True,
+        )
+        self.assertIn("--batch-size", args)
+        self.assertEqual(args[args.index("--batch-size") + 1], "8192")
+        self.assertEqual(args[args.index("--memory-limit-mb") + 1], "2048")
+        self.assertIn("--parquet-pushdown-filters", args)
+        defaults = runner.command_for("rs", [], "01.sql", 2)
+        self.assertNotIn("--batch-size", defaults)
+        self.assertNotIn("--memory-limit-mb", defaults)
+        self.assertNotIn("--parquet-pushdown-filters", defaults)
+
+    def test_tpch_rejects_invalid_execution_settings(self):
+        for settings in ({"batch_size": 0}, {"memory_limit_mb": -1},
+                         {"batch_size": True}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                runner.benchmark("rs", [], Path("."), **settings)
 
     def test_query_errors_do_not_skip_later_queries(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -35,6 +35,7 @@ def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
         raise ValueError("Repeat and warmup must be valid")
     output.mkdir(parents=True, exist_ok=True)
     configurations = []
+    fingerprints = {}
     for n in partitions:
         path = output / f"partitions-{n}.json"
         if path.exists():
@@ -46,6 +47,18 @@ def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
         report = json.loads(path.read_text(encoding="utf-8"))
         results = report.get("results", [])
         ok = sum(row.get("status") == "ok" for row in results)
+        for row in results:
+            if row.get("status") != "ok":
+                continue
+            number = row.get("id")
+            digest = row.get("result_sha256")
+            if type(number) is not int or number not in range(1, 23):
+                raise ValueError("Invalid TPC-H query ID in partition report")
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError(f"Missing result fingerprint for Q{number:02}")
+            if number in fingerprints and fingerprints[number] != digest:
+                raise ValueError(f"Query Q{number:02} changed answers across partitions")
+            fingerprints[number] = digest
         complete = (len(results) == 22 and ok == 22 and process.returncode == 0
                     and {row.get("id") for row in results} == set(range(1, 23)))
         total = None
