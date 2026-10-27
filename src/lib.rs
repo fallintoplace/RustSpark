@@ -534,6 +534,21 @@ impl RustSparkSession {
             .collect())
     }
 
+    /// Plan MIN and MAX for one registered column without collecting rows.
+    ///
+    /// The result is a lazy single-row DataFrame with min_value and max_value.
+    /// NULL inputs are ignored; an empty or all-NULL column produces NULLs.
+    pub async fn column_extrema(&self, table: &str, column: &str) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, &[column])?;
+        let source = quote_catalog_table(table, "column_extrema requires a table path")?;
+        let key = quote_join_identifier(column);
+        self.sql_read_only(&format!(
+            "SELECT MIN({key}) AS min_value, MAX({key}) AS max_value FROM {source}"
+        ))
+        .await
+    }
+
     /// Count NULL values in selected table columns without collecting rows.
     ///
     /// An empty column list includes all columns. The result is a lazy
