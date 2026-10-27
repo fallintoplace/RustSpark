@@ -5,7 +5,9 @@ use std::{
 };
 
 use datafusion::{
-    dataframe::DataFrameWriteOptions, parquet::file::reader::SerializedFileReader,
+    config::TableParquetOptions,
+    dataframe::DataFrameWriteOptions,
+    parquet::file::reader::SerializedFileReader,
     prelude::DataFrame,
 };
 use futures::{StreamExt, stream};
@@ -496,6 +498,7 @@ pub(super) async fn save_table(
     dataframe: DataFrame,
     root: &Path,
     name: &str,
+    compression: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(root)?;
     let destination = root.join(name);
@@ -510,8 +513,13 @@ pub(super) async fn save_table(
     let staged = temporary.path().join("data");
     let staged_path = staged.to_str().ok_or("Database path must be valid UTF-8")?;
     let schema = dataframe.schema().inner().clone();
+    let parquet_options = compression.map(|codec| {
+        let mut options = TableParquetOptions::default();
+        options.global.compression = Some(codec.to_owned());
+        options
+    });
     dataframe
-        .write_parquet(staged_path, DataFrameWriteOptions::new(), None)
+        .write_parquet(staged_path, DataFrameWriteOptions::new(), parquet_options)
         .await?;
     if !staged.exists() || fs::read_dir(&staged)?.next().is_none() {
         // DataFusion emits no Parquet part for a zero-row result. Preserve
