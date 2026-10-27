@@ -128,6 +128,13 @@ def run_cases(cases, rustspark_runner, spark_runner):
     return failed
 
 
+def build_spark_session(spark_session, master: str):
+    return (spark_session.builder.master(master)
+            .appName("RustSpark SQL compatibility")
+            .config("spark.sql.session.timeZone", "UTC")
+            .getOrCreate())
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rustspark", default="./target/debug/rustspark")
@@ -148,7 +155,7 @@ def main(argv=None):
     except ImportError:
         parser.error("Install PySpark 4.x before differential comparison: pip install pyspark")
 
-    session = SparkSession.builder.master(args.spark_master).appName("RustSpark SQL compatibility").getOrCreate()
+    session = build_spark_session(SparkSession, args.spark_master)
     try:
         failed = run_cases(
             cases,

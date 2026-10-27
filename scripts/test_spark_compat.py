@@ -83,6 +83,33 @@ class SparkCompatibilityTests(unittest.TestCase):
         self.assertIn("DIFF diff", output.getvalue())
         self.assertIn("ERROR error: simulated failure", output.getvalue())
 
+    def test_spark_session_uses_utc_timezone(self):
+        class FakeBuilder:
+            def __init__(self):
+                self.options = {}
+
+            def master(self, value):
+                self.options["master"] = value
+                return self
+
+            def appName(self, value):
+                self.options["app_name"] = value
+                return self
+
+            def config(self, key, value):
+                self.options[key] = value
+                return self
+
+            def getOrCreate(self):
+                return self.options
+
+        class FakeSession:
+            builder = FakeBuilder()
+
+        config = mod.build_spark_session(FakeSession, "local[2]")
+        self.assertEqual(config["master"], "local[2]")
+        self.assertEqual(config["spark.sql.session.timeZone"], "UTC")
+
     def test_corpus_is_valid(self):
         cases = mod.load_cases(mod.DEFAULT_CASES)
         self.assertGreaterEqual(len(cases), 25)
