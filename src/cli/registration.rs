@@ -153,14 +153,11 @@ fn parsed_named_inputs(args: &Args) -> Result<Vec<NamedInput>, Box<dyn std::erro
     Ok(inputs)
 }
 
-pub(super) async fn register_inputs(
+async fn register_named_inputs(
     session: &Arc<RustSparkSession>,
     args: &Arc<Args>,
+    inputs: Vec<NamedInput>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if register_unnamed_input(session, args).await? {
-        return Ok(());
-    }
-    let inputs = parsed_named_inputs(args)?;
     let mut registration_jobs = tokio::task::JoinSet::new();
     // Parallel metadata and CSV inference work scales with available cores,
     // but bound outstanding jobs to avoid loading hundreds of schemas at once.
@@ -180,10 +177,39 @@ pub(super) async fn register_inputs(
     Ok(())
 }
 
+pub(super) async fn register_inputs(
+    session: &Arc<RustSparkSession>,
+    args: &Arc<Args>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if register_unnamed_input(session, args).await? {
+        return Ok(());
+    }
+    register_named_inputs(session, args, parsed_named_inputs(args)?).await
+}
+
 #[cfg(test)]
 mod named_input_validation_tests {
     use super::{Args, parsed_named_inputs};
     use clap::Parser;
+
+    #[test]
+    fn groups_named_inputs_in_format_order() {
+        let args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--json-table",
+            "logs=data.json",
+            "--csv-table",
+            "users=data.csv",
+            "--parquet-table",
+            "events=data.parquet",
+        ])
+        .unwrap();
+        let inputs = parsed_named_inputs(&args).unwrap();
+        let names: Vec<_> = inputs.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(names, ["users", "events", "logs"]);
+    }
 
     #[test]
     fn rejects_duplicate_names_across_input_formats_before_registration() {
