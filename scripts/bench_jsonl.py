@@ -12,13 +12,16 @@ from bench_rustspark import WORKLOADS, benchmark_row, expected_results, output_s
 from bench_stats import summarize_samples
 
 
+def encode_jsonl_row(index):
+    city, amount = benchmark_row(index)
+    return json.dumps({"id": index, "city": city, "amount": amount}) + "\n"
+
+
 def write_jsonl(path, rows):
     if rows < 1:
         raise ValueError("rows must be positive")
     with Path(path).open("w", encoding="utf-8") as stream:
-        for index in range(rows):
-            city, amount = benchmark_row(index)
-            stream.write(json.dumps({"id": index, "city": city, "amount": amount}) + "\n")
+        stream.writelines(encode_jsonl_row(index) for index in range(rows))
 
 
 def command(binary, file, sql):
