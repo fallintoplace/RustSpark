@@ -1,0 +1,9 @@
+sku,day,delta
+apple,1,10
+apple,2,-3
+apple,3,-8
+banana,1,20
+banana,2,-5
+carrot,1,5
+carrot,2,-2
+carrot,3,1
