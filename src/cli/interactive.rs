@@ -129,6 +129,35 @@ async fn handle_schema_command(session: &RustSparkSession, command: &str) -> boo
     true
 }
 
+enum ShellAction {
+    Continue,
+    Exit,
+    Sql,
+}
+
+async fn dispatch_shell_command(session: &RustSparkSession, command: &str) -> ShellAction {
+    match command {
+        "\\q" | ".quit" | ".exit" => return ShellAction::Exit,
+        "\\h" | ".help" => {
+            eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
+            eprintln!("Shell commands: .tables, .schema TABLE, .quit.");
+            return ShellAction::Continue;
+        }
+        ".tables" => {
+            for table in session.list_tables() {
+                println!("{table}");
+            }
+            return ShellAction::Continue;
+        }
+        _ => {}
+    }
+    if handle_schema_command(session, command).await {
+        ShellAction::Continue
+    } else {
+        ShellAction::Sql
+    }
+}
+
 /// Run SQL statements in one session so views and DDL survive between prompts.
 pub(super) async fn run_interactive(
     session: &RustSparkSession,
@@ -162,24 +191,11 @@ pub(super) async fn run_interactive(
             line = line.trim_start_matches('\u{feff}').to_owned();
         }
         if pending.trim().is_empty() {
-            match line.trim() {
-                "\\q" | ".quit" | ".exit" => break,
-                "\\h" | ".help" => {
-                    eprintln!("Enter SQL ending with ';'. Use \\q to quit.");
-                    eprintln!("Shell commands: .tables, .schema TABLE, .quit.");
-                    continue;
-                }
-                ".tables" => {
-                    for table in session.list_tables() {
-                        println!("{table}");
-                    }
-                    continue;
-                }
-                _ => {}
+            match dispatch_shell_command(session, line.trim()).await {
+                ShellAction::Exit => break,
+                ShellAction::Continue => continue,
+                ShellAction::Sql => {}
             }
-        }
-        if pending.trim().is_empty() && handle_schema_command(session, line.trim()).await {
-            continue;
         }
         pending.push_str(&line);
         if !terminator.push(&line) {
