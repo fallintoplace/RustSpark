@@ -4,6 +4,8 @@ use ballista::prelude::*;
 use datafusion::prelude::SessionContext;
 use rustspark::RustSparkSession;
 
+mod result_preview;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("BALLISTA_URL")
@@ -21,6 +23,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session.register_parquet("data", &path).await?;
     }
 
-    session.sql(&query).await?.show().await?;
+    let result = session.sql(&query).await?;
+    if let Some(rows) = result_preview::configured_rows()? {
+        result.show_limit(rows).await?;
+    } else {
+        result.show().await?;
+    }
     Ok(())
 }
