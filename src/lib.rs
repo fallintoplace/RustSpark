@@ -64,6 +64,8 @@ mod sql_compat_try_negate;
 mod sql_compat_try_abs;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+#[path = "sql_compat/shiftleft.rs"]
+mod sql_compat_shiftleft;
 mod sql_results;
 
 pub use export::SqlExportFormat;
@@ -173,6 +175,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_negate::udf());
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_bit_count::udf());
+        context.register_udf(sql_compat_shiftleft::udf());
         Self { context }
     }
 
