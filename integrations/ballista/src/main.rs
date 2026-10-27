@@ -6,6 +6,7 @@ use rustspark::RustSparkSession;
 
 mod deadline;
 mod remote_inputs;
+mod result_preview;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +37,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     remote_inputs::register(&session).await?;
 
-    session.sql(&query).await?.show().await?;
+    let result = session.sql(&query).await?;
+    if let Some(rows) = result_preview::configured_rows()? {
+        result.show_limit(rows).await?;
+    } else {
+        result.show().await?;
+    }
     Ok(())
 }
