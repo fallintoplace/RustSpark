@@ -54,6 +54,10 @@ def run_smoke(mode: str, client: str | None = None, timeout: int = 300) -> None:
     with tempfile.TemporaryDirectory(prefix="rustspark-ballista-smoke-") as temp:
         orders, rates = write_fixtures(pathlib.Path(temp))
         env = os.environ.copy()
+        # A developer's local query settings must not change the smoke workload.
+        for name in ("RUSTSPARK_PARQUET", "RUSTSPARK_MAX_ROWS",
+                     "RUSTSPARK_QUERY_TIMEOUT_SECS"):
+            env.pop(name, None)
         env.update({
             "RUSTSPARK_INPUTS": f"csv:orders={orders};csv:rates={rates}",
             "RUSTSPARK_SQL": QUERY,

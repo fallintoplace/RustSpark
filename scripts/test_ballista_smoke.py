@@ -62,5 +62,24 @@ class BallistaSmokeTests(unittest.TestCase):
             ballista_smoke.run_smoke("standalone", timeout=0)
 
 
+    @mock.patch.object(ballista_smoke.subprocess, "run")
+    def test_ignores_inherited_query_settings(self, run):
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout="| matches | weighted_total |\n| 2 | 80 |\n",
+            stderr="",
+        )
+        inherited = {
+            "RUSTSPARK_PARQUET": "/tmp/unrelated.parquet",
+            "RUSTSPARK_MAX_ROWS": "1",
+            "RUSTSPARK_QUERY_TIMEOUT_SECS": "1",
+        }
+        with mock.patch.dict(ballista_smoke.os.environ, inherited):
+            ballista_smoke.run_smoke("standalone")
+        env = run.call_args.kwargs["env"]
+        for name in inherited:
+            self.assertNotIn(name, env)
+
+
 if __name__ == "__main__":
     unittest.main()
