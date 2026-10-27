@@ -564,19 +564,12 @@ impl RustSparkSession {
         result
     }
 
-    /// Rename several columns atomically, like Spark withColumnsRenamed.
-    ///
-    /// All names refer to the original schema, so swaps such as a -> b and
-    /// b -> a work without intermediate collisions. This does not change the
-    /// registered table or collect its rows.
-    pub async fn rename_columns(&self, table: &str, renames: &[(&str, &str)]) -> Result<DataFrame> {
+    fn renamed_column_projection(
+        dataframe: &DataFrame,
+        renames: &[(&str, &str)],
+    ) -> Result<Vec<datafusion::logical_expr::Expr>> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
-
-        let dataframe = self.table(table).await?;
-        if renames.is_empty() {
-            return Ok(dataframe);
-        }
 
         let mut mappings = HashMap::new();
         for &(source, target) in renames {
@@ -622,6 +615,20 @@ impl RustSparkSession {
                 column.alias(target)
             });
         }
+        Ok(projection)
+    }
+
+    /// Rename several columns atomically, like Spark withColumnsRenamed.
+    ///
+    /// All names refer to the original schema, so swaps such as a -> b and
+    /// b -> a work without intermediate collisions. This does not change the
+    /// registered table or collect its rows.
+    pub async fn rename_columns(&self, table: &str, renames: &[(&str, &str)]) -> Result<DataFrame> {
+        let dataframe = self.table(table).await?;
+        if renames.is_empty() {
+            return Ok(dataframe);
+        }
+        let projection = Self::renamed_column_projection(&dataframe, renames)?;
         dataframe.select(projection)
     }
 
