@@ -12,11 +12,9 @@ fn query_timer_can_be_enabled_and_disabled_between_statements()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("missing stdin")?
-        .write_all(b".timer on\nSELECT 17 AS first;\n.timer off\nSELECT 19 AS second;\n.quit\n")?;
+    child.stdin.take().ok_or("missing stdin")?.write_all(
+        b".timer\ton\nSELECT 17 AS first;\n.timer   off\nSELECT 19 AS second;\n.quit\n",
+    )?;
     let output = child.wait_with_output()?;
     assert!(
         output.status.success(),
