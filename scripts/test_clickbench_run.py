@@ -77,7 +77,7 @@ class QueryRunnerTests(unittest.TestCase):
         self.assertIn("Timed out", result["error"])
 
     def test_invalid_utf8_output_is_a_query_error(self):
-        decode_error = UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid start byte")
+        decode_error = UnicodeDecodeError("utf-8", bytes([0xff]), 0, 1, "invalid start byte")
         with mock.patch.object(runner.subprocess, "run", side_effect=decode_error):
             result = runner.measure_query("bin", pathlib.Path("data"), 4, "SELECT 1;", 1, 0, 10)
         self.assertEqual(result["status"], "error")
