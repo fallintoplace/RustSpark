@@ -51,3 +51,36 @@ treat the runtime numbers of this harness as Spark-versus-RustSpark results.
 
 To view the verified RustSpark vs DuckDB/Spark benchmark results as Markdown,
 see [Reading benchmark results](engine-comparison.md#reading-benchmark-results).
+
+## 12-query end-to-end latency suite
+
+Run the 12-query RustSpark-only suite to see per-query execution times:
+
+```sh
+cargo build --release --locked
+python3 scripts/bench_query_latency.py --binary ./target/release/rustspark \
+  --rows 100000 --warmup 1 --repeat 3 \
+  --json-out benchmarks/results/query-latency.json \
+  --markdown-out benchmarks/results/query-latency.md
+```
+
+The suite covers row counts, selective filters, groups, DISTINCT, HAVING,
+ORDER BY/LIMIT, window ranks, UNION ALL, self joins and aggregate joins. All
+queries use a deterministic typed CSV dataset generated outside timing. An
+independent Python result oracle verifies each warmup and measured sample. A
+failed query is reported without preventing later queries from running, and
+the command exits nonzero if any query fails.
+
+Use `--only top_k self_join` to measure just selected queries. The JSON saves
+individual samples, median, nearest-rank p95, SQL, result hashes, input
+checksum, and the runner environment. The Markdown file shows timing per
+query in milliseconds. Query names are in `scripts/bench_query_latency.py`.
+
+**Metric:** Each sample is a new RustSpark CLI process. Timings include CLI
+startup, typed CSV registration, SQL planning/execution and JSON output. They
+do not isolate warm engine execution time. The dedicated
+`RustSpark query latency` GitHub Actions workflow runs when these benchmark
+files change in a pull request, and can also be triggered manually after the
+workflow is available on the default branch. The workflow uploads raw JSON
+and the readable Markdown report for 90 days. Shared runner timings are
+informational only and must not be treated as a strict performance gate.

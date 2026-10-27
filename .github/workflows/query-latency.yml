@@ -1,0 +1,69 @@
+name: RustSpark query latency
+
+on:
+  pull_request:
+    paths:
+      - scripts/bench_query_latency.py
+      - scripts/test_bench_query_latency.py
+      - benchmarks/README.md
+      - .github/workflows/query-latency.yml
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Number of deterministic CSV rows
+        required: true
+        default: '100000'
+      repeats:
+        description: Measured runs per query
+        required: true
+        default: '3'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  query-latency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Validate query suite
+        run: python3 -m unittest discover -s scripts -p 'test_bench_query_latency.py'
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Measure query latencies
+        run: |
+          python3 scripts/bench_query_latency.py \
+            --binary ./target/release/rustspark \
+            --rows "${{ inputs.rows || '100000' }}" \
+            --repeat "${{ inputs.repeats || '3' }}" --warmup 1 \
+            --json-out benchmarks/results/query-latency.json \
+            --markdown-out benchmarks/results/query-latency.md
+      - name: Publish query timings
+        if: always()
+        run: |
+          if [ -f benchmarks/results/query-latency.md ]; then
+            cat benchmarks/results/query-latency.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Query latency report unavailable; see earlier job steps.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: rustspark-query-latencies
+          path: |
+            benchmarks/results/query-latency.json
+            benchmarks/results/query-latency.md
+          if-no-files-found: warn
+          retention-days: 90
