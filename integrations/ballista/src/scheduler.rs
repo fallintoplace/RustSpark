@@ -3,7 +3,7 @@ use std::{collections::HashSet, env, time::Duration};
 
 use ballista::prelude::*;
 use datafusion::{
-    execution::SessionStateBuilder,
+    execution::{session_state::SessionState, SessionStateBuilder},
     prelude::{SessionConfig, SessionContext},
 };
 
@@ -83,18 +83,18 @@ async fn probe_reachable(endpoint: &str, limit: Duration) -> Result<(), String> 
     }
 }
 
-async fn connect_endpoint(
-    endpoint: &str,
-    partitions: Option<usize>,
-) -> Result<SessionContext, String> {
+fn connection_state(partitions: Option<usize>) -> SessionState {
     let mut config = SessionConfig::new_with_ballista();
     if let Some(partitions) = partitions {
         config = config.with_target_partitions(partitions);
     }
-    let state = SessionStateBuilder::new()
+    SessionStateBuilder::new()
         .with_config(config)
         .with_default_features()
-        .build();
+        .build()
+}
+
+async fn connect_endpoint(endpoint: &str, state: SessionState) -> Result<SessionContext, String> {
     SessionContext::remote_with_state(endpoint, state)
         .await
         .map_err(|error| error.to_string())
@@ -119,16 +119,39 @@ async fn bounded_connect<T>(
     }
 }
 
+struct SchedulerOptions {
+    partitions: Option<usize>,
+    endpoints: Vec<String>,
+    timeout: Option<Duration>,
+}
+
+impl SchedulerOptions {
+    fn from_env(primary: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let partitions = optional_env("RUSTSPARK_TARGET_PARTITIONS")?
+            .as_deref()
+            .map(parse_partitions)
+            .transpose()?;
+        let configured = optional_env("RUSTSPARK_SCHEDULER_URLS")?;
+        let endpoints = parse_endpoints(primary, configured.as_deref())?;
+        let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
+        let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
+        Ok(Self {
+            partitions,
+            endpoints,
+            timeout,
+        })
+    }
+}
+
 pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Error>> {
-    let partitions = match env::var("RUSTSPARK_TARGET_PARTITIONS") {
-        Ok(value) => Some(parse_partitions(&value)?),
-        Err(env::VarError::NotPresent) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let configured = optional_env("RUSTSPARK_SCHEDULER_URLS")?;
-    let endpoints = parse_endpoints(url, configured.as_deref())?;
-    let configured_timeout = optional_env("RUSTSPARK_SCHEDULER_CONNECT_TIMEOUT_SECS")?;
-    let timeout = parse_connect_timeout(configured_timeout.as_deref(), endpoints.len())?;
+    let SchedulerOptions {
+        partitions,
+        endpoints,
+        timeout,
+    } = SchedulerOptions::from_env(url)?;
+    // Building DataFusion's planner is independent of the chosen scheduler.
+    // Reuse session state when trying fallback endpoints.
+    let state = connection_state(partitions);
     let mut failures = Vec::new();
 
     for (index, endpoint) in endpoints.iter().enumerate() {
@@ -140,7 +163,7 @@ pub async fn connect(url: &str) -> Result<SessionContext, Box<dyn std::error::Er
             if let Some(limit) = timeout {
                 probe_reachable(endpoint, limit).await?;
             }
-            connect_endpoint(endpoint, partitions).await
+            connect_endpoint(endpoint, state.clone()).await
         })
         .await;
         match result {
@@ -236,6 +259,13 @@ mod tests {
         })
         .await;
         assert_eq!(failed, Err("scheduler refused connection".into()));
+    }
+
+    #[test]
+    fn cloned_connection_state_keeps_partition_config() {
+        let state = connection_state(Some(7));
+        assert_eq!(state.config().target_partitions(), 7);
+        assert_eq!(state.clone().config().target_partitions(), 7);
     }
 
     #[test]

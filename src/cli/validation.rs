@@ -48,6 +48,18 @@ impl InputAvailability {
     }
 }
 
+fn named_input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    args.csv_tables
+        .iter()
+        .chain(&args.parquet_tables)
+        .chain(&args.json_tables)
+        .map(|mapping| {
+            let (_, path) = parse_named_table(mapping)?;
+            Ok(PathBuf::from(path))
+        })
+        .collect()
+}
+
 fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut sources: Vec<PathBuf> = Vec::new();
     for path in [
@@ -63,15 +75,7 @@ fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> 
             sources.push(path.clone());
         }
     }
-    for mapping in args
-        .csv_tables
-        .iter()
-        .chain(&args.parquet_tables)
-        .chain(&args.json_tables)
-    {
-        let (_, path) = parse_named_table(mapping)?;
-        sources.push(PathBuf::from(path));
-    }
+    sources.extend(named_input_paths(args)?);
     if let Some(manifest) = args.parquet_file_list.as_deref() {
         sources.push(manifest.to_path_buf());
         sources.extend(load_parquet_file_list(manifest)?);

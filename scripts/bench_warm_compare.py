@@ -7,13 +7,13 @@ import math
 import pathlib
 import platform
 import re
-import statistics
 import subprocess
 import sys
 import tempfile
 
-from bench_rustspark import (WORKLOADS, expected_results, output_signature, percentile, write_csv,
-                            _unique_json_keys, _reject_nonfinite_json)
+from bench_rustspark import (WORKLOADS, expected_results, output_signature, write_csv,
+                            _unique_json_keys, _reject_nonfinite_json, _finite_json_float)
+from bench_stats import summarize_samples
 
 TIMER = re.compile(r"^Time:\s+(\d+(?:\.\d+)?)\s+ms$", re.MULTILINE)
 SPARK_WORKER = """
@@ -75,6 +75,7 @@ for request in requests:
 def parse_result_line(line):
     return json.loads(
         line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite_json,
+        parse_float=_finite_json_float,
     )
 
 
@@ -178,12 +179,23 @@ def summarize(samples, requests, row_count, warmup, repeat):
             raise ValueError(f"Missing samples for {name}")
         measured = durations[warmup:]
         report[name] = {
-            "median_ms": round(statistics.median(measured), 3),
-            "p95_ms": round(percentile(measured, 0.95), 3),
-            "samples_ms": [round(value, 3) for value in measured],
+            **summarize_samples(measured),
             "result_sha256": fingerprints[name],
         }
     return report
+
+
+def competitor_median_ratios(reports, engine):
+    if "rustspark" not in reports or engine not in reports:
+        return {}
+    return {
+        name: (
+            round(reports[engine][name]["median_ms"]
+                  / reports["rustspark"][name]["median_ms"], 3)
+            if reports["rustspark"][name]["median_ms"] > 0 else None
+        )
+        for name in WORKLOADS
+    }
 
 
 def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master):
@@ -206,26 +218,8 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
             else:
                 samples = run_duckdb(csv, requests, timeout)
             reports[engine] = summarize(samples, requests, rows, warmup, repeat)
-        ratios = {}
-        if "rustspark" in reports and "spark" in reports:
-            ratios = {
-                name: (
-                    round(reports["spark"][name]["median_ms"]
-                          / reports["rustspark"][name]["median_ms"], 3)
-                    if reports["rustspark"][name]["median_ms"] > 0 else None
-                )
-                for name in WORKLOADS
-            }
-        duckdb_ratios = {}
-        if "rustspark" in reports and "duckdb" in reports:
-            duckdb_ratios = {
-                name: (
-                    round(reports["duckdb"][name]["median_ms"]
-                          / reports["rustspark"][name]["median_ms"], 3)
-                    if reports["rustspark"][name]["median_ms"] > 0 else None
-                )
-                for name in WORKLOADS
-            }
+        ratios = competitor_median_ratios(reports, "spark")
+        duckdb_ratios = competitor_median_ratios(reports, "duckdb")
         return {
             "metric": "Warm local SQL planning, execution and JSON serialization",
             "warning": "Excludes startup, input registration and distributed execution",
