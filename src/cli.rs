@@ -244,6 +244,10 @@ struct Args {
     #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
     target_partitions: Option<usize>,
 
+    /// Minimum total file-group size before DataFusion splits a scan across workers.
+    #[arg(long = "scan-split-min-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
+    scan_split_min_bytes: Option<usize>,
+
     /// Maximum concurrent file metadata reads during schema and statistics discovery.
     #[arg(long = "metadata-fetch-concurrency", value_name = "FILES", value_parser = parse_positive_metadata_concurrency)]
     metadata_fetch_concurrency: Option<usize>,
@@ -613,6 +617,12 @@ fn parse_batch_size(value: &str) -> Result<usize, String> {
 
 fn parse_target_partitions(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--target-partitions")
+}
+
+fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--scan-split-min-kb")?
+        .checked_mul(1024)
+        .ok_or_else(|| "--scan-split-min-kb exceeds the supported range".to_owned())
 }
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
