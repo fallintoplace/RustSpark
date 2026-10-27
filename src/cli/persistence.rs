@@ -520,6 +520,42 @@ pub(super) async fn save_table(
     Ok(())
 }
 
+struct BackupInventory {
+    tables: Vec<String>,
+    copies: Vec<(PathBuf, PathBuf)>,
+}
+
+fn collect_backup_parts(source: &Path, snapshot: &Path) -> Result<BackupInventory, Box<dyn Error>> {
+    let mut tables = Vec::new();
+    let mut copies = Vec::new();
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let filename = entry.file_name();
+        let Some(table) = filename.to_str() else {
+            continue;
+        };
+        if !valid_identifier(table) {
+            continue;
+        }
+        validate_table_files(&entry.path(), table)?;
+        let target = snapshot.join(table);
+        fs::create_dir(&target)?;
+        for part in fs::read_dir(entry.path())? {
+            let part = part?;
+            if !part.file_type()?.is_file() {
+                return Err(format!("Unexpected database part: {}", part.path().display()).into());
+            }
+            copies.push((part.path(), target.join(part.file_name())));
+        }
+        tables.push(table.to_owned());
+    }
+
+    Ok(BackupInventory { tables, copies })
+}
+
 /// Create an independent, consistent copy of a local database while its
 /// process lock is held. Copy rather than hard-link parts so later external
 /// edits to one snapshot cannot corrupt the other.
@@ -550,32 +586,7 @@ pub(super) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
         .tempdir_in(&parent)?;
     let snapshot = temporary.path().join("snapshot");
     fs::create_dir(&snapshot)?;
-    let mut tables = Vec::new();
-    let mut copies = Vec::new();
-    for entry in fs::read_dir(&source)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let filename = entry.file_name();
-        let Some(table) = filename.to_str() else {
-            continue;
-        };
-        if !valid_identifier(table) {
-            continue;
-        }
-        validate_table_files(&entry.path(), table)?;
-        let target = snapshot.join(table);
-        fs::create_dir(&target)?;
-        for part in fs::read_dir(entry.path())? {
-            let part = part?;
-            if !part.file_type()?.is_file() {
-                return Err(format!("Unexpected database part: {}", part.path().display()).into());
-            }
-            copies.push((part.path(), target.join(part.file_name())));
-        }
-        tables.push(table.to_owned());
-    }
+    let BackupInventory { mut tables, copies } = collect_backup_parts(&source, &snapshot)?;
 
     // Large backups can copy immutable parts independently. Bound the number
     // of workers so fragmented tables do not spawn a thread per Parquet file.
