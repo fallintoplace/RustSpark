@@ -5,10 +5,8 @@ use std::{
 };
 
 use datafusion::{
-    config::TableParquetOptions,
-    dataframe::DataFrameWriteOptions,
-    parquet::file::reader::SerializedFileReader,
-    prelude::DataFrame,
+    config::TableParquetOptions, dataframe::DataFrameWriteOptions,
+    parquet::file::reader::SerializedFileReader, prelude::DataFrame,
 };
 use futures::{StreamExt, stream};
 use rustspark::RustSparkSession;
