@@ -10,6 +10,8 @@ use datafusion::{
 mod export;
 mod joins;
 mod set_operations;
+#[path = "features/null_safe_equality.rs"]
+mod feature_null_safe_equality;
 mod sources;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
