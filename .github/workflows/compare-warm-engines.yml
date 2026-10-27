@@ -1,6 +1,8 @@
 name: Compare warm local SQL sessions
 
 on:
+  schedule:
+    - cron: '37 3 * * 2'
   workflow_dispatch:
     inputs:
       rows:
@@ -41,8 +43,8 @@ jobs:
       - name: Compare warm SQL sessions
         run: |
           python3 scripts/bench_warm_compare.py --binary ./target/release/rustspark \
-            --engines rustspark spark --rows "${{ inputs.rows }}" \
-            --repeat "${{ inputs.repeats }}" --warmup 1 --target-partitions 2 \
+            --engines rustspark spark --rows "${{ inputs.rows || '100000' }}" \
+            --repeat "${{ inputs.repeats || '5' }}" --warmup 1 --target-partitions 2 \
             --json-out benchmarks/warm-comparison.json
       - name: Render checked Markdown comparison
         run: |
@@ -56,3 +58,4 @@ jobs:
             benchmarks/warm-comparison.json
             benchmarks/reports/warm.md
           if-no-files-found: warn
+          retention-days: 90
