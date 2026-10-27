@@ -47,8 +47,31 @@ jobs:
             exit 1
           fi
 
-  build:
+  storage-qualification:
     needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Qualify local storage and V1 CLI workflows
+        run: >-
+          cargo test --locked
+          --test cli_insert_recovery
+          --test cli_database_lock
+          --test cli_catalog_recovery
+          --test cli_database_backup
+          --test v1_workflows
+
+  build:
+    needs: [verify, storage-qualification]
     strategy:
       fail-fast: false
       matrix:
