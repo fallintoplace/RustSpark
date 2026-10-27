@@ -99,6 +99,11 @@ async fn sparse_updates_on_wide_tables_preserve_order() -> TestResult {
     assert_eq!(names[0], "c0");
     assert_eq!(names[63], "c63");
     assert_eq!(names[64], "extra");
-    assert!(session.with_columns("wide", &[("C63", lit(1))]).await.is_err());
+    assert!(
+        session
+            .with_columns("wide", &[("C63", lit(1))])
+            .await
+            .is_err()
+    );
     Ok(())
 }
