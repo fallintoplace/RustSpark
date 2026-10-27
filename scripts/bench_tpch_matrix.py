@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -58,10 +59,22 @@ def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
             if number in fingerprints and fingerprints[number] != digest:
                 raise ValueError(f"Query Q{number:02} changed answers across partitions")
             fingerprints[number] = digest
+        complete = (len(results) == 22 and ok == 22 and process.returncode == 0
+                    and {row.get("id") for row in results} == set(range(1, 23)))
+        total = None
+        if complete:
+            times = [row.get("median_ms") for row in results]
+            if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                   for value in times):
+                raise ValueError(f"Invalid median in {n}-partition full-suite report")
+            total = round(math.fsum(times), 3)
         configurations.append({"partitions": n, "queries_attempted": len(results),
                                "queries_ok": ok, "runner_exit": process.returncode,
-                               "report": path.name})
+                               "sum_median_ms": total, "report": path.name})
+    complete_runs = [row for row in configurations if row["sum_median_ms"] is not None]
+    best = min(complete_runs, key=lambda row: row["sum_median_ms"]) if complete_runs else None
     summary = {"metric": "cold CLI + Parquet registration + SQL + JSON output",
+               "best_complete_partitions": best["partitions"] if best else None,
                "configurations": configurations}
     (output / "matrix.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary

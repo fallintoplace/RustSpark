@@ -110,6 +110,16 @@ def competitor_median_ratios(results, engines):
     }
 
 
+def _benchmark_engine(binary, engine, csv, expected, repeat, warmup, timeout):
+    results = {}
+    for workload, query in WORKLOADS.items():
+        results[workload] = measure_engine_workload(
+            engine, workload, command_for(engine, binary, csv, query),
+            expected[workload], repeat, warmup, timeout,
+        )
+    return results
+
+
 def benchmark(binary, engines, rows, repeat, warmup, timeout):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
@@ -124,14 +134,10 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
             name: output_signature("\n".join(json.dumps(row) for row in results))[0]
             for name, results in expected_results(rows).items()
         }
-        results = {}
-        for engine in engines:
-            results[engine] = {}
-            for workload, query in WORKLOADS.items():
-                results[engine][workload] = measure_engine_workload(
-                    engine, workload, command_for(engine, binary, csv, query),
-                    expected[workload], repeat, warmup, timeout
-                )
+        results = {
+            engine: _benchmark_engine(binary, engine, csv, expected, repeat, warmup, timeout)
+            for engine in engines
+        }
         ratios = competitor_median_ratios(results, engines)
         return {
             "metric": "cold process startup + typed CSV registration + SQL + JSON output",

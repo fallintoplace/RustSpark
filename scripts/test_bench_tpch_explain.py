@@ -1,6 +1,7 @@
 """Verify that EXPLAIN reports per-query failures without stopping."""
 
 from pathlib import Path
+import hashlib
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +29,10 @@ class ExplainTests(unittest.TestCase):
                 result = explain.capture("rs", parquet, [(1, directory / "01.sql"), (2, directory / "02.sql")], directory / "plans")
             self.assertEqual([entry["status"] for entry in result], ["error", "ok"])
             self.assertEqual((directory / "plans/02.txt").read_text(), "AggregateExec")
+            self.assertEqual(result[1]["plan_sha256"],
+                             hashlib.sha256(b"AggregateExec").hexdigest())
+            self.assertEqual(result[1]["plan_bytes"], len(b"AggregateExec"))
+            self.assertNotIn("plan_sha256", result[0])
 
 
 if __name__ == "__main__":
