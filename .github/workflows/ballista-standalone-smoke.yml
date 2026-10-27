@@ -18,4 +18,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m unittest discover -s scripts -p test_ballista_smoke.py
+      - run: cargo test --manifest-path integrations/ballista/Cargo.toml
       - run: python3 scripts/ballista_smoke.py --mode standalone --timeout 900
