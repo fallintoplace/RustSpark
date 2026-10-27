@@ -31,6 +31,11 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual((names, types, nullables), (["first\tpart"], ["bigint"], [False]))
 
+    def test_unsigned_types_are_not_mangled_by_signed_aliases(self):
+        for type_name in ("UInt8", "UInt16", "UInt32", "UInt64"):
+            self.assertEqual(mod.canonical_type(type_name), type_name.lower())
+        self.assertEqual(mod.canonical_type("List(Int64)"), "list(bigint)")
+
     def test_parse_rustspark_description_rejects_incomplete_fields(self):
         self.assertEqual(
             mod.parse_rustspark_description("count\tInt64\tNULL\n"),

@@ -33,11 +33,18 @@ class TypedResult:
 
 def canonical_type(value: str) -> str:
     value = re.sub(r"\s+", "", value).lower()
-    value = value.replace("int64", "bigint").replace("int32", "int")
-    value = value.replace("int16", "smallint").replace("int8", "tinyint")
-    value = value.replace("utf8", "string").replace("float64", "double")
-    value = value.replace("float32", "float").replace("boolean", "boolean")
-    value = value.replace("date32", "date")
+    aliases = {
+        "int64": "bigint",
+        "int32": "int",
+        "int16": "smallint",
+        "int8": "tinyint",
+        "utf8": "string",
+        "float64": "double",
+        "float32": "float",
+        "date32": "date",
+    }
+    value = re.sub(r"\b(?:int64|int32|int16|int8|utf8|float64|float32|date32)\b",
+                   lambda match: aliases[match.group(0)], value)
     value = re.sub(r"decimal128\((\d+),(\d+)\)", r"decimal(\1,\2)", value)
     if value.startswith("timestamp("):
         return "timestamp"
