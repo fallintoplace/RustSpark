@@ -50,6 +50,8 @@ def write_csv(path: pathlib.Path, rows: int):
 
 
 def percentile(samples, fraction):
+    if not 0 < fraction <= 1:
+        raise ValueError("fraction must be greater than zero and at most one")
     if not samples:
         raise ValueError("samples cannot be empty")
     ordered = sorted(samples)

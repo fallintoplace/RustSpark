@@ -55,6 +55,12 @@ class BenchmarkHarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench.percentile([], 0.95)
 
+    def test_percentile_rejects_out_of_range_fractions(self):
+        for fraction in (0, -0.5, 1.1, float("nan"), float("inf")):
+            with self.assertRaisesRegex(ValueError, "fraction"):
+                bench.percentile([1, 2, 3], fraction)
+        self.assertEqual(bench.percentile([1, 2, 3], 1), 3)
+
     def test_signature_ignores_unordered_rows(self):
         a, rows = bench.output_signature('{"id":2}\n{"id":1}\n')
         b, _ = bench.output_signature('{"id":1}\n{"id":2}\n')
