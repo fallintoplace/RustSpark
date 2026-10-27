@@ -23,6 +23,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
             .with_repartition_file_scans(true)
             .with_repartition_file_min_size(min_bytes);
     }
+    if let Some(rows) = args.output_rows_per_file {
+        config = config.set_usize("datafusion.execution.soft_max_rows_per_output_file", rows);
+    }
     if let Some(files) = args.metadata_fetch_concurrency {
         config = config.set_usize("datafusion.execution.meta_fetch_concurrency", files);
     }

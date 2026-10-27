@@ -105,6 +105,14 @@ fn reject_missing_format_inputs(
 }
 
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.output_rows_per_file.is_some()
+        && args.output_parquet.is_none()
+        && args.output_csv.is_none()
+        && args.output_json.is_none()
+        && args.database_dir.is_none()
+    {
+        return Err("--output-rows-per-file requires a file export or --database-dir".into());
+    }
     let single_inputs = u8::from(args.csv.is_some())
         + u8::from(args.parquet.is_some())
         + u8::from(args.json.is_some());

@@ -464,6 +464,19 @@ cargo run -- --sql 'SELECT 42 AS answer' --stdout-format html
 
 NULL cells receive a `null` CSS class. Column names and values are HTML-escaped.
 
+Split very large partitioned exports into manageable part files:
+
+```sh
+cargo run -- --csv /data/events.csv --batch-size 4096 \\
+  --sql 'SELECT * FROM data' --output-parquet /data/exported \\
+  --output-rows-per-file 1000000
+```
+
+This is a soft limit (batch boundaries may exceed it). DataFusion may produce
+multiple Parquet, CSV or JSON parts, depending on the input partitions.
+The same tuning also applies to persistent database writes. It cannot be
+combined with `--output-single-file`.
+
 Export a query result as a single Apache Arrow IPC file for downstream Arrow
 tools, without collecting all result batches in memory:
 
