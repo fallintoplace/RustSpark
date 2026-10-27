@@ -47,12 +47,7 @@ async fn explicitly_controls_null_position_for_each_sort_direction() -> TestResu
         .await?;
     assert_eq!(ids(descending).await?, [None, Some(2), Some(1)]);
 
-    assert!(
-        session
-            .sort_rows_with_nulls("items", &[])
-            .await
-            .is_err()
-    );
+    assert!(session.sort_rows_with_nulls("items", &[]).await.is_err());
     assert!(
         session
             .sort_rows_with_nulls("items", &[("missing", true, true)])
