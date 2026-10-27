@@ -45,6 +45,12 @@ class SparkCompatibilityTests(unittest.TestCase):
             mod.compare(mod.QueryResult(["a"], [[]]), mod.QueryResult(["b"], [[]]))
         )
 
+    def test_binary_buffers_match_between_engines(self):
+        left = mod.QueryResult(["payload"], [[bytearray(b"\\x00\\xff")]])
+        right = mod.QueryResult(["payload"], [[memoryview(b"\\x00\\xff")]])
+        self.assertIsNone(mod.compare(left, right))
+        self.assertEqual(mod.normalize(bytes([0, 255])), "00ff")
+
     def test_case_validator_rejects_malformed_cases(self):
         with self.assertRaisesRegex(ValueError, "string id"):
             mod.validate_case({"sql": "SELECT 1"}, set())
