@@ -1,27 +1,6 @@
-use datafusion::{
-    error::{DataFusionError, Result},
-    prelude::DataFrame,
-};
+use datafusion::{error::Result, prelude::DataFrame};
 
 use crate::RustSparkSession;
-
-// Quote every component. Table names are identifiers, never executable SQL.
-fn quote_table_path(name: &str) -> Result<String> {
-    let parts: Vec<_> = name.split('.').collect();
-    if parts
-        .iter()
-        .any(|part| part.is_empty() || part.trim() != *part)
-    {
-        return Err(DataFusionError::Plan(
-            "Set operations require a non-empty table path".into(),
-        ));
-    }
-    Ok(parts
-        .into_iter()
-        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join("."))
-}
 
 impl RustSparkSession {
     async fn set_operation(
@@ -30,8 +9,10 @@ impl RustSparkSession {
         right: &str,
         operator: &'static str,
     ) -> Result<DataFrame> {
-        let left = quote_table_path(left)?;
-        let right = quote_table_path(right)?;
+        let left =
+            super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
+        let right =
+            super::quote_catalog_table(right, "Set operations require a non-empty table path")?;
         self.sql_read_only(&format!(
             "SELECT * FROM {left} {operator} SELECT * FROM {right}"
         ))
