@@ -481,6 +481,20 @@ async fn persist_created_table(
     Ok(())
 }
 
+fn bind_query_params(
+    dataframe: DataFrame,
+    args: &Args,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    if !args.named_params.is_empty() {
+        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
+        Ok(dataframe.with_param_values(params)?)
+    } else if !args.params.is_empty() {
+        Ok(dataframe.with_param_values(args.params.clone())?)
+    } else {
+        Ok(dataframe)
+    }
+}
+
 async fn plan_with_args(
     session: &RustSparkSession,
     query: &str,
@@ -492,14 +506,7 @@ async fn plan_with_args(
     } else {
         session.sql(query).await?
     };
-    if !args.named_params.is_empty() {
-        let params: HashMap<_, _> = args.named_params.iter().cloned().collect();
-        Ok(dataframe.with_param_values(params)?)
-    } else if !args.params.is_empty() {
-        Ok(dataframe.with_param_values(args.params.clone())?)
-    } else {
-        Ok(dataframe)
-    }
+    bind_query_params(dataframe, args)
 }
 
 pub(super) async fn plan_query(

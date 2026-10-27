@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: Package RustSpark binary
         run: tar -czf rustspark-typed.tar.gz -C target/debug rustspark
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rustspark-typed-binary
           path: rustspark-typed.tar.gz
@@ -36,16 +36,16 @@ jobs:
       matrix:
         input_format: [csv, parquet]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: rustspark-typed-binary
       - name: Extract RustSpark binary
         run: mkdir -p target/debug && tar -xzf rustspark-typed.tar.gz -C target/debug
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -55,7 +55,7 @@ jobs:
           python3 scripts/spark_typed_compat.py --rustspark ./target/debug/rustspark \
             --input-format "${{ matrix.input_format }}" --check-nullability \
             --json-out "reports/spark-typed-${{ matrix.input_format }}.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: spark-typed-differential-${{ matrix.input_format }}

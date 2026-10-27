@@ -86,6 +86,9 @@ def parse_rustspark_json(stdout: str, columns: list[str]) -> QueryResult:
         json.loads(line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite)
         for line in stdout.splitlines() if line.strip()
     ]
+    # json.loads accepts a huge exponent (1e400) as infinity even when
+    # parse_constant rejects the explicit Infinity token.
+    json.dumps(objects, allow_nan=False)
     expected = set(columns)
     if len(expected) != len(columns) or any(
         not isinstance(obj, dict) or set(obj) != expected for obj in objects

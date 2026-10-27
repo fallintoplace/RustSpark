@@ -4,11 +4,7 @@ use datafusion::arrow::ipc::writer::FileWriter;
 use futures::StreamExt;
 use rustspark::RustSparkSession;
 
-pub async fn write_arrow(
-    session: &RustSparkSession,
-    query: &str,
-    destination: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn arrow_output_parent(destination: &Path) -> Result<&Path, Box<dyn std::error::Error>> {
     if destination.file_name().is_none() {
         return Err("RUSTSPARK_OUTPUT_ARROW must name a file".into());
     }
@@ -17,10 +13,18 @@ pub async fn write_arrow(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let parent = destination
+    Ok(destination
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .unwrap_or_else(|| Path::new(".")))
+}
+
+pub async fn write_arrow(
+    session: &RustSparkSession,
+    query: &str,
+    destination: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = arrow_output_parent(destination)?;
     let mut stream = session.sql_read_only_stream(query).await?;
     let schema = stream.schema();
     let temporary = tempfile::NamedTempFile::new_in(parent)?;

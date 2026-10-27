@@ -10,6 +10,10 @@ enum MultisetOperation {
     Except,
 }
 
+fn quote_set_table(path: &str) -> Result<String> {
+    super::quote_catalog_table(path, "Set operations require a non-empty table path")
+}
+
 fn numbered_input_sql(table: &str, columns: &[String], index: &str) -> String {
     let partition = columns
         .iter()
@@ -26,10 +30,8 @@ impl RustSparkSession {
         right: &str,
         operator: &'static str,
     ) -> Result<DataFrame> {
-        let left =
-            super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
-        let right =
-            super::quote_catalog_table(right, "Set operations require a non-empty table path")?;
+        let left = quote_set_table(left)?;
+        let right = quote_set_table(right)?;
         self.sql_read_only(&format!(
             "SELECT * FROM {left} {operator} SELECT * FROM {right}"
         ))
@@ -58,10 +60,8 @@ impl RustSparkSession {
         right: &str,
         operation: MultisetOperation,
     ) -> Result<DataFrame> {
-        let left_path =
-            super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
-        let right_path =
-            super::quote_catalog_table(right, "Set operations require a non-empty table path")?;
+        let left_path = quote_set_table(left)?;
+        let right_path = quote_set_table(right)?;
         let left_frame = self.table(left).await?;
         let right_frame = self.table(right).await?;
         let left_columns = left_frame
@@ -142,10 +142,8 @@ impl RustSparkSession {
     /// This combines both directed SQL EXCEPT results, with SQL NULL equality.
     /// The schemas must be compatible by column position.
     pub async fn symmetric_difference_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
-        let left =
-            super::quote_catalog_table(left, "Set operations require a non-empty table path")?;
-        let right =
-            super::quote_catalog_table(right, "Set operations require a non-empty table path")?;
+        let left = quote_set_table(left)?;
+        let right = quote_set_table(right)?;
         self.sql_read_only(&format!(
             "SELECT * FROM (SELECT * FROM {left} EXCEPT SELECT * FROM {right}) AS left_only \
              UNION ALL \
@@ -157,7 +155,17 @@ impl RustSparkSession {
 
 #[cfg(test)]
 mod numbered_input_tests {
-    use super::numbered_input_sql;
+    use super::{numbered_input_sql, quote_set_table};
+
+    #[test]
+    fn set_table_quoting_keeps_qualified_identifiers() {
+        assert_eq!(
+            quote_set_table("catalog.events").unwrap(),
+            "\"catalog\".\"events\""
+        );
+        assert!(quote_set_table("").is_err());
+        assert!(quote_set_table("catalog..events").is_err());
+    }
 
     #[test]
     fn quotes_partition_columns_in_numbered_sources() {
