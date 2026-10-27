@@ -167,7 +167,8 @@ async fn register_named_inputs(
         let session = Arc::clone(session);
         let args = Arc::clone(args);
         registration_jobs.spawn(async move {
-            kind.register(&session, &args, &name, Path::new(&path)).await
+            kind.register(&session, &args, &name, Path::new(&path))
+                .await
         });
         finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
     }
