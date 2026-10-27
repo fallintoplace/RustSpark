@@ -295,10 +295,15 @@ struct Args {
     parquet_compression: Option<String>,
 }
 
-fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(path) = args.auto_input.as_ref() else {
-        return Ok(());
-    };
+enum AutoInputKind {
+    Csv,
+    Json,
+    Parquet,
+}
+
+fn classify_auto_input(
+    path: &std::path::Path,
+) -> Result<(AutoInputKind, String), Box<dyn std::error::Error>> {
     if path.is_dir() {
         return Err("--input needs a file; use --csv, --json or --parquet for directories".into());
     }
@@ -306,21 +311,33 @@ fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>>
         .extension()
         .and_then(|extension| extension.to_str())
         .ok_or("--input needs a .csv, .json, .jsonl, .ndjson or .parquet extension")?;
-    let actual_extension = format!(".{extension}");
-    match extension.to_ascii_lowercase().as_str() {
-        "csv" => {
-            args.csv = Some(path.clone());
-            args.csv_extension.get_or_insert(actual_extension);
-        }
-        "json" | "jsonl" | "ndjson" => {
-            args.json = Some(path.clone());
-            args.json_extension.get_or_insert(actual_extension);
-        }
-        "parquet" => {
-            args.parquet = Some(path.clone());
-            args.parquet_extension.get_or_insert(actual_extension);
-        }
+    let kind = match extension.to_ascii_lowercase().as_str() {
+        "csv" => AutoInputKind::Csv,
+        "json" | "jsonl" | "ndjson" => AutoInputKind::Json,
+        "parquet" => AutoInputKind::Parquet,
         _ => return Err(format!("Unsupported --input extension: .{extension}").into()),
+    };
+    Ok((kind, format!(".{extension}")))
+}
+
+fn resolve_auto_input(args: &mut Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = args.auto_input.as_ref() else {
+        return Ok(());
+    };
+    let (kind, extension) = classify_auto_input(path)?;
+    match kind {
+        AutoInputKind::Csv => {
+            args.csv = Some(path.clone());
+            args.csv_extension.get_or_insert(extension);
+        }
+        AutoInputKind::Json => {
+            args.json = Some(path.clone());
+            args.json_extension.get_or_insert(extension);
+        }
+        AutoInputKind::Parquet => {
+            args.parquet = Some(path.clone());
+            args.parquet_extension.get_or_insert(extension);
+        }
     }
     Ok(())
 }
@@ -790,3 +807,26 @@ async fn execute_registered_query(
 
 mod output;
 use output::{write_arrow_ipc, write_stdout};
+
+#[cfg(test)]
+mod auto_input_tests {
+    use super::{AutoInputKind, classify_auto_input};
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_extensions_case_insensitively() {
+        assert!(matches!(
+            classify_auto_input(Path::new("events.CSV")),
+            Ok((AutoInputKind::Csv, extension)) if extension == ".CSV"
+        ));
+        assert!(matches!(
+            classify_auto_input(Path::new("events.ndjson")),
+            Ok((AutoInputKind::Json, extension)) if extension == ".ndjson"
+        ));
+        assert!(matches!(
+            classify_auto_input(Path::new("events.PARQUET")),
+            Ok((AutoInputKind::Parquet, extension)) if extension == ".PARQUET"
+        ));
+        assert!(classify_auto_input(Path::new("events.txt")).is_err());
+    }
+}
