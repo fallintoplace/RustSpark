@@ -8,7 +8,6 @@ Neither mode tests worker crash recovery or production-scale throughput.
 import argparse
 import os
 import pathlib
-import re
 import subprocess
 import tempfile
 
@@ -18,7 +17,8 @@ QUERY = (
     "SELECT COUNT(*) AS matches, SUM(o.amount * r.multiplier) AS weighted_total "
     "FROM orders o JOIN rates r ON o.id = r.id"
 )
-EXPECTED_ROW = re.compile(r"^\|\s*2\s*\|\s*80\s*\|$")
+EXPECTED_COLUMNS = ["matches", "weighted_total"]
+EXPECTED_VALUES = ["2", "80"]
 
 
 def command_for(mode: str, client: str | None) -> list[str]:
@@ -41,11 +41,15 @@ def write_fixtures(directory: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]
 
 
 def verify_output(stdout: str) -> None:
-    if "matches" not in stdout or "weighted_total" not in stdout:
-        raise RuntimeError("Ballista smoke did not return the expected columns:\n" + stdout)
-    if not any(EXPECTED_ROW.fullmatch(line.strip()) for line in stdout.splitlines()):
-        raise RuntimeError("Ballista join/aggregate expected (2, 80):\n" + stdout)
-
+    # The aggregate returns one header and one data row. Ignore table borders
+    # and ordinary log lines, but never accept a matching value elsewhere.
+    table_rows = [
+        [cell.strip() for cell in line.strip()[1:-1].split("|")]
+        for line in stdout.splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    if table_rows != [EXPECTED_COLUMNS, EXPECTED_VALUES]:
+        raise RuntimeError("Ballista join/aggregate expected one row (2, 80):\n" + stdout)
 
 def run_smoke(mode: str, client: str | None = None, timeout: int = 300) -> None:
     command = command_for(mode, client)
