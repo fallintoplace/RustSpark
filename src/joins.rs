@@ -380,6 +380,51 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
+    /// Join on string keys without distinguishing uppercase and lowercase.
+    ///
+    /// Both columns in every key pair must support SQL LOWER. NULL keys do
+    /// not match; the returned DataFrame remains lazy. Duplicate column names
+    /// are preserved, as for an ordinary ON join.
+    pub async fn join_tables_case_insensitive(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        keys: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        use std::fmt::Write as _;
+
+        validate_join_key_pairs(
+            keys,
+            "join_tables_case_insensitive requires non-empty key pairs",
+        )?;
+        let operator = outer_join_operator(
+            join_type,
+            "join_tables_case_insensitive supports inner and outer joins only",
+        )?;
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let mut predicates = String::new();
+        for (left_key, right_key) in keys {
+            if !predicates.is_empty() {
+                predicates.push_str(" AND ");
+            }
+            write!(
+                &mut predicates,
+                "LOWER({left_alias}.{}) = LOWER({right_alias}.{})",
+                quote_join_identifier(left_key),
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let query = format!(
+            "SELECT * FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {predicates}",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join two registered tables on one or more pairs of equality keys.
     ///
     /// The result is a lazy DataFrame. Join types such as inner, left, right,
