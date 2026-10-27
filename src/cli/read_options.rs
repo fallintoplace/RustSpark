@@ -3,9 +3,13 @@ use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
 use super::Args;
 
 fn csv_null_regex(value: &str) -> String {
-    let mut pattern = String::from("^");
+    let mut pattern = String::with_capacity(value.len() + 2);
+    pattern.push('^');
     for character in value.chars() {
-        if r"\.^$|?*+()[]{}".contains(character) {
+        if matches!(
+            character,
+            '\\' | '.' | '^' | '$' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}'
+        ) {
             pattern.push('\\');
         }
         pattern.push(character);
@@ -86,5 +90,17 @@ pub(super) fn json_read_options(args: &Args) -> JsonReadOptions<'_> {
         options.schema_infer_max_records(rows)
     } else {
         options
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::csv_null_regex;
+
+    #[test]
+    fn null_marker_regex_escapes_special_characters() {
+        assert_eq!(csv_null_regex(".+?"), r"^\.\+\?$");
+        assert_eq!(csv_null_regex(r"\|[]{}"), r"^\\\|\[\]\{\}$");
+        assert_eq!(csv_null_regex("naïve"), "^naïve$");
     }
 }
