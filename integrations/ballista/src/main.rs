@@ -2,10 +2,24 @@
 //! Run from the RustSpark repository root after starting Ballista 55.
 use rustspark::RustSparkSession;
 
+mod deadline;
+mod remote_inputs;
+mod result_preview;
 mod scheduler;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(limit) = deadline::configured_deadline()? {
+        match tokio::time::timeout(limit, run()).await {
+            Ok(result) => result,
+            Err(_) => Err("Ballista client query deadline exceeded; remote jobs may still run".into()),
+        }
+    } else {
+        run().await
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("BALLISTA_URL")
         .unwrap_or_else(|_| "df://localhost:50050".to_owned());
     let query = std::env::var("RUSTSPARK_SQL")
@@ -19,7 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(path) = std::env::var("RUSTSPARK_PARQUET") {
         session.register_parquet("data", &path).await?;
     }
+    remote_inputs::register(&session).await?;
 
-    session.sql(&query).await?.show().await?;
+    let result = session.sql(&query).await?;
+    if let Some(rows) = result_preview::configured_rows()? {
+        result.show_limit(rows).await?;
+    } else {
+        result.show().await?;
+    }
     Ok(())
 }

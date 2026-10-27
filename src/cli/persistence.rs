@@ -406,11 +406,10 @@ pub(super) async fn register_database_tables(
     entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
 
     let mut tables = Vec::new();
-    for (_, entry) in entries {
+    for (filename, entry) in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let filename = entry.file_name();
         let Some(name) = filename.to_str() else {
             continue;
         };

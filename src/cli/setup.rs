@@ -37,29 +37,27 @@ async fn plan_view_query(
     Ok(dataframe)
 }
 
+fn union_definitions(args: &Args) -> impl Iterator<Item = (&str, bool)> {
+    args.unions_by_name
+        .iter()
+        .map(|definition| (definition.as_str(), false))
+        .chain(
+            args.unions_distinct_by_name
+                .iter()
+                .map(|definition| (definition.as_str(), true)),
+        )
+}
+
 async fn register_unions_by_name(
     session: &RustSparkSession,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut union_names = HashSet::new();
-    for declaration in args
-        .unions_by_name
-        .iter()
-        .chain(&args.unions_distinct_by_name)
-    {
+    for (declaration, _) in union_definitions(args) {
         let (name, _) = parse_union_by_name(declaration)?;
         ensure_unique_name(&mut union_names, name, "union destination")?;
     }
-    let unions = args
-        .unions_by_name
-        .iter()
-        .map(|definition| (definition, false))
-        .chain(
-            args.unions_distinct_by_name
-                .iter()
-                .map(|definition| (definition, true)),
-        );
-    for (definition, distinct) in unions {
+    for (definition, distinct) in union_definitions(args) {
         let (name, sources) = parse_union_by_name(definition)?;
         let union = if distinct {
             session.union_tables_distinct_by_name(&sources).await?
