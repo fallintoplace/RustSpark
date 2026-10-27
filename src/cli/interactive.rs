@@ -156,7 +156,8 @@ async fn handle_columns_command(session: &RustSparkSession, command: &str) -> bo
 
 // Handle the schema-specific shell command without changing pending SQL.
 async fn handle_schema_command(session: &RustSparkSession, command: &str) -> bool {
-    if command != ".schema" && !command.starts_with(".schema ") && !command.starts_with(".schema\t") {
+    if command != ".schema" && !command.starts_with(".schema ") && !command.starts_with(".schema\t")
+    {
         return false;
     }
     let name = command.strip_prefix(".schema").unwrap_or_default().trim();
