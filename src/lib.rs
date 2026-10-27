@@ -8,6 +8,8 @@ use datafusion::{
 };
 
 mod export;
+#[path = "features/group_row_numbers.rs"]
+mod feature_group_row_numbers;
 mod joins;
 mod set_operations;
 mod sources;
