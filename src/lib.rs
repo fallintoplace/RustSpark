@@ -800,6 +800,22 @@ impl RustSparkSession {
         self.context.table(name).await
     }
 
+    /// Return a lazy window of rows from a registered table.
+    ///
+    /// A length of zero produces an empty result. Sort the source before
+    /// slicing if stable row ordering is required.
+    pub async fn slice_rows(
+        &self,
+        table: &str,
+        offset: usize,
+        length: usize,
+    ) -> Result<DataFrame> {
+        offset.checked_add(length).ok_or_else(|| {
+            DataFusionError::Plan("slice_rows offset plus length exceeds usize".into())
+        })?;
+        self.table(table).await?.limit(offset, Some(length))
+    }
+
     /// Join two registered tables on one or more pairs of equality keys.
     ///
     /// The result is a lazy DataFrame. Join types such as inner, left, right,
