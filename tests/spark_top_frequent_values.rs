@@ -23,8 +23,11 @@ async fn top_frequencies_are_sorted_and_bounded() -> TestResult {
         ScalarValue::Int64(Some(3))
     );
     assert_eq!(
-        session.sql_scalar("SELECT value FROM popular").await?,
-        ScalarValue::Utf8(Some("apple".into()))
+        session
+            .sql_scalar("SELECT value FROM popular")
+            .await?
+            .to_string(),
+        "apple"
     );
     assert_eq!(
         session
