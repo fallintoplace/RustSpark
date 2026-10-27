@@ -166,6 +166,17 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 Missing columns are filled with NULL and duplicates are removed across all
 sources. Union destination names must be unique across both union flags.
 
+Increase file metadata concurrency when loading directories with many files:
+
+```sh
+cargo run -- --parquet /data/lake/events --metadata-fetch-concurrency 64 \\
+  --sql 'SELECT COUNT(*) FROM data'
+```
+
+This controls concurrent file schema and statistics reads. Higher settings can
+reduce metadata latency but use more memory and storage I/O. The default is
+unchanged when the flag is omitted.
+
 Enable Parquet late materialization for selective filters:
 
 ```sh
