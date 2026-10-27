@@ -26,7 +26,7 @@ fn markdown_streams_rows_across_batches() -> TestResult {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "| id |\\n| --- |\\n| 1 |\\n| 2 |\\n| 3 |\\n"
+        "| id |\n| --- |\n| 1 |\n| 2 |\n| 3 |\n"
     );
     Ok(())
 }
@@ -40,7 +40,7 @@ fn markdown_escapes_pipes_and_prints_null_explicitly() -> TestResult {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "| value | missing |\\n| --- | --- |\\n| a\\\\|b | NULL |\\n"
+        "| value | missing |\n| --- | --- |\n| a\\|b | NULL |\n"
     );
     Ok(())
 }
@@ -51,7 +51,7 @@ fn markdown_empty_result_has_column_headers() -> TestResult {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "| answer |\\n| --- |\\n"
+        "| answer |\n| --- |\n"
     );
     Ok(())
 }
