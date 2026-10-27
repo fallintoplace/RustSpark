@@ -2,6 +2,7 @@
 """Capture logical/physical EXPLAIN plans for numbered TPC-H SQL files."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -35,6 +36,9 @@ def capture(binary, parquet, queries, output, timeout=120, partitions=2):
             if not process.stdout.strip():
                 raise ValueError("Empty EXPLAIN result")
             destination.write_text(process.stdout, encoding="utf-8")
+            plan_bytes = process.stdout.encode("utf-8")
+            entry["plan_sha256"] = hashlib.sha256(plan_bytes).hexdigest()
+            entry["plan_bytes"] = len(plan_bytes)
             entry["status"] = "ok"
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             entry.update({"status": "error", "error": str(error)[-500:]})
