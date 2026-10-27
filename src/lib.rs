@@ -21,6 +21,8 @@ mod sql_compat_nullifzero;
 mod sql_compat_oct;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
+#[path = "features/substring_filter.rs"]
+mod feature_substring_filter;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/startswith.rs"]
