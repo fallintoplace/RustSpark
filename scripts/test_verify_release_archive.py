@@ -62,6 +62,12 @@ class ArchiveVerifierTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Archive members differ"):
                 archive.verify_archive(path, binary, self.root, self.root)
 
+    def test_rejects_oversized_members_before_loading(self):
+        for kind in ("tar", "zip"):
+            path, binary = self.build(kind, binary_payload=b"program\n" + b"X" * 1024)
+            with self.assertRaisesRegex(ValueError, "size differs"):
+                archive.verify_archive(path, binary, self.root, self.root)
+
     def test_rejects_changed_executable(self):
         for kind in ("tar", "zip"):
             path, binary = self.build(kind, binary_payload=b"changed\n")
