@@ -166,6 +166,18 @@ cargo run -- --csv-table first=tests/fixtures/sales.csv \
 Missing columns are filled with NULL and duplicates are removed across all
 sources. Union destination names must be unique across both union flags.
 
+Tune scan splitting for large input files and many available CPU cores:
+
+```sh
+cargo run -- --csv /data/large.csv --target-partitions 8 \\
+  --scan-split-min-kb 256 --sql 'SELECT SUM(amount) FROM data'
+```
+
+The option sets the minimum file-group size that DataFusion considers for
+splitting a scan. Smaller values can help fill workers on moderate-size files
+but add scheduling and I/O overhead. The default stays unchanged unless the
+option is specified. Compressed or unsplittable formats may not benefit.
+
 Enable Parquet late materialization for selective filters:
 
 ```sh

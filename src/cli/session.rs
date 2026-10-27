@@ -18,6 +18,11 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }
+    if let Some(min_bytes) = args.scan_split_min_bytes {
+        config = config
+            .with_repartition_file_scans(true)
+            .with_repartition_file_min_size(min_bytes);
+    }
     config
 }
 
