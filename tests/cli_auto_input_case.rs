@@ -6,9 +6,18 @@ fn assert_row_count(path: &Path, expected: &str) -> TestResult {
     let result = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--input")
         .arg(path)
-        .args(["--sql", "SELECT COUNT(*) AS total FROM data", "--stdout-format", "csv"])
+        .args([
+            "--sql",
+            "SELECT COUNT(*) AS total FROM data",
+            "--stdout-format",
+            "csv",
+        ])
         .output()?;
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(String::from_utf8(result.stdout)?, expected);
     Ok(())
 }
@@ -32,7 +41,11 @@ fn auto_input_keeps_original_case_for_reader_extension() -> TestResult {
         .arg(&parquet)
         .arg("--output-single-file")
         .output()?;
-    assert!(export.status.success(), "{}", String::from_utf8_lossy(&export.stderr));
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
     let uppercase = dir.path().join("saved.PARQUET");
     fs::copy(parquet, &uppercase)?;
     assert_row_count(&uppercase, "total\n1\n")?;
