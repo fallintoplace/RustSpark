@@ -1479,9 +1479,9 @@ impl RustSparkSession {
         filter: datafusion::logical_expr::Expr,
     ) -> Result<DataFrame> {
         if keys.is_empty()
-            || keys
-                .iter()
-                .any(|(left_key, right_key)| left_key.trim().is_empty() || right_key.trim().is_empty())
+            || keys.iter().any(|(left_key, right_key)| {
+                left_key.trim().is_empty() || right_key.trim().is_empty()
+            })
         {
             return Err(DataFusionError::Plan(
                 "join_tables_filtered requires one or more non-empty key pairs".into(),
