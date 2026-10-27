@@ -35,5 +35,17 @@ async fn typed_in_filter_handles_nulls_empty_sets_and_unknown_columns()
             .is_err()
     );
     assert_eq!(session.table("events").await?.count().await?, 4);
+
+    session
+        .register_sql_view("dotted", "SELECT CAST(5 AS BIGINT) AS \"tag.id\"")
+        .await?;
+    assert_eq!(
+        session
+            .filter_rows_in_values("dotted", "tag.id", &[ScalarValue::Int64(Some(5))])
+            .await?
+            .count()
+            .await?,
+        1
+    );
     Ok(())
 }
