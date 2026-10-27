@@ -30,7 +30,7 @@ def git_revision(directory):
     return None
 
 
-def _collect_provenance(executable, repository):
+def collect_provenance(executable, repository):
     return {
         "binary_sha256": sha256(executable),
         "binary_bytes": executable.stat().st_size,
@@ -51,7 +51,7 @@ def enrich(report, binary, repository="."):
     copy = dict(report)
     if "provenance" in copy:
         raise ValueError("Report already contains provenance")
-    copy["provenance"] = _collect_provenance(executable, repository)
+    copy["provenance"] = collect_provenance(executable, repository)
     return copy
 
 
