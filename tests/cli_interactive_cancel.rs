@@ -4,7 +4,8 @@ use std::{
 };
 
 #[test]
-fn cancel_discards_pending_sql_without_affecting_later_queries() -> Result<(), Box<dyn std::error::Error>> {
+fn cancel_discards_pending_sql_without_affecting_later_queries()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args(["--interactive", "--csv", "tests/fixtures/sales.csv"])
         .stdin(Stdio::piped())
@@ -32,7 +33,8 @@ fn cancel_discards_pending_sql_without_affecting_later_queries() -> Result<(), B
 }
 
 #[test]
-fn cancel_is_not_interpreted_inside_a_quoted_sql_literal() -> Result<(), Box<dyn std::error::Error>> {
+fn cancel_is_not_interpreted_inside_a_quoted_sql_literal() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut child = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .args(["--interactive", "--csv", "tests/fixtures/sales.csv"])
         .stdin(Stdio::piped())
@@ -45,7 +47,11 @@ fn cancel_is_not_interpreted_inside_a_quoted_sql_literal() -> Result<(), Box<dyn
         .ok_or("missing stdin")?
         .write_all(b"SELECT 'first\n.cancel\nlast' AS value;\n.quit\n")?;
     let output = child.wait_with_output()?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains(".cancel"), "{stdout}");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("Pending SQL cancelled"));
