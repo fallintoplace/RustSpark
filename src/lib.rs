@@ -1321,13 +1321,16 @@ impl RustSparkSession {
         self.table(table).await?.distinct()?.count().await
     }
 
-    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
+    fn sort_dataframe_with_nulls(
+        dataframe: DataFrame,
+        order: &[(&str, bool, bool)],
+    ) -> Result<DataFrame> {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
         let mut seen = HashSet::new();
-        let mut sort_exprs = Vec::new();
-        for &(name, ascending) in order {
+        let mut expressions = Vec::with_capacity(order.len());
+        for &(name, ascending, nulls_first) in order {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate sort column: {name}"
@@ -1343,9 +1346,17 @@ impl RustSparkSession {
                     "Unknown sort column: {name}"
                 )));
             }
-            sort_exprs.push(Expr::Column(Column::from_name(name)).sort(ascending, ascending));
+            expressions.push(Expr::Column(Column::from_name(name)).sort(ascending, nulls_first));
         }
-        dataframe.sort(sort_exprs)
+        dataframe.sort(expressions)
+    }
+
+    fn sort_dataframe(dataframe: DataFrame, order: &[(&str, bool)]) -> Result<DataFrame> {
+        let keys = order
+            .iter()
+            .map(|&(name, ascending)| (name, ascending, ascending))
+            .collect::<Vec<_>>();
+        Self::sort_dataframe_with_nulls(dataframe, &keys)
     }
 
     /// Sort rows by multiple named columns using Spark-like NULL ordering.
@@ -1393,38 +1404,12 @@ impl RustSparkSession {
         table: &str,
         order: &[(&str, bool, bool)],
     ) -> Result<DataFrame> {
-        use datafusion::{common::Column, logical_expr::Expr};
-        use std::collections::HashSet;
-
         if order.is_empty() {
             return Err(DataFusionError::Plan(
                 "sort_rows_with_nulls requires at least one key".into(),
             ));
         }
-
-        let dataframe = self.table(table).await?;
-        let available: HashSet<&str> = dataframe
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        let mut seen = HashSet::new();
-        let mut expressions = Vec::with_capacity(order.len());
-        for &(name, ascending, nulls_first) in order {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate sort column: {name}"
-                )));
-            }
-            if !available.contains(name) {
-                return Err(DataFusionError::Plan(format!(
-                    "Unknown sort column: {name}"
-                )));
-            }
-            expressions.push(Expr::Column(Column::from_name(name)).sort(ascending, nulls_first));
-        }
-        dataframe.sort(expressions)
+        Self::sort_dataframe_with_nulls(self.table(table).await?, order)
     }
 
     // Plan independent SQL inputs concurrently, with bounded outstanding
