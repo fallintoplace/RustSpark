@@ -105,6 +105,7 @@ fn publish_single_file_export(
     // before renaming it into place to avoid another full-size copy.
     let completed = fs::OpenOptions::new().write(true).open(path)?;
     completed.sync_all()?;
+    drop(completed);
     if let Err(rename_error) = fs::rename(path, destination) {
         // Some platforms cannot rename over an existing destination.
         // Preserve the previous cross-platform atomic replacement path.
