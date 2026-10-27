@@ -104,7 +104,7 @@ class WarmComparisonTests(unittest.TestCase):
     def test_duckdb_uses_one_session_and_checks_results(self):
         requests, samples = fixture(16)
         result = mock.Mock(
-            returncode=0, stdout="\\n".join(json.dumps(s) for s in samples), stderr=""
+            returncode=0, stdout="\n".join(json.dumps(s) for s in samples), stderr=""
         )
         with mock.patch.object(warm.importlib.util, "find_spec", return_value=object()), \
              mock.patch.object(warm.subprocess, "run", return_value=result) as command:
