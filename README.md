@@ -94,6 +94,14 @@ let joined = session
 let row_count = joined.count().await?;
 ```
 
+Get distinct values from one column without collecting all rows:
+
+```rust
+let cities = session.distinct_column_values("sales", "city").await?;
+```
+
+The result is lazy and includes at most one NULL. Sort it when ordering matters.
+
 Get a lazy row window from a registered table with `slice_rows`. Sort
 the table first when row order matters:
 
