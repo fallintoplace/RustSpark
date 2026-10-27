@@ -435,6 +435,21 @@ impl RustSparkSession {
         dataframe.select_columns(columns)
     }
 
+    /// Select distinct combinations of the named columns from a table.
+    ///
+    /// Column order follows the caller's list. The operation is lazy and
+    /// does not alter the registered table.
+    pub async fn distinct_columns(&self, table: &str, columns: &[&str]) -> Result<DataFrame> {
+        if columns.is_empty() {
+            return Err(DataFusionError::Plan(
+                "distinct_columns requires at least one column".into(),
+            ));
+        }
+        let dataframe = self.table(table).await?;
+        Self::validate_selected_columns(&dataframe, columns)?;
+        dataframe.select_columns(columns)?.distinct()
+    }
+
     fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
         use std::collections::HashSet;
 
