@@ -63,6 +63,19 @@ def valid_result(entry) -> bool:
             and entry["result_rows"] >= 0)
 
 
+def result_mismatch(before: dict, after: dict) -> str | None:
+    if not isinstance(before.get("sql"), str) or before["sql"] != after.get("sql"):
+        return "SQL differs"
+    if before.get("status") != "executed" or after.get("status") != "executed":
+        return "query did not execute in both reports"
+    if not valid_result(before) or not valid_result(after) or (
+        before["result_sha256"] != after["result_sha256"]
+        or before["result_rows"] != after["result_rows"]
+    ):
+        return "result differs"
+    return None
+
+
 def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None = None) -> dict:
     if max_slowdown is not None and (not is_duration(max_slowdown) or max_slowdown < 1):
         raise ValueError("--max-slowdown must be finite and at least 1")
@@ -79,17 +92,8 @@ def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None
         if before is None or after is None:
             errors.append(f"Query {number}: missing in one report")
             continue
-        if not isinstance(before.get("sql"), str) or before["sql"] != after.get("sql"):
-            errors.append(f"Query {number}: SQL differs")
-            continue
-        if before.get("status") != "executed" or after.get("status") != "executed":
-            errors.append(f"Query {number}: query did not execute in both reports")
-            continue
-        if not valid_result(before) or not valid_result(after) or (
-            before["result_sha256"] != after["result_sha256"]
-            or before["result_rows"] != after["result_rows"]
-        ):
-            errors.append(f"Query {number}: result differs")
+        if mismatch := result_mismatch(before, after):
+            errors.append(f"Query {number}: {mismatch}")
             continue
         baseline_ms, candidate_ms = before.get("median_ms"), after.get("median_ms")
         if not is_duration(baseline_ms) or not is_duration(candidate_ms):
