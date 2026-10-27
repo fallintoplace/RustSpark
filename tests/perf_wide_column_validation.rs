@@ -26,7 +26,11 @@ async fn wide_selection_preserves_names_and_validation_errors() -> TestResult {
         .await
         .err()
         .expect("unknown column should fail");
-    assert!(error.to_string().contains("Unknown selected column: missing"));
+    assert!(
+        error
+            .to_string()
+            .contains("Unknown selected column: missing")
+    );
 
     let mut duplicate = selected.clone();
     duplicate[31] = "C0";
