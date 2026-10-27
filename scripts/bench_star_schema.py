@@ -46,6 +46,12 @@ def validate(rows, products, regions):
         raise ValueError("rows, products, and regions must be positive")
 
 
+def write_fixture(path, lines):
+    with path.open("w", encoding="utf-8") as stream:
+        stream.write("id,dim,amount\n")
+        stream.writelines(lines)
+
+
 def fixtures(root, rows, products, regions):
     validate(rows, products, regions)
     inputs = {
@@ -53,18 +59,16 @@ def fixtures(root, rows, products, regions):
         "products": root / "products.csv",
         "regions": root / "regions.csv",
     }
-    with inputs["facts"].open("w", encoding="utf-8") as stream:
-        stream.write("id,dim,amount\n")
-        for index in range(rows):
-            stream.write(f"{index},{index % products},{index * 17 % 100}\n")
-    with inputs["products"].open("w", encoding="utf-8") as stream:
-        stream.write("id,dim,amount\n")
-        for index in range(products):
-            stream.write(f"{index},{index % regions},0\n")
-    with inputs["regions"].open("w", encoding="utf-8") as stream:
-        stream.write("id,dim,amount\n")
-        for index in range(regions):
-            stream.write(f"{index},0,0\n")
+    write_fixture(inputs["facts"], (
+        f"{index},{index % products},{index * 17 % 100}\n"
+        for index in range(rows)
+    ))
+    write_fixture(inputs["products"], (
+        f"{index},{index % regions},0\n" for index in range(products)
+    ))
+    write_fixture(inputs["regions"], (
+        f"{index},0,0\n" for index in range(regions)
+    ))
     return inputs
 
 
