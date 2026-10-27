@@ -84,6 +84,20 @@ class ExperimentTests(unittest.TestCase):
                 run_variant("fake", Path("unused"), "SELECT COUNT(*) AS n FROM data",
                             [], expected, len(values), 1, 0, 5)
 
+    def test_ordered_results_reject_permutations(self):
+        sql = "SELECT id FROM data ORDER BY id LIMIT 2"
+        expected, values = sqlite_reference(sql, 8)
+        wrong_order = mock.Mock(stdout='{"id": 1}\n{"id": 0}\n')
+        with mock.patch("bench_experiment.subprocess.run", return_value=wrong_order):
+            with self.assertRaisesRegex(ValueError, "differs"):
+                run_variant("fake", Path("unused"), sql, [],
+                            expected, len(values), 1, 0, 5, ordered_values=values)
+
+    def test_ordered_configuration_is_boolean(self):
+        invalid = {**configuration(), "ordered": "yes"}
+        with self.assertRaises(ValueError):
+            self.load(invalid)
+
     def test_report_contains_two_verified_variants(self):
         with mock.patch("bench_experiment.subprocess.run",
                         return_value=mock.Mock(stdout='{"n": 8}\n')):
