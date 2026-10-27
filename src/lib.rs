@@ -11,6 +11,15 @@ mod export;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
+mod joins_multi_range;
+pub use joins_multi_range::RangeTableJoin;
+mod joins_existence;
+pub use joins_existence::{ExistenceFilter, ExistenceMode};
+mod joins_star;
+pub use joins_star::StarDimension;
+mod joins_many_using;
+mod joins_many;
+pub use joins_many::MultiJoinStep;
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
 mod set_operations;
@@ -93,8 +102,6 @@ mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
 mod sql_results;
-mod joins_multi_range;
-pub use joins_multi_range::RangeTableJoin;
 
 pub use export::SqlExportFormat;
 

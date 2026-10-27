@@ -41,7 +41,7 @@ def command(binary, format_name, file, sql):
     return [binary, *inputs, "--sql", sql, "--stdout-format", "json"]
 
 
-def _run_verified_query(binary, kind, file, sql, expected_hash, timeout):
+def verified_elapsed(binary, kind, file, sql, expected_hash, timeout):
     started = time.perf_counter()
     output = subprocess.run(
         command(binary, kind, file, sql), capture_output=True,
@@ -57,7 +57,7 @@ def _run_verified_query(binary, kind, file, sql, expected_hash, timeout):
 def measure(binary, kind, file, sql, expected_hash, repeat, warmup, timeout):
     values = []
     for index in range(repeat + warmup):
-        elapsed = _run_verified_query(binary, kind, file, sql, expected_hash, timeout)
+        elapsed = verified_elapsed(binary, kind, file, sql, expected_hash, timeout)
         if index >= warmup:
             values.append(elapsed)
     return {**summarize_samples(values), "result_sha256": expected_hash}

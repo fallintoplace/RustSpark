@@ -85,21 +85,22 @@ def rustspark_command(
     return command + ["--sql", sql]
 
 
+def _rustspark_stdout(command, arguments):
+    return subprocess.run(
+        command + arguments, capture_output=True, text=True,
+        check=True, timeout=120,
+    ).stdout
+
+
 def rustspark_query(
     binary: str, sql: str, input_format: str = "csv",
     parquet_root: pathlib.Path | None = None,
 ) -> TypedResult:
     command = rustspark_command(binary, sql, input_format, parquet_root)
-    described = subprocess.run(
-        command + ["--describe"], capture_output=True, text=True,
-        check=True, timeout=120,
-    )
-    columns, types, nullables = parse_rustspark_description(described.stdout)
-    output = subprocess.run(
-        command + ["--stdout-format", "json"], capture_output=True, text=True,
-        check=True, timeout=120,
-    )
-    return TypedResult(parse_rustspark_json(output.stdout, columns), types, nullables)
+    described = _rustspark_stdout(command, ["--describe"])
+    columns, types, nullables = parse_rustspark_description(described)
+    output = _rustspark_stdout(command, ["--stdout-format", "json"])
+    return TypedResult(parse_rustspark_json(output, columns), types, nullables)
 
 
 def register_spark_sources(
