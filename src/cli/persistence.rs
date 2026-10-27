@@ -283,6 +283,49 @@ pub(super) fn lock_database(root: &Path) -> Result<fs::File, Box<dyn Error>> {
     Ok(file)
 }
 
+// Preserve the valid backup while quarantining corrupt live table files.
+fn restore_corrupt_snapshot(
+    root: &Path,
+    live: &Path,
+    old: &Path,
+    table: &str,
+    corruption: &dyn Error,
+) -> Result<(), Box<dyn Error>> {
+    if !old.is_dir() {
+        return Err(format!(
+            "Invalid live table '{table}' and no recoverable backup: {corruption}"
+        )
+        .into());
+    }
+    validate_table_files(old, table).map_err(|backup_error| {
+        format!(
+            "Both live and backup snapshots of '{table}' are invalid: live: {corruption}; backup: {backup_error}"
+        )
+    })?;
+
+    // Retain the corrupt snapshot outside the reserved stage.
+    // Startup skips this hidden directory. Keeping it also
+    // protects evidence if restoration fails halfway through.
+    let quarantine = tempfile::Builder::new()
+        .prefix(".rustspark-corrupt-")
+        .tempdir_in(root)?
+        .keep();
+    let corrupt_path = quarantine.join(table);
+    fs::rename(live, &corrupt_path)?;
+    if let Err(restore_error) = fs::rename(old, live) {
+        return Err(format!(
+            "Cannot restore valid INSERT backup for '{table}': {restore_error}; corrupt data retained at {}",
+            corrupt_path.display()
+        )
+        .into());
+    }
+    eprintln!(
+        "Recovered previous snapshot for '{table}'; corrupt data retained at {}",
+        corrupt_path.display()
+    );
+    Ok(())
+}
+
 /// Restore the old snapshot if a crash left no visible table.
 fn recover_interrupted_insert(
     root: &Path,
@@ -297,38 +340,7 @@ fn recover_interrupted_insert(
             // live. Never discard a valid backup before verifying the live
             // Parquet parts, or a failed publication could destroy recovery.
             if let Err(corruption) = validate_table_files(&live, table) {
-                if !old.is_dir() {
-                    return Err(format!(
-                        "Invalid live table '{table}' and no recoverable backup: {corruption}"
-                    )
-                    .into());
-                }
-                validate_table_files(&old, table).map_err(|backup_error| {
-                    format!(
-                        "Both live and backup snapshots of '{table}' are invalid: live: {corruption}; backup: {backup_error}"
-                    )
-                })?;
-
-                // Retain the corrupt snapshot outside the reserved stage.
-                // Startup skips this hidden directory. Keeping it also
-                // protects evidence if restoration fails halfway through.
-                let quarantine = tempfile::Builder::new()
-                    .prefix(".rustspark-corrupt-")
-                    .tempdir_in(root)?
-                    .keep();
-                let corrupt_path = quarantine.join(table);
-                fs::rename(&live, &corrupt_path)?;
-                if let Err(restore_error) = fs::rename(&old, &live) {
-                    return Err(format!(
-                        "Cannot restore valid INSERT backup for '{table}': {restore_error}; corrupt data retained at {}",
-                        corrupt_path.display()
-                    )
-                    .into());
-                }
-                eprintln!(
-                    "Recovered previous snapshot for '{table}'; corrupt data retained at {}",
-                    corrupt_path.display()
-                );
+                restore_corrupt_snapshot(root, &live, &old, table, corruption.as_ref())?;
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
