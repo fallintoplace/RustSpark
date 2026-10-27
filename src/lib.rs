@@ -804,12 +804,7 @@ impl RustSparkSession {
     ///
     /// A length of zero produces an empty result. Sort the source before
     /// slicing if stable row ordering is required.
-    pub async fn slice_rows(
-        &self,
-        table: &str,
-        offset: usize,
-        length: usize,
-    ) -> Result<DataFrame> {
+    pub async fn slice_rows(&self, table: &str, offset: usize, length: usize) -> Result<DataFrame> {
         offset.checked_add(length).ok_or_else(|| {
             DataFusionError::Plan("slice_rows offset plus length exceeds usize".into())
         })?;
