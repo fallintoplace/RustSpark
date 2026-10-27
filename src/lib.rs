@@ -1161,6 +1161,12 @@ impl RustSparkSession {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
 
+        let existing: HashMap<_, _> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| (field.name().to_ascii_lowercase(), field.name().as_str()))
+            .collect();
         let mut updates = HashMap::new();
         let mut seen = HashSet::new();
         for (name, expr) in columns {
@@ -1172,6 +1178,14 @@ impl RustSparkSession {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate withColumns name: {name}"
+                )));
+            }
+            if existing
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|original| original != name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "with_columns name conflicts with an existing column: {name}"
                 )));
             }
             updates.insert(*name, (*expr).clone());
