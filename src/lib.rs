@@ -13,6 +13,22 @@ mod set_operations;
 mod sources;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
+#[path = "sql_compat/oct.rs"]
+mod sql_compat_oct;
+#[path = "sql_compat/space.rs"]
+mod sql_compat_space;
+#[path = "sql_compat/zeroifnull.rs"]
+mod sql_compat_zeroifnull;
+#[path = "sql_compat/nullifzero.rs"]
+mod sql_compat_nullifzero;
+#[path = "sql_compat/pmod.rs"]
+mod sql_compat_pmod;
+#[path = "sql_compat/try_mod.rs"]
+mod sql_compat_try_mod;
+#[path = "sql_compat/bin.rs"]
+mod sql_compat_bin;
+#[path = "sql_compat/try_divide.rs"]
+mod sql_compat_try_divide;
 
 pub use export::SqlExportFormat;
 
@@ -106,6 +122,14 @@ impl RustSparkSession {
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_oct::udf());
+        context.register_udf(sql_compat_space::udf());
+        context.register_udf(sql_compat_zeroifnull::udf());
+        context.register_udf(sql_compat_nullifzero::udf());
+        context.register_udf(sql_compat_pmod::udf());
+        context.register_udf(sql_compat_try_mod::udf());
+        context.register_udf(sql_compat_bin::udf());
+        context.register_udf(sql_compat_try_divide::udf());
         Self { context }
     }
 
@@ -531,12 +555,14 @@ impl RustSparkSession {
             return Ok(dataframe);
         }
         Self::validate_selected_columns(&dataframe, excluded)?;
+        // Avoid rescanning every exclusion for every field on wide tables.
+        let excluded: std::collections::HashSet<&str> = excluded.iter().copied().collect();
         let remaining: Vec<String> = dataframe
             .schema()
             .fields()
             .iter()
             .map(|field| field.name().as_str())
-            .filter(|name| !excluded.contains(name))
+            .filter(|name| !excluded.contains(*name))
             .map(str::to_owned)
             .collect();
         if remaining.is_empty() {
@@ -808,6 +834,28 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    // Preserve first-seen literal order and avoid huge repeated IN lists.
+    fn distinct_membership_literals(
+        values: &[datafusion::common::ScalarValue],
+    ) -> Vec<datafusion::logical_expr::Expr> {
+        use std::collections::HashSet;
+
+        if values.len() <= 8 {
+            return values
+                .iter()
+                .cloned()
+                .map(datafusion::prelude::lit)
+                .collect();
+        }
+        let mut seen = HashSet::new();
+        values
+            .iter()
+            .filter(|value| seen.insert(*value))
+            .cloned()
+            .map(datafusion::prelude::lit)
+            .collect()
+    }
+
     /// Filter rows against typed values without SQL string interpolation.
     ///
     /// A NULL entry follows SQL IN semantics. An empty set matches no rows.
@@ -824,11 +872,7 @@ impl RustSparkSession {
             return dataframe.filter(datafusion::prelude::lit(false));
         }
         use datafusion::{common::Column, logical_expr::Expr};
-        let list = values
-            .iter()
-            .cloned()
-            .map(datafusion::prelude::lit)
-            .collect();
+        let list = Self::distinct_membership_literals(values);
         dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, false))
     }
 
@@ -849,11 +893,7 @@ impl RustSparkSession {
             return Ok(dataframe);
         }
         use datafusion::{common::Column, logical_expr::Expr};
-        let list = values
-            .iter()
-            .cloned()
-            .map(datafusion::prelude::lit)
-            .collect();
+        let list = Self::distinct_membership_literals(values);
         dataframe.filter(Expr::Column(Column::from_name(column)).in_list(list, true))
     }
 
@@ -1160,6 +1200,12 @@ impl RustSparkSession {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::{HashMap, HashSet};
 
+        let existing: HashMap<_, _> = dataframe
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| (field.name().to_ascii_lowercase(), field.name().as_str()))
+            .collect();
         let mut updates = HashMap::new();
         let mut seen = HashSet::new();
         for (name, expr) in columns {
@@ -1171,6 +1217,14 @@ impl RustSparkSession {
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
                     "Duplicate withColumns name: {name}"
+                )));
+            }
+            if existing
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|original| original != name)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "with_columns name conflicts with an existing column: {name}"
                 )));
             }
             updates.insert(*name, (*expr).clone());
@@ -1574,6 +1628,14 @@ impl RustSparkSession {
         use datafusion::{common::Column, logical_expr::Expr};
         use std::collections::HashSet;
 
+        let fields = dataframe.schema().fields();
+        // Repeated full-schema searches scale poorly with many sort keys.
+        let indexed = (order.len() > 8).then(|| {
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>()
+        });
         let mut seen = HashSet::new();
         let mut expressions = Vec::with_capacity(order.len());
         for &(name, ascending, nulls_first) in order {
@@ -1582,12 +1644,11 @@ impl RustSparkSession {
                     "Duplicate sort column: {name}"
                 )));
             }
-            if !dataframe
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name().as_str() == name)
-            {
+            let present = match &indexed {
+                Some(indexed) => indexed.contains(name),
+                None => fields.iter().any(|field| field.name().as_str() == name),
+            };
+            if !present {
                 return Err(DataFusionError::Plan(format!(
                     "Unknown sort column: {name}"
                 )));

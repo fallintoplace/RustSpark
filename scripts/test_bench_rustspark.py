@@ -67,6 +67,14 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(rows, [{"id": 2}, {"id": 1}])
 
+    def test_signature_rejects_nonfinite_numbers_and_duplicate_keys(self):
+        for output in ('{"value": NaN}', '{"value": Infinity}',
+                       '{"value": -Infinity}', '{"id": 1, "id": 2}',
+                       '{"nested": {"x": 1, "x": 2}}'):
+            with self.subTest(output=output):
+                with self.assertRaises(ValueError):
+                    bench.output_signature(output)
+
     def test_measure_workload_keeps_only_measured_runs(self):
         values = [(1.0, "same", []), (2.0, "same", []), (3.0, "same", [])]
         with mock.patch.object(bench, "execute", side_effect=values) as execute:

@@ -25,6 +25,18 @@ impl RustSparkSession {
         join_type: datafusion::logical_expr::JoinType,
         columns: &[&str],
     ) -> Result<DataFrame> {
+        self.join_tables_using_inner(left, right, join_type, columns, None)
+            .await
+    }
+
+    async fn join_tables_using_inner(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        columns: &[&str],
+        preloaded: Option<(DataFrame, DataFrame)>,
+    ) -> Result<DataFrame> {
         use datafusion::logical_expr::JoinType;
         use std::collections::HashSet;
 
@@ -55,7 +67,10 @@ impl RustSparkSession {
 
         // The two read-only table lookups are independent. Resolve them
         // together, but keep the left/right schema order in the final plan.
-        let (left_frame, right_frame) = tokio::try_join!(self.table(left), self.table(right))?;
+        let (left_frame, right_frame) = match preloaded {
+            Some(frames) => frames,
+            None => tokio::try_join!(self.table(left), self.table(right))?,
+        };
         for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
             let field_names: HashSet<&str> = frame
                 .schema()
@@ -141,20 +156,29 @@ impl RustSparkSession {
             .iter()
             .map(|field| field.name().as_str())
             .collect();
-        let columns: Vec<&str> = left_frame
+        let columns: Vec<String> = left_frame
             .schema()
             .fields()
             .iter()
             .map(|field| field.name().as_str())
             .filter(|column| right_columns.contains(column))
+            .map(str::to_owned)
             .collect();
         if columns.is_empty() {
             return Err(DataFusionError::Plan(format!(
                 "Tables {left} and {right} have no common join columns"
             )));
         }
-        self.join_tables_using(left, right, join_type, &columns)
-            .await
+        // Own the key names so the preloaded frames can move into the join.
+        let column_refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+        self.join_tables_using_inner(
+            left,
+            right,
+            join_type,
+            &column_refs,
+            Some((left_frame, right_frame)),
+        )
+        .await
     }
 
     /// Join two tables and suffix columns whose names occur on both sides.
