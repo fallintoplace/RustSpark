@@ -111,6 +111,12 @@ fn reject_missing_format_inputs(
 }
 
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.parquet_compression.is_some()
+        && args.output_parquet.is_none()
+        && args.save_table.is_none()
+    {
+        return Err("--parquet-compression requires --output-parquet or --save-table".into());
+    }
     if args.output_rows_per_file.is_some()
         && args.output_parquet.is_none()
         && args.output_csv.is_none()
