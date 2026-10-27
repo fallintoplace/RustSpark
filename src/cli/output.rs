@@ -229,7 +229,14 @@ async fn write_markdown<W: Write>(
     Ok(())
 }
 
-fn escape_html_cell(value: &str) -> String {
+fn escape_html_cell(value: &str) -> std::borrow::Cow<'_, str> {
+    // Plain text is the common case; it needs no copy or heap allocation.
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return std::borrow::Cow::Borrowed(value);
+    }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -241,7 +248,7 @@ fn escape_html_cell(value: &str) -> String {
             other => escaped.push(other),
         }
     }
-    escaped
+    std::borrow::Cow::Owned(escaped)
 }
 
 // Stream an embeddable HTML table, escaping all column names and cell values.
