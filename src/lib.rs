@@ -458,14 +458,16 @@ impl RustSparkSession {
         }
         Self::validate_selected_columns(&dataframe, &selected)?;
 
-        let expressions = selected
-            .iter()
-            .map(|name| {
-                let quoted = quote_join_identifier(name);
-                format!("COUNT(*) - COUNT({quoted}) AS {quoted}")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        use std::fmt::Write as _;
+        let mut expressions = String::with_capacity(selected.len() * 48);
+        for name in &selected {
+            if !expressions.is_empty() {
+                expressions.push_str(", ");
+            }
+            let quoted = quote_join_identifier(name);
+            write!(&mut expressions, "COUNT(*) - COUNT({quoted}) AS {quoted}")
+                .expect("writing to a String cannot fail");
+        }
         let source = quote_catalog_table(table, "null_counts requires a table name")?;
         self.sql(&format!("SELECT {expressions} FROM {source}"))
             .await
