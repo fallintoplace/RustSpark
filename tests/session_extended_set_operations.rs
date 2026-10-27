@@ -23,7 +23,9 @@ async fn all_set_operations_preserve_row_multiplicities() -> TestResult {
     let session = RustSparkSession::new();
     register_inputs(&session).await?;
 
-    let common = session.intersect_all_tables("left_rows", "right_rows").await?;
+    let common = session
+        .intersect_all_tables("left_rows", "right_rows")
+        .await?;
     assert_eq!(common.count().await?, 3);
 
     let remaining = session.except_all_tables("left_rows", "right_rows").await?;
@@ -84,12 +86,7 @@ async fn extended_set_operations_reject_bad_paths_and_schemas() -> TestResult {
             .await
             .is_err()
     );
-    assert!(
-        session
-            .except_all_tables("", "right_rows")
-            .await
-            .is_err()
-    );
+    assert!(session.except_all_tables("", "right_rows").await.is_err());
     assert!(
         session
             .symmetric_difference_tables("left_rows; DROP TABLE right_rows", "right_rows")
