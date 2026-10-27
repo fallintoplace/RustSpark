@@ -68,6 +68,21 @@ QUERIES = {
 ORDERED_QUERIES = frozenset({"top_k"})
 
 
+def _expected_ranked_rows(rows):
+    groups = {}
+    for index in range(min(rows, 256)):
+        city, amount = benchmark_row(index)
+        groups.setdefault(city, []).append((index, amount))
+    ranked_rows = []
+    for city, entries in groups.items():
+        for rank, (index, _) in enumerate(
+            sorted(entries, key=lambda entry: (-entry[1], entry[0]))[:2], 1
+        ):
+            ranked_rows.append({"city": city, "id": index, "rn": rank})
+
+    return ranked_rows
+
+
 def expected_answers(rows):
     """Independent expected values in O(ROW_PATTERN_PERIOD) work per query."""
     if rows < 1:
@@ -98,16 +113,7 @@ def expected_answers(rows):
         {"id": index, "amount": benchmark_row(index)[1]} for index in top_ids
     ]
 
-    groups = {}
-    for index in range(min(rows, 256)):
-        city, amount = benchmark_row(index)
-        groups.setdefault(city, []).append((index, amount))
-    ranked_rows = []
-    for city, entries in groups.items():
-        for rank, (index, _) in enumerate(
-            sorted(entries, key=lambda entry: (-entry[1], entry[0]))[:2], 1
-        ):
-            ranked_rows.append({"city": city, "id": index, "rn": rank})
+    ranked_rows = _expected_ranked_rows(rows)
 
     return {
         "scan_count": base["scan_count"],

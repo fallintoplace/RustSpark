@@ -33,14 +33,19 @@ BENCHMARK_TOOLS = {
 }
 
 
-def test_manifest():
-    """Fail closed if a new unittest module is missing from CI or assigned twice."""
-    candidates = {path.name for path in SCRIPTS.glob("test_*.py")}
+def _suite_assignments(candidates):
     assigned = {}
     for suite, patterns in TEST_PATTERNS.items():
         for name in candidates:
             if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
                 assigned.setdefault(name, []).append(suite)
+    return assigned
+
+
+def test_manifest():
+    """Fail closed if a new unittest module is missing from CI or assigned twice."""
+    candidates = {path.name for path in SCRIPTS.glob("test_*.py")}
+    assigned = _suite_assignments(candidates)
     missing = sorted(candidates - assigned.keys())
     duplicates = sorted(name for name, owners in assigned.items() if len(owners) != 1)
     if missing or duplicates:

@@ -92,8 +92,7 @@ def output_signature(stdout: str):
     return digest, rows
 
 
-def expected_results(rows: int):
-    """Compute workload answers from the deterministic benchmark input."""
+def _input_aggregates(rows: int):
     counts = {}
     totals = {}
     filtered_total = 0
@@ -108,6 +107,12 @@ def expected_results(rows: int):
         if amount >= 70:
             filtered_total += amount * occurrences
             filtered_rows += occurrences
+    return counts, totals, filtered_total, filtered_rows
+
+
+def expected_results(rows: int):
+    """Compute workload answers from the deterministic benchmark input."""
+    counts, totals, filtered_total, filtered_rows = _input_aggregates(rows)
     return {
         "scan_count": [{"n": rows}],
         "filter_sum": [{"total": filtered_total if filtered_rows else None}],

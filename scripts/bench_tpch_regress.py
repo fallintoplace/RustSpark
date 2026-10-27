@@ -7,6 +7,13 @@ import math
 from pathlib import Path
 
 
+def checked_median(value, number):
+    if (isinstance(value, bool) or not isinstance(value, (float, int))
+            or not math.isfinite(value) or value <= 0):
+        raise ValueError(f"Invalid median for query {number}")
+    return float(value)
+
+
 def medians(report):
     results = report.get("results")
     if not isinstance(results, list) or not results:
@@ -18,10 +25,7 @@ def medians(report):
             raise ValueError("Missing, repeated or invalid query ID")
         if row.get("status") != "ok":
             raise ValueError(f"Query {number} has not succeeded")
-        value = row.get("median_ms")
-        if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
-            raise ValueError(f"Invalid median for query {number}")
-        values[number] = float(value)
+        values[number] = checked_median(row.get("median_ms"), number)
     return values
 
 
@@ -53,8 +57,15 @@ def compare(baseline, candidate, max_regression=0.20):
             "ratio": round(ratio, 4),
             "regression": ratio > 1 + max_regression,
         })
+    full_suite = set(old) == set(range(1, 23))
+    suite_speedup = None
+    if full_suite:
+        log_ratio = math.fsum(math.log(old[q]) - math.log(new[q]) for q in old) / 22
+        suite_speedup = round(math.exp(log_ratio), 4)
     return {"threshold_fraction": max_regression,
             "regressions": [x["id"] for x in comparisons if x["regression"]],
+            "full_22_query_suite": full_suite,
+            "geometric_mean_baseline_over_candidate": suite_speedup,
             "results": comparisons}
 
 

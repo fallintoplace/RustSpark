@@ -24,23 +24,7 @@ OPTIONS = {
 MAX_ROWS = 2_000_000
 
 
-def load_experiment(path):
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("Experiment must be a JSON object")
-    name, sql, variants = data.get("name"), data.get("sql"), data.get("variants")
-    rows = data.get("rows", 100_000)
-    ordered = data.get("ordered", False)
-    if type(ordered) is not bool:
-        raise ValueError("ordered must be a boolean")
-    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", name):
-        raise ValueError("Experiment name must be a safe identifier")
-    if not isinstance(sql, str) or not sql.lstrip().lower().startswith(("select ", "with ")):
-        raise ValueError("Experiment SQL must be a read-only SELECT/WITH statement")
-    if not isinstance(variants, list) or not 2 <= len(variants) <= 20:
-        raise ValueError("Experiments require 2 to 20 variants")
-    if type(rows) is not int or not 1 <= rows <= MAX_ROWS:
-        raise ValueError(f"rows must be between 1 and {MAX_ROWS}")
+def _validate_variants(variants):
     seen = set()
     for variant in variants:
         if not isinstance(variant, dict):
@@ -61,6 +45,26 @@ def load_experiment(path):
         for option, raw in zip(options, flags[1::2]):
             if not raw.isdecimal() or int(raw) < 1:
                 raise ValueError(f"{option} needs a positive integer")
+
+
+def load_experiment(path):
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Experiment must be a JSON object")
+    name, sql, variants = data.get("name"), data.get("sql"), data.get("variants")
+    rows = data.get("rows", 100_000)
+    ordered = data.get("ordered", False)
+    if type(ordered) is not bool:
+        raise ValueError("ordered must be a boolean")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", name):
+        raise ValueError("Experiment name must be a safe identifier")
+    if not isinstance(sql, str) or not sql.lstrip().lower().startswith(("select ", "with ")):
+        raise ValueError("Experiment SQL must be a read-only SELECT/WITH statement")
+    if not isinstance(variants, list) or not 2 <= len(variants) <= 20:
+        raise ValueError("Experiments require 2 to 20 variants")
+    if type(rows) is not int or not 1 <= rows <= MAX_ROWS:
+        raise ValueError(f"rows must be between 1 and {MAX_ROWS}")
+    _validate_variants(variants)
     return {"name": name, "sql": sql, "rows": rows, "ordered": ordered, "variants": variants}
 
 
