@@ -213,8 +213,12 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        self.register_view_dataframe(name, self.sql_read_only_with_params(query, params).await?, false)
-            .await
+        self.register_view_dataframe(
+            name,
+            self.sql_read_only_with_params(query, params).await?,
+            false,
+        )
+        .await
     }
 
     /// Materialize a parameterized SQL query once and register its cached result.
@@ -224,8 +228,12 @@ impl RustSparkSession {
         query: &str,
         params: impl Into<datafusion::common::ParamValues>,
     ) -> Result<()> {
-        self.register_view_dataframe(name, self.sql_read_only_with_params(query, params).await?, true)
-            .await
+        self.register_view_dataframe(
+            name,
+            self.sql_read_only_with_params(query, params).await?,
+            true,
+        )
+        .await
     }
 
     /// Join two registered tables by their shared column names (SQL USING).
