@@ -748,7 +748,8 @@ impl RustSparkSession {
     ///
     /// Without touching endpoints, intervals are interpreted as half-open
     /// [start, end). With touching endpoints, they are closed [start, end].
-    /// Empty or reversed ranges do not match, and NULL endpoints never match.
+    /// Zero-width half-open ranges are empty, while closed ones are points.
+    /// Reversed ranges and NULL endpoints never match.
     pub async fn join_tables_on_interval_overlap(
         &self,
         left: &str,
