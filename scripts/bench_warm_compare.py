@@ -12,7 +12,8 @@ import subprocess
 import sys
 import tempfile
 
-from bench_rustspark import WORKLOADS, expected_results, output_signature, percentile, write_csv
+from bench_rustspark import (WORKLOADS, expected_results, output_signature, percentile, write_csv,
+                            _unique_json_keys, _reject_nonfinite_json)
 
 TIMER = re.compile(r"^Time:\s+(\d+(?:\.\d+)?)\s+ms$", re.MULTILINE)
 SPARK_WORKER = """
@@ -47,6 +48,12 @@ finally:
 """
 
 
+def parse_result_line(line):
+    return json.loads(
+        line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite_json,
+    )
+
+
 def requests_for(warmup, repeat):
     return [{"name": name, "sql": sql}
             for name, sql in WORKLOADS.items()
@@ -59,7 +66,7 @@ def parse_rustspark(stdout, stderr, requests, row_count):
     times = [float(value) for value in TIMER.findall(stderr)]
     if len(times) != len(requests):
         raise ValueError(f"Got {len(times)} timers for {len(requests)} SQL statements")
-    data = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    data = [parse_result_line(line) for line in stdout.splitlines() if line.strip()]
     expected = expected_results(row_count)
     offset = 0
     samples = []
@@ -103,7 +110,7 @@ def run_spark(csv, requests, timeout, master):
     )
     if output.returncode:
         raise RuntimeError(f"PySpark exit {output.returncode}: {output.stderr}")
-    return [json.loads(line) for line in output.stdout.splitlines() if line.strip()]
+    return [parse_result_line(line) for line in output.stdout.splitlines() if line.strip()]
 
 
 def summarize(samples, requests, row_count, warmup, repeat):
