@@ -764,9 +764,9 @@ impl RustSparkSession {
         predicates: &[datafusion::logical_expr::Expr],
     ) -> Result<DataFrame> {
         let mut predicates = predicates.iter().cloned();
-        let first = predicates.next().ok_or_else(|| {
-            DataFusionError::Plan("filter_rows_any requires a predicate".into())
-        })?;
+        let first = predicates
+            .next()
+            .ok_or_else(|| DataFusionError::Plan("filter_rows_any requires a predicate".into()))?;
         self.table(table)
             .await?
             .filter(predicates.fold(first, |combined, predicate| combined.or(predicate)))
