@@ -20,7 +20,7 @@ async fn nullifzero_works_with_rows_and_nulls() -> Result<(), Box<dyn std::error
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        result.extend(column.iter().map(|value| value));
+        result.extend(column.iter());
     }
     assert_eq!(result, vec![None, Some(5), None, Some(-2)]);
     Ok(())
