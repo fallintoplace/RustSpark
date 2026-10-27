@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import bench_report
+import sql_result_verify
 
 
 def measurement(median, digest="a" * 64):
@@ -120,6 +121,72 @@ class BenchmarkReportTests(unittest.TestCase):
             raw.write_text(json.dumps(report()), encoding="utf-8")
             self.assertEqual(bench_report.main([str(raw), "--output", str(output)]), 0)
             self.assertIn("# Local SQL benchmark comparison", output.read_text())
+
+
+
+def sql_report_sample():
+    return {
+        "query_file_sha256": "d" * 64,
+        "queries_attempted": 2,
+        "results": [
+            {"id": 1, "sql": "SELECT 1;", "status": "executed",
+             "result_sha256": "a" * 64, "result_rows": 1},
+            {"id": 2, "sql": "SELECT 2;", "status": "executed",
+             "result_sha256": "b" * 64, "result_rows": 2},
+        ],
+    }
+
+
+class SQLResultVerificationTests(unittest.TestCase):
+    def test_accepts_same_results_in_different_query_order(self):
+        reference = sql_report_sample()
+        actual = sql_report_sample()
+        actual["results"].reverse()
+        self.assertEqual(sql_result_verify.verify_reports(actual, reference), [])
+
+    def test_detects_result_digest_and_count_changes(self):
+        reference = sql_report_sample()
+        actual = sql_report_sample()
+        actual["results"][0]["result_sha256"] = "c" * 64
+        actual["results"][0]["result_rows"] = 3
+        issues = sql_result_verify.verify_reports(actual, reference)
+        self.assertTrue(any("hash differs" in issue for issue in issues))
+        self.assertTrue(any("row count differs" in issue for issue in issues))
+
+    def test_checks_workload_hash_and_sql_text(self):
+        reference = sql_report_sample()
+        actual = sql_report_sample()
+        actual["query_file_sha256"] = "e" * 64
+        with self.assertRaisesRegex(ValueError, "workload hash"):
+            sql_result_verify.verify_reports(actual, reference)
+        actual = sql_report_sample()
+        actual["results"][0]["sql"] = "SELECT 9;"
+        self.assertIn("SQL differs", sql_result_verify.verify_reports(actual, reference)[0])
+
+    def test_rejects_duplicate_ids_and_invalid_reference_rows(self):
+        reference = sql_report_sample()
+        actual = sql_report_sample()
+        actual["results"][1]["id"] = 1
+        with self.assertRaisesRegex(ValueError, "duplicate query ID"):
+            sql_result_verify.verify_reports(actual, reference)
+        actual = sql_report_sample()
+        reference["results"][0]["status"] = "error"
+        self.assertIn("invalid reference", sql_result_verify.verify_reports(actual, reference)[0])
+
+    def test_strict_json_loader_and_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            actual_path = root / "actual.json"
+            reference_path = root / "reference.json"
+            payload = json.dumps(sql_report_sample())
+            actual_path.write_text(payload, encoding="utf-8")
+            reference_path.write_text(payload, encoding="utf-8")
+            self.assertEqual(sql_result_verify.main([
+                "--actual", str(actual_path), "--reference", str(reference_path),
+            ]), 0)
+            actual_path.write_text('{"results": [], "results": []}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Duplicate JSON key"):
+                sql_result_verify.load_report(actual_path)
 
 
 if __name__ == "__main__":
