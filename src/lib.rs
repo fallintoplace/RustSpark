@@ -814,6 +814,24 @@ impl RustSparkSession {
         dataframe.filter(predicate)
     }
 
+    /// Keep rows matching every typed filter expression.
+    ///
+    /// Predicates are AND-combined lazily. A zero-length list is rejected so
+    /// callers do not accidentally query an unfiltered table.
+    pub async fn filter_rows_all(
+        &self,
+        table: &str,
+        predicates: &[datafusion::logical_expr::Expr],
+    ) -> Result<DataFrame> {
+        let mut predicates = predicates.iter().cloned();
+        let first = predicates
+            .next()
+            .ok_or_else(|| DataFusionError::Plan("filter_rows_all requires a predicate".into()))?;
+        self.table(table)
+            .await?
+            .filter(predicates.fold(first, |combined, predicate| combined.and(predicate)))
+    }
+
     /// Filter a registered table with a typed DataFusion expression.
     ///
     /// SQL NULL predicates do not keep rows. The operation is lazy, and the
