@@ -383,9 +383,10 @@ mod tests {
     #[test]
     fn null_display_reuses_a_borrowed_constant() {
         let column: datafusion::arrow::array::ArrayRef =
-            std::sync::Arc::new(datafusion::arrow::array::StringArray::from(
-                vec![None, Some("value")],
-            ));
+            std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec![
+                None,
+                Some("value"),
+            ]));
         assert!(matches!(
             display_cell(&column, 0).unwrap(),
             std::borrow::Cow::Borrowed("NULL")
