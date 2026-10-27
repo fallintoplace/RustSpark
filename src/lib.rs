@@ -444,7 +444,8 @@ impl RustSparkSession {
                 "Tables {left} and {right} have no common join columns"
             )));
         }
-        self.join_tables_using(left, right, join_type, &columns).await
+        self.join_tables_using(left, right, join_type, &columns)
+            .await
     }
 
     pub fn register_dataframe(&self, table: &str, dataframe: DataFrame) -> Result<()> {
