@@ -33,21 +33,7 @@ fn has_json_input(args: &Args) -> bool {
     args.json.is_some() || !args.json_tables.is_empty()
 }
 
-fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(destination) = [
-        args.output_arrow.as_ref(),
-        args.output_parquet.as_ref(),
-        args.output_csv.as_ref(),
-        args.output_json.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .next() else {
-        return Ok(());
-    };
-    let Some(destination) = canonical_output_path(destination) else {
-        return Ok(());
-    };
+fn input_paths(args: &Args) -> Result<Vec<&Path>, Box<dyn std::error::Error>> {
     let mut sources: Vec<&std::path::Path> = Vec::new();
     for path in [
         args.csv.as_ref(),
@@ -71,6 +57,25 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
         let (_, path) = parse_named_table(mapping)?;
         sources.push(std::path::Path::new(path));
     }
+    Ok(sources)
+}
+
+fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(destination) = [
+        args.output_arrow.as_ref(),
+        args.output_parquet.as_ref(),
+        args.output_csv.as_ref(),
+        args.output_json.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next() else {
+        return Ok(());
+    };
+    let Some(destination) = canonical_output_path(destination) else {
+        return Ok(());
+    };
+    let sources = input_paths(args)?;
     if sources
         .iter()
         .any(|source| overlaps_input_path(source, &destination))
