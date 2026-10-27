@@ -282,29 +282,43 @@ impl RustSparkSession {
         // DataFusion 55's SELECT * FULL JOIN USING may return a NULL join key
         // for a row preserved only on the left. An explicit projection avoids
         // that behavior and gives all join types the same output column order.
-        let mut projection = Vec::new();
-        let mut predicates = Vec::new();
+        use std::fmt::Write as _;
+        let projected_fields =
+            left_frame.schema().fields().len() + right_frame.schema().fields().len();
+        let mut projection = String::with_capacity(projected_fields * 32);
+        let mut predicates = String::with_capacity(columns.len() * 64);
         for column in columns {
             let key = quote_join_identifier(column);
-            projection.push(format!(
+            if !projection.is_empty() {
+                projection.push_str(", ");
+            }
+            write!(
+                &mut projection,
                 "COALESCE({left_alias}.{key}, {right_alias}.{key}) AS {key}"
-            ));
-            predicates.push(format!("{left_alias}.{key} = {right_alias}.{key}"));
+            )
+            .expect("writing to a String cannot fail");
+            if !predicates.is_empty() {
+                predicates.push_str(" AND ");
+            }
+            write!(&mut predicates, "{left_alias}.{key} = {right_alias}.{key}")
+                .expect("writing to a String cannot fail");
         }
         for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
             for field in frame.schema().fields() {
                 if !seen.contains(&field.name().to_ascii_lowercase()) {
                     let name = quote_join_identifier(field.name());
-                    projection.push(format!("{alias}.{name} AS {name}"));
+                    if !projection.is_empty() {
+                        projection.push_str(", ");
+                    }
+                    write!(&mut projection, "{alias}.{name} AS {name}")
+                        .expect("writing to a String cannot fail");
                 }
             }
         }
         let query = format!(
-            "SELECT {} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {}",
-            projection.join(", "),
+            "SELECT {projection} FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {predicates}",
             quote_join_table(left)?,
             quote_join_table(right)?,
-            predicates.join(" AND ")
         );
         self.sql(&query).await
     }
