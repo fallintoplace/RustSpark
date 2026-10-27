@@ -539,6 +539,13 @@ impl RustSparkSession {
         self.context.table_exist(name)
     }
 
+    /// Count rows in a registered table.
+    ///
+    /// This runs a count aggregate without collecting the table's rows.
+    pub async fn table_row_count(&self, table: &str) -> Result<usize> {
+        self.table(table).await?.count().await
+    }
+
     /// Rename a registered table without copying its data.
     ///
     /// An existing destination is never overwritten. The new registration
