@@ -18,4 +18,4 @@ required-features = ["standalone"]
 ballista = { version = "=55.0.0", default-features = false }
 datafusion = { version = "=55.1.0", default-features = false, features = ["sql", "parquet"] }
 rustspark = { path = "../.." }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
