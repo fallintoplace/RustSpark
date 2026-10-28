@@ -21,6 +21,17 @@ def check_samples(entry):
     return samples
 
 
+def variability_row(number, entry, threshold):
+    samples = check_samples(entry)
+    mean = statistics.fmean(samples)
+    cv = statistics.pstdev(samples) / mean if mean else 0.0
+    median = statistics.median(samples)
+    mad = statistics.median(abs(x - median) for x in samples)
+    return {"id": number, "coefficient_of_variation": round(cv, 4),
+                 "median_absolute_deviation_ms": round(mad, 3),
+                 "unstable": cv > threshold, "samples": len(samples)}
+
+
 def inspect(report, threshold=0.15):
     if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 0:
         raise ValueError("Variation threshold must be finite and nonnegative")
@@ -36,14 +47,7 @@ def inspect(report, threshold=0.15):
         seen.add(number)
         if entry.get("status") != "ok":
             raise ValueError(f"Query Q{number:02} did not succeed")
-        samples = check_samples(entry)
-        mean = statistics.fmean(samples)
-        cv = statistics.pstdev(samples) / mean if mean else 0.0
-        median = statistics.median(samples)
-        mad = statistics.median(abs(x - median) for x in samples)
-        rows.append({"id": number, "coefficient_of_variation": round(cv, 4),
-                     "median_absolute_deviation_ms": round(mad, 3),
-                     "unstable": cv > threshold, "samples": len(samples)})
+        rows.append(variability_row(number, entry, threshold))
     return {"metric": "sample variability for cold TPC-H query timings",
             "warning": "Noise diagnostics; not statistical proof of a speedup",
             "max_cv": threshold, "unstable_queries": sorted(x["id"] for x in rows if x["unstable"]),
