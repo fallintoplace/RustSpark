@@ -159,6 +159,8 @@ mod sql_compat_mask;
 mod sql_compat_nullifzero;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
+#[path = "sql_compat/timestamp_seconds.rs"]
+mod sql_compat_timestamp_seconds;
 #[path = "sql_compat/conv.rs"]
 mod sql_compat_conv;
 #[path = "sql_compat/pmod.rs"]
@@ -371,6 +373,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
         context.register_udf(sql_compat_ucase::udf());
+        context.register_udf(sql_compat_timestamp_seconds::udf());
         context.register_udf(sql_compat_sec::udf());
         context.register_udf(sql_compat_csc::udf());
         context.register_udf(sql_compat_hypot::udf());
