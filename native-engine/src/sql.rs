@@ -233,7 +233,7 @@ impl Parser {
         Ok(SelectItem::Scalar(Selection::new(expr, alias)))
     }
 
-    fn select(&mut self) -> Result<Plan> {
+    fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
         let mut select = Vec::new();
@@ -338,6 +338,10 @@ impl Parser {
             plan = Plan::Distinct { input: Box::new(plan) };
         }
 
+        Ok(plan)
+    }
+
+    fn finish_query(&mut self, mut plan: Plan) -> Result<Plan> {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
@@ -391,7 +395,13 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let plan = parser.select()?;
+    let mut plan = parser.select_body()?;
+    while parser.take_word("UNION") {
+        parser.expect_word("ALL")?;
+        let right = parser.select_body()?;
+        plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+    }
+    let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');
     if parser.peek().is_some() {
         return Err(Error::Unsupported(format!(
