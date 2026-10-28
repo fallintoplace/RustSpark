@@ -363,6 +363,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Optional performance tuning for Parquet-backed analytics.
+    #[arg(long = "parquet-row-group-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_bytes: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
