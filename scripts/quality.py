@@ -25,6 +25,7 @@ BENCHMARK_TOOLS = {
     "cold": "bench_compare.py",
     "warm": "bench_warm_compare.py",
     "tpch": "tpch_run.py",
+    "billion": "bench_billion_rows.py",
     "tpch-prepare": "tpch_prepare.py",
     "clickbench": "clickbench_run.py",
     "clickbench-fetch": "clickbench_fetch.py",
