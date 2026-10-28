@@ -141,6 +141,8 @@ mod sql_compat_exp;
 mod sql_compat_expm1;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
+#[path = "sql_compat/hex.rs"]
+mod sql_compat_hex;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
 #[path = "sql_compat/log1p.rs"]
@@ -366,6 +368,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_luhn_check::udf());
         context.register_udf(sql_compat_mask::udf());
         context.register_udf(sql_compat_factorial::udf());
+        context.register_udf(sql_compat_hex::udf());
         Self { context }
     }
 
