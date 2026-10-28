@@ -58,7 +58,7 @@ fn append_existence_predicate(
         ExistenceMode::Exists => "EXISTS",
         ExistenceMode::NotExists => "NOT EXISTS",
     };
-    let match_alias = quote_join_identifier(&format!("__rustspark_match_{index}"));
+    let match_alias = format!("\"__rustspark_match_{index}\"");
     let lookup = quote_catalog_table(filter.table, "Invalid existence filter table name")?;
     write!(
         query, "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
