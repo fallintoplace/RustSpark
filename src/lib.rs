@@ -191,6 +191,8 @@ mod sql_compat_hex;
 mod sql_compat_date_sub;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
+#[path = "sql_compat/to_binary.rs"]
+mod sql_compat_to_binary;
 #[path = "sql_compat/datediff.rs"]
 mod sql_compat_datediff;
 #[path = "sql_compat/log1p.rs"]
@@ -458,6 +460,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_sec::udf());
         context.register_udf(sql_compat_csc::udf());
         context.register_udf(sql_compat_hypot::udf());
+        context.register_udf(sql_compat_to_binary::udf());
         context.register_udf(sql_compat_log1p::udf());
         context.register_udf(sql_compat_crc32::udf());
         context.register_udf(sql_compat_negative::udf());
