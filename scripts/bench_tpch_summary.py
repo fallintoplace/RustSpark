@@ -4,6 +4,7 @@
 import argparse
 import json
 import math
+import statistics
 from pathlib import Path
 
 
@@ -15,6 +16,15 @@ def checked_medians(entries):
         value = row.get("median_ms")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"Invalid median for query {row['id']}")
+        if "samples_ms" in row:
+            samples = row["samples_ms"]
+            if (not isinstance(samples, list) or not samples
+                    or any(type(sample) not in (int, float)
+                           or not math.isfinite(sample) or sample <= 0
+                           for sample in samples)):
+                raise ValueError(f"Invalid timing samples for query {row['id']}")
+            if abs(statistics.median(samples) - value) > 0.002:
+                raise ValueError(f"Reported median differs from samples for query {row['id']}")
         medians.append(float(value))
     return medians
 
