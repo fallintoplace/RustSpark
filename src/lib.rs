@@ -78,6 +78,8 @@ mod sql_compat_space;
 mod sql_compat_acos;
 #[path = "features/group_ranks.rs"]
 mod feature_group_ranks;
+#[path = "features/grouped_min_max.rs"]
+mod feature_grouped_min_max;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
 #[path = "sql_compat/asin.rs"]
