@@ -41,7 +41,8 @@ pub fn execute_with_guard(
     options: ExecutionOptions,
     guard: &QueryGuard,
 ) -> Result<Batch> {
-    execute_inner(plan, catalog, &options, 0, guard)
+    let optimized = crate::optimizer::optimize(plan.clone());
+    execute_inner(&optimized, catalog, &options, 0, guard)
 }
 
 fn execute_inner(
