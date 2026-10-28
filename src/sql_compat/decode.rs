@@ -20,7 +20,7 @@ fn utf16(bytes: &[u8], little_endian: bool) -> String {
     }).collect::<Vec<_>>();
     let mut result = String::from_utf16_lossy(&units);
     if !chunks.remainder().is_empty() {
-        result.push('\\u{fffd}');
+        result.push('\u{fffd}');
     }
     result
 }
@@ -30,7 +30,7 @@ fn evaluate(bytes: &[u8], charset: &str) -> datafusion::error::Result<Option<Str
     let decoded = match encoding.as_str() {
         "utf-8" | "utf8" => String::from_utf8_lossy(bytes).into_owned(),
         "us-ascii" | "ascii" => bytes.iter()
-            .map(|byte| if byte.is_ascii() { char::from(*byte) } else { '\\u{fffd}' })
+            .map(|byte| if byte.is_ascii() { char::from(*byte) } else { '\u{fffd}' })
             .collect(),
         "iso-8859-1" | "latin1" | "latin-1" =>
             bytes.iter().copied().map(char::from).collect(),
