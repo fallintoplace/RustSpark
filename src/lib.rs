@@ -179,6 +179,8 @@ mod sql_compat_raise_error;
 mod sql_compat_unix_date;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
+#[path = "sql_compat/unix_millis.rs"]
+mod sql_compat_unix_millis;
 #[path = "sql_compat/add_months.rs"]
 mod sql_compat_add_months;
 #[path = "sql_compat/hex.rs"]
@@ -466,6 +468,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_luhn_check::udf());
         context.register_udf(sql_compat_mask::udf());
         context.register_udf(sql_compat_factorial::udf());
+        context.register_udf(sql_compat_unix_millis::udf());
         context.register_udf(sql_compat_hex::udf());
         Self { context }
     }
