@@ -301,6 +301,8 @@ mod sql_compat_url_encode;
 mod sql_compat_width_bucket;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "sql_compat/spark_dates.rs"]
+mod sql_compat_spark_dates;
 #[path = "sql_compat/weekday.rs"]
 mod sql_compat_weekday;
 mod sql_results;
