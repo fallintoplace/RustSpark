@@ -1530,6 +1530,18 @@ impl RustSparkSession {
         Ok(dataframe)
     }
 
+    /// Spark-style duplicate-preserving intersection for two registered tables.
+    ///
+    /// Column order, not column name, defines row equality. Planning is lazy.
+    pub async fn intersect_all_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let left = quote_catalog_table(left, "intersect_all_tables requires a left table")?;
+        let right = quote_catalog_table(right, "intersect_all_tables requires a right table")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {left} INTERSECT ALL SELECT * FROM {right}"
+        ))
+        .await
+    }
+
     /// Union registered tables with matching schemas by column position.
     ///
     /// Duplicate rows are preserved. All sources must have compatible schemas.
