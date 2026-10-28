@@ -21,6 +21,25 @@ class ScaleTests(unittest.TestCase):
         self.assertIn("tpch_run.py", run[1])
         self.assertNotIn("--query-ids", run)
 
+    def test_full_suite_requires_measurement_evidence(self):
+        from tempfile import TemporaryDirectory
+        from unittest import mock
+        import json
+        with TemporaryDirectory() as tmp:
+            report = Path(tmp) / "run.json"
+            rows = [{"id": n, "status": "ok"} for n in range(1, 23)]
+
+            def run(command, **kwargs):
+                report.write_text(json.dumps({"results": rows}), encoding="utf-8")
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(sweep.subprocess, "run", side_effect=run):
+                self.assertEqual(sweep.run_scale(["prepare"], ["run"], report)["status"], "error")
+                for row in rows:
+                    row.update({"median_ms": 1.0, "result_rows": 1,
+                                "sql_sha256": "a" * 64, "result_sha256": "b" * 64})
+                self.assertEqual(sweep.run_scale(["prepare"], ["run"], report)["status"], "ok")
+
     def test_rejects_duplicate_successful_query_ids(self):
         import json
         from tempfile import TemporaryDirectory
