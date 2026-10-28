@@ -15,6 +15,8 @@ mod read;
 
 mod inventory;
 
+mod verify;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
