@@ -400,6 +400,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_tan::udf());
         context.register_udf(sql_compat_shiftleft::udf());
         context.register_udf(sql_compat_chr::udf());
+        context.register_udf(sql_compat_chr::char_udf());
         context.register_udf(sql_compat_cot::udf());
         context.register_udf(sql_compat_weekofyear::udf());
         context.register_udf(sql_compat_positive::udf());
