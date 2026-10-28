@@ -345,6 +345,10 @@ struct Args {
     #[arg(long = "leaf-expression-pushdown")]
     leaf_expression_pushdown: bool,
 
+    /// combine compatible UNION DISTINCT filters.
+    #[arg(long = "union-filter-rewrite")]
+    union_filter_rewrite: bool,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,

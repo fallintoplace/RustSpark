@@ -52,6 +52,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.leaf_expression_pushdown {
         config.options_mut().optimizer.enable_leaf_expression_pushdown = true;
     }
+    if args.union_filter_rewrite {
+        config.options_mut().optimizer.enable_unions_to_filter = true;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -506,5 +509,17 @@ mod perf_leaf_expression_pushdown {
     fn cli_enables_optimizer_flag() {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--leaf-expression-pushdown"]).unwrap();
         assert!(build_session_config(&args).options().optimizer.enable_leaf_expression_pushdown);
+    }
+}
+
+#[cfg(test)]
+mod perf_union_filter_rewrite {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_enables_optimizer_flag() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--union-filter-rewrite"]).unwrap();
+        assert!(build_session_config(&args).options().optimizer.enable_unions_to_filter);
     }
 }
