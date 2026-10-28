@@ -271,6 +271,82 @@ struct Args {
     #[arg(long = "metadata-fetch-concurrency", value_name = "FILES", value_parser = parse_positive_metadata_concurrency)]
     metadata_fetch_concurrency: Option<usize>,
 
+    /// Maximum values considered for Parquet IN-list statistics pruning.
+    #[arg(long = "parquet-in-list-pruning-limit", value_name = "VALUES", value_parser = parse_positive_tuning_usize)]
+    parquet_in_list_pruning_limit: Option<usize>,
+
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-predicate-cache-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_predicate_cache_bytes: Option<usize>,
+
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-metadata-hint-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_metadata_hint_bytes: Option<usize>,
+
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-force-row-selection", requires = "parquet_pushdown_filters")]
+    parquet_force_row_selection: bool,
+
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-write-bloom-filters")]
+    parquet_write_bloom_filters: bool,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-row-group-rows", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_rows: Option<usize>,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-page-size-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_page_size_bytes: Option<usize>,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-page-row-limit", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_page_row_limit: Option<usize>,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-write-batch-rows", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_write_batch_rows: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-row-group-writers", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_writers: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-write-buffered-batches", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_write_buffered_batches: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "perfect-hash-key-range", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    perfect_hash_key_range: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "hash-join-probe-buffer-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    hash_join_probe_buffer_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "join-inlist-pushdown-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    join_inlist_pushdown_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "join-inlist-pushdown-values", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    join_inlist_pushdown_values: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "sort-in-place-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    sort_in_place_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "window-topn")]
+    window_topn: bool,
+
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "prefer-existing-sort")]
+    prefer_existing_sort: bool,
+
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "split-file-groups-by-statistics")]
+    split_file_groups_by_statistics: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
@@ -675,6 +751,10 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_positive_tuning_usize(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "Performance tuning value")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
