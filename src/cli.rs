@@ -335,6 +335,10 @@ struct Args {
     #[arg(long = "sort-in-place-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     sort_in_place_bytes: Option<usize>,
 
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "window-topn")]
+    window_topn: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
