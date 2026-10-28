@@ -357,6 +357,14 @@ struct Args {
     )]
     hash_join_probe_buffer_mb: Option<usize>,
 
+    /// tune in-place sort size threshold, measured in KiB.
+    #[arg(
+        long = "sort-in-place-kb",
+        value_name = "SIZE",
+        value_parser = parse_sort_in_place_bytes
+    )]
+    sort_in_place_kb: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -854,6 +862,12 @@ fn parse_hash_join_probe_buffer_bytes(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--hash-join-probe-buffer-mb")?
         .checked_mul(1048576)
         .ok_or_else(|| "--hash-join-probe-buffer-mb is too large".to_owned())
+}
+
+fn parse_sort_in_place_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-in-place-kb")?
+        .checked_mul(1024)
+        .ok_or_else(|| "--sort-in-place-kb is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
