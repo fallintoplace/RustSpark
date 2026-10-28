@@ -11,3 +11,5 @@ pub use error::{Error, Result};
 pub mod scalar;
 
 pub mod schema;
+
+pub mod batch;
