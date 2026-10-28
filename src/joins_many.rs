@@ -101,6 +101,7 @@ impl RustSparkSession {
             quote_catalog_table(base_table, "Invalid base join table name")?,
             quote_join_identifier(base_alias)
         );
+        query.reserve(steps.len().saturating_mul(128));
 
         for step in steps {
             if step.alias.trim().is_empty() {
