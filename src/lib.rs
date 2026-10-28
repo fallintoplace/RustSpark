@@ -221,6 +221,8 @@ mod sql_compat_try_to_binary;
 mod sql_compat_json;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "sql_compat/spark_left.rs"]
+mod sql_compat_spark_left;
 #[path = "sql_compat/mask.rs"]
 mod sql_compat_mask;
 #[path = "sql_compat/make_date.rs"]
@@ -538,6 +540,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_locate::udf());
         context.register_udf(sql_compat_luhn_check::udf());
+        context.register_udf(sql_compat_spark_left::udf());
         context.register_udf(sql_compat_mask::udf());
         context.register_udf(sql_compat_make_date::udf());
         context.register_udf(sql_compat_factorial::udf());
