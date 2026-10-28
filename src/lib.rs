@@ -287,6 +287,8 @@ mod sql_compat_try_abs;
 mod sql_compat_try_add;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
+#[path = "sql_compat/time_from_seconds.rs"]
+mod sql_compat_time_from_seconds;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
 #[path = "sql_compat/try_multiply.rs"]
@@ -453,6 +455,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_cos::udf());
         context.register_udf(sql_compat_bitwise_xor::udf());
         context.register_udf(sql_compat_try_divide::udf());
+        context.register_udf(sql_compat_time_from_seconds::udf());
         context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
         context.register_udf(sql_compat_datediff::udf());
