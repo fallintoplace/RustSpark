@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.max_buffered_output_batches {
+        config = config.set_usize("datafusion.execution.max_buffered_batches_per_output_file", value);
+    }
     if let Some(value) = args.default_filter_selectivity {
         config.options_mut().optimizer.default_filter_selectivity = value;
     }
@@ -426,6 +429,32 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn validates_and_configures_max_buffered_output_batches() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--max-buffered-output-batches",
+            "8",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().execution.max_buffered_batches_per_output_file.get(), defaults.options().execution.max_buffered_batches_per_output_file.get());
+        assert_eq!(configured.options().execution.max_buffered_batches_per_output_file.get(), 8);
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--max-buffered-output-batches",
+            "1",
+        ])
+        .is_err());
     }
 
     #[test]

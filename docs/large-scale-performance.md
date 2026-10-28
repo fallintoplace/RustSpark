@@ -6,6 +6,7 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 
 ## Available tuning knobs
 
+- `--max-buffered-output-batches 8`: Set buffered batches per output file, minimum 2. More buffering uses additional RAM.
 - `--default-filter-selectivity 10`: Set assumed filter selectivity from 0 to 100 percent when exact statistics are unavailable. Incorrect values can worsen plans.
 - `--parquet-column-index-truncate 256`: Tune Parquet page-index truncation for string columns. Larger indexes use more storage and can increase metadata I/O.
 - `--parquet-statistics-truncate 256`: Set Parquet min/max statistics truncation length on writes. Longer values may improve pruning but increase footer size.
