@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -19,7 +19,7 @@ fn hex_digit(value: u8) -> Option<u8> {
     }
 }
 
-fn percent_decode(input: &str) -> datafusion::error::Result<String> {
+pub(crate) fn percent_decode(input: &str) -> datafusion::error::Result<String> {
     let bytes = input.as_bytes();
     if !bytes.contains(&b'%') {
         return Ok(if bytes.contains(&b'+') {
@@ -86,6 +86,24 @@ pub(crate) fn udf() -> ScalarUDF {
                                 // Common case: copy the existing string into Arrow once.
                                 result.append_value(value);
                             }
+                            Some(value) if !value.as_bytes().contains(&b'%') => {
+                                // Convert form '+' characters directly into the Arrow buffer.
+                                let mut pieces = value.split('+');
+                                if let Some(first) = pieces.next() {
+                                    result
+                                        .write_str(first)
+                                        .expect("Arrow string writes cannot fail");
+                                }
+                                for piece in pieces {
+                                    result
+                                        .write_char(' ')
+                                        .expect("Arrow string writes cannot fail");
+                                    result
+                                        .write_str(piece)
+                                        .expect("Arrow string writes cannot fail");
+                                }
+                                result.append_value("");
+                            }
                             Some(value) => {
                                 result.append_value(percent_decode(value)?);
                             }
@@ -108,6 +126,7 @@ mod tests {
         assert_eq!(percent_decode("plain/café").unwrap(), "plain/café");
         assert_eq!(percent_decode("a%20b").unwrap(), "a b");
         assert_eq!(percent_decode("a+b").unwrap(), "a b");
+        assert_eq!(percent_decode("a++b").unwrap(), "a  b");
         assert_eq!(percent_decode("%C3%A9").unwrap(), "é");
         assert!(percent_decode("%").is_err());
         assert!(percent_decode("%GG").is_err());
