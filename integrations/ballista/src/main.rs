@@ -55,6 +55,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     present_result(&session, &query).await
 }
 
+async fn plan_preview(
+    session: &RustSparkSession,
+    query: &str,
+) -> datafusion::error::Result<datafusion::prelude::DataFrame> {
+    // The demo client must not execute writes merely to show a query result.
+    session.sql_read_only(query).await
+}
+
 async fn present_result(
     session: &RustSparkSession,
     query: &str,
@@ -68,7 +76,7 @@ async fn present_result(
             eprintln!("Wrote Arrow IPC result to {path}");
         }
         Err(std::env::VarError::NotPresent) => {
-            let result = session.sql(&query).await?;
+            let result = plan_preview(session, query).await?;
             if let Some(rows) = result_preview::configured_rows()? {
                 result.show_limit(rows).await?;
             } else {
@@ -84,6 +92,15 @@ async fn present_result(
 mod tests {
     use super::default_if_unset;
     use std::{env::VarError, ffi::OsString};
+
+    #[tokio::test]
+    async fn remote_preview_planning_rejects_sql_mutations() {
+        let session = rustspark::RustSparkSession::new();
+        let read = super::plan_preview(&session, "SELECT 42 AS answer").await.unwrap();
+        assert_eq!(read.schema().fields().len(), 1);
+        assert!(super::plan_preview(&session, "CREATE TABLE surprise (id INT)").await.is_err());
+        assert!(!session.table_exists("surprise").unwrap());
+    }
 
     #[test]
     fn only_missing_variables_use_default_values() {
