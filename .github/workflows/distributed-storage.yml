@@ -1,12 +1,21 @@
 name: Replicated storage
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/distributed_storage/**'
+      - 'src/sources.rs'
+      - 'tests/distributed_snapshot_parquet.rs'
+      - 'integrations/ballista/src/replicated_inputs.rs'
+      - '.github/workflows/distributed-storage.yml'
   pull_request:
     paths:
       - 'src/distributed_storage/**'
       - 'src/sources.rs'
       - 'tests/distributed_snapshot_parquet.rs'
       - 'integrations/ballista/src/replicated_inputs.rs'
+      - '.github/workflows/distributed-storage.yml'
   workflow_dispatch:
 
 permissions:
