@@ -232,8 +232,9 @@ def render_markdown(report):
                 f"| {result['p95_ms']:.3f} | OK ({result['result_rows']} rows) |"
             )
         else:
-            safe_error = (result["error"].replace("|", "\\|").replace("\n", " ")
-                          .replace("\r", " ").replace("<", "&lt;"))
+            safe_error = (result["error"].replace("&", "&amp;")
+                          .replace("<", "&lt;").replace(">", "&gt;")
+                          .replace("|", "\\|").replace("\n", " ").replace("\r", " "))
             lines.append(f"| {result['name']} | - | - | ERROR: {safe_error} |")
     lines.extend([
         "",
