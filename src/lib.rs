@@ -41,6 +41,8 @@ mod sql_compat_nullifzero;
 mod feature_approx_distinct_count;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
+#[path = "sql_compat/radians.rs"]
+mod sql_compat_radians;
 #[path = "features/approx_percentile.rs"]
 mod feature_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
@@ -197,6 +199,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_endswith::udf());
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_oct::udf());
+        context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_space::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_nullifzero::udf());
