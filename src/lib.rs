@@ -42,6 +42,8 @@ mod sql_compat_sin;
 mod feature_numeric_column_summary;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
+#[path = "sql_compat/exp.rs"]
+mod sql_compat_exp;
 #[path = "features/approx_distinct_count.rs"]
 mod feature_approx_distinct_count;
 #[path = "sql_compat/oct.rs"]
@@ -208,6 +210,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_space::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_nullifzero::udf());
+        context.register_udf(sql_compat_exp::udf());
         context.register_udf(sql_compat_pmod::udf());
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_bin::udf());
