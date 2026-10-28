@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.parquet_row_group_bytes {
+        config = config.set_usize("datafusion.execution.parquet.max_row_group_bytes", value);
+    }
     if let Some(value) = args.optimizer_passes {
         config = config.set_usize("datafusion.optimizer.max_passes", value);
     }
@@ -408,6 +411,30 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn configures_parquet_row_group_bytes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-row-group-bytes",
+            "134217728",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.max_row_group_bytes.map(|v| v.get()),
+            defaults.options().execution.parquet.max_row_group_bytes.map(|v| v.get())
+        );
+        assert_eq!(
+            configured.options().execution.parquet.max_row_group_bytes.map(|v| v.get()),
+            Some(134217728)
+        );
     }
 
     #[test]

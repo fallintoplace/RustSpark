@@ -6,6 +6,7 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 
 ## Available tuning knobs
 
+- `--parquet-row-group-bytes 134217728`: Limit Parquet output row-group size by bytes. Requires `--parquet-serial-file-write`; otherwise the parallel writer may ignore this limit.
 - `--optimizer-passes 5`: Set the maximum logical optimization passes. More passes can improve some plans but add planning latency.
 - `--parquet-serial-file-write`: Disable parallel encoding within a single Parquet file. Required for byte-based row-group limits, but can reduce write throughput.
 - `--min-parallel-output-files 8`: Set a lower bound on concurrent export files. Higher counts increase memory and file management overhead.
