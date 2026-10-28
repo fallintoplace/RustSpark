@@ -50,7 +50,8 @@ def compare(a, b):
     changes = []
     for table in sorted(TABLES):
         if (a["tables"][table]["sha256"] != b["tables"][table]["sha256"]
-                or a["tables"][table]["rows"] != b["tables"][table]["rows"]):
+                or a["tables"][table]["rows"] != b["tables"][table]["rows"]
+                or a["tables"][table]["physical_bytes"] != b["tables"][table]["physical_bytes"]):
             changes.append(table)
     changed_sql = [number for number in range(1, 23)
                    if a["query_sha256"][number] != b["query_sha256"][number]]
