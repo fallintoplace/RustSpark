@@ -171,6 +171,8 @@ mod sql_compat_isnan;
 mod sql_compat_e;
 #[path = "sql_compat/expm1.rs"]
 mod sql_compat_expm1;
+#[path = "sql_compat/raise_error.rs"]
+mod sql_compat_raise_error;
 #[path = "sql_compat/unix_date.rs"]
 mod sql_compat_unix_date;
 #[path = "sql_compat/factorial.rs"]
@@ -436,6 +438,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_bit_get::udf());
         context.register_udf(sql_compat_bit_get::getbit_udf());
         context.register_udf(sql_compat_expm1::udf());
+        context.register_udf(sql_compat_raise_error::udf());
         context.register_udf(sql_compat_unix_date::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
