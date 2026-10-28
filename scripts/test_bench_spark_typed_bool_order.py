@@ -12,7 +12,7 @@ class TypedOrderedFlagTests(unittest.TestCase):
             with self.subTest(ordered=ordered), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "cases.json"
                 path.write_text(json.dumps([{"id": "probe", "sql": "SELECT 1", "ordered": ordered}]))
-                with self.assertRaisesRegex(ValueError, "ordering"):
+                with self.assertRaisesRegex(ValueError, "ordered"):
                     typed.load_cases(path)
 
     def test_accepts_boolean_flags(self):
