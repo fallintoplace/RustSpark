@@ -127,14 +127,20 @@ impl ReplicaStore {
     /// minimizes movement when membership changes.
     pub fn placements(&self, key: &str) -> io::Result<Vec<&StorageNode>> {
         validate_key(key)?;
-        let mut ranked: Vec<&StorageNode> = self.nodes.iter().collect();
-        ranked.sort_by(|a, b| {
-            placement_score(key, &b.id)
-                .cmp(&placement_score(key, &a.id))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        ranked.truncate(self.factor);
-        Ok(ranked)
+        // Compute each rendezvous score once and select only the required
+        // replicas, rather than hashing each node during a full O(n log n) sort.
+        let mut ranked: Vec<_> = self.nodes.iter()
+            .map(|node| (placement_score(key, &node.id), node))
+            .collect();
+        let compare = |a: &(u64, &StorageNode), b: &(u64, &StorageNode)| {
+            b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id))
+        };
+        if self.factor < ranked.len() {
+            ranked.select_nth_unstable_by(self.factor, compare);
+            ranked.truncate(self.factor);
+        }
+        ranked.sort_unstable_by(compare);
+        Ok(ranked.into_iter().map(|(_, node)| node).collect())
     }
 }
 
@@ -215,6 +221,33 @@ mod tests {
             let link = root.path().join("alias");
             std::os::unix::fs::symlink(root.path(), &link).unwrap();
             assert!(StorageNode::new("node", link).is_err());
+        }
+    }
+
+    #[test]
+    fn partial_replica_selection_matches_full_sort() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes: Vec<_> = (0..16)
+            .map(|index| {
+                let id = format!("node-{index:02}");
+                let path = root.path().join(&id);
+                fs::create_dir(&path).unwrap();
+                StorageNode::new(id, path).unwrap()
+            })
+            .collect();
+        for factor in [1, 2, 3, 8, 16] {
+            let store = ReplicaStore::new(nodes.clone(), factor).unwrap();
+            for index in 0..32 {
+                let key = format!("part-{index:02}.parquet");
+                let mut expected: Vec<_> = store.nodes().iter().collect();
+                expected.sort_by(|a, b| {
+                    placement_score(&key, &b.id)
+                        .cmp(&placement_score(&key, &a.id))
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+                expected.truncate(factor);
+                assert_eq!(store.placements(&key).unwrap(), expected);
+            }
         }
     }
 }
