@@ -53,8 +53,12 @@ pub(crate) fn udf() -> ScalarUDF {
                     value.as_deref().map(checksum),
                 )));
             }
-            let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0]
+            let [ColumnarValue::Array(array)] = args else {
+                return Err(DataFusionError::Internal(
+                    "crc32 expects a Utf8 array".into(),
+                ));
+            };
+            let input = array
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("crc32 expects Utf8".into()))?;
@@ -86,5 +90,33 @@ mod tests {
         for value in ["hello", "a\0b", "café", "❄️", "A long string with spaces"] {
             assert_eq!(checksum(value), reference(value));
         }
+    }
+}
+
+#[cfg(test)]
+mod array_fast_path_tests {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
+
+    #[tokio::test]
+    async fn handles_nullable_column_batches() -> datafusion::error::Result<()> {
+        let rows = RustSparkSession::new()
+            .sql(
+                "SELECT CRC32(v) FROM (VALUES (0, '123456789'), (1, CAST(NULL AS VARCHAR)), (2, '')) AS t(idx, v) ORDER BY idx",
+            )
+            .await?
+            .collect()
+            .await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            actual.extend(values.iter());
+        }
+        assert_eq!(actual, vec![Some(0xCBF4_3926), None, Some(0)]);
+        Ok(())
     }
 }
