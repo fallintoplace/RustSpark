@@ -27,7 +27,8 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  check:
+  clippy:
+    name: Clippy
     needs: format
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -40,7 +41,51 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --all-targets --locked
+
+  tests:
+    name: Linux integration shard ${{ matrix.shard }}/8
+    needs: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run library, binary, and integration tests by executable
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib
+          if [[ "$SHARD" == "0" ]]; then
+            cargo test --locked --bins
+          fi
+          mapfile -t tests < <(find tests -maxdepth 1 -type f -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
+          for i in "${!tests[@]}"; do
+            if (( i % 8 == SHARD )); then
+              cargo test --locked --test "${tests[$i]}"
+            fi
+          done
+
+  smoke:
+    name: CLI smoke
+    needs: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build CLI for end-to-end smoke checks
         run: cargo build --locked --bin rustspark
       - uses: actions/setup-python@v7
