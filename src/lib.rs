@@ -159,6 +159,8 @@ mod sql_compat_exp;
 mod sql_compat_e;
 #[path = "sql_compat/expm1.rs"]
 mod sql_compat_expm1;
+#[path = "sql_compat/unix_date.rs"]
+mod sql_compat_unix_date;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
 #[path = "sql_compat/hex.rs"]
@@ -400,6 +402,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_bitwise_or::udf());
         context.register_udf(sql_compat_bit_get::udf());
         context.register_udf(sql_compat_expm1::udf());
+        context.register_udf(sql_compat_unix_date::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
         context.register_udf(sql_compat_ucase::udf());
