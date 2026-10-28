@@ -132,3 +132,47 @@ mod tests {
         assert_eq!(store.repair_missing("large.parquet").unwrap(), 0);
     }
 }
+
+impl ReplicaStore {
+    /// Repair missing replicas for every inventoried object. Existing
+    /// divergent copies are never overwritten, and failures stop the scan.
+    /// The total counts restored replica files, not distinct objects.
+    pub fn repair_all_missing(&self) -> io::Result<usize> {
+        let mut repaired = 0usize;
+        for key in self.list_keys()? {
+            repaired = repaired
+                .checked_add(self.repair_missing(&key)?)
+                .ok_or_else(|| io::Error::other("Repaired replica count overflow"))?;
+        }
+        Ok(repaired)
+    }
+}
+
+#[cfg(test)]
+mod repair_inventory_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn repairs_multiple_missing_replicas_idempotently() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect();
+        let store = ReplicaStore::new(nodes, 2).unwrap();
+        for key in ["a.parquet", "b.parquet"] {
+            store.put(key, b"data").unwrap();
+            let first = store.placements(key).unwrap()[0];
+            fs::remove_file(first.root.join("objects").join(key)).unwrap();
+        }
+        assert_eq!(store.repair_all_missing().unwrap(), 2);
+        assert_eq!(store.repair_all_missing().unwrap(), 0);
+        assert_eq!(store.verify("a.parquet").unwrap().healthy, 2);
+        assert_eq!(store.verify("b.parquet").unwrap().healthy, 2);
+    }
+}

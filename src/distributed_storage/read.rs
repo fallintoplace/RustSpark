@@ -106,3 +106,46 @@ mod tests {
         assert!(store.get("missing.parquet").is_err());
     }
 }
+
+impl ReplicaStore {
+    /// Read an object and identify the replica that successfully served it.
+    /// Like get(), this reports the last error if every replica fails.
+    pub fn get_with_source(&self, key: &str) -> io::Result<(String, Vec<u8>)> {
+        let mut last_error = None;
+        for node in self.placements(key)? {
+            let path = node.root.join("objects").join(key);
+            match read_regular_replica(&path) {
+                Ok(bytes) => return Ok((node.id.clone(), bytes)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found")))
+    }
+}
+
+#[cfg(test)]
+mod read_source_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn identifies_surviving_node_after_primary_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let store = ReplicaStore::new(nodes, 2).unwrap();
+        store.put("p.parquet", b"payload").unwrap();
+        let primary = store.placements("p.parquet").unwrap()[0];
+        fs::remove_file(primary.root.join("objects/p.parquet")).unwrap();
+        let (node, bytes) = store.get_with_source("p.parquet").unwrap();
+        assert_ne!(node, primary.id);
+        assert_eq!(bytes, b"payload");
+        assert!(store.get_with_source("missing").is_err());
+    }
+}

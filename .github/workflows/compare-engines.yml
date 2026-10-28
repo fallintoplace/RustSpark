@@ -51,7 +51,7 @@ jobs:
           python3 scripts/bench_compare.py --binary ./target/release/rustspark \
             --engines rustspark duckdb spark \
             --rows "${{ inputs.rows || '10000' }}" --repeat "${{ inputs.repeats || '3' }}" \
-            --warmup 1 --json-out benchmarks/engine-comparison.json
+            --warmup 1 --balanced-order --json-out benchmarks/engine-comparison.json
       - name: Render checked Markdown comparison
         run: |
           python3 scripts/bench_report.py benchmarks/engine-comparison.json --output benchmarks/reports/cold.md

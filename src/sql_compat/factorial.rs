@@ -35,8 +35,12 @@ pub(crate) fn udf() -> ScalarUDF {
                     value.and_then(factorial),
                 )));
             }
-            let arrays = ColumnarValue::values_to_arrays(args)?;
-            let values = arrays[0]
+            let [ColumnarValue::Array(array)] = args else {
+                return Err(DataFusionError::Internal(
+                    "factorial expects a Int64 array".into(),
+                ));
+            };
+            let values = array
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("factorial expects Int64".into()))?;
@@ -61,5 +65,33 @@ mod tests {
         assert_eq!(factorial(20), Some(2_432_902_008_176_640_000));
         assert_eq!(factorial(-1), None);
         assert_eq!(factorial(21), None);
+    }
+}
+
+#[cfg(test)]
+mod array_fast_path_tests {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
+
+    #[tokio::test]
+    async fn handles_nullable_column_batches() -> datafusion::error::Result<()> {
+        let rows = RustSparkSession::new()
+            .sql(
+                "SELECT FACTORIAL(v) FROM (VALUES (0, CAST(5 AS BIGINT)), (1, CAST(NULL AS BIGINT)), (2, CAST(21 AS BIGINT)), (3, CAST(0 AS BIGINT))) AS t(idx, v) ORDER BY idx",
+            )
+            .await?
+            .collect()
+            .await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            actual.extend(values.iter());
+        }
+        assert_eq!(actual, vec![Some(120), None, None, Some(1)]);
+        Ok(())
     }
 }
