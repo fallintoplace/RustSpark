@@ -22,6 +22,7 @@ TEST_PATTERNS = {
 BENCHMARK_TOOLS = {
     "local": "bench_rustspark.py",
     "latency": "bench_query_latency.py",
+    "billion": "bench_billion_rows.py",
     "cold": "bench_compare.py",
     "warm": "bench_warm_compare.py",
     "tpch": "tpch_run.py",
