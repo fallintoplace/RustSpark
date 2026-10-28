@@ -36,3 +36,16 @@ in-memory CSV inputs and a deliberately restricted SQL subset. SQL JOIN,
 UNION and some other operators are available in the native Rust API, but
 not exposed through SQL yet. It does not yet read Parquet or support
 disk spill, parallel scheduling, or distributed execution.
+
+## Streaming SQL with external sorting
+
+The `rustspark-stream` native binary executes SELECT, WHERE, projection,
+LIMIT/OFFSET and ORDER BY over bounded CSV batches without DataFusion.
+ORDER BY writes sorted spill runs and merges them in multiple passes when
+needed. Source schema must be explicit. For example:
+
+    cargo run --manifest-path native-engine/Cargo.toml --bin rustspark-stream -- --csv tests/fixtures/sales.csv --schema 'city:text,amount:int' --table sales --sql 'SELECT city, amount FROM sales ORDER BY amount DESC LIMIT 10'
+
+The implementation is experimental. Memory limits, cancellation, SQL
+compatibility, Parquet scans, high-cardinality grouping and distributed
+execution still need production validation before the old engine is removed.
