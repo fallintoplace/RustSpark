@@ -64,8 +64,6 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          # Cargo metadata discovers explicit and implicit test targets, including
-          # nonstandard paths. One cargo invocation avoids repeated build checks.
           python3 - <<'PY'
           import json
           import os
@@ -78,7 +76,7 @@ jobs:
           ))
           members = set(metadata["workspace_members"])
           targets = sorted({
-              target["name"]
+              (target["name"], tuple(target["kind"]))
               for package in metadata["packages"]
               if package["id"] in members
               for target in package["targets"]
@@ -86,13 +84,13 @@ jobs:
           })
           if not targets:
               raise SystemExit("No integration test targets discovered")
-          selected = [name for index, name in enumerate(targets) if index % 8 == shard]
+          selected = [name for index, (name, _) in enumerate(targets) if index % 8 == shard]
           command = ["cargo", "test", "--locked"]
           if shard == 0:
               command.extend(["--lib", "--bins"])
           for name in selected:
               command.extend(["--test", name])
-          if len(command) == 3:
+          if not selected and shard != 0:
               raise SystemExit(f"Empty shard {shard}")
           print(f"Shard {shard}: {len(selected)} integration targets", flush=True)
           subprocess.run(command, check=True)
