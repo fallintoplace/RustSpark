@@ -31,3 +31,5 @@ pub mod aggregate;
 pub mod distinct;
 
 pub mod join;
+
+pub mod union;
