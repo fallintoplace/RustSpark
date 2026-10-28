@@ -14,6 +14,15 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Int64(value)),
+                ColumnarValue::Scalar(ScalarValue::Int64(shift)),
+            ] = args
+            {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    (*value).zip(*shift).map(|(value, shift)| (value as u64).wrapping_shr(shift as u32) as i64),
+                )));
+            }
             // Reuse the scalar value while shifting every row of the right column.
             if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
                 let right = right.as_any().downcast_ref::<Int64Array>()
@@ -27,14 +36,11 @@ pub(crate) fn udf() -> ScalarUDF {
             if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
                 let left = left.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("shiftrightunsigned expects Int64".into()))?;
-                let result: Vec<Option<i64>> = left.iter()
+                let result: Int64Array = left.iter()
                     .map(|left| left.zip(*right).map(|(value, shift)| (value as u64).wrapping_shr(shift as u32) as i64))
                     .collect();
-                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(result)));
             }
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let lhs = arrays[0]
                 .as_any()
@@ -44,7 +50,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("shiftrightunsigned expects Int64".into()))?;
-            let result: Vec<Option<i64>> = lhs
+            let result: Int64Array = lhs
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| {
@@ -52,13 +58,7 @@ pub(crate) fn udf() -> ScalarUDF {
                         .map(|(left, right)| (left as u64).wrapping_shr(right as u32) as i64)
                 })
                 .collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }
