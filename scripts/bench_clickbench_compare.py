@@ -48,6 +48,8 @@ def compare(baseline, candidate, threshold=0.2):
     compared = []
     for query in sorted(old):
         ratio = new[query]["median"] / old[query]["median"]
+        if not math.isfinite(ratio):
+            raise ValueError(f"ClickBench query {query} latency ratio is not finite")
         compared.append({
             "id": query,
             "same_result": old[query]["hash"] == new[query]["hash"],
