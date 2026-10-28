@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use datafusion::{
     arrow::{
-        array::{Int64Array, StringArray},
+        array::{Int64Array, StringBuilder},
         datatypes::DataType,
     },
     common::{DataFusionError, ScalarValue},
@@ -24,11 +24,13 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("space expects Int64".into()))?;
-            let mut result: Vec<Option<String>> = Vec::with_capacity(input.len());
+            // Use one contiguous Arrow buffer instead of allocating a String per row.
+            const CHUNK: &str = "                                                                ";
+            let mut result = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(16));
             for value in input.iter() {
-                let padded = match value {
-                    None => None,
-                    Some(n) if n <= 0 => Some(String::new()),
+                match value {
+                    None => result.append_null(),
+                    Some(n) if n <= 0 => result.append_value(""),
                     Some(n) => {
                         let count = usize::try_from(n).map_err(|_| {
                             DataFusionError::Execution("SPACE length overflows usize".into())
@@ -38,17 +40,22 @@ pub(crate) fn udf() -> ScalarUDF {
                                 "SPACE length exceeds the 1048576-character limit".into(),
                             ));
                         }
-                        Some(" ".repeat(count))
+                        for _ in 0..count / CHUNK.len() {
+                            result.write_str(CHUNK).expect("writing to an Arrow string buffer cannot fail");
+                        }
+                        result.write_str(&CHUNK[..count % CHUNK.len()])
+                            .expect("writing to an Arrow string buffer cannot fail");
+                        result.append_value("");
                     }
-                };
-                result.push(padded);
+                }
             }
+            let result = result.finish();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten().map(str::to_owned),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(StringArray::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )

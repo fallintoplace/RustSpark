@@ -26,6 +26,12 @@ class ReportTests(unittest.TestCase):
                 {"id": 1, "status": "error"}, {"id": 1, "status": "error"},
             ]})
 
+    def test_non_object_query_rows_are_rejected(self):
+        for value in (None, 9, "wrong", []):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, "JSON objects"):
+                reporter.render({"results": [value]})
+
 
 if __name__ == "__main__":
     unittest.main()

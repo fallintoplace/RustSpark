@@ -292,6 +292,8 @@ def main(argv=None) -> int:
     parser.add_argument("--spill-dir", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.json_out.resolve() in (args.parquet.resolve(), args.queries.resolve()):
+            raise ValueError("JSON output must differ from Parquet and SQL inputs")
         engine_args = build_engine_args(args)
         report = benchmark(
             args.binary, args.parquet, args.queries, args.repeat, args.warmup,

@@ -21,7 +21,11 @@ def write_jsonl(path, rows):
     if rows < 1:
         raise ValueError("rows must be positive")
     with Path(path).open("w", encoding="utf-8") as stream:
-        stream.writelines(encode_jsonl_row(index) for index in range(rows))
+        for start in range(0, rows, 4096):
+            stream.write("".join(
+                encode_jsonl_row(index)
+                for index in range(start, min(start + 4096, rows))
+            ))
 
 
 def command(binary, file, sql):

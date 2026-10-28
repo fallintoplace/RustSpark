@@ -67,9 +67,24 @@ impl RustSparkSession {
             .await
     }
 
-    async fn extract_scalar(dataframe: DataFrame) -> Result<datafusion::common::ScalarValue> {
+    fn record_scalar_batch(
+        result: &mut Option<datafusion::common::ScalarValue>,
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Result<()> {
         use datafusion::common::ScalarValue;
 
+        if batch.num_rows() > 1 || (batch.num_rows() > 0 && result.is_some()) {
+            return Err(DataFusionError::Plan(
+                "Scalar query must return exactly one row".into(),
+            ));
+        }
+        if batch.num_rows() == 1 {
+            *result = Some(ScalarValue::try_from_array(batch.column(0).as_ref(), 0)?);
+        }
+        Ok(())
+    }
+
+    async fn extract_scalar(dataframe: DataFrame) -> Result<datafusion::common::ScalarValue> {
         if dataframe.schema().fields().len() != 1 {
             return Err(DataFusionError::Plan(
                 "Scalar query must return exactly one column".into(),
@@ -81,14 +96,7 @@ impl RustSparkSession {
         let mut result = None;
         while let Some(batch) = batches.next().await {
             let batch = batch?;
-            if batch.num_rows() > 1 || (batch.num_rows() > 0 && result.is_some()) {
-                return Err(DataFusionError::Plan(
-                    "Scalar query must return exactly one row".into(),
-                ));
-            }
-            if batch.num_rows() == 1 {
-                result = Some(ScalarValue::try_from_array(batch.column(0).as_ref(), 0)?);
-            }
+            Self::record_scalar_batch(&mut result, &batch)?;
         }
         result.ok_or_else(|| DataFusionError::Plan("Scalar query returned no rows".into()))
     }

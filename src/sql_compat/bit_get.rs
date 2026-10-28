@@ -14,6 +14,20 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // Keep constant SQL operands as scalars instead of broadcasting a new Arrow array.
+            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
+                let left = left.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("bit_get expects Int64".into()))?;
+                let mut result = Vec::with_capacity(left.len());
+                for left in left.iter() {
+                    result.push(match (left, *right) {
+                        (Some(_), Some(right)) if !(0..64).contains(&right) => return Err(DataFusionError::Execution("BIT_GET position must be between 0 and 63".into())),
+                        (Some(left), Some(right)) => Some(((left as u64 >> (right as u32)) & 1) as i64),
+                        _ => None,
+                    });
+                }
+                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+            }
             let scalar = args
                 .iter()
                 .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));

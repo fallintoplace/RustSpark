@@ -198,7 +198,7 @@ def load_cases(path: pathlib.Path) -> list[dict]:
     from spark_compat import load_cases as validate_cases
     cases = validate_cases(path)
     for case in cases:
-        if case.get("ordered", False) not in (True, False):
+        if type(case.get("ordered", False)) is not bool:
             raise ValueError(f"Invalid ordering for {case['id']}")
     return cases
 

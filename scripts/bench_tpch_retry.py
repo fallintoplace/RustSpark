@@ -39,6 +39,21 @@ def retry_completed(replay, ids):
             and all(row.get("status") == "ok" for row in new))
 
 
+def execute_retry(args):
+    ids = failed_ids(json.loads(args.previous.read_text(encoding="utf-8")))
+    if not ids:
+        print("All recorded TPC-H queries succeeded; nothing to retry")
+        return 0
+    args.json_out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = retry_command(args.binary, args.queries_dir, args.parquet_dir,
+                        ids, args.json_out, args.repeat, args.timeout)
+    result = subprocess.run(cmd, check=False)
+    # Original runner versions can exit 0 even if some queries failed.
+    replay = json.loads(args.json_out.read_text(encoding="utf-8"))
+    completed = retry_completed(replay, ids)
+    return 0 if completed and result.returncode == 0 else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("previous", type=Path)
@@ -50,20 +65,9 @@ def main(argv=None):
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
     try:
-        ids = failed_ids(json.loads(args.previous.read_text(encoding="utf-8")))
-        if not ids:
-            print("All recorded TPC-H queries succeeded; nothing to retry")
-            return 0
-        args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        cmd = retry_command(args.binary, args.queries_dir, args.parquet_dir,
-                            ids, args.json_out, args.repeat, args.timeout)
-        result = subprocess.run(cmd, check=False)
-        # Original runner versions can exit 0 even if some queries failed.
-        replay = json.loads(args.json_out.read_text(encoding="utf-8"))
-        completed = retry_completed(replay, ids)
+        return execute_retry(args)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"retry failed: {error}\n")
-    return 0 if completed and result.returncode == 0 else 1
 
 
 if __name__ == "__main__":

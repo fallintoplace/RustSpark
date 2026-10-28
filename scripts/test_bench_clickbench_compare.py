@@ -29,6 +29,12 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differ"):
             comparison.compare(report([(1, 5, "a")]), report([(2, 5, "a")]))
 
+    def test_rejects_overflowed_latency_ratio(self):
+        baseline = report([(1, 1e-308, "a")])
+        candidate = report([(1, 1e308, "a")])
+        with self.assertRaisesRegex(ValueError, "latency ratio is not finite"):
+            comparison.compare(baseline, candidate)
+
 
 if __name__ == "__main__":
     unittest.main()

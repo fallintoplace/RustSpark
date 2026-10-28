@@ -55,6 +55,35 @@ class DuckdbWarmTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 warm.benchmark(Path(tmp), [(1, sql)], threads=0)
 
+    def test_duckdb_query_error_does_not_skip_later_queries(self):
+        import sys
+        import types
+
+        class FakeDatabaseError(Exception):
+            pass
+
+        class Connection(FakeConnection):
+            def execute(self, sql):
+                if sql == "SELECT missing":
+                    raise FakeDatabaseError("missing table")
+                return super().execute(sql)
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "01.sql"
+            second = Path(tmp) / "02.sql"
+            first.write_text("SELECT missing", encoding="utf-8")
+            second.write_text("SELECT 42 AS answer", encoding="utf-8")
+            fake_duckdb = types.SimpleNamespace(Error=FakeDatabaseError)
+            with mock.patch.dict(sys.modules, {"duckdb": fake_duckdb}):
+                with mock.patch.object(warm, "reference_connection", return_value=Connection()):
+                    result = warm.benchmark(Path(tmp), [(1, first), (2, second)],
+                                            warmup=0, repeat=1)
+            self.assertEqual([row["status"] for row in result["results"]],
+                             ["error", "ok"])
+            self.assertIn("missing table", result["results"][0]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

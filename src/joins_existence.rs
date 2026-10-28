@@ -27,6 +27,50 @@ pub struct ExistenceFilter<'a> {
     pub keys: &'a [(&'a str, &'a str)],
 }
 
+fn append_existence_predicate(
+    query: &mut String,
+    source_alias: &str,
+    index: usize,
+    filter: &ExistenceFilter<'_>,
+) -> Result<()> {
+    if filter.keys.is_empty() {
+        return Err(DataFusionError::Plan(
+            "Every existence filter requires non-empty join keys".into(),
+        ));
+    }
+    if index != 0 {
+        query.push_str(" AND ");
+    }
+    let operator = match filter.mode {
+        ExistenceMode::Exists => "EXISTS",
+        ExistenceMode::NotExists => "NOT EXISTS",
+    };
+    let match_alias = quote_join_identifier(&format!("__rustspark_match_{index}"));
+    let lookup = quote_catalog_table(filter.table, "Invalid existence filter table name")?;
+    write!(
+        query, "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
+    ).expect("writing to a String cannot fail");
+
+    for (key_index, (source_key, match_key)) in filter.keys.iter().enumerate() {
+        if source_key.trim().is_empty() || match_key.trim().is_empty() {
+            return Err(DataFusionError::Plan(
+                "Existence filter key names cannot be blank".into(),
+            ));
+        }
+        if key_index != 0 {
+            query.push_str(" AND ");
+        }
+        write!(
+            query,
+            "{source_alias}.{} = {match_alias}.{}",
+            quote_join_identifier(source_key),
+            quote_join_identifier(match_key)
+        ).expect("writing to a String cannot fail");
+    }
+    query.push(')');
+    Ok(())
+}
+
 impl RustSparkSession {
     /// Filter a registered table with any number of EXISTS/NOT EXISTS checks.
     ///
@@ -50,41 +94,7 @@ impl RustSparkSession {
             quote_catalog_table(source, "Invalid source table name")?
         );
         for (index, filter) in filters.iter().enumerate() {
-            if filter.keys.is_empty() {
-                return Err(DataFusionError::Plan(
-                    "Every existence filter requires non-empty join keys".into(),
-                ));
-            }
-            if index != 0 {
-                query.push_str(" AND ");
-            }
-            let operator = match filter.mode {
-                ExistenceMode::Exists => "EXISTS",
-                ExistenceMode::NotExists => "NOT EXISTS",
-            };
-            let match_alias = quote_join_identifier(&format!("__rustspark_match_{index}"));
-            let lookup = quote_catalog_table(filter.table, "Invalid existence filter table name")?;
-            write!(
-                &mut query, "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
-            ).expect("writing to a String cannot fail");
-
-            for (key_index, (source_key, match_key)) in filter.keys.iter().enumerate() {
-                if source_key.trim().is_empty() || match_key.trim().is_empty() {
-                    return Err(DataFusionError::Plan(
-                        "Existence filter key names cannot be blank".into(),
-                    ));
-                }
-                if key_index != 0 {
-                    query.push_str(" AND ");
-                }
-                write!(
-                    &mut query,
-                    "{source_alias}.{} = {match_alias}.{}",
-                    quote_join_identifier(source_key),
-                    quote_join_identifier(match_key)
-                ).expect("writing to a String cannot fail");
-            }
-            query.push(')');
+            append_existence_predicate(&mut query, source_alias, index, filter)?;
         }
         self.sql(&query).await
     }

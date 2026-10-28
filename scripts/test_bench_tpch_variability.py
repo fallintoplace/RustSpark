@@ -23,7 +23,7 @@ class VariabilityTests(unittest.TestCase):
         self.assertGreater(result["results"][0]["coefficient_of_variation"], 0.3)
 
     def test_too_few_or_invalid_samples_rejected(self):
-        for samples in ([1], [1, 2], [1, float("inf"), 2], [1, True, 2], [-1, 2, 3]):
+        for samples in ([1], [1, 2], [1, float("inf"), 2], [1, True, 2], [-1, 2, 3], [0, 0, 0], [0, 2, 3]):
             with self.subTest(samples=samples), self.assertRaises(ValueError):
                 variation.inspect(report(samples))
         changed = report([1, 2, 3])

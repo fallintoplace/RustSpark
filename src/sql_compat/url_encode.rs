@@ -11,7 +11,9 @@ fn percent_encode(input: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(input.len());
     for byte in input.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+        if byte == b' ' {
+            encoded.push('+');
+        } else if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'*') {
             encoded.push(char::from(byte));
         } else {
             encoded.push('%');

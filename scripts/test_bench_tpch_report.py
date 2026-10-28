@@ -36,6 +36,11 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             report.render({"results": [{"id": 1, "status": "error"}, {"id": 1, "status": "error"}]})
 
+    def test_rejects_non_object_rows(self):
+        for row in (None, "wrong", 5, []):
+            with self.subTest(row=row), self.assertRaisesRegex(ValueError, "JSON objects"):
+                report.render({"results": [row]})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ use rustspark::RustSparkSession;
 
 mod deadline;
 mod remote_inputs;
+mod replicated_inputs;
 mod result_export;
 mod result_preview;
 mod scheduler;
@@ -49,6 +50,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     }
     remote_inputs::register(&session).await?;
+    replicated_inputs::register(&session).await?;
 
     present_result(&session, &query).await
 }

@@ -36,12 +36,20 @@ def entries(report):
 def compare(baseline, candidate, threshold=0.2):
     if not math.isfinite(threshold) or threshold < 0:
         raise ValueError("Threshold must be nonnegative")
+    old_hash, new_hash = baseline.get("query_file_sha256"), candidate.get("query_file_sha256")
+    if old_hash is not None or new_hash is not None:
+        if (not isinstance(old_hash, str) or len(old_hash) != 64
+                or any(ch not in "0123456789abcdef" for ch in old_hash)
+                or old_hash != new_hash):
+            raise ValueError("ClickBench SQL corpus differs between reports")
     old, new = entries(baseline), entries(candidate)
     if old.keys() != new.keys():
         raise ValueError("Query IDs differ between reports")
     compared = []
     for query in sorted(old):
         ratio = new[query]["median"] / old[query]["median"]
+        if not math.isfinite(ratio):
+            raise ValueError(f"ClickBench query {query} latency ratio is not finite")
         compared.append({
             "id": query,
             "same_result": old[query]["hash"] == new[query]["hash"],

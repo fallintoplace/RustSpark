@@ -48,6 +48,13 @@ def measure_query(connection, sql, warmup, repeat):
 def benchmark(parquet, queries, warmup=1, repeat=5, threads=2):
     if type(threads) is not int or threads < 1:
         raise ValueError("Threads must be a positive integer")
+    # DuckDB is an optional dependency; unit tests can use a fake connection.
+    try:
+        import duckdb
+    except ImportError:
+        query_errors = (ValueError, RuntimeError)
+    else:
+        query_errors = (ValueError, RuntimeError, duckdb.Error)
     connection = reference_connection(parquet)
     results = []
     try:
@@ -57,7 +64,7 @@ def benchmark(parquet, queries, warmup=1, repeat=5, threads=2):
             item = {"id": number, "sql_sha256": __import__("hashlib").sha256(path.read_bytes()).hexdigest()}
             try:
                 item.update(measure_query(connection, sql, warmup, repeat))
-            except (ValueError, RuntimeError) as error:
+            except query_errors as error:
                 item.update({"status": "error", "error": str(error)[-500:]})
             results.append(item)
     finally:

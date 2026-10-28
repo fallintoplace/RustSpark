@@ -50,6 +50,12 @@ class ComparisonTests(unittest.TestCase):
             verify.parse_rows('{"x":1,"x":2}\n')
         self.assertEqual(verify.parse_rows('{"x":1.5}\n'), [{"x": Decimal("1.5")}])
 
+    def test_unordered_tolerance_finds_non_greedy_pairing(self):
+        actual = [{"n": 1.1}, {"n": 1.0}]
+        expected = [{"n": 1.0}, {"n": 1.2}]
+        self.assertTrue(verify.equal_rows(actual, expected, Decimal("0.15"), False))
+        self.assertFalse(verify.equal_rows(actual, expected, Decimal("0.01"), False))
+
 
 if __name__ == "__main__":
     unittest.main()
