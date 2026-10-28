@@ -11,3 +11,4 @@ pub mod partition_spill;
 pub mod grace_join;
 pub mod grouped_spill;
 pub mod distinct_spill;
+pub mod union_stream;
