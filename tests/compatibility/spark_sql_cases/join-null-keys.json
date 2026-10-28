@@ -1,0 +1,12 @@
+[
+  {
+    "id": "inner_join_null_keys_do_not_match",
+    "ordered": true,
+    "sql": "SELECT l.k, r.payload FROM (VALUES (CAST(NULL AS BIGINT)), (1)) AS l(k) INNER JOIN (VALUES (CAST(NULL AS BIGINT), 99), (1, 10)) AS r(k, payload) ON l.k = r.k ORDER BY l.k"
+  },
+  {
+    "id": "left_join_preserves_null_key",
+    "ordered": true,
+    "sql": "SELECT l.k, r.payload FROM (VALUES (CAST(NULL AS BIGINT)), (1)) AS l(k) LEFT JOIN (VALUES (1, 10)) AS r(k, payload) ON l.k = r.k ORDER BY l.k NULLS FIRST"
+  }
+]
