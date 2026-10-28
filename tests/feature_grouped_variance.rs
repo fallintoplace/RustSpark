@@ -16,7 +16,10 @@ async fn grouped_variance_handles_groups_with_missing_pairs() -> TestResult {
     let result = session.variance_per_group("events", "segment", "metric").await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE sample_variance IS NOT NULL").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE sample_variance IS NOT NULL")
+            .await?
+            .to_string(),
         "1"
     );
     assert!(session.variance_per_group("events", "segment", "missing").await.is_err());
