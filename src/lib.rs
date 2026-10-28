@@ -55,6 +55,8 @@ mod feature_group_ranks;
 mod sql_compat_startswith;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
+#[path = "sql_compat/atan.rs"]
+mod sql_compat_atan;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
 #[path = "sql_compat/zeroifnull.rs"]
@@ -204,6 +206,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_try_divide::udf());
+        context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_try_multiply::udf());
