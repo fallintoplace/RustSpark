@@ -9,6 +9,8 @@ use std::{
     path::PathBuf,
 };
 
+mod write;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
