@@ -25,6 +25,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.hash_join_inlist_max_values {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = value;
     }
+    if let Some(value) = args.hash_join_single_partition_bytes {
+        config.options_mut().optimizer.hash_join_single_partition_threshold = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -364,5 +367,18 @@ mod perf_hash_join_inlist_values {
             "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-values", "0",
         ])
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_single_partition_bytes {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn reads_nonzero_tuning_value() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-mb", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().optimizer.hash_join_single_partition_threshold, 8388608);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-mb", "0"]).is_err());
     }
 }
