@@ -16,6 +16,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
     }
+    if args.union_filter_rewrite {
+        config.options_mut().optimizer.enable_unions_to_filter = true;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -106,5 +109,17 @@ mod tests {
         assert!(validate_spill_directory(&nested, Some(&database)).is_err());
         assert!(validate_spill_directory(&database, Some(&database)).is_err());
         assert!(validate_spill_directory(&directory.path().join("missing"), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_union_filter_rewrite {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_enables_optimizer_flag() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--union-filter-rewrite"]).unwrap();
+        assert!(build_session_config(&args).options().optimizer.enable_unions_to_filter);
     }
 }
