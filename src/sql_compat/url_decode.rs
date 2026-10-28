@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Array, StringArray}, datatypes::DataType},
+    arrow::{array::{StringArray, StringBuilder}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -18,7 +18,7 @@ fn hex_digit(value: u8) -> Option<u8> {
 
 fn percent_decode(input: &str) -> datafusion::error::Result<String> {
     let bytes = input.as_bytes();
-    if !bytes.contains(&b'%') {
+    if !bytes.contains(&b'%') && !bytes.contains(&b'+') {
         return Ok(input.to_owned());
     }
     let mut result = Vec::with_capacity(bytes.len());
@@ -52,26 +52,36 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
-            let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0]
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| DataFusionError::Internal("url_decode expects Utf8".into()))?;
-            let mut result = Vec::with_capacity(input.len());
-            for value in input.iter() {
-                result.push(value.map(percent_decode).transpose()?);
+            match args {
+                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
+                    Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
+                        value.as_deref().map(percent_decode).transpose()?,
+                    )))
+                }
+                [ColumnarValue::Array(array)] => {
+                    let input = array.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| DataFusionError::Internal("url_decode expects Utf8".into()))?;
+                    let mut result = StringBuilder::with_capacity(
+                        input.len(), input.value_data().len(),
+                    );
+                    for value in input.iter() {
+                        match value {
+                            None => result.append_null(),
+                            Some(value) if !value.as_bytes().contains(&b'%')
+                                && !value.as_bytes().contains(&b'+') => {
+                                // Common case: copy the existing string into Arrow once.
+                                result.append_value(value);
+                            }
+                            Some(value) => {
+                                result.append_value(percent_decode(value)?);
+                            }
+                        }
+                    }
+                    Ok(ColumnarValue::Array(Arc::new(result.finish())))
+                }
+                _ => Err(DataFusionError::Internal("url_decode expects Utf8".into())),
             }
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(StringArray::from(result))))
-            }
-        }),
+        },
     )
 }
 
@@ -83,9 +93,35 @@ mod tests {
     fn plain_and_encoded_urls_preserve_semantics() {
         assert_eq!(percent_decode("plain/café").unwrap(), "plain/café");
         assert_eq!(percent_decode("a%20b").unwrap(), "a b");
+        assert_eq!(percent_decode("a+b").unwrap(), "a b");
         assert_eq!(percent_decode("%C3%A9").unwrap(), "é");
         assert!(percent_decode("%").is_err());
         assert!(percent_decode("%GG").is_err());
         assert!(percent_decode("%FF").is_err());
+    }
+}
+
+#[cfg(test)]
+mod array_regression {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
+
+    #[tokio::test]
+    async fn decodes_column_values_with_plain_unicode_and_nulls() -> datafusion::error::Result<()> {
+        let rows = RustSparkSession::new()
+            .sql(
+                "SELECT URL_DECODE(v) FROM                  (VALUES (0, 'spark+sql'), (1, 'caf%C3%A9'),                          (2, 'plain/café'), (3, CAST(NULL AS VARCHAR))) AS t(idx, v) ORDER BY idx"
+            )
+            .await?.collect().await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            actual.extend(values.iter().map(|value| value.map(str::to_owned)));
+        }
+        assert_eq!(actual, vec![
+            Some("spark sql".into()), Some("café".into()),
+            Some("plain/café".into()), None,
+        ]);
+        Ok(())
     }
 }
