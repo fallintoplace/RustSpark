@@ -367,6 +367,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Enforce the target RecordBatch size at join outputs.
+    #[arg(long = "enforce-join-batch-size")]
+    enforce_join_batch_size: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
