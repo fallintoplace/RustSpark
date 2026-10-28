@@ -49,6 +49,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.use_statistics_registry {
         config.options_mut().optimizer.use_statistics_registry = true;
     }
+    if args.leaf_expression_pushdown {
+        config.options_mut().optimizer.enable_leaf_expression_pushdown = true;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -491,5 +494,17 @@ mod perf_statistics_registry {
     fn cli_flag_updates_optimizer_config() {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--use-statistics-registry"]).unwrap();
         assert_eq!(build_session_config(&args).options().optimizer.use_statistics_registry, true);
+    }
+}
+
+#[cfg(test)]
+mod perf_leaf_expression_pushdown {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_enables_optimizer_flag() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--leaf-expression-pushdown"]).unwrap();
+        assert!(build_session_config(&args).options().optimizer.enable_leaf_expression_pushdown);
     }
 }
