@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.max_spill_file_bytes {
+        config = config.set_usize("datafusion.execution.max_spill_file_size_bytes", value);
+    }
     if args.prefer_sort_merge_join {
         config.options_mut().optimizer.prefer_hash_join = false;
     }
@@ -435,6 +438,27 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn configures_max_spill_file_bytes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--max-spill-file-bytes",
+            "268435456",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.max_spill_file_size_bytes.get(),
+            defaults.options().execution.max_spill_file_size_bytes.get()
+        );
+        assert_eq!(configured.options().execution.max_spill_file_size_bytes.get(), 268435456);
     }
 
     #[test]

@@ -547,6 +547,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Tune max-spill-file-bytes for large Parquet datasets.
+    #[arg(long = "max-spill-file-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    max_spill_file_bytes: Option<usize>,
+
     /// Compress spilled intermediate data when disk bandwidth is limited.
     #[arg(long = "spill-compression", value_name = "CODEC", value_parser = ["uncompressed", "lz4_frame", "zstd"])]
     spill_compression: Option<String>,
