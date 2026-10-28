@@ -271,6 +271,10 @@ struct Args {
     #[arg(long = "metadata-fetch-concurrency", value_name = "FILES", value_parser = parse_positive_metadata_concurrency)]
     metadata_fetch_concurrency: Option<usize>,
 
+    /// Maximum values considered for Parquet IN-list statistics pruning.
+    #[arg(long = "parquet-in-list-pruning-limit", value_name = "VALUES", value_parser = parse_positive_tuning_usize)]
+    parquet_in_list_pruning_limit: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
@@ -675,6 +679,10 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_positive_tuning_usize(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "Performance tuning value")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {

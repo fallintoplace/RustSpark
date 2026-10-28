@@ -33,6 +33,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(files) = args.metadata_fetch_concurrency {
         config = config.set_usize("datafusion.execution.meta_fetch_concurrency", files);
     }
+    if let Some(limit) = args.parquet_in_list_pruning_limit {
+        config.options_mut().execution.parquet.max_in_list_size = limit;
+    }
     config
 }
 
@@ -86,6 +89,23 @@ mod tests {
     use super::{Args, custom_runtime, validate_spill_directory};
     use clap::Parser;
     use std::fs;
+
+    #[test]
+    fn allows_tuning_parquet_in_list_pruning_without_changing_the_default() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--parquet-in-list-pruning-limit", "128",
+        ]).unwrap();
+        let default_limit = datafusion::prelude::SessionConfig::new()
+            .options().execution.parquet.max_in_list_size;
+        assert_eq!(super::build_session_config(&original)
+            .options().execution.parquet.max_in_list_size, default_limit);
+        assert_eq!(super::build_session_config(&tuned)
+            .options().execution.parquet.max_in_list_size, 128);
+        assert!(Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--parquet-in-list-pruning-limit", "0",
+        ]).is_err());
+    }
 
     #[test]
     fn leaves_the_default_session_without_custom_runtime() {
