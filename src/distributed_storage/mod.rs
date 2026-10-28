@@ -39,6 +39,8 @@ mod materialize;
 
 mod rebalance;
 
+mod health;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
