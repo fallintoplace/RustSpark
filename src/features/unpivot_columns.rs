@@ -49,7 +49,13 @@ impl RustSparkSession {
         let id_prefix = if ids.is_empty() { String::new() } else { format!("{}, ", ids.join(", ")) };
         let label_alias = quote_join_identifier(name_column);
         let value_alias = quote_join_identifier(value_column);
-        let mut query = String::new();
+        // Reserve room for one SELECT per value column and the separators.
+        let per_branch = 64usize
+            .saturating_add(id_prefix.len())
+            .saturating_add(label_alias.len())
+            .saturating_add(value_alias.len())
+            .saturating_add(source.len());
+        let mut query = String::with_capacity(value_columns.len().saturating_mul(per_branch));
         for (index, name) in value_columns.iter().enumerate() {
             if index != 0 {
                 query.push_str(" UNION ALL ");
