@@ -99,6 +99,8 @@ mod sql_compat_atanh;
 mod sql_compat_bin;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+#[path = "sql_compat/quarter.rs"]
+mod sql_compat_quarter;
 #[path = "sql_compat/bitwise_and.rs"]
 mod sql_compat_bitwise_and;
 #[path = "sql_compat/bit_get.rs"]
@@ -324,6 +326,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
+        context.register_udf(sql_compat_quarter::udf());
         context.register_udf(sql_compat_conv::udf());
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_rint::udf());
