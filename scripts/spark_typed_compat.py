@@ -45,6 +45,7 @@ def canonical_type(value: str) -> str:
         "int16": "smallint",
         "int8": "tinyint",
         "utf8": "string",
+        "utf8view": "string",
         "float64": "double",
         "float32": "float",
         "date32": "date",
