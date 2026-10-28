@@ -24,3 +24,15 @@ cargo test --manifest-path native-engine/Cargo.toml --all-targets
 
 Do not claim Spark parity or better-than-Spark performance until these gates pass.
 The native crate is experimental and is not the default RustSpark engine.
+
+## Run the native CLI
+
+```sh
+cargo run --manifest-path native-engine/Cargo.toml -- --csv tests/fixtures/sales.csv --table sales --sql "SELECT city, SUM(amount) AS total FROM sales GROUP BY city ORDER BY city"
+```
+
+The native CLI runs without DataFusion. It currently operates on bounded,
+in-memory CSV inputs and a deliberately restricted SQL subset. SQL JOIN,
+UNION and some other operators are available in the native Rust API, but
+not exposed through SQL yet. It does not yet read Parquet or support
+disk spill, parallel scheduling, or distributed execution.
