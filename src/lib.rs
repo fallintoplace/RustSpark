@@ -132,6 +132,8 @@ mod sql_compat_crc32;
 mod sql_compat_url_encode;
 #[path = "sql_compat/url_decode.rs"]
 mod sql_compat_url_decode;
+#[path = "sql_compat/json.rs"]
+mod sql_compat_json;
 #[path = "sql_compat/width_bucket.rs"]
 mod sql_compat_width_bucket;
 #[path = "sql_compat/soundex.rs"]
@@ -281,6 +283,9 @@ impl RustSparkSession {
         context.register_udf(sql_compat_crc32::udf());
         context.register_udf(sql_compat_url_encode::udf());
         context.register_udf(sql_compat_url_decode::udf());
+        context.register_udf(sql_compat_json::get_json_object_udf());
+        context.register_udf(sql_compat_json::json_valid_udf());
+        context.register_udf(sql_compat_json::json_array_length_udf());
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_luhn_check::udf());
