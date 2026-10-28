@@ -41,3 +41,5 @@ pub mod executor;
 pub mod lexer;
 
 pub mod sql;
+
+pub mod csv;
