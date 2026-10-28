@@ -43,6 +43,8 @@ def render(report):
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("TPC-H report has no query results")
+    if any(not isinstance(row, dict) for row in results):
+        raise ValueError("TPC-H query rows must be JSON objects")
     ids = [row.get("id") for row in results]
     if any(isinstance(i, bool) or not isinstance(i, int) or i not in range(1, 23) for i in ids) or len(set(ids)) != len(ids):
         raise ValueError("Invalid or duplicate query IDs")
