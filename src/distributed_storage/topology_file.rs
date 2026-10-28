@@ -6,6 +6,17 @@ use std::{
 
 use super::{ReplicaStore, StorageNode, invalid};
 
+fn parse_topology_node(line: &str) -> io::Result<StorageNode> {
+    let (name, root) = line
+        .split_once('=')
+        .ok_or_else(|| invalid("Topology line must contain node=absolute_path"))?;
+    let path = Path::new(root.trim());
+    if !path.is_absolute() {
+        return Err(invalid("Storage node path must be absolute"));
+    }
+    StorageNode::new(name.trim(), path)
+}
+
 impl ReplicaStore {
     /// Parse one node=absolute_mount_path per line. Comments start with #.
     pub fn from_topology_file(path: &Path, factor: usize) -> io::Result<Self> {
@@ -22,14 +33,7 @@ impl ReplicaStore {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (name, root) = line
-                .split_once('=')
-                .ok_or_else(|| invalid("Topology line must contain node=absolute_path"))?;
-            let path = Path::new(root.trim());
-            if !path.is_absolute() {
-                return Err(invalid("Storage node path must be absolute"));
-            }
-            nodes.push(StorageNode::new(name.trim(), path)?);
+            nodes.push(parse_topology_node(line)?);
             if nodes.len() > 256 {
                 return Err(invalid("Topology supports at most 256 nodes"));
             }
