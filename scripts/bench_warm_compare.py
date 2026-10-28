@@ -205,6 +205,8 @@ def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master
     if (not engines or len(engines) != len(set(engines))
             or any(engine not in ("rustspark", "spark", "duckdb") for engine in engines)):
         raise ValueError("Specify unique engines: rustspark, spark and/or duckdb")
+    if "rustspark" not in engines:
+        raise ValueError("Warm comparison must include RustSpark")
     with tempfile.TemporaryDirectory(prefix="rustspark-warm-") as directory:
         csv = pathlib.Path(directory) / "input.csv"
         write_csv(csv, rows)
