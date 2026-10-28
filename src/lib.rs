@@ -40,6 +40,8 @@ mod sql_compat_endswith;
 mod sql_compat_sin;
 #[path = "features/numeric_column_summary.rs"]
 mod feature_numeric_column_summary;
+#[path = "features/grouped_numeric_summary.rs"]
+mod feature_grouped_numeric_summary;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
 #[path = "sql_compat/exp.rs"]
