@@ -87,6 +87,8 @@ def output_signature(stdout: str):
                    parse_float=_finite_json_float, object_pairs_hook=_unique_json_keys)
         for line in stdout.splitlines() if line.strip()
     ]
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError("Expected a JSON object for each benchmark result row")
     normalized = sorted(json.dumps(row, sort_keys=True, allow_nan=False) for row in rows)
     digest = hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
     return digest, rows
