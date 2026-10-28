@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Tune the build-side integer key range for the perfect-hash fast path.
+    #[arg(long = "perfect-hash-small-range", value_name = "COUNT", value_parser = parse_perfect_hash_small_range)]
+    perfect_hash_small_range: Option<usize>,
+
     /// Expose the maximum number of distinct build-side join keys for IN-list dynamic filtering.
     #[arg(long = "join-dynamic-inlist-distinct", value_name = "COUNT", value_parser = parse_join_dynamic_inlist_distinct)]
     join_dynamic_inlist_distinct: Option<usize>,
@@ -737,6 +741,10 @@ fn parse_join_dynamic_inlist_bytes(value: &str) -> Result<usize, String> {
 
 fn parse_join_dynamic_inlist_distinct(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--join-dynamic-inlist-distinct")
+}
+
+fn parse_perfect_hash_small_range(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--perfect-hash-small-range")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
