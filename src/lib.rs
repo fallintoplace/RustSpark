@@ -110,6 +110,8 @@ mod sql_compat_shiftleft;
 mod sql_compat_cot;
 #[path = "sql_compat/shiftright.rs"]
 mod sql_compat_shiftright;
+#[path = "sql_compat/cbrt.rs"]
+mod sql_compat_cbrt;
 #[path = "sql_compat/bit_get.rs"]
 mod sql_compat_bit_get;
 #[path = "sql_compat/shiftrightunsigned.rs"]
@@ -266,6 +268,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_shiftleft::udf());
         context.register_udf(sql_compat_cot::udf());
         context.register_udf(sql_compat_shiftright::udf());
+        context.register_udf(sql_compat_cbrt::udf());
         context.register_udf(sql_compat_bit_get::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
