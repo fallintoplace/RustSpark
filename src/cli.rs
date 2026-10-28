@@ -329,6 +329,14 @@ struct Args {
     )]
     partial_aggregate_probe_rows: Option<usize>,
 
+    /// tune subset-aware repartition threshold.
+    #[arg(
+        long = "subset-repartition-threshold",
+        value_name = "ROWS",
+        value_parser = parse_subset_repartition_threshold
+    )]
+    subset_repartition_threshold: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -816,6 +824,10 @@ fn parse_planning_concurrency_override(value: &str) -> Result<usize, String> {
 
 fn parse_partial_aggregate_probe_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--partial-aggregate-probe-rows")
+}
+
+fn parse_subset_repartition_threshold(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--subset-repartition-threshold")
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
