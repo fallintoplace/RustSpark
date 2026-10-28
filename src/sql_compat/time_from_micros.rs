@@ -49,14 +49,14 @@ mod tests {
 
     #[test]
     fn accepts_valid_times_and_rejects_invalid_values() {
-        assert_eq!(evaluate(52200500000000), Some(52200500000000));
+        assert_eq!(evaluate(52200500000), Some(52200500000000));
         assert_eq!(evaluate(-1), None);
     }
 
     #[tokio::test]
     async fn sql_scalar() -> datafusion::error::Result<()> {
         let rows = RustSparkSession::new()
-            .sql("SELECT TIME_FROM_MICROS(52200500000000)")
+            .sql("SELECT TIME_FROM_MICROS(52200500000)")
             .await?
             .collect()
             .await?;
