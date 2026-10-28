@@ -62,6 +62,21 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.query("SELECT 1", process_timeout=0)
 
+    def test_rejects_invalid_numeric_options_before_subprocess(self):
+        client = RustSpark()
+        for bad in (True, 1.5, float("nan"), -1):
+            with self.subTest(option="max_rows", bad=bad):
+                with self.assertRaisesRegex(ValueError, "max_rows"):
+                    client.query("SELECT 1", max_rows=bad)
+        for bad in (False, 1.5, float("inf")):
+            with self.subTest(option="query_timeout", bad=bad):
+                with self.assertRaisesRegex(ValueError, "query_timeout"):
+                    client.query("SELECT 1", query_timeout=bad)
+        for bad in (True, float("nan"), float("inf"), -1):
+            with self.subTest(option="process_timeout", bad=bad):
+                with self.assertRaisesRegex(ValueError, "process_timeout"):
+                    client.query("SELECT 1", process_timeout=bad)
+
     @patch("rustspark_local.subprocess.run", side_effect=subprocess.TimeoutExpired("rustspark", 3))
     def test_deadline_is_reported(self, run):
         with self.assertRaisesRegex(RustSparkError, "process timeout"):

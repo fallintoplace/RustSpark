@@ -71,12 +71,15 @@ class RustSpark:
             raise ValueError("Provide only one unnamed input")
         if any(value is not None for value in unnamed.values()) and any(named.values()):
             raise ValueError("Named and unnamed inputs cannot be mixed")
-        if max_rows is not None and max_rows < 0:
-            raise ValueError("max_rows must be nonnegative")
-        if query_timeout is not None and query_timeout <= 0:
-            raise ValueError("query_timeout must be positive")
-        if process_timeout is not None and process_timeout <= 0:
-            raise ValueError("process_timeout must be positive")
+        if max_rows is not None and (type(max_rows) is not int or max_rows < 0):
+            raise ValueError("max_rows must be a nonnegative integer")
+        if query_timeout is not None and (type(query_timeout) is not int or query_timeout <= 0):
+            raise ValueError("query_timeout must be a positive integer")
+        if process_timeout is not None and (
+            type(process_timeout) not in (int, float)
+            or not math.isfinite(process_timeout) or process_timeout <= 0
+        ):
+            raise ValueError("process_timeout must be finite and positive")
 
         command = [os.fspath(self.binary), "--sql", sql, "--stdout-format", "json-array"]
         if self.database_dir is not None:
