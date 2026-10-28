@@ -44,6 +44,8 @@ mod spark_except_all_tables;
 mod spark_left_semi_join_tables;
 #[path = "spark_api/spark_left_anti_join_tables.rs"]
 mod spark_left_anti_join_tables;
+#[path = "spark_api/spark_left_semi_join_tables_null_safe.rs"]
+mod spark_left_semi_join_tables_null_safe;
 #[path = "spark_api/spark_group_rows.rs"]
 mod spark_group_rows;
 #[path = "spark_api/spark_group_value_counts.rs"]
