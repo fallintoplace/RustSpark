@@ -41,6 +41,8 @@ mod rebalance;
 
 mod health;
 
+mod orphan;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
