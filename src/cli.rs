@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Expose the maximum number of distinct build-side join keys for IN-list dynamic filtering.
+    #[arg(long = "join-dynamic-inlist-distinct", value_name = "COUNT", value_parser = parse_join_dynamic_inlist_distinct)]
+    join_dynamic_inlist_distinct: Option<usize>,
+
     /// Tune maximum per-partition IN-list dynamic filter bytes.
     #[arg(long = "join-dynamic-inlist-kb", value_name = "KIB", value_parser = parse_join_dynamic_inlist_bytes)]
     join_dynamic_inlist_bytes: Option<usize>,
@@ -729,6 +733,10 @@ fn parse_join_dynamic_inlist_bytes(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--join-dynamic-inlist-kb")?
         .checked_mul(1024)
         .ok_or_else(|| "--join-dynamic-inlist-kb exceeds the supported range".into())
+}
+
+fn parse_join_dynamic_inlist_distinct(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--join-dynamic-inlist-distinct")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
