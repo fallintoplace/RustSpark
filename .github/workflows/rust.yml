@@ -58,22 +58,45 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run library, binary, and integration tests by executable
+      - name: Run assigned Cargo test targets
         shell: bash
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          cargo test --locked --lib
-          if [[ "$SHARD" == "0" ]]; then
-            cargo test --locked --bins
-          fi
-          mapfile -t tests < <(find tests -maxdepth 1 -type f -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
-          for i in "${!tests[@]}"; do
-            if (( i % 8 == SHARD )); then
-              cargo test --locked --test "${tests[$i]}"
-            fi
-          done
+          # Cargo metadata discovers explicit and implicit test targets, including
+          # nonstandard paths. One cargo invocation avoids repeated build checks.
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          shard = int(os.environ["SHARD"])
+          metadata = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+              text=True,
+          ))
+          members = set(metadata["workspace_members"])
+          targets = sorted({
+              target["name"]
+              for package in metadata["packages"]
+              if package["id"] in members
+              for target in package["targets"]
+              if "test" in target["kind"]
+          })
+          if not targets:
+              raise SystemExit("No integration test targets discovered")
+          selected = [name for index, name in enumerate(targets) if index % 8 == shard]
+          command = ["cargo", "test", "--locked"]
+          if shard == 0:
+              command.extend(["--lib", "--bins"])
+          for name in selected:
+              command.extend(["--test", name])
+          if len(command) == 3:
+              raise SystemExit(f"Empty shard {shard}")
+          print(f"Shard {shard}: {len(selected)} integration targets", flush=True)
+          subprocess.run(command, check=True)
+          PY
 
   smoke:
     name: CLI smoke
