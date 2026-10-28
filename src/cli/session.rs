@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.disable_file_work_stealing {
+        config.options_mut().execution.enable_file_stream_work_stealing = false;
+    }
     if args.enforce_join_batch_size {
         config.options_mut().execution.enforce_batch_size_in_joins = true;
     }
@@ -396,6 +399,26 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_disable_file_work_stealing_only_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--disable-file-work-stealing",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.enable_file_stream_work_stealing,
+            defaults.options().execution.enable_file_stream_work_stealing
+        );
+        assert_eq!(configured.options().execution.enable_file_stream_work_stealing, false);
     }
 
     #[test]

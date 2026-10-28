@@ -433,6 +433,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Disable file-scan work stealing for predictable layouts.
+    #[arg(long = "disable-file-work-stealing")]
+    disable_file_work_stealing: bool,
+
     /// Enforce the target RecordBatch size at join outputs.
     #[arg(long = "enforce-join-batch-size")]
     enforce_join_batch_size: bool,

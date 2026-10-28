@@ -6,6 +6,7 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 
 ## Available tuning knobs
 
+- `--disable-file-work-stealing`: Disable file-scan work stealing for prebalanced file groups. Leave enabled for skewed inputs.
 - `--enforce-join-batch-size`: Enforce target batch size on joins to reduce memory spikes. It can add CPU overhead.
 - `--skip-table-statistics`: Skip initial table statistics. Can reduce cold metadata work but may worsen join and aggregation plans.
 - `--preserve-file-partitions 365`: Retain Hive partition grouping when enough distinct partition values exist; can avoid repartition work for partition-aligned aggregations. Measure plans because a high threshold can reduce parallelism.
