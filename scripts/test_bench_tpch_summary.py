@@ -18,6 +18,17 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(result["fastest_query"], 1)
         self.assertGreater(result["geometric_mean_ms"], 0)
 
+    def test_rejects_medians_that_disagree_with_samples(self):
+        data = report()
+        data["results"][0]["samples_ms"] = [1.0, 1.0, 100.0]
+        self.assertEqual(suite.summarize(data)["queries_executed"], 22)
+        data["results"][0]["samples_ms"] = [100.0, 100.0, 100.0]
+        with self.assertRaisesRegex(ValueError, "differs from samples"):
+            suite.summarize(data)
+        data["results"][0]["samples_ms"] = [float("nan")]
+        with self.assertRaisesRegex(ValueError, "Invalid timing samples"):
+            suite.summarize(data)
+
     def test_missing_or_failed_queries_are_rejected(self):
         data = report()
         data["results"].pop()
