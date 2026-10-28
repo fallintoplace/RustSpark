@@ -215,6 +215,8 @@ mod sql_compat_try_negate;
 mod sql_compat_try_subtract;
 #[path = "sql_compat/url_decode.rs"]
 mod sql_compat_url_decode;
+#[path = "sql_compat/try_url_decode.rs"]
+mod sql_compat_try_url_decode;
 #[path = "sql_compat/unhex.rs"]
 mod sql_compat_unhex;
 #[path = "sql_compat/url_encode.rs"]
@@ -379,6 +381,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_negative::udf());
         context.register_udf(sql_compat_url_encode::udf());
         context.register_udf(sql_compat_url_decode::udf());
+        context.register_udf(sql_compat_try_url_decode::udf());
         context.register_udf(sql_compat_unhex::udf());
         context.register_udf(sql_compat_json::get_json_object_udf());
         context.register_udf(sql_compat_json::json_valid_udf());
