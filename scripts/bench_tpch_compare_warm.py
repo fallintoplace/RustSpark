@@ -42,8 +42,15 @@ def verified_ids(report):
     results = report.get("results")
     if not isinstance(results, list) or len(results) != 22:
         raise ValueError("Reference verification must cover all 22 queries")
-    matched = [row.get("id") for row in results if isinstance(row, dict)
-               and row.get("status") == "match"]
+    matched = []
+    for row in results:
+        if not isinstance(row, dict) or row.get("status") != "match":
+            continue
+        expected, actual = row.get("expected_rows"), row.get("actual_rows")
+        if (type(expected) is not int or expected < 0
+                or type(actual) is not int or actual != expected):
+            raise ValueError("Reference verification has invalid row counts")
+        matched.append(row.get("id"))
     if len(matched) != 22 or set(matched) != set(range(1, 23)) or len(set(matched)) != 22:
         raise ValueError("TPC-H row-value reference verification is incomplete")
     return set(matched)

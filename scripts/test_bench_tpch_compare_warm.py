@@ -15,7 +15,9 @@ def report(ms, name):
 
 def verification():
     return {"results": [{"id": number, "status": "match",
-                         "sql_sha256": "a" * 64} for number in range(1, 23)]}
+                         "sql_sha256": "a" * 64,
+                         "expected_rows": 1, "actual_rows": 1}
+                        for number in range(1, 23)]}
 
 
 class CompareWarmTests(unittest.TestCase):
@@ -44,6 +46,14 @@ class CompareWarmTests(unittest.TestCase):
         dd["results"].pop()
         with self.assertRaises(ValueError):
             compare.compare(rs, dd, verification())
+
+    def test_rejects_fabricated_matching_reference_rows(self):
+        for invalid in (2, -1, None, True):
+            with self.subTest(invalid=invalid):
+                reference = verification()
+                reference["results"][0]["actual_rows"] = invalid
+                with self.assertRaisesRegex(ValueError, "row counts"):
+                    compare.compare(report(10, "rs"), report(20, "duckdb"), reference)
 
     def test_rejects_changed_sql(self):
         rustspark = report(10, "rs")
