@@ -87,6 +87,7 @@ impl ReplicaStore {
 mod node_usage_feature_tests {
     use super::*;
     use crate::distributed_storage::StorageNode;
+    use std::fs;
 
     #[test]
     fn counts_physical_bytes_and_ignores_temporary_names() {
