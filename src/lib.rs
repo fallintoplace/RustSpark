@@ -155,6 +155,8 @@ mod sql_compat_json;
 mod sql_compat_luhn_check;
 #[path = "sql_compat/mask.rs"]
 mod sql_compat_mask;
+#[path = "sql_compat/make_valid_utf8.rs"]
+mod sql_compat_make_valid_utf8;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
 #[path = "sql_compat/oct.rs"]
@@ -388,6 +390,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_locate::udf());
         context.register_udf(sql_compat_luhn_check::udf());
         context.register_udf(sql_compat_mask::udf());
+        context.register_udf(sql_compat_make_valid_utf8::udf());
         context.register_udf(sql_compat_factorial::udf());
         context.register_udf(sql_compat_hex::udf());
         Self { context }
