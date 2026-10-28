@@ -32,6 +32,8 @@ mod spark_filter_outside_range;
 mod spark_filter_rows;
 #[path = "spark_api/spark_filter_rows_between.rs"]
 mod spark_filter_rows_between;
+#[path = "spark_api/spark_except_tables.rs"]
+mod spark_except_tables;
 #[path = "spark_api/spark_group_rows.rs"]
 mod spark_group_rows;
 #[path = "spark_api/spark_group_value_counts.rs"]
