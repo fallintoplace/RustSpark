@@ -237,3 +237,51 @@ mod tests {
         assert!(!destination.exists());
     }
 }
+
+impl ReplicaStore {
+    /// Select the latest generation once and materialize its immutable parts.
+    /// Returns None without creating a destination when no snapshot exists.
+    /// Concurrent deletion of manifests is not supported.
+    pub fn materialize_latest_snapshot(
+        &self,
+        table: &str,
+        destination: &Path,
+    ) -> io::Result<Option<(u64, Vec<PathBuf>)>> {
+        let Some(generation) = self.list_snapshots(table)?.last().copied() else {
+            return Ok(None);
+        };
+        self.materialize_snapshot(table, generation, destination)
+            .map(|paths| Some((generation, paths)))
+    }
+}
+
+#[cfg(test)]
+mod materialize_latest_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn selects_latest_generation_and_leaves_missing_tables_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        let empty = root.path().join("empty-output");
+        assert!(store.materialize_latest_snapshot("none", &empty).unwrap().is_none());
+        assert!(!empty.exists());
+        store.put("first.parquet", b"one").unwrap();
+        store.put("second.parquet", b"two").unwrap();
+        store.create_snapshot("sales", 1, vec!["first.parquet".into()]).unwrap();
+        store.create_snapshot("sales", 4, vec!["second.parquet".into()]).unwrap();
+        let destination = root.path().join("latest");
+        let (generation, paths) = store
+            .materialize_latest_snapshot("sales", &destination)
+            .unwrap()
+            .unwrap();
+        assert_eq!(generation, 4);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(fs::read(&paths[0]).unwrap(), b"two");
+    }
+}
