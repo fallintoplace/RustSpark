@@ -58,6 +58,9 @@ pub(crate) fn udf() -> ScalarUDF {
         Arc::new(|args| {
             if let [ColumnarValue::Scalar(ScalarValue::Utf8(value))] = args {
                 let encoded = value.as_deref().map(|name| {
+                    if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+                        return name.to_owned();
+                    }
                     soundex_bytes(name)
                         .map(|digits| std::str::from_utf8(&digits).unwrap().to_owned())
                         .unwrap_or_default()
@@ -74,6 +77,11 @@ pub(crate) fn udf() -> ScalarUDF {
             for value in input.iter() {
                 match value {
                     None => result.append_null(),
+                    Some(name)
+                        if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) =>
+                    {
+                        result.append_value(name);
+                    }
                     Some(name) => match soundex_bytes(name) {
                         Some(digits) => result.append_value(std::str::from_utf8(&digits).unwrap()),
                         None => result.append_value(""),
@@ -83,4 +91,39 @@ pub(crate) fn udf() -> ScalarUDF {
             Ok(ColumnarValue::Array(Arc::new(result.finish())))
         }),
     )
+}
+
+#[cfg(test)]
+mod spark_soundex_regression {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
+
+    #[tokio::test]
+    async fn preserves_nonletter_first_characters_and_nulls()
+        -> datafusion::error::Result<()>
+    {
+        let batches = RustSparkSession::new()
+            .sql(
+                "SELECT SOUNDEX(value) FROM (VALUES                 (0, 'Miller'), (1, '123abc'), (2, '#smith'),                 (3, ''), (4, CAST(NULL AS VARCHAR)))                 AS t(idx, value) ORDER BY idx",
+            )
+            .await?
+            .collect()
+            .await?;
+        let column = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            column.iter().collect::<Vec<_>>(),
+            vec![
+                Some("M460"),
+                Some("123abc"),
+                Some("#smith"),
+                Some(""),
+                None,
+            ],
+        );
+        Ok(())
+    }
 }
