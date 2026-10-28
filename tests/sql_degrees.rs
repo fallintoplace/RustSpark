@@ -2,7 +2,8 @@ use datafusion::arrow::array::Float64Array;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn spark_degrees_handles_scalars_columns_and_nulls() -> Result<(), Box<dyn std::error::Error>> {
+async fn spark_degrees_handles_scalars_columns_and_nulls() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     let batches = session
         .sql("SELECT DEGREES(v) FROM (VALUES (0, CAST(0.0 AS DOUBLE)), (1, CAST(3.141592653589793 AS DOUBLE)), (2, CAST(NULL AS DOUBLE))) AS t(idx, v) ORDER BY idx")
@@ -11,22 +12,41 @@ async fn spark_degrees_handles_scalars_columns_and_nulls() -> Result<(), Box<dyn
         .await?;
     let actual: Vec<Option<f64>> = batches
         .iter()
-        .flat_map(|batch| batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap().iter().collect::<Vec<_>>())
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+        })
         .collect();
     let expected = [Some(0.0_f64), Some(180.0), None];
     assert_eq!(actual.len(), expected.len());
     for (observed, expected) in actual.into_iter().zip(expected) {
         match (observed, expected) {
             (Some(got), Some(want)) => {
-                assert!((got - want).abs() <= 1e-12 * want.abs().max(1.0), "expected {want}, got {got}");
+                assert!(
+                    (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                    "expected {want}, got {got}"
+                );
             }
             (None, None) => {}
             (got, want) => panic!("expected {want:?}, got {got:?}"),
         }
     }
 
-    let scalar = session.sql("SELECT DEGREES(CAST(0.0 AS DOUBLE))").await?.collect().await?;
-    let scalar_values = scalar[0].column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+    let scalar = session
+        .sql("SELECT DEGREES(CAST(0.0 AS DOUBLE))")
+        .await?
+        .collect()
+        .await?;
+    let scalar_values = scalar[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
     assert!((scalar_values.value(0) - 0.0_f64).abs() <= 1e-12);
     Ok(())
 }
