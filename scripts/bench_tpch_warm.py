@@ -21,6 +21,10 @@ BOUNDARY = "__rustspark_tpch_boundary"
 def requests_for(queries, warmup, repeat):
     if warmup < 0 or repeat < 1 or not queries:
         raise ValueError("Queries required; warmup >= 0 and repeat >= 1")
+    ids = [number for number, _ in queries]
+    if (any(type(number) is not int or number not in range(1, 23) for number in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("Invalid or duplicate TPC-H query IDs")
     requests = []
     for number, path in queries:
         sql_bytes = path.read_bytes()
