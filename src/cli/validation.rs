@@ -22,11 +22,11 @@ fn canonical_output_path(destination: &Path) -> Option<PathBuf> {
     }
 }
 
-fn overlaps_input_path(source: &Path, destination: &Path) -> bool {
+fn overlaps_input_path(source: &Path, destination: &Path, destination_is_dir: bool) -> bool {
     source.canonicalize().is_ok_and(|source| {
         destination == source
             || (source.is_dir() && destination.starts_with(&source))
-            || (destination.is_dir() && source.starts_with(destination))
+            || (destination_is_dir && source.starts_with(destination))
     })
 }
 
@@ -104,9 +104,10 @@ fn reject_output_input_collision(args: &Args) -> Result<(), Box<dyn std::error::
         return Ok(());
     };
     let sources = input_paths(args)?;
+    let destination_is_dir = destination.is_dir();
     if sources
         .iter()
-        .any(|source| overlaps_input_path(source.as_path(), &destination))
+        .any(|source| overlaps_input_path(source.as_path(), &destination, destination_is_dir))
     {
         return Err("Output path must not overwrite an input file or SQL script or be inside an input directory".into());
     }
