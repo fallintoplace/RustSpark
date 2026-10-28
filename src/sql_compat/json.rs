@@ -80,6 +80,32 @@ pub(crate) fn get_json_object_udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
+            // A literal JSON path is shared by the entire input batch.
+            // Parse it once rather than once for every JSON document.
+            if let [
+                ColumnarValue::Array(column),
+                ColumnarValue::Scalar(ScalarValue::Utf8(path)),
+            ] = args
+            {
+                let input = column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| DataFusionError::Internal("get_json_object expects UTF-8 JSON".into()))?;
+                let parsed_path = path.as_deref().and_then(parse_json_path);
+                let mut result = StringBuilder::new();
+                for value in input.iter() {
+                    let extracted = value.and_then(|value| {
+                        parsed_path
+                            .as_deref()
+                            .and_then(|path| extract_json(value, path))
+                    });
+                    match extracted {
+                        Some(value) => result.append_value(value),
+                        None => result.append_null(),
+                    }
+                }
+                return Ok(ColumnarValue::Array(Arc::new(result.finish())));
+            }
             let all_scalars = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
@@ -174,6 +200,33 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
 #[cfg(test)]
 mod tests {
     use super::query_json;
+
+    #[tokio::test]
+    async fn constant_path_extracts_from_each_row_with_nulls() -> datafusion::error::Result<()> {
+        use crate::RustSparkSession;
+        use datafusion::arrow::array::StringArray;
+
+        let batches = RustSparkSession::new()
+            .sql(
+                r#"SELECT GET_JSON_OBJECT(payload, '$.n')
+                   FROM (VALUES ('{"n":"first"}'), ('{"n":"second"}'),
+                                ('{"other":1}'), (CAST(NULL AS VARCHAR)), ('bad json'))
+                        AS t(payload)"#,
+            )
+            .await?
+            .collect()
+            .await?;
+        let mut actual = Vec::new();
+        for batch in batches {
+            let column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            actual.extend(column.iter().map(|value| value.map(str::to_owned)));
+        }
+        assert_eq!(
+            actual,
+            vec![Some("first".into()), Some("second".into()), None, None, None]
+        );
+        Ok(())
+    }
 
     #[test]
     fn supports_fields_indices_and_quoted_keys() {
