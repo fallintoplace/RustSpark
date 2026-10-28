@@ -55,6 +55,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.union_filter_rewrite {
         config.options_mut().optimizer.enable_unions_to_filter = true;
     }
+    if let Some(value) = args.hash_join_probe_buffer_mb {
+        config.options_mut().execution.hash_join_buffering_capacity = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -521,5 +524,25 @@ mod perf_union_filter_rewrite {
     fn cli_enables_optimizer_flag() {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--union-filter-rewrite"]).unwrap();
         assert!(build_session_config(&args).options().optimizer.enable_unions_to_filter);
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_probe_buffer {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn config_uses_requested_value() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-probe-buffer-mb", "8",
+        ])
+        .unwrap();
+        let config = build_session_config(&args);
+        assert_eq!(config.options().execution.hash_join_buffering_capacity, 8388608);
+        assert!(Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-probe-buffer-mb", "0",
+        ])
+        .is_err());
     }
 }

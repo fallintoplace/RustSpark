@@ -349,6 +349,14 @@ struct Args {
     #[arg(long = "union-filter-rewrite")]
     union_filter_rewrite: bool,
 
+    /// Configure buffer hash-join probe input while building in MiB.
+    #[arg(
+        long = "hash-join-probe-buffer-mb",
+        value_name = "SIZE",
+        value_parser = parse_hash_join_probe_buffer_bytes
+    )]
+    hash_join_probe_buffer_mb: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -840,6 +848,12 @@ fn parse_partial_aggregate_probe_rows(value: &str) -> Result<usize, String> {
 
 fn parse_subset_repartition_threshold(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--subset-repartition-threshold")
+}
+
+fn parse_hash_join_probe_buffer_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--hash-join-probe-buffer-mb")?
+        .checked_mul(1048576)
+        .ok_or_else(|| "--hash-join-probe-buffer-mb is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
