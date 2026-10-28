@@ -8,6 +8,7 @@ use datafusion::{
 };
 
 mod export;
+pub mod distributed_storage;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
