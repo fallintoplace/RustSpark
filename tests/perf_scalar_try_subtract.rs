@@ -5,7 +5,7 @@ use rustspark::RustSparkSession;
 async fn try_subtract_scalar_operand_keeps_nulls() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     let batches = session.sql(
-        "SELECT TRY_SUBTRACT(n, CAST(3 AS BIGINT)) AS value FROM \\
+        "SELECT TRY_SUBTRACT(n, CAST(3 AS BIGINT)) AS value FROM 
          (VALUES (0, CAST(7 AS BIGINT)), (1, CAST(NULL AS BIGINT))) AS t(idx, n) ORDER BY idx",
     ).await?.collect().await?;
     let mut values = Vec::new();
