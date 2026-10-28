@@ -367,6 +367,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Skip listing-time table statistics for cold-start latency.
+    #[arg(long = "skip-table-statistics")]
+    skip_table_statistics: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
