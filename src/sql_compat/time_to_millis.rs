@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use datafusion::{
     arrow::{
-        array::{Int64Array, Time64MicrosecondArray},
+        array::{Int64Array, Time64NanosecondArray},
         datatypes::{DataType, TimeUnit},
     },
     common::{DataFusionError, ScalarValue},
@@ -10,18 +10,18 @@ use datafusion::{
 };
 
 /// Spark TIME_TO_MILLIS converts a time of day from microseconds.
-fn evaluate(micros: i64) -> Option<i64> {
-    Some(micros.div_euclid(1_000))
+fn evaluate(nanos: i64) -> Option<i64> {
+    Some(nanos.div_euclid(1_000_000))
 }
 
 pub(crate) fn udf() -> ScalarUDF {
     create_udf(
         "time_to_millis",
-        vec![DataType::Time64(TimeUnit::Microsecond)],
+        vec![DataType::Time64(TimeUnit::Nanosecond)],
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            if let [ColumnarValue::Scalar(ScalarValue::Time64Microsecond(value))] = args {
+            if let [ColumnarValue::Scalar(ScalarValue::Time64Nanosecond(value))] = args {
                 return Ok(ColumnarValue::Scalar(
                     ScalarValue::Int64(value.and_then(evaluate)),
                 ));
@@ -29,7 +29,7 @@ pub(crate) fn udf() -> ScalarUDF {
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
-                .downcast_ref::<Time64MicrosecondArray>()
+                .downcast_ref::<Time64NanosecondArray>()
                 .ok_or_else(|| DataFusionError::Internal("Expected TIME value".into()))?;
             let result: Int64Array = input
                 .iter()
@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn epoch_time_and_microseconds() {
         assert_eq!(evaluate(0), Some(0));
-        assert_eq!(evaluate(52_200_000_000), Some(52200000));
+        assert_eq!(evaluate(52_200_000_000_000), Some(52200000));
     }
 
     #[tokio::test]
