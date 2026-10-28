@@ -30,17 +30,7 @@ def run_command(binary, queries, parquet, partitions, json_out, repeat, warmup):
             "--warmup", str(warmup), "--json-out", str(json_out)]
 
 
-def run_configuration(binary, queries, parquet, output, n, repeat, warmup, fingerprints):
-    path = output / f"partitions-{n}.json"
-    if path.exists():
-        raise ValueError(f"Report already exists: {path}")
-    process = subprocess.run(run_command(binary, queries, parquet, n, path, repeat, warmup),
-                             capture_output=True, text=True, check=False)
-    if not path.is_file():
-        raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")
-    report = json.loads(path.read_text(encoding="utf-8"))
-    results = report.get("results", [])
-    ok = sum(row.get("status") == "ok" for row in results)
+def verify_query_fingerprints(results, fingerprints):
     for row in results:
         if row.get("status") != "ok":
             continue
@@ -53,6 +43,20 @@ def run_configuration(binary, queries, parquet, output, n, repeat, warmup, finge
         if number in fingerprints and fingerprints[number] != digest:
             raise ValueError(f"Query Q{number:02} changed answers across partitions")
         fingerprints[number] = digest
+
+
+def run_configuration(binary, queries, parquet, output, n, repeat, warmup, fingerprints):
+    path = output / f"partitions-{n}.json"
+    if path.exists():
+        raise ValueError(f"Report already exists: {path}")
+    process = subprocess.run(run_command(binary, queries, parquet, n, path, repeat, warmup),
+                             capture_output=True, text=True, check=False)
+    if not path.is_file():
+        raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    results = report.get("results", [])
+    ok = sum(row.get("status") == "ok" for row in results)
+    verify_query_fingerprints(results, fingerprints)
     complete = (len(results) == 22 and ok == 22 and process.returncode == 0
                 and {row.get("id") for row in results} == set(range(1, 23)))
     total = None
