@@ -367,6 +367,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_cbrt::udf());
         context.register_udf(sql_compat_bitwise_or::udf());
         context.register_udf(sql_compat_bit_get::udf());
+        context.register_udf(sql_compat_bit_get::getbit_udf());
         context.register_udf(sql_compat_expm1::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
