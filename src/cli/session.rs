@@ -46,6 +46,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(count) = args.join_dynamic_inlist_distinct {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = count;
     }
+    if let Some(count) = args.perfect_hash_small_range {
+        config.options_mut().execution.perfect_hash_join_small_build_threshold = count;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -189,6 +192,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--join-dynamic-inlist-distinct", "512"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_inlist_pushdown_max_distinct_values, 512);
+    }
+
+    #[test]
+    fn configures_perfect_hash_small_range() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--perfect-hash-small-range", "16384"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.perfect_hash_join_small_build_threshold, 16384);
     }
 
     #[test]
