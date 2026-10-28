@@ -42,6 +42,8 @@ mod sql_compat_cos;
 mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "features/top_groups_by_count.rs"]
+mod feature_top_groups_by_count;
 #[path = "sql_compat/sin.rs"]
 mod sql_compat_sin;
 #[path = "features/numeric_column_summary.rs"]
