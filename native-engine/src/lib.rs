@@ -45,3 +45,5 @@ pub mod sql;
 pub mod csv;
 
 pub mod cancellation;
+
+pub mod pipeline;
