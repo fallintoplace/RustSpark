@@ -172,6 +172,8 @@ mod sql_compat_width_bucket;
 mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "features/approx_duplicate_count.rs"]
+mod feature_approx_duplicate_count;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
 mod sql_results;
