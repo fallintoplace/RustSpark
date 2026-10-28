@@ -14,14 +14,23 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            let scalar = args
+                .iter()
+                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let ys = arrays[0].as_any().downcast_ref::<Float64Array>()
+            let ys = arrays[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("atan2 expects Float64 y".into()))?;
-            let xs = arrays[1].as_any().downcast_ref::<Float64Array>()
+            let xs = arrays[1]
+                .as_any()
+                .downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("atan2 expects Float64 x".into()))?;
-            let result: Vec<Option<f64>> = ys.iter().zip(xs.iter())
-                .map(|(y, x)| y.zip(x).map(|(y, x)| y.atan2(x))).collect();
+            let result: Vec<Option<f64>> = ys
+                .iter()
+                .zip(xs.iter())
+                .map(|(y, x)| y.zip(x).map(|(y, x)| y.atan2(x)))
+                .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Float64(
                     result.into_iter().next().flatten(),
