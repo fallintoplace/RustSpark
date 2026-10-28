@@ -39,3 +39,5 @@ pub mod plan;
 pub mod executor;
 
 pub mod lexer;
+
+pub mod sql;
