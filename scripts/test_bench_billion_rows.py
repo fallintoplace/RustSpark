@@ -1,4 +1,6 @@
+import json
 import pathlib
+import tempfile
 import sys
 import unittest
 from unittest import mock
@@ -27,6 +29,35 @@ class BillionRowBenchmarkTests(unittest.TestCase):
         answers = bench.workloads(1_000_000_000, 42)
         self.assertEqual(answers["full_count"][1], [{"n": 1_000_000_000}])
         self.assertGreater(answers["partition_count"][1][0]["n"], 2_000_000)
+
+    def test_dataset_manifest_rejects_missing_parts_or_mismatched_generator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            data = root / "data"
+            data.mkdir()
+            (data / "part-a.parquet").write_bytes(b"PAR1")
+            (data / "part-b.parquet").write_bytes(b"PAR1")
+            manifest = {
+                "generator": "rustspark-billion-v1",
+                "schema_version": bench.SCHEMA_VERSION,
+                "rows": 1000,
+                "day_modulus": bench.DAYS,
+                "customer_modulus": bench.CUSTOMERS,
+                "files": 2,
+            }
+            path = root / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(bench.load_manifest(root)["files"], 2)
+            (data / "part-b.parquet").unlink()
+            with self.assertRaisesRegex(ValueError, "Incomplete dataset"):
+                bench.load_manifest(root)
+            (data / "part-b.parquet").write_bytes(b"PAR1")
+            for name, bad in (("files", True), ("day_modulus", 12),
+                              ("customer_modulus", 42)):
+                corrupted = {**manifest, name: bad}
+                path.write_text(json.dumps(corrupted))
+                with self.assertRaises(ValueError, msg=name):
+                    bench.load_manifest(root)
 
     def test_rejects_bad_inputs(self):
         for rows, day in ((0, 1), (1, -1), (1, 365), (True, 1)):
