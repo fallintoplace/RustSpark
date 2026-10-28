@@ -97,7 +97,7 @@ informational only and must not be treated as a strict performance gate.
 ## JSON_VALID base-versus-PR comparison
 
 Pull requests changing `src/sql_compat/json.rs` run the
-`JSON_VALID base vs PR performance` workflow. It builds the base and PR
+`RustSpark query latency` workflow. Its paired comparison builds the base and PR
 revisions in release mode, then alternates measured runs of both binaries on
 the same runner and deterministic typed CSV fixture. Every measured SQL result
 is checked against an independent valid-row count.
