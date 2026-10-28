@@ -66,6 +66,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_write_buffered_batches {
         config.options_mut().execution.parquet.maximum_buffered_record_batches_per_stream = value;
     }
+    if let Some(value) = args.perfect_hash_key_range {
+        config.options_mut().execution.perfect_hash_join_small_build_threshold = value;
+    }
     config
 }
 
@@ -205,6 +208,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-write-buffered-batches", "8"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.maximum_buffered_record_batches_per_stream, 8);
+    }
+
+    #[test]
+    fn sets_perfect_hash_key_range_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--perfect-hash-key-range", "65536"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.perfect_hash_join_small_build_threshold, 65536);
     }
 
     #[test]

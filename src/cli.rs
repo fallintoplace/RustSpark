@@ -315,6 +315,10 @@ struct Args {
     #[arg(long = "parquet-write-buffered-batches", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     parquet_write_buffered_batches: Option<usize>,
 
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "perfect-hash-key-range", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    perfect_hash_key_range: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
