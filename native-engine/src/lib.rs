@@ -45,3 +45,7 @@ pub mod sql;
 pub mod csv;
 
 pub mod arrow_bridge;
+
+pub mod spill_ipc;
+
+pub mod external_sort;
