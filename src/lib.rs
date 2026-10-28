@@ -145,6 +145,8 @@ mod sql_compat_negative;
 mod sql_compat_csc;
 #[path = "sql_compat/degrees.rs"]
 mod sql_compat_degrees;
+#[path = "sql_compat/unbase64.rs"]
+mod sql_compat_unbase64;
 #[path = "sql_compat/dayofweek.rs"]
 mod sql_compat_dayofweek;
 #[path = "sql_compat/endswith.rs"]
@@ -385,6 +387,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_quote::udf());
         context.register_udf(sql_compat_add_months::udf());
         context.register_udf(sql_compat_degrees::udf());
+        context.register_udf(sql_compat_unbase64::udf());
         context.register_udf(sql_compat_dayofweek::udf());
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_date_sub::udf());
