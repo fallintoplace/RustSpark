@@ -311,6 +311,10 @@ struct Args {
     #[arg(long = "parquet-row-group-writers", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     parquet_row_group_writers: Option<usize>,
 
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-write-buffered-batches", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_write_buffered_batches: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",

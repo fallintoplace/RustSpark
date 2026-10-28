@@ -16,3 +16,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--parquet-page-row-limit 4096`: Limit rows per Parquet data page for new files. Smaller pages can increase metadata and encoding overhead.
 - `--parquet-write-batch-rows 16384`: Set Parquet writer batch rows. Larger batches can consume more memory.
 - `--parquet-row-group-writers 4`: Set parallel row-group writers for Parquet export. High concurrency increases memory use.
+- `--parquet-write-buffered-batches 8`: Maximum buffered record batches per Parquet stream. Increasing this uses more memory.

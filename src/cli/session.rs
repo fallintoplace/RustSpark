@@ -63,6 +63,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_row_group_writers {
         config.options_mut().execution.parquet.maximum_parallel_row_group_writers = value;
     }
+    if let Some(value) = args.parquet_write_buffered_batches {
+        config.options_mut().execution.parquet.maximum_buffered_record_batches_per_stream = value;
+    }
     config
 }
 
@@ -195,6 +198,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-row-group-writers", "4"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.maximum_parallel_row_group_writers, 4);
+    }
+
+    #[test]
+    fn sets_parquet_write_buffered_batches_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-write-buffered-batches", "8"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.maximum_buffered_record_batches_per_stream, 8);
     }
 
     #[test]
