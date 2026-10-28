@@ -243,6 +243,8 @@ mod sql_compat_quote;
 mod sql_compat_radians;
 #[path = "sql_compat/rint.rs"]
 mod sql_compat_rint;
+#[path = "sql_compat/spark_right.rs"]
+mod sql_compat_spark_right;
 #[path = "sql_compat/sec.rs"]
 mod sql_compat_sec;
 #[path = "sql_compat/shiftleft.rs"]
@@ -436,6 +438,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_conv::udf());
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_rint::udf());
+        context.register_udf(sql_compat_spark_right::udf());
         context.register_udf(sql_compat_space::udf());
         context.register_udf(sql_compat_timestamp_millis::udf());
         context.register_udf(sql_compat_monthname::udf());
