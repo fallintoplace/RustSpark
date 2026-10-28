@@ -1,5 +1,5 @@
-use rustspark::RustSparkSession;
 use datafusion::arrow::array::StringArray;
+use rustspark::RustSparkSession;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -43,8 +43,35 @@ async fn left_semi_join_tables_null_safe_matches_spark_null_and_duplicate_rules(
     }
     values.sort();
     assert_eq!(values, vec!["null-left", "one-a", "one-b"]);
-    assert!(session.left_semi_join_tables_null_safe("spark_join_left", "spark_join_right", &[]).await.is_err());
-    assert!(session.left_semi_join_tables_null_safe("spark_join_left", "spark_join_right", &[("", "lookup_id")]).await.is_err());
-    assert!(session.left_semi_join_tables_null_safe("spark_join_left", "spark_join_right", &[("missing", "lookup_id")]).await.is_err());
+    assert!(
+        session
+            .left_semi_join_tables_null_safe(
+                "spark_join_left",
+                "spark_join_right",
+                &[],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .left_semi_join_tables_null_safe(
+                "spark_join_left",
+                "spark_join_right",
+                &[("", "lookup_id")],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .left_semi_join_tables_null_safe(
+                "spark_join_left",
+                "spark_join_right",
+                &[("missing", "lookup_id")],
+            )
+            .await
+            .is_err()
+    );
     Ok(())
 }
