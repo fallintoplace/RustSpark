@@ -45,3 +45,5 @@ pub mod sql;
 pub mod csv;
 
 pub mod statistics;
+
+pub mod statistics_pruning;
