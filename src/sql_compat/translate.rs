@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(evaluate("spark", "sa", "12"), "1p2rk");
         assert_eq!(evaluate("spark", "ss", "12"), "1park");
         assert_eq!(evaluate("café", "é", "e"), "cafe");
-        assert_eq!(evaluate("ab", "ab", "\\0Z"), "ab");
+        assert_eq!(evaluate("ab", "ab", "\0Z"), "Z");
     }
 
     #[tokio::test]
