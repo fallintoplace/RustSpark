@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Read Parquet strings and binary data as Arrow view types.
+    #[arg(long = "parquet-view-arrays")]
+    parquet_view_arrays: bool,
+
     /// Force row selections for Parquet filter pushdown instead of auto choice.
     #[arg(long = "parquet-force-filter-selections", requires = "parquet_pushdown_filters")]
     parquet_force_filter_selections: bool,
