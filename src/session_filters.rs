@@ -23,7 +23,7 @@ fn combine_predicates(
 }
 
 impl RustSparkSession {
-    fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
+    pub(crate) fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
         Self::validate_named_columns(dataframe, selected, "dropna")
     }
 
