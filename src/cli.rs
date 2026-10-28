@@ -343,6 +343,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "split-file-groups-by-statistics")]
+    split_file_groups_by_statistics: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",

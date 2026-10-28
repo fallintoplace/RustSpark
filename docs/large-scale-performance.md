@@ -24,3 +24,16 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--sort-in-place-bytes 8388608`: Sort data in a single RecordBatch below this byte threshold. Higher values can increase peak memory.
 - `--window-topn`: Use PartitionedTopK for filtered ROW_NUMBER windows. Can regress high-cardinality partitions.
 - `--prefer-existing-sort`: Use existing input ordering over maximizing repartition parallelism. Can reduce parallel throughput.
+- `--split-file-groups-by-statistics`: Experimental statistics-based file grouping for sorted non-overlapping files. Verify correctness and query plans before production.
+
+## Verify billions of rows with a reproducible fixture
+
+The optional benchmark creates deterministic partitioned Parquet with DuckDB (a separate dependency, not needed for normal RustSpark). It requires enough free space and can take a long time to generate at one billion rows. Generation is outside all timed samples.
+
+```sh
+python3 -m pip install duckdb
+cargo build --release --locked
+python3 scripts/quality.py bench billion -- --data-dir /data/rustspark-billion --generate --rows 1000000000 --json-out /data/billion-report.json
+```
+
+For short correctness and runner smoke checks, use `--rows 10000` on a fresh dataset root. Subsequent runs omit `--generate` to reuse the files and manifest. The generator writes `id, day, customer_id, amount`, partitioned by `day` with 365 partitions. The benchmark includes a full count, filtered counts, filtered sum and partition maximum. Each sample starts a new process and validates every result against an independent constant-time arithmetic oracle. Reported latency includes process startup and table registration, not only execution. Results are hardware-dependent. The benchmark does **not** demonstrate sub-second or seconds-scale performance until run on actual billion-row data.
