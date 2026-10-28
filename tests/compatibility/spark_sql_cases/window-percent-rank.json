@@ -1,0 +1,12 @@
+[
+  {
+    "id": "window_percent_rank_ties",
+    "ordered": true,
+    "sql": "SELECT id, PERCENT_RANK() OVER (ORDER BY score) AS rank_fraction FROM (VALUES (1, 10), (2, 10), (3, 20)) AS t(id, score) ORDER BY id"
+  },
+  {
+    "id": "window_cume_dist_ties",
+    "ordered": true,
+    "sql": "SELECT id, CUME_DIST() OVER (ORDER BY score) AS cumulative FROM (VALUES (1, 10), (2, 10), (3, 20)) AS t(id, score) ORDER BY id"
+  }
+]
