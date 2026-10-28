@@ -31,12 +31,21 @@ impl RustSparkSession {
             return Err(DataFusionError::Plan(format!("Output column already exists: {output_column}")));
         }
         let source = quote_catalog_table(table, "with_group_row_numbers requires a table path")?;
-        let group_by = partitions.iter().map(|name| quote_join_identifier(name)).collect::<Vec<_>>().join(", ");
-        let ordering = order.iter().map(|(name, ascending)| {
-            let direction = if *ascending { "ASC" } else { "DESC" };
-            let nulls = if *ascending { "FIRST" } else { "LAST" };
-            format!("{} {direction} NULLS {nulls}", quote_join_identifier(name))
-        }).collect::<Vec<_>>().join(", ");
+        let mut group_by = String::new();
+        for name in partitions {
+            if !group_by.is_empty() {
+                group_by.push_str(", ");
+            }
+            group_by.push_str(&quote_join_identifier(name));
+        }
+        let mut ordering = String::new();
+        for (name, ascending) in order {
+            if !ordering.is_empty() {
+                ordering.push_str(", ");
+            }
+            ordering.push_str(&quote_join_identifier(name));
+            ordering.push_str(if *ascending { " ASC NULLS FIRST" } else { " DESC NULLS LAST" });
+        }
         let output = quote_join_identifier(output_column);
         self.sql_read_only(&format!(
             "SELECT *, ROW_NUMBER() OVER (PARTITION BY {group_by} ORDER BY {ordering}) AS {output} FROM {source}"

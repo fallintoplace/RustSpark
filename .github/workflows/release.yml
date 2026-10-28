@@ -7,6 +7,24 @@ on:
     paths:
       - .github/workflows/release.yml
       - docs/releasing.md
+      - Cargo.toml
+      - Cargo.lock
+      - src/main.rs
+      - src/lib.rs
+      - src/cli.rs
+      - src/cli/**
+      - src/export.rs
+      - scripts/release_smoke.py
+      - scripts/release_backup_smoke.py
+      - scripts/verify_release_archive.py
+      - scripts/test_release_smoke.py
+      - scripts/test_release_backup_smoke.py
+      - scripts/test_verify_release_archive.py
+      - tests/cli_insert_recovery.rs
+      - tests/cli_database_lock.rs
+      - tests/cli_catalog_recovery.rs
+      - tests/cli_database_backup.rs
+      - tests/v1_workflows.rs
   workflow_dispatch:
 
 permissions:

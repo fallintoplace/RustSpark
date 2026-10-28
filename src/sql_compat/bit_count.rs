@@ -14,15 +14,17 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    value.map(|value| i64::from(value.count_ones())),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("bit_count expects Int64".into()))?;
-            // A non-nullable primitive array can skip per-row validity checks.
+            // Retain the null-free integer kernel for large input batches.
             let result: Int64Array = if input.null_count() == 0 {
                 Int64Array::from_iter_values(
                     input.values().iter().map(|value| i64::from(value.count_ones())),
@@ -33,13 +35,7 @@ pub(crate) fn udf() -> ScalarUDF {
                     .map(|value| value.map(|value| i64::from(value.count_ones())))
                     .collect()
             };
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }

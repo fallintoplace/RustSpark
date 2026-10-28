@@ -126,6 +126,12 @@ pub(super) async fn register_derived_tables(
     register_sql_views(session, args).await
 }
 
+fn strip_sql_bom(sql: &mut String) {
+    if sql.starts_with('\u{feff}') {
+        sql.replace_range(..'\u{feff}'.len_utf8(), "");
+    }
+}
+
 pub(super) async fn read_query(
     args: &Args,
 ) -> Result<std::borrow::Cow<'_, str>, Box<dyn std::error::Error>> {
@@ -139,9 +145,7 @@ pub(super) async fn read_query(
         } else {
             std::fs::read_to_string(path)?
         };
-        if sql.starts_with('\u{feff}') {
-            sql.replace_range(..'\u{feff}'.len_utf8(), "");
-        }
+        strip_sql_bom(&mut sql);
         return Ok(std::borrow::Cow::Owned(sql));
     }
     unreachable!("clap requires either --sql or --sql-file")

@@ -1,0 +1,11 @@
+{
+  "name": "rustspark-local",
+  "version": "0.1.0",
+  "description": "Local RustSpark CLI client for Node.js",
+  "type": "module",
+  "engines": {"node": ">=20"},
+  "exports": "./index.mjs",
+  "scripts": {"test": "node --test"},
+  "license": "Apache-2.0",
+  "private": true
+}

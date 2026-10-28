@@ -18,6 +18,21 @@ fn require_complete_copy(before: u64, copied: u64, after: u64) -> io::Result<()>
     Ok(())
 }
 
+fn export_replica(source_path: &Path, destination: &Path, parent: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(source_path)?.file_type().is_file() {
+        return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe replica"));
+    }
+    let mut source = File::open(source_path)?;
+    let original_size = source.metadata()?.len();
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    // Stream bounded chunks instead of collecting a multi-GB object.
+    let bytes = io::copy(&mut source, &mut staged)?;
+    require_complete_copy(original_size, bytes, source.metadata()?.len())?;
+    staged.as_file().sync_all()?;
+    staged.persist_noclobber(destination).map_err(|error| error.error)?;
+    Ok(())
+}
+
 impl ReplicaStore {
     /// Export a replica to an existing local directory without overwrites.
     pub fn export(&self, key: &str, destination: &Path) -> io::Result<()> {
@@ -25,20 +40,7 @@ impl ReplicaStore {
         let mut last_error = None;
         for node in self.placements(key)? {
             let source_path = node.root.join("objects").join(key);
-            let attempt = (|| -> io::Result<()> {
-                if !fs::symlink_metadata(&source_path)?.file_type().is_file() {
-                    return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe replica"));
-                }
-                let mut source = File::open(&source_path)?;
-                let original_size = source.metadata()?.len();
-                let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-                // Stream bounded chunks instead of collecting a multi-GB object.
-                let bytes = io::copy(&mut source, &mut staged)?;
-                require_complete_copy(original_size, bytes, source.metadata()?.len())?;
-                staged.as_file().sync_all()?;
-                staged.persist_noclobber(destination).map_err(|error| error.error)?;
-                Ok(())
-            })();
+            let attempt = export_replica(&source_path, destination, parent);
             match attempt {
                 Ok(()) => return Ok(()),
                 // Never try another replica after an output collision.

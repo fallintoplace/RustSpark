@@ -60,6 +60,21 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Float64(value)),
+                ColumnarValue::Scalar(ScalarValue::Float64(lower)),
+                ColumnarValue::Scalar(ScalarValue::Float64(upper)),
+                ColumnarValue::Scalar(ScalarValue::Int64(count)),
+            ] = args
+            {
+                let result = (*value)
+                    .zip(*lower)
+                    .zip(*upper)
+                    .zip(*count)
+                    .map(|(((value, lower), upper), count)| bucket(value, lower, upper, count))
+                    .transpose()?;
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(result)));
+            }
             // Do not broadcast three SQL literals into Arrow arrays for each batch.
             if let [
                 ColumnarValue::Array(values),
@@ -75,9 +90,6 @@ pub(crate) fn udf() -> ScalarUDF {
                 }
                 return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
             }
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let values = arrays[0].as_any().downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("WIDTH_BUCKET expects Float64".into()))?;
@@ -102,13 +114,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 };
                 result.push(next);
             }
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
-            }
+            Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
         }),
     )
 }

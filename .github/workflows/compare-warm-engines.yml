@@ -14,6 +14,10 @@ on:
         required: true
         default: '5'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -40,6 +44,8 @@ jobs:
           java-version: '17'
       - run: cargo build --release --locked
       - run: python3 -m pip install 'pyspark>=4,<5'
+      - name: Record dependency versions
+        run: python3 -m pip freeze > benchmarks/warm-comparison-deps.txt
       - name: Compare warm SQL sessions
         run: |
           python3 scripts/bench_warm_compare.py --binary ./target/release/rustspark \
@@ -57,5 +63,6 @@ jobs:
           path: |
             benchmarks/warm-comparison.json
             benchmarks/reports/warm.md
+            benchmarks/warm-comparison-deps.txt
           if-no-files-found: warn
           retention-days: 90

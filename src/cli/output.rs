@@ -119,6 +119,15 @@ fn display_cell<'a>(
 ) -> datafusion::arrow::error::Result<std::borrow::Cow<'a, str>> {
     if column.is_null(row) {
         Ok(std::borrow::Cow::Borrowed("NULL"))
+    } else if let Some(values) = column
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+    {
+        Ok(std::borrow::Cow::Borrowed(if values.value(row) {
+            "true"
+        } else {
+            "false"
+        }))
     } else if let Some(strings) = column
         .as_any()
         .downcast_ref::<datafusion::arrow::array::StringArray>()

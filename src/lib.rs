@@ -11,6 +11,8 @@ mod export;
 pub mod distributed_storage;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
+#[path = "features/group_size_skew.rs"]
+mod feature_group_size_skew;
 mod joins;
 mod joins_existence;
 pub use joins_existence::{ExistenceFilter, ExistenceMode};
@@ -21,6 +23,8 @@ mod joins_many;
 pub use joins_many::MultiJoinStep;
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
+#[path = "features/grouped_null_counts.rs"]
+mod feature_grouped_null_counts;
 mod set_operations;
 #[path = "features/null_safe_equality.rs"]
 mod feature_null_safe_equality;
@@ -28,6 +32,8 @@ mod session_filters;
 mod sources;
 #[path = "features/top_rows_per_group.rs"]
 mod feature_top_rows_per_group;
+#[path = "features/grouped_weighted_mean.rs"]
+mod feature_grouped_weighted_mean;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/cos.rs"]
@@ -36,34 +42,52 @@ mod sql_compat_cos;
 mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "features/top_groups_by_count.rs"]
+mod feature_top_groups_by_count;
 #[path = "sql_compat/sin.rs"]
 mod sql_compat_sin;
+#[path = "features/grouped_stddev.rs"]
+mod feature_grouped_stddev;
 #[path = "features/numeric_column_summary.rs"]
 mod feature_numeric_column_summary;
+#[path = "features/grouped_numeric_summary.rs"]
+mod feature_grouped_numeric_summary;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
 #[path = "sql_compat/exp.rs"]
 mod sql_compat_exp;
+#[path = "features/grouped_correlation.rs"]
+mod feature_grouped_correlation;
 #[path = "features/approx_distinct_count.rs"]
 mod feature_approx_distinct_count;
+#[path = "features/grouped_approx_distinct.rs"]
+mod feature_grouped_approx_distinct;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
 #[path = "sql_compat/radians.rs"]
 mod sql_compat_radians;
 #[path = "features/approx_percentile.rs"]
 mod feature_approx_percentile;
+#[path = "features/grouped_approx_percentile.rs"]
+mod feature_grouped_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
 #[path = "sql_compat/degrees.rs"]
 mod sql_compat_degrees;
 #[path = "features/substring_filter.rs"]
 mod feature_substring_filter;
+#[path = "features/grouped_completeness.rs"]
+mod feature_grouped_completeness;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/acos.rs"]
 mod sql_compat_acos;
+#[path = "features/top_groups_by_sum.rs"]
+mod feature_top_groups_by_sum;
 #[path = "features/group_ranks.rs"]
 mod feature_group_ranks;
+#[path = "features/grouped_min_max.rs"]
+mod feature_grouped_min_max;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
 #[path = "sql_compat/asin.rs"]
@@ -72,12 +96,16 @@ mod sql_compat_asin;
 mod sql_compat_try_divide;
 #[path = "sql_compat/atan.rs"]
 mod sql_compat_atan;
+#[path = "features/grouped_covariance.rs"]
+mod feature_grouped_covariance;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
 #[path = "sql_compat/atan2.rs"]
 mod sql_compat_atan2;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "features/grouped_variance.rs"]
+mod feature_grouped_variance;
 #[path = "sql_compat/acosh.rs"]
 mod sql_compat_acosh;
 #[path = "sql_compat/try_add.rs"]
@@ -98,6 +126,8 @@ mod sql_compat_try_negate;
 mod sql_compat_sinh;
 #[path = "sql_compat/try_abs.rs"]
 mod sql_compat_try_abs;
+#[path = "features/grouped_positive_counts.rs"]
+mod feature_grouped_positive_counts;
 #[path = "sql_compat/tanh.rs"]
 mod sql_compat_tanh;
 #[path = "sql_compat/bit_count.rs"]
@@ -106,6 +136,8 @@ mod sql_compat_bit_count;
 mod sql_compat_tan;
 #[path = "sql_compat/shiftleft.rs"]
 mod sql_compat_shiftleft;
+#[path = "features/grouped_zero_counts.rs"]
+mod feature_grouped_zero_counts;
 #[path = "sql_compat/cot.rs"]
 mod sql_compat_cot;
 #[path = "sql_compat/shiftright.rs"]
@@ -126,6 +158,8 @@ mod sql_compat_sec;
 mod sql_compat_csc;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
+#[path = "features/fixed_width_histogram.rs"]
+mod feature_fixed_width_histogram;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
 #[path = "sql_compat/url_encode.rs"]
@@ -136,13 +170,19 @@ mod sql_compat_url_decode;
 mod sql_compat_json;
 #[path = "sql_compat/width_bucket.rs"]
 mod sql_compat_width_bucket;
+#[path = "features/approx_quantile_summary.rs"]
+mod feature_approx_quantile_summary;
 #[path = "sql_compat/soundex.rs"]
 mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "features/approx_duplicate_count.rs"]
+mod feature_approx_duplicate_count;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
 mod sql_results;
+#[path = "features/grouped_row_counts.rs"]
+mod feature_grouped_row_counts;
 mod joins_multi_range;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -1207,15 +1247,14 @@ impl RustSparkSession {
         // Reuse the same key and duplicate checks as sort_rows without
         // executing the resulting plan.
         Self::sort_dataframe(dataframe, order)?;
-        let ordering = order
-            .iter()
-            .map(|(name, ascending)| {
-                let direction = if *ascending { "ASC" } else { "DESC" };
-                let nulls = if *ascending { "FIRST" } else { "LAST" };
-                format!("{} {direction} NULLS {nulls}", quote_join_identifier(name))
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut ordering = String::new();
+        for (name, ascending) in order {
+            if !ordering.is_empty() {
+                ordering.push_str(", ");
+            }
+            ordering.push_str(&quote_join_identifier(name));
+            ordering.push_str(if *ascending { " ASC NULLS FIRST" } else { " DESC NULLS LAST" });
+        }
         let source =
             quote_catalog_table(table, "with_row_numbers requires a non-empty table path")?;
         let alias = quote_join_identifier(output_column);

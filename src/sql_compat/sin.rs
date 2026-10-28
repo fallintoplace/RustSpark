@@ -19,8 +19,15 @@ pub(crate) fn udf() -> ScalarUDF {
                     value.map(|x| x.sin()),
                 )));
             }
-            let arrays = ColumnarValue::values_to_arrays(args)?;
-            let values = arrays[0]
+            let owned_arrays;
+            let array = match args {
+                [ColumnarValue::Array(array)] => array,
+                _ => {
+                    owned_arrays = ColumnarValue::values_to_arrays(args)?;
+                    &owned_arrays[0]
+                }
+            };
+            let values = array
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("sin expects Float64".into()))?;

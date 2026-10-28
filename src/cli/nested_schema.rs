@@ -31,9 +31,10 @@ fn split_top_level(input: &str) -> Result<Vec<&str>, String> {
 }
 
 fn parse_fields(specification: &str) -> Result<Vec<Field>, String> {
-    let mut fields = Vec::new();
-    let mut names = HashSet::new();
-    for entry in split_top_level(specification)? {
+    let entries = split_top_level(specification)?;
+    let mut fields = Vec::with_capacity(entries.len());
+    let mut names = HashSet::with_capacity(entries.len());
+    for entry in entries {
         let (raw_name, type_name) = entry
             .split_once(':')
             .ok_or_else(|| "JSON schema needs NAME:TYPE entries".to_owned())?;
@@ -47,6 +48,30 @@ fn parse_fields(specification: &str) -> Result<Vec<Field>, String> {
         fields.push(Field::new(name, parse_type(type_name)?, true));
     }
     Ok(fields)
+}
+
+fn parse_map_type(inner: &str) -> Result<DataType, String> {
+    let types = split_top_level(inner)?;
+    if types.len() != 2 {
+        return Err("JSON map type must be map<KEY,VALUE>".into());
+    }
+    let key = parse_type(types[0])?;
+    let value = parse_type(types[1])?;
+    // Arrow maps require a non-null key in a non-null entries struct.
+    Ok(DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new("key", key, false)),
+                    Arc::new(Field::new("value", value, true)),
+                ]
+                .into(),
+            ),
+            false,
+        )),
+        false,
+    ))
 }
 
 fn parse_type(specification: &str) -> Result<DataType, String> {
@@ -72,29 +97,7 @@ fn parse_type(specification: &str) -> Result<DataType, String> {
                 .collect::<Vec<_>>()
                 .into(),
         )),
-        "map" => {
-            let types = split_top_level(inner)?;
-            if types.len() != 2 {
-                return Err("JSON map type must be map<KEY,VALUE>".into());
-            }
-            let key = parse_type(types[0])?;
-            let value = parse_type(types[1])?;
-            // Arrow maps require a non-null key in a non-null entries struct.
-            Ok(DataType::Map(
-                Arc::new(Field::new(
-                    "entries",
-                    DataType::Struct(
-                        vec![
-                            Arc::new(Field::new("key", key, false)),
-                            Arc::new(Field::new("value", value, true)),
-                        ]
-                        .into(),
-                    ),
-                    false,
-                )),
-                false,
-            ))
-        }
+        "map" => parse_map_type(inner),
         _ => Err(format!("Unsupported JSON type: {name}")),
     }
 }

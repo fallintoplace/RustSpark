@@ -20,7 +20,7 @@ impl TableManifest {
         if objects.is_empty() {
             return Err(invalid("Table manifest needs at least one object"));
         }
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::with_capacity(objects.len());
         for key in &objects {
             validate_key(key)?;
             if !seen.insert(key) {
