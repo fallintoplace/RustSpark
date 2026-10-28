@@ -109,3 +109,59 @@ mod tests {
         assert_eq!(fs::read(output).unwrap(), payload);
     }
 }
+
+impl ReplicaStore {
+    /// Export distinct object keys into an existing regular directory.
+    /// Each file is published atomically without overwrite, but the whole
+    /// batch is not transactional if a later object fails.
+    pub fn export_many(&self, keys: &[&str], directory: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+        if !fs::symlink_metadata(directory)?.file_type().is_dir() {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "Export destination must be a directory"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for key in keys {
+            self.placements(key)?;
+            if !seen.insert(*key) {
+                return Err(io::Error::new(ErrorKind::InvalidInput, "Duplicate object export key"));
+            }
+        }
+        let mut outputs = Vec::with_capacity(keys.len());
+        for key in keys {
+            let output = directory.join(key);
+            self.export(key, &output)?;
+            outputs.push(output);
+        }
+        Ok(outputs)
+    }
+}
+
+#[cfg(test)]
+mod batch_export_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn exports_multiple_files_without_overwriting_previous_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        store.put("a.parquet", b"a").unwrap();
+        store.put("b.parquet", b"b").unwrap();
+        let directory = root.path().join("exported");
+        fs::create_dir(&directory).unwrap();
+        assert!(store.export_many(&["a.parquet", "a.parquet"], &directory).is_err());
+        assert!(store.export_many(&["a.parquet", "../bad"], &directory).is_err());
+        assert!(fs::read_dir(&directory).unwrap().next().is_none());
+        let files = store.export_many(&["a.parquet", "b.parquet"], &directory).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(fs::read(&files[0]).unwrap(), b"a");
+        assert_eq!(fs::read(&files[1]).unwrap(), b"b");
+        assert_eq!(
+            store.export_many(&["a.parquet"], &directory).unwrap_err().kind(),
+            ErrorKind::AlreadyExists
+        );
+    }
+}
