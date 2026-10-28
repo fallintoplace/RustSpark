@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark BITWISE_XOR supports signed 64-bit bitwise conjunction.
+/// Spark BITWISE_XOR performs a signed 64-bit bitwise exclusive OR.
 fn evaluate(left: i64, right: i64) -> Option<i64> {
     Some(left ^ right)
 }
@@ -55,6 +55,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
 
     #[test]
     fn reference_vectors() {
@@ -69,7 +70,12 @@ mod tests {
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 6);
         Ok(())
     }
 }
