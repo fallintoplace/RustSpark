@@ -50,6 +50,56 @@ class ComparisonTests(unittest.TestCase):
                          [25.0, 25.0])
         self.assertEqual(report["competitor_median_over_rustspark_median"], {})
 
+    def test_balanced_order_interleaves_engines_and_keeps_checked_samples(self):
+        from bench_rustspark import expected_results, output_signature
+        engine_calls = []
+        reference = expected_results(2)
+
+        def fake_execute(command, timeout):
+            engine, query = command
+            engine_calls.append(engine)
+            name = next(name for name, sql in bench_compare.WORKLOADS.items()
+                        if sql == query)
+            rows = reference[name]
+            digest = output_signature("\n".join(json.dumps(row) for row in rows))[0]
+            return (10.0 if engine == "rustspark" else 20.0), digest, rows
+
+        with mock.patch.object(bench_compare, "check_dependencies"), mock.patch.object(
+            bench_compare, "command_for",
+            side_effect=lambda engine, binary, csv, sql: (engine, sql),
+        ), mock.patch.object(
+            bench_compare, "execute", side_effect=fake_execute,
+        ):
+            report = bench_compare.benchmark(
+                "unused", ["rustspark", "spark"], 2, 2, 1, 10, balanced_order=True
+            )
+        self.assertEqual(engine_calls[:6], [
+            "rustspark", "spark", "spark", "rustspark", "rustspark", "spark",
+        ])
+        self.assertEqual(report["sampling_order"], "interleaved_rounds")
+        self.assertEqual(
+            report["results"]["rustspark"]["scan_count"]["samples_ms"],
+            [10.0, 10.0],
+        )
+        self.assertEqual(
+            report["results"]["spark"]["scan_count"]["samples_ms"],
+            [20.0, 20.0],
+        )
+        self.assertEqual(
+            report["competitor_median_over_rustspark_median"]["spark"]["scan_count"],
+            2.0,
+        )
+
+    def test_balanced_order_rejects_wrong_results_before_reporting_latency(self):
+        with mock.patch.object(bench_compare, "check_dependencies"), mock.patch.object(
+            bench_compare, "execute", return_value=(1.0, "wrong", []),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Incorrect result"):
+                bench_compare.benchmark(
+                    "unused", ["rustspark", "duckdb"], 2, 1, 0, 10,
+                    balanced_order=True,
+                )
+
     def test_measurement_checks_warmups_and_retains_samples(self):
         values = [(1.0, "ok", []), (2.0, "ok", []), (3.0, "ok", [])]
         with mock.patch.object(bench_compare, "execute", side_effect=values) as execute:
