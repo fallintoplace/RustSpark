@@ -22,6 +22,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
+    if args.filter_null_join_keys {
+        config.options_mut().optimizer.filter_null_join_keys = true;
+    }
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }

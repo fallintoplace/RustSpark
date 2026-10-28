@@ -257,6 +257,10 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
+    /// Null-key join filtering (opt-in for benchmarking).
+    #[arg(long = "filter-null-join-keys")]
+    filter_null_join_keys: bool,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
