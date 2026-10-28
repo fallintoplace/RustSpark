@@ -33,7 +33,10 @@ mod tests {
     #[test]
     fn parses_only_positive_padded_generations() {
         let prefix = "_snapshot_sales_";
-        assert_eq!(parse_snapshot_generation("_snapshot_sales_00000000000000000007", prefix), Some(7));
+        assert_eq!(
+            parse_snapshot_generation("_snapshot_sales_00000000000000000007", prefix),
+            Some(7)
+        );
         for key in [
             "_snapshot_sales_7",
             "_snapshot_sales_00000000000000000000",
