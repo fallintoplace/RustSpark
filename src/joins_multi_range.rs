@@ -25,6 +25,15 @@ pub struct RangeTableJoin<'a> {
     pub bounds: RangeJoinBounds,
 }
 
+fn range_comparators(bounds: RangeJoinBounds) -> (&'static str, &'static str) {
+    match bounds {
+        RangeJoinBounds::Open => (">", "<"),
+        RangeJoinBounds::Closed => (">=", "<="),
+        RangeJoinBounds::LeftClosed => (">=", "<"),
+        RangeJoinBounds::RightClosed => (">", "<="),
+    }
+}
+
 impl RustSparkSession {
     /// Join facts to several interval tables using independently chosen bounds.
     ///
@@ -75,12 +84,7 @@ impl RustSparkSession {
                     "join_many_range_tables supports inner and left joins only".into(),
                 )),
             };
-            let (lower_cmp, upper_cmp) = match range.bounds {
-                RangeJoinBounds::Open => (">", "<"),
-                RangeJoinBounds::Closed => (">=", "<="),
-                RangeJoinBounds::LeftClosed => (">=", "<"),
-                RangeJoinBounds::RightClosed => (">", "<="),
-            };
+            let (lower_cmp, upper_cmp) = range_comparators(range.bounds);
             let interval_table = quote_catalog_table(
                 range.table, "Invalid range join interval table name"
             )?;
@@ -95,5 +99,18 @@ impl RustSparkSession {
             ).expect("writing to a String cannot fail");
         }
         self.sql(&query).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RangeJoinBounds, range_comparators};
+
+    #[test]
+    fn interval_comparators_preserve_open_and_closed_endpoints() {
+        assert_eq!(range_comparators(RangeJoinBounds::Open), (">", "<"));
+        assert_eq!(range_comparators(RangeJoinBounds::Closed), (">=", "<="));
+        assert_eq!(range_comparators(RangeJoinBounds::LeftClosed), (">=", "<"));
+        assert_eq!(range_comparators(RangeJoinBounds::RightClosed), (">", "<="));
     }
 }

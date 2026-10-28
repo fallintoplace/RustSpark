@@ -7,6 +7,12 @@ on:
       - 'integrations/ballista/**'
       - 'scripts/ballista_smoke.py'
       - 'scripts/test_ballista_smoke.py'
+      - 'scripts/quality.py'
+      - 'Cargo.toml'
+      - 'src/lib.rs'
+      - 'src/sources.rs'
+      - 'src/distributed_storage/**'
+      - 'src/sql_compat/**'
       - '.github/workflows/ballista-standalone-smoke.yml'
 
 concurrency:
@@ -31,7 +37,7 @@ jobs:
           python-version: '3.12'
       - run: python3 scripts/quality.py test --suite bench
       - name: Test default remote-client configuration
-        run: cargo test --manifest-path integrations/ballista/Cargo.toml
+        run: cargo test --all-targets --manifest-path integrations/ballista/Cargo.toml
       - name: Test the standalone feature configuration
-        run: cargo test --manifest-path integrations/ballista/Cargo.toml --features standalone
+        run: cargo test --all-targets --manifest-path integrations/ballista/Cargo.toml --features standalone
       - run: python3 scripts/ballista_smoke.py --mode standalone --timeout 900

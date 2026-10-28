@@ -2173,6 +2173,7 @@ dependencies = [
  "clap",
  "datafusion",
  "futures",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

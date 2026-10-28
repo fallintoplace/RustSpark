@@ -36,6 +36,8 @@ def commands(scale, binary, output):
 
 def run_scale(prepare, run, report):
     subprocess.run(prepare, check=True, timeout=1800)
+    # Never consume a report left by an earlier invocation.
+    report.unlink(missing_ok=True)
     process = subprocess.run(
         run, check=False, capture_output=True, text=True, timeout=7200,
     )

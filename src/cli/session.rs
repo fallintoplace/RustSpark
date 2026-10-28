@@ -37,32 +37,14 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.distinct_soft_limit {
         config.options_mut().optimizer.enable_distinct_aggregation_soft_limit = true;
     }
-    if let Some(value) = args.hash_join_inlist_max_bytes {
-        config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = value;
-    }
-    if let Some(value) = args.hash_join_inlist_max_values {
-        config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = value;
-    }
     if let Some(value) = args.hash_join_single_partition_bytes {
         config.options_mut().optimizer.hash_join_single_partition_threshold = value;
     }
     if let Some(value) = args.hash_join_single_partition_rows {
         config.options_mut().optimizer.hash_join_single_partition_threshold_rows = value;
     }
-    if let Some(value) = args.perfect_hash_small_build_rows {
-        config.options_mut().execution.perfect_hash_join_small_build_threshold = value;
-    }
-    if let Some(value) = args.sort_read_ahead_bytes {
-        config.options_mut().execution.sort_pushdown_buffer_capacity = value;
-    }
     if let Some(value) = args.planning_concurrency_override {
         config.options_mut().execution.planning_concurrency = value;
-    }
-    if let Some(value) = args.partial_aggregate_probe_rows {
-        config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
-    }
-    if let Some(value) = args.subset_repartition_threshold {
-        config.options_mut().optimizer.subset_repartition_threshold = value;
     }
     if args.use_statistics_registry {
         config.options_mut().optimizer.use_statistics_registry = true;
@@ -73,37 +55,22 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.union_filter_rewrite {
         config.options_mut().optimizer.enable_unions_to_filter = true;
     }
-    if let Some(value) = args.hash_join_probe_buffer_mb {
-        config.options_mut().execution.hash_join_buffering_capacity = value;
-    }
-    if let Some(value) = args.sort_in_place_kb {
-        config.options_mut().execution.sort_in_place_threshold_bytes = value;
-    }
-    if let Some(bytes) = args.join_dynamic_inlist_bytes {
-        config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = bytes;
-    }
-    if let Some(count) = args.join_dynamic_inlist_distinct {
-        config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = count;
-    }
-    if let Some(count) = args.perfect_hash_small_range {
-        config.options_mut().execution.perfect_hash_join_small_build_threshold = count;
-    }
     if let Some(bytes) = args.sort_spill_reserve_bytes {
         config.options_mut().execution.sort_spill_reservation_bytes = bytes;
     }
-    if let Some(bytes) = args.sort_in_place_threshold_bytes {
-        config.options_mut().execution.sort_in_place_threshold_bytes = bytes;
+    if let Some(value) = args.sort_pushdown_buffer_bytes.or(args.sort_read_ahead_bytes) {
+        config.options_mut().execution.sort_pushdown_buffer_capacity = value;
     }
-    if let Some(bytes) = args.sort_pushdown_buffer_bytes {
-        config.options_mut().execution.sort_pushdown_buffer_capacity = bytes;
-    }
-    if let Some(value) = args.partial_agg_probe_rows {
+    if let Some(value) = args.partial_agg_probe_rows.or(args.partial_aggregate_probe_rows) {
         config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
     }
     if let Some(value) = args.partial_agg_skip_ratio {
         config.options_mut().execution.skip_partial_aggregation_probe_ratio_threshold = value;
     }
-    if let Some(value) = args.subset_repartition_min_partitions {
+    if let Some(value) = args
+        .subset_repartition_min_partitions
+        .or(args.subset_repartition_threshold)
+    {
         config.options_mut().optimizer.subset_repartition_threshold = value;
     }
     if let Some(batch_size) = args.batch_size {
@@ -165,19 +132,35 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_write_buffered_batches {
         config.options_mut().execution.parquet.maximum_buffered_record_batches_per_stream = value;
     }
-    if let Some(value) = args.perfect_hash_key_range {
+    if let Some(value) = args
+        .perfect_hash_key_range
+        .or(args.perfect_hash_small_range)
+        .or(args.perfect_hash_small_build_rows)
+    {
         config.options_mut().execution.perfect_hash_join_small_build_threshold = value;
     }
-    if let Some(value) = args.hash_join_probe_buffer_bytes {
+    if let Some(value) = args.hash_join_probe_buffer_bytes.or(args.hash_join_probe_buffer_mb) {
         config.options_mut().execution.hash_join_buffering_capacity = value;
     }
-    if let Some(value) = args.join_inlist_pushdown_bytes {
+    if let Some(value) = args
+        .join_inlist_pushdown_bytes
+        .or(args.join_dynamic_inlist_bytes)
+        .or(args.hash_join_inlist_max_bytes)
+    {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = value;
     }
-    if let Some(value) = args.join_inlist_pushdown_values {
+    if let Some(value) = args
+        .join_inlist_pushdown_values
+        .or(args.join_dynamic_inlist_distinct)
+        .or(args.hash_join_inlist_max_values)
+    {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = value;
     }
-    if let Some(value) = args.sort_in_place_bytes {
+    if let Some(value) = args
+        .sort_in_place_bytes
+        .or(args.sort_in_place_threshold_bytes)
+        .or(args.sort_in_place_kb)
+    {
         config.options_mut().execution.sort_in_place_threshold_bytes = value;
     }
     if args.window_topn {
@@ -1244,5 +1227,46 @@ mod perf_sort_in_place {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-kb", "8"]).unwrap();
         assert_eq!(build_session_config(&args).options().execution.sort_in_place_threshold_bytes, 8192);
         assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-kb", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tuning_mapping_tests {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn older_aliases_still_configure_the_optimizer() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.hash_join_inlist_max_bytes = Some(4096);
+        args.partial_aggregate_probe_rows = Some(64);
+        let config = build_session_config(&args);
+        assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_size, 4096);
+        assert_eq!(
+            config.options().execution.skip_partial_aggregation_probe_rows_threshold,
+            64
+        );
+    }
+
+    #[test]
+    fn newer_aliases_configure_the_same_targets() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.join_inlist_pushdown_bytes = Some(8192);
+        args.partial_agg_probe_rows = Some(128);
+        let config = build_session_config(&args);
+        assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_size, 8192);
+        assert_eq!(
+            config.options().execution.skip_partial_aggregation_probe_rows_threshold,
+            128
+        );
+    }
+
+    #[test]
+    fn latest_alias_keeps_existing_precedence_when_both_are_present() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.sort_in_place_kb = Some(1024);
+        args.sort_in_place_bytes = Some(4096);
+        let config = build_session_config(&args);
+        assert_eq!(config.options().execution.sort_in_place_threshold_bytes, 4096);
     }
 }

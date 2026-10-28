@@ -1,30 +1,36 @@
 use std::{
     fs,
     io::{self, ErrorKind},
+    path::PathBuf,
 };
 
 use super::ReplicaStore;
+
+// Collect every safe existing replica before any deletion starts.
+fn existing_replica_paths(store: &ReplicaStore, key: &str) -> io::Result<Vec<PathBuf>> {
+    let mut existing = Vec::new();
+    for node in store.placements(key)? {
+        let path = node.root.join("objects").join(key);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_file() => existing.push(path),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Replica is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(existing)
+}
 
 impl ReplicaStore {
     /// Delete the current assigned copies. There are no tombstones, so this
     /// must not race a writer or a migration from an older cluster topology.
     pub fn delete(&self, key: &str) -> io::Result<usize> {
-        // Fail before deleting any copy if one of the placements is unsafe.
-        let mut existing = Vec::new();
-        for node in self.placements(key)? {
-            let path = node.root.join("objects").join(key);
-            match fs::symlink_metadata(&path) {
-                Ok(meta) if meta.file_type().is_file() => existing.push(path),
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidData,
-                        "Replica is not a regular file",
-                    ));
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
+        let existing = existing_replica_paths(self, key)?;
         for path in &existing {
             fs::remove_file(path)?;
         }

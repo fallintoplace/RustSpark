@@ -93,3 +93,17 @@ files change in a pull request, and can also be triggered manually after the
 workflow is available on the default branch. The workflow uploads raw JSON
 and the readable Markdown report for 90 days. Shared runner timings are
 informational only and must not be treated as a strict performance gate.
+
+## JSON_VALID base-versus-PR comparison
+
+Pull requests changing `src/sql_compat/json.rs` run the
+`RustSpark query latency` workflow. Its paired comparison builds the base and PR
+revisions in release mode, then alternates measured runs of both binaries on
+the same runner and deterministic typed CSV fixture. Every measured SQL result
+is checked against an independent valid-row count.
+
+The Actions job summary shows baseline and candidate median milliseconds,
+speedup (base/PR), and percent latency reduction. Raw timing samples, fixture
+checksum, SQL, and environment are uploaded as JSON. CI does not fail on
+small speed differences because hosted runners are noisy. The metric includes
+process startup, CSV scanning, and SQL execution; it is not isolated UDF time.

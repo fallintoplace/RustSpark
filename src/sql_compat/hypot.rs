@@ -27,10 +27,10 @@ pub(crate) fn udf() -> ScalarUDF {
             if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Float64(right))] = args {
                 let left = left.as_any().downcast_ref::<Float64Array>()
                     .ok_or_else(|| DataFusionError::Internal("hypot expects Float64".into()))?;
-                let result: Vec<Option<f64>> = left.iter()
+                let result: Float64Array = left.iter()
                     .map(|left| left.zip(*right).map(|(left, right)| left.hypot(right)))
                     .collect();
-                return Ok(ColumnarValue::Array(Arc::new(Float64Array::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             let scalar = args
                 .iter()

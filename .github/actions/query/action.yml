@@ -1,0 +1,72 @@
+name: RustSpark local SQL query
+description: Run a bounded RustSpark SQL query and provide a result file
+inputs:
+  binary:
+    description: Path to an existing RustSpark executable on the runner
+    default: rustspark
+  sql:
+    description: SQL query string (choose sql or sql-file)
+    default: ''
+  sql-file:
+    description: SQL file path (choose sql or sql-file)
+    default: ''
+  input:
+    description: Optional CSV, JSON, or Parquet input file
+    default: ''
+  format:
+    description: Result format (json-array, json, csv, tsv)
+    default: json-array
+  max-rows:
+    description: Maximum returned rows
+    default: '1000'
+  query-timeout:
+    description: Query timeout in seconds
+    default: '30'
+outputs:
+  result-file:
+    description: Result path inside RUNNER_TEMP
+    value: ${{ steps.query.outputs.result-file }}
+runs:
+  using: composite
+  steps:
+    - id: query
+      shell: bash
+      env:
+        RUSTSPARK_BINARY: ${{ inputs.binary }}
+        RUSTSPARK_SQL: ${{ inputs.sql }}
+        RUSTSPARK_SQL_FILE: ${{ inputs.sql-file }}
+        RUSTSPARK_INPUT: ${{ inputs.input }}
+        RUSTSPARK_FORMAT: ${{ inputs.format }}
+        RUSTSPARK_MAX_ROWS: ${{ inputs.max-rows }}
+        RUSTSPARK_TIMEOUT: ${{ inputs.query-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$RUSTSPARK_SQL" && -n "$RUSTSPARK_SQL_FILE" ]] ||
+           [[ -z "$RUSTSPARK_SQL" && -z "$RUSTSPARK_SQL_FILE" ]]; then
+          echo "::error::Provide exactly one of sql or sql-file" >&2
+          exit 2
+        fi
+        case "$RUSTSPARK_FORMAT" in
+          json-array|json|csv|tsv) ;;
+          *) echo "::error::Unsupported format" >&2; exit 2 ;;
+        esac
+        for value in "$RUSTSPARK_MAX_ROWS" "$RUSTSPARK_TIMEOUT"; do
+          if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Row limit and timeout must be positive integers" >&2
+            exit 2
+          fi
+        done
+        args=(--stdout-format "$RUSTSPARK_FORMAT" --max-rows "$RUSTSPARK_MAX_ROWS" --query-timeout "$RUSTSPARK_TIMEOUT")
+        if [[ -n "$RUSTSPARK_SQL" ]]; then
+          args+=(--sql "$RUSTSPARK_SQL")
+        else
+          args+=(--sql-file "$RUSTSPARK_SQL_FILE")
+        fi
+        if [[ -n "$RUSTSPARK_INPUT" ]]; then
+          args+=(--input "$RUSTSPARK_INPUT")
+        fi
+        output="$(mktemp "$RUNNER_TEMP/rustspark-query.XXXXXXXX")"
+        trap 'rm -f "$output"' ERR
+        "$RUSTSPARK_BINARY" "${args[@]}" > "$output"
+        echo "result-file=$output" >> "$GITHUB_OUTPUT"
+        trap - ERR

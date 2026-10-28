@@ -14,11 +14,15 @@ permissions:
 
 jobs:
   harness-unit-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: python3 scripts/quality.py test --suite compat
+      - run: python scripts/quality.py test --suite compat
