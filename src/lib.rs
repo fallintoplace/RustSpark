@@ -136,6 +136,8 @@ mod sql_compat_bit_count;
 mod sql_compat_tan;
 #[path = "sql_compat/shiftleft.rs"]
 mod sql_compat_shiftleft;
+#[path = "features/grouped_zero_counts.rs"]
+mod feature_grouped_zero_counts;
 #[path = "sql_compat/cot.rs"]
 mod sql_compat_cot;
 #[path = "sql_compat/shiftright.rs"]
