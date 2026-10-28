@@ -72,6 +72,13 @@ Run the real PySpark 4 suite with `--check-nullability` to see NULL metadata
 differences. Every mismatch and error remains visible in the JSON report.
 Normalization does not establish full Spark compatibility.
 
+DataFusion currently exposes the native `RANK()` result as unsigned 64-bit,
+while Spark exposes an integer. The `table_window_rank` differential case uses
+an explicit `CAST(... AS INT)` on both engines to validate rank **values** and
+the type of the explicit cast. It does not claim native `RANK()` type parity.
+Similarly, Arrow `Utf8View` and `Utf8` are the same logical SQL string type;
+the harness normalizes both to Spark's `string` without changing the values.
+
 ## Parquet-backed Spark SQL differential checks
 
 Run the existing typed table-backed queries using identical Parquet files
