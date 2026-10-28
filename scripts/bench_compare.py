@@ -168,6 +168,8 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout, balanced_order=Fal
     if (not engines or len(engines) != len(set(engines))
             or any(engine not in ("rustspark", "duckdb", "spark") for engine in engines)):
         raise ValueError("Select unique engines from rustspark, duckdb and spark")
+    if "rustspark" not in engines:
+        raise ValueError("Cross-engine comparison must include RustSpark")
     check_dependencies(engines)
     with tempfile.TemporaryDirectory(prefix="rustspark-compare-") as directory:
         csv = pathlib.Path(directory) / "input.csv"
