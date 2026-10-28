@@ -76,3 +76,51 @@ mod tests {
         assert_eq!(fs::read(first).unwrap(), b"keep");
     }
 }
+
+impl ReplicaStore {
+    /// Delete assigned copies of distinct object keys. All existing paths
+    /// are checked for unsafe entries before deletion starts. This is not a
+    /// transactional operation: I/O failures can leave partial progress.
+    pub fn delete_many(&self, keys: &[&str]) -> io::Result<usize> {
+        let mut seen = std::collections::HashSet::new();
+        let mut paths = Vec::new();
+        for key in keys {
+            if seen.insert(*key) {
+                paths.extend(existing_replica_paths(self, key)?);
+            }
+        }
+        for path in &paths {
+            fs::remove_file(path)?;
+        }
+        Ok(paths.len())
+    }
+}
+
+#[cfg(test)]
+mod batch_delete_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn validates_all_keys_before_deleting_any() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        store.put("one", b"1").unwrap();
+        store.put("two", b"2").unwrap();
+        let unsafe_path = root.path().join("objects/two");
+        fs::remove_file(&unsafe_path).unwrap();
+        fs::create_dir(&unsafe_path).unwrap();
+        assert_eq!(
+            store.delete_many(&["one", "two"]).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(store.get("one").unwrap(), b"1");
+        fs::remove_dir(&unsafe_path).unwrap();
+        assert_eq!(store.delete_many(&["one", "one", "two"]).unwrap(), 1);
+        assert!(store.get("one").is_err());
+    }
+}
