@@ -73,3 +73,5 @@ pub mod metrics;
 pub mod optimizer;
 
 pub mod scale;
+
+pub mod stream_scan;
