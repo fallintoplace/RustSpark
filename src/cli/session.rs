@@ -28,6 +28,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
     }
+    if args.split_file_groups_by_statistics {
+        config.options_mut().execution.split_file_groups_by_statistics = true;
+    }
     if let Some(min_bytes) = args.scan_split_min_bytes {
         config = config
             .with_repartition_file_scans(true)
