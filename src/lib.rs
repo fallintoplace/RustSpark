@@ -299,6 +299,8 @@ mod sql_compat_time_from_millis;
 mod sql_compat_try_negate;
 #[path = "sql_compat/try_subtract.rs"]
 mod sql_compat_try_subtract;
+#[path = "sql_compat/time_from_micros.rs"]
+mod sql_compat_time_from_micros;
 #[path = "sql_compat/url_decode.rs"]
 mod sql_compat_url_decode;
 #[path = "sql_compat/try_url_decode.rs"]
@@ -465,6 +467,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_make_valid_utf8::udf());
         context.register_udf(sql_compat_month::udf());
         context.register_udf(sql_compat_try_subtract::udf());
+        context.register_udf(sql_compat_time_from_micros::udf());
         context.register_udf(sql_compat_atanh::udf());
         context.register_udf(sql_compat_day::udf());
         context.register_udf(sql_compat_try_multiply::udf());
