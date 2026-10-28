@@ -16,6 +16,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
     }
+    if let Some(value) = args.hash_join_single_partition_rows {
+        config.options_mut().optimizer.hash_join_single_partition_threshold_rows = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -106,5 +109,18 @@ mod tests {
         assert!(validate_spill_directory(&nested, Some(&database)).is_err());
         assert!(validate_spill_directory(&database, Some(&database)).is_err());
         assert!(validate_spill_directory(&directory.path().join("missing"), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_single_partition_rows {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn reads_nonzero_tuning_value() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-rows", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().optimizer.hash_join_single_partition_threshold_rows, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-rows", "0"]).is_err());
     }
 }
