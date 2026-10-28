@@ -11,7 +11,7 @@ impl ReplicaStore {
         }
         let generations = self.list_snapshots(table)?;
         let to_remove = generations.len().saturating_sub(keep);
-        let mut removed = Vec::new();
+        let mut removed = Vec::with_capacity(to_remove);
         for generation in generations.into_iter().take(to_remove) {
             if self.delete(&snapshot_key(table, generation)?)? == 0 {
                 return Err(io::Error::new(
