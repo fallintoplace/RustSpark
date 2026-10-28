@@ -56,6 +56,8 @@ mod sql_compat_oct;
 mod sql_compat_radians;
 #[path = "features/approx_percentile.rs"]
 mod feature_approx_percentile;
+#[path = "features/grouped_approx_percentile.rs"]
+mod feature_grouped_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
 #[path = "sql_compat/degrees.rs"]
