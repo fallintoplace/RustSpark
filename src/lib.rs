@@ -153,6 +153,8 @@ mod sql_compat_negative;
 mod sql_compat_csc;
 #[path = "sql_compat/degrees.rs"]
 mod sql_compat_degrees;
+#[path = "sql_compat/last_day.rs"]
+mod sql_compat_last_day;
 #[path = "sql_compat/decode.rs"]
 mod sql_compat_decode;
 #[path = "sql_compat/unbase64.rs"]
@@ -414,6 +416,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_year::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
+        context.register_udf(sql_compat_last_day::udf());
         context.register_udf(sql_compat_nullifzero::udf());
         context.register_udf(sql_compat_nanvl::udf());
         context.register_udf(sql_compat_exp::udf());
