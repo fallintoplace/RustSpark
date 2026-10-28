@@ -24,3 +24,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--sort-in-place-bytes 8388608`: Sort data in a single RecordBatch below this byte threshold. Higher values can increase peak memory.
 - `--window-topn`: Use PartitionedTopK for filtered ROW_NUMBER windows. Can regress high-cardinality partitions.
 - `--prefer-existing-sort`: Use existing input ordering over maximizing repartition parallelism. Can reduce parallel throughput.
+- `--split-file-groups-by-statistics`: Experimental statistics-based file grouping for sorted non-overlapping files. Verify correctness and query plans before production.
