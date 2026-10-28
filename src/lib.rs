@@ -93,6 +93,8 @@ mod sql_compat_acosh;
 mod sql_compat_asin;
 #[path = "sql_compat/asinh.rs"]
 mod sql_compat_asinh;
+#[path = "sql_compat/make_valid_utf8.rs"]
+mod sql_compat_make_valid_utf8;
 #[path = "sql_compat/month.rs"]
 mod sql_compat_month;
 #[path = "sql_compat/atan.rs"]
@@ -111,6 +113,8 @@ mod sql_compat_day;
 mod sql_compat_bin;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+#[path = "sql_compat/validate_utf8.rs"]
+mod sql_compat_validate_utf8;
 #[path = "sql_compat/quarter.rs"]
 mod sql_compat_quarter;
 #[path = "sql_compat/bitwise_and.rs"]
@@ -145,12 +149,16 @@ mod sql_compat_weekofyear;
 mod sql_compat_positive;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
+#[path = "sql_compat/dayname.rs"]
+mod sql_compat_dayname;
 #[path = "sql_compat/negative.rs"]
 mod sql_compat_negative;
 #[path = "sql_compat/csc.rs"]
 mod sql_compat_csc;
 #[path = "sql_compat/degrees.rs"]
 mod sql_compat_degrees;
+#[path = "sql_compat/last_day.rs"]
+mod sql_compat_last_day;
 #[path = "sql_compat/decode.rs"]
 mod sql_compat_decode;
 #[path = "sql_compat/unbase64.rs"]
@@ -247,6 +255,8 @@ mod sql_compat_bround;
 mod sql_compat_sinh;
 #[path = "sql_compat/format_number.rs"]
 mod sql_compat_format_number;
+#[path = "sql_compat/date_add.rs"]
+mod sql_compat_date_add;
 #[path = "sql_compat/date_from_unix_date.rs"]
 mod sql_compat_date_from_unix_date;
 #[path = "sql_compat/soundex.rs"]
@@ -259,6 +269,8 @@ mod sql_compat_space;
 mod sql_compat_timestamp_millis;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
+#[path = "sql_compat/timestamp_micros.rs"]
+mod sql_compat_timestamp_micros;
 #[path = "sql_compat/tan.rs"]
 mod sql_compat_tan;
 #[path = "sql_compat/tanh.rs"]
@@ -392,6 +404,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_weekday::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_timestamp_micros::udf());
         context.register_udf(sql_compat_dayofyear::udf());
         context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
@@ -404,9 +417,11 @@ impl RustSparkSession {
         context.register_udf(sql_compat_monthname::udf());
         context.register_udf(sql_compat_acos::udf());
         context.register_udf(sql_compat_is_valid_utf8::udf());
+        context.register_udf(sql_compat_dayname::udf());
         context.register_udf(sql_compat_year::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
+        context.register_udf(sql_compat_last_day::udf());
         context.register_udf(sql_compat_nullifzero::udf());
         context.register_udf(sql_compat_nanvl::udf());
         context.register_udf(sql_compat_exp::udf());
@@ -418,6 +433,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_quote::udf());
         context.register_udf(sql_compat_add_months::udf());
         context.register_udf(sql_compat_degrees::udf());
+        context.register_udf(sql_compat_date_add::udf());
         context.register_udf(sql_compat_decode::udf());
         context.register_udf(sql_compat_unbase64::udf());
         context.register_udf(sql_compat_dayofweek::udf());
@@ -433,6 +449,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_add::udf());
         context.register_udf(sql_compat_datediff::udf());
         context.register_udf(sql_compat_asinh::udf());
+        context.register_udf(sql_compat_make_valid_utf8::udf());
         context.register_udf(sql_compat_month::udf());
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_atanh::udf());
@@ -448,6 +465,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_tanh::udf());
         context.register_udf(sql_compat_bit_count::udf());
+        context.register_udf(sql_compat_validate_utf8::udf());
         context.register_udf(sql_compat_bitwise_and::udf());
         context.register_udf(sql_compat_dayofmonth::udf());
         context.register_udf(sql_compat_tan::udf());
