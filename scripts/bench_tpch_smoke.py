@@ -35,6 +35,8 @@ def complete_query_results(records):
 
 def smoke_report_succeeded(report, exit_code):
     data = json.loads(report.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return False
     records = data.get("results", [])
     return complete_query_results(records) and exit_code == 0
 
