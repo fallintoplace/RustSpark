@@ -23,8 +23,17 @@ def failed_ids(report):
     return sorted(failed)
 
 
+def checked_retry_ids(ids):
+    """Refuse invalid or duplicate query numbers before invoking the runner."""
+    if (not ids or any(type(i) is not int or i not in range(1, 23) for i in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("Invalid retry query IDs")
+    return ids
+
+
 def retry_command(binary, queries, parquet, ids, report, repeat=1, timeout=120):
-    if not ids or repeat < 1 or timeout < 1:
+    checked_retry_ids(ids)
+    if repeat < 1 or timeout < 1:
         raise ValueError("Invalid retry parameters")
     return [sys.executable, str(Path(__file__).with_name("tpch_run.py")),
             "--binary", binary, "--queries-dir", str(queries), "--parquet-dir", str(parquet),
