@@ -76,7 +76,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(values.value(0), "\'Spark SQL\'");
+        assert_eq!(values.value(0), "'Spark SQL'");
         Ok(())
     }
 }
