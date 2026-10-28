@@ -165,6 +165,8 @@ mod sql_compat_next_day;
 mod sql_compat_ucase;
 #[path = "sql_compat/exp.rs"]
 mod sql_compat_exp;
+#[path = "sql_compat/unix_seconds.rs"]
+mod sql_compat_unix_seconds;
 #[path = "sql_compat/isnan.rs"]
 mod sql_compat_isnan;
 #[path = "sql_compat/e.rs"]
@@ -386,6 +388,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_nullifzero::udf());
         context.register_udf(sql_compat_nanvl::udf());
         context.register_udf(sql_compat_exp::udf());
+        context.register_udf(sql_compat_unix_seconds::udf());
         context.register_udf(sql_compat_isnan::udf());
         context.register_udf(sql_compat_e::udf());
         context.register_udf(sql_compat_pmod::udf());
