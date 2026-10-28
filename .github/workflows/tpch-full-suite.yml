@@ -33,6 +33,8 @@ jobs:
         env:
           SCALE_FACTOR: ${{ inputs.scale_factor || '0.01' }}
         run: python3 scripts/tpch_prepare.py --scale-factor "$SCALE_FACTOR" --output "$RUNNER_TEMP/tpch"
+      - name: Validate generated TPC-H fixture
+        run: python3 scripts/bench_tpch_manifest.py "$RUNNER_TEMP/tpch"
       - name: Run all TPC-H queries
         run: |
           python3 scripts/tpch_run.py --binary target/release/rustspark \
