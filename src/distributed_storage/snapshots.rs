@@ -60,6 +60,51 @@ mod tests {
 }
 
 impl ReplicaStore {
+    /// Publish a new generation containing the previous manifest's objects
+    /// followed by new parts. Existing generations are never modified.
+    pub fn create_snapshot_from(
+        &self,
+        table: &str,
+        base_generation: u64,
+        new_generation: u64,
+        appended: Vec<String>,
+    ) -> io::Result<()> {
+        if new_generation <= base_generation {
+            return Err(invalid("New snapshot generation must exceed the base"));
+        }
+        let base = self.read_snapshot(table, base_generation)?;
+        let mut objects = base.objects().to_vec();
+        objects.extend(appended);
+        self.create_snapshot(table, new_generation, objects)
+    }
+}
+
+#[cfg(test)]
+mod incremental_snapshot_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn creates_new_generation_without_modifying_previous_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        store.create_snapshot("sales", 1, vec!["one.parquet".into()]).unwrap();
+        store.create_snapshot_from("sales", 1, 2, vec!["two.parquet".into()]).unwrap();
+        assert_eq!(store.read_snapshot("sales", 1).unwrap().objects(), ["one.parquet"]);
+        assert_eq!(
+            store.read_snapshot("sales", 2).unwrap().objects(),
+            ["one.parquet", "two.parquet"]
+        );
+        assert!(store.create_snapshot_from("sales", 1, 3, vec!["one.parquet".into()]).is_err());
+        assert!(store.create_snapshot_from("sales", 1, 1, vec![]).is_err());
+    }
+}
+
+impl ReplicaStore {
     /// Return (added, removed) object keys between two generations.
     /// The results follow their respective manifest orders.
     pub fn snapshot_changes(
