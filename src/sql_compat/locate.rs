@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark LOCATE supports signed 64-bit bitwise conjunction.
+/// Spark LOCATE returns the one-based Unicode position of a substring.
 fn evaluate(needle: &str, haystack: &str) -> Option<i64> {
     Some(haystack.find(needle).map_or(0, |offset| haystack[..offset].chars().count() as i64 + 1))
 }
@@ -55,6 +55,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
 
     #[test]
     fn reference_vectors() {
@@ -65,11 +66,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT LOCATE(CAST(12 AS BIGINT), CAST(10 AS BIGINT))")
+            .sql("SELECT LOCATE('é', 'café')")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 4);
         Ok(())
     }
 }
