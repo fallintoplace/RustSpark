@@ -60,7 +60,7 @@ mod tests {
     async fn sql_scalar_and_null() -> datafusion::error::Result<()> {
         let session = RustSparkSession::new();
         let rows = session
-            .sql("SELECT TIMESTAMP_MILLIS(1) = TIMESTAMP '1970-01-01 00:00:01'")
+            .sql("SELECT TIMESTAMP_MILLIS(1000) = TIMESTAMP '1970-01-01 00:00:01'")
             .await?
             .collect()
             .await?;
