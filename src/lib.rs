@@ -155,6 +155,8 @@ mod sql_compat_json;
 mod sql_compat_luhn_check;
 #[path = "sql_compat/mask.rs"]
 mod sql_compat_mask;
+#[path = "sql_compat/unix_seconds.rs"]
+mod sql_compat_unix_seconds;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
 #[path = "sql_compat/oct.rs"]
@@ -356,6 +358,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_format_number::udf());
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_tanh::udf());
+        context.register_udf(sql_compat_unix_seconds::udf());
         context.register_udf(sql_compat_bit_count::udf());
         context.register_udf(sql_compat_bitwise_and::udf());
         context.register_udf(sql_compat_tan::udf());
