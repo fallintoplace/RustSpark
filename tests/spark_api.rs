@@ -36,6 +36,8 @@ mod spark_filter_rows_between;
 mod spark_intersect_tables;
 #[path = "spark_api/spark_intersect_all_tables.rs"]
 mod spark_intersect_all_tables;
+#[path = "spark_api/spark_except_tables.rs"]
+mod spark_except_tables;
 #[path = "spark_api/spark_group_rows.rs"]
 mod spark_group_rows;
 #[path = "spark_api/spark_group_value_counts.rs"]
