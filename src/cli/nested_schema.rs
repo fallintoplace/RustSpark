@@ -31,9 +31,10 @@ fn split_top_level(input: &str) -> Result<Vec<&str>, String> {
 }
 
 fn parse_fields(specification: &str) -> Result<Vec<Field>, String> {
-    let mut fields = Vec::new();
-    let mut names = HashSet::new();
-    for entry in split_top_level(specification)? {
+    let entries = split_top_level(specification)?;
+    let mut fields = Vec::with_capacity(entries.len());
+    let mut names = HashSet::with_capacity(entries.len());
+    for entry in entries {
         let (raw_name, type_name) = entry
             .split_once(':')
             .ok_or_else(|| "JSON schema needs NAME:TYPE entries".to_owned())?;
