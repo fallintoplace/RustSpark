@@ -12,7 +12,7 @@ pub fn optimize(plan: Plan) -> Plan {
         Plan::Scan { .. } => plan,
         Plan::Filter { input, predicate } => {
             let input = optimize(*input);
-            if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
+            if matches!(&predicate, Expr::Literal(Value::Boolean(true))) {
                 input
             } else {
                 Plan::Filter { input: Box::new(input), predicate }
@@ -77,7 +77,7 @@ pub fn optimize(plan: Plan) -> Plan {
         }
         Plan::Distinct { input } => {
             let child = optimize(*input);
-            if matches!(child, Plan::Distinct { .. }) {
+            if matches!(&child, Plan::Distinct { .. }) {
                 child
             } else {
                 Plan::Distinct { input: Box::new(child) }
