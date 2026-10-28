@@ -15,3 +15,4 @@ pub mod union_stream;
 pub mod dictionary;
 pub mod hll;
 pub mod file_catalog;
+pub mod stream_execute;
