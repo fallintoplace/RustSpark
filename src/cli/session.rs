@@ -15,6 +15,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
+        if let Some(bytes) = args.parquet_metadata_hint_bytes {
+            parquet.metadata_size_hint = Some(bytes);
+        }
         if let Some(size) = args.parquet_max_in_list_size {
             parquet.max_in_list_size = size;
         }
@@ -107,6 +110,14 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--parquet-max-in-list-size", "64"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().execution.parquet.max_in_list_size, 64);
+    }
+
+    #[test]
+    fn configures_parquet_metadata_prefetch_hint() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-metadata-hint-kb", "512"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.parquet.metadata_size_hint,
+            Some(512 * 1024));
     }
 
     #[test]
