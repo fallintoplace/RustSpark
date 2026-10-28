@@ -49,6 +49,18 @@ class QualityRunnerTests(unittest.TestCase):
             "--rows", "100", "--engines", "rustspark", "duckdb",
         ])
 
+    def test_billion_tpch_benchmark_is_available_through_quality_cli(self):
+        with mock.patch.object(quality.subprocess, "call", return_value=0) as call:
+            self.assertEqual(quality.main([
+                "bench", "billion-tpch", "--fixture", "/data/tpch-sf167",
+                "--repeat", "3", "--target-partitions", "16",
+            ]), 0)
+        self.assertEqual(call.call_args.args[0], [
+            sys.executable, str(quality.SCRIPTS / "bench_billion_tpch.py"),
+            "--fixture", "/data/tpch-sf167",
+            "--repeat", "3", "--target-partitions", "16",
+        ])
+
     def test_bench_supports_separator_for_help_forwarding(self):
         with mock.patch.object(quality.subprocess, "call", return_value=0) as call:
             self.assertEqual(quality.main(["bench", "local", "--", "--help"]), 0)
