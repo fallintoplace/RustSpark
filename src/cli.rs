@@ -367,6 +367,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Stop preferring hash joins for eligible large joins.
+    #[arg(long = "prefer-sort-merge-join")]
+    prefer_sort_merge_join: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
