@@ -60,7 +60,7 @@ mod tests {
     #[tokio::test]
     async fn sql_scalar() -> datafusion::error::Result<()> {
         let rows = RustSparkSession::new()
-            .sql("SELECT TIME_FROM_SECONDS(52200.5)")
+            .sql("SELECT TIME_FROM_SECONDS(CAST(52200.5 AS DOUBLE))")
             .await?
             .collect()
             .await?;
