@@ -55,3 +55,5 @@ pub mod pipeline;
 pub mod hash_partition;
 
 pub mod csv_stream;
+
+pub mod statistics;
