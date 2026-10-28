@@ -1,5 +1,4 @@
 //! Typed filter fast path over native column buffers with SQL-null semantics.
-use std::cmp::Ordering;
 use crate::{batch::Batch, expr::{BinaryOp, Expr}, scalar::Value, Result};
 
 fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
