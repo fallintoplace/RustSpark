@@ -16,6 +16,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
     }
+    if let Some(value) = args.hash_join_inlist_max_bytes {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -106,5 +109,25 @@ mod tests {
         assert!(validate_spill_directory(&nested, Some(&database)).is_err());
         assert!(validate_spill_directory(&database, Some(&database)).is_err());
         assert!(validate_spill_directory(&directory.path().join("missing"), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_inlist_size {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn config_uses_requested_value() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-kb", "8",
+        ])
+        .unwrap();
+        let config = build_session_config(&args);
+        assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_size, 8192);
+        assert!(Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-kb", "0",
+        ])
+        .is_err());
     }
 }
