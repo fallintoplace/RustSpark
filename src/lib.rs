@@ -255,6 +255,8 @@ mod sql_compat_add_months;
 mod sql_compat_year;
 #[path = "sql_compat/month.rs"]
 mod sql_compat_month;
+#[path = "sql_compat/dayofmonth.rs"]
+mod sql_compat_dayofmonth;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -437,6 +439,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_add_months::udf());
         context.register_udf(sql_compat_year::udf());
         context.register_udf(sql_compat_month::udf());
+        context.register_udf(sql_compat_dayofmonth::udf());
         Self { context }
     }
 
