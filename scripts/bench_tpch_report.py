@@ -39,7 +39,8 @@ def append_latency_concentration(lines, ok, results):
                 lines.append(f"- Q{row['id']:02}: {share:.1f}% of summed query medians")
 
 
-def render(report):
+def validated_query_rows(report):
+    """Validate report query identities before any Markdown is emitted."""
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("TPC-H report has no query results")
@@ -48,6 +49,11 @@ def render(report):
     ids = [row.get("id") for row in results]
     if any(isinstance(i, bool) or not isinstance(i, int) or i not in range(1, 23) for i in ids) or len(set(ids)) != len(ids):
         raise ValueError("Invalid or duplicate query IDs")
+    return results
+
+
+def render(report):
+    results = validated_query_rows(report)
     ok = [row for row in results if row.get("status") == "ok"]
     lines = [
         "# TPC-H execution report", "",
