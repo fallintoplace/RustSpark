@@ -253,6 +253,14 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
+    /// tune multi-branch SQL planning concurrency, measured in concurrent planning tasks.
+    #[arg(
+        long = "planning-concurrency",
+        value_name = "SIZE",
+        value_parser = parse_planning_concurrency_override
+    )]
+    planning_concurrency_override: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -614,6 +622,12 @@ fn parse_csv_schema(value: &str) -> Result<Schema, String> {
 
 fn parse_json_schema(value: &str) -> Result<Schema, String> {
     parse_column_schema(value, "JSON")
+}
+
+fn parse_planning_concurrency_override(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--planning-concurrency")?
+        .checked_mul(1)
+        .ok_or_else(|| "--planning-concurrency is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
