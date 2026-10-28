@@ -241,6 +241,8 @@ mod sql_compat_dayofweek;
 mod sql_compat_weekday;
 #[path = "sql_compat/dayofyear.rs"]
 mod sql_compat_dayofyear;
+#[path = "sql_compat/quarter.rs"]
+mod sql_compat_quarter;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -416,6 +418,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_dayofweek::udf());
         context.register_udf(sql_compat_weekday::udf());
         context.register_udf(sql_compat_dayofyear::udf());
+        context.register_udf(sql_compat_quarter::udf());
         Self { context }
     }
 
