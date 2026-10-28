@@ -137,7 +137,7 @@ fn validate_input_selection(args: &Args) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_export_settings(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.parquet_compression.is_some()
         && args.output_parquet.is_none()
         && args.save_table.is_none()
@@ -155,6 +155,11 @@ pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Err
     if args.output_single_file && selected_output_path(args).is_none() {
         return Err("--output-single-file requires an output format".into());
     }
+    Ok(())
+}
+
+pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    validate_export_settings(args)?;
     validate_input_selection(args)?;
     reject_output_input_collision(args)?;
     if args.parquet_pushdown_filters && !InputAvailability::from_args(args).parquet {
@@ -322,9 +327,18 @@ mod path_collision_tests {
 
 #[cfg(test)]
 mod input_selection_tests {
-    use super::{Args, validate_input_selection};
+    use super::{Args, validate_export_settings, validate_input_selection};
     use clap::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn validates_export_settings_without_input_selection() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.output_single_file = true;
+        assert!(validate_export_settings(&args).is_err());
+        args.output_csv = Some(PathBuf::from("report.csv"));
+        assert!(validate_export_settings(&args).is_ok());
+    }
 
     #[test]
     fn separates_named_and_unnamed_input_modes() {
