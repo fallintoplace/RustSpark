@@ -137,6 +137,12 @@ pub(crate) fn get_json_object_udf() -> ScalarUDF {
     )
 }
 
+// Only validate JSON syntax; building a Value tree allocates for every
+// nested object, array and string, which JSON_VALID never needs.
+fn is_valid_json(input: &str) -> bool {
+    serde_json::from_str::<serde::de::IgnoredAny>(input).is_ok()
+}
+
 pub(crate) fn json_valid_udf() -> ScalarUDF {
     create_udf(
         "json_valid",
@@ -147,7 +153,7 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
             match args {
                 [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
                     Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
-                        value.as_deref().map(|text| serde_json::from_str::<serde_json::Value>(text).is_ok()),
+                        value.as_deref().map(|text| is_valid_json(text)),
                     )))
                 }
                 [ColumnarValue::Array(array)] => {
@@ -157,7 +163,7 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
                         .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
                     let result: BooleanArray = input
                         .iter()
-                        .map(|text| text.map(|text| serde_json::from_str::<serde_json::Value>(text).is_ok()))
+                        .map(|text| text.map(|text| is_valid_json(text)))
                         .collect();
                     Ok(ColumnarValue::Array(Arc::new(result)))
                 }
@@ -201,7 +207,7 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
-    use super::query_json;
+    use super::{is_valid_json, query_json};
 
     #[tokio::test]
     async fn constant_path_extracts_from_each_row_with_nulls() -> datafusion::error::Result<()> {
@@ -227,6 +233,57 @@ mod tests {
         assert_eq!(
             actual,
             vec![Some("first".into()), Some("second".into()), None, None, None]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validates_without_materializing_nested_values() {
+        for valid in [
+            r#"{"nested":[{"x":"é"},true,null,17]}"#,
+            r#" [1, 2, {"item": "value"}] "#,
+            "null",
+            r#""a string""#,
+            "0.5",
+        ] {
+            assert!(is_valid_json(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "{bad json}",
+            r#"{"nested":[1,2}"#,
+            "{} extra",
+            r#""unterminated"#,
+        ] {
+            assert!(!is_valid_json(invalid), "{invalid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_valid_preserves_sql_nulls_and_validation() -> datafusion::error::Result<()> {
+        use datafusion::arrow::array::BooleanArray;
+
+        let batches = crate::RustSparkSession::new()
+            .sql(
+                r#"SELECT JSON_VALID(payload)
+                   FROM (VALUES (0, '{"nested":[1, {"ok":true}]}'),
+                                (1, '{"nested":[1}'),
+                                (2, CAST(NULL AS VARCHAR)),
+                                (3, ' 0 '), (4, '"hello"'),
+                                (5, '{} trailing')) AS t(idx, payload)
+                   ORDER BY idx"#,
+            )
+            .await?
+            .collect()
+            .await?;
+        let mut actual = Vec::new();
+        for batch in batches {
+            let column = batch.column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+            actual.extend(column.iter());
+        }
+        assert_eq!(
+            actual,
+            [Some(true), Some(false), None, Some(true), Some(true), Some(false)]
         );
         Ok(())
     }
