@@ -15,6 +15,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
+        if let Some(size) = args.parquet_max_in_list_size {
+            parquet.max_in_list_size = size;
+        }
         if args.parquet_bloom_filters {
             parquet.bloom_filter_on_read = true;
         }
@@ -97,6 +100,13 @@ mod tests {
         ]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.parquet.bloom_filter_on_read);
+    }
+
+    #[test]
+    fn configures_parquet_in_list_pruning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-max-in-list-size", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.parquet.max_in_list_size, 64);
     }
 
     #[test]
