@@ -18,8 +18,12 @@ fn hex_digit(value: u8) -> Option<u8> {
 
 fn percent_decode(input: &str) -> datafusion::error::Result<String> {
     let bytes = input.as_bytes();
-    if !bytes.contains(&b'%') && !bytes.contains(&b'+') {
-        return Ok(input.to_owned());
+    if !bytes.contains(&b'%') {
+        return Ok(if bytes.contains(&b'+') {
+            input.replace('+', " ")
+        } else {
+            input.to_owned()
+        });
     }
     let mut result = Vec::with_capacity(bytes.len());
     let mut index = 0;
