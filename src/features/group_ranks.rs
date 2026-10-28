@@ -58,7 +58,7 @@ impl RustSparkSession {
             let direction = if *ascending { "ASC" } else { "DESC" };
             let nulls = if *ascending { "FIRST" } else { "LAST" };
             ordering.push_str(&quote_join_identifier(name));
-            ordering.push_str(" ");
+            ordering.push(' ');
             ordering.push_str(direction);
             ordering.push_str(" NULLS ");
             ordering.push_str(nulls);

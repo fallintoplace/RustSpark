@@ -21,7 +21,7 @@ fn parse_json_path(path: &str) -> Option<Vec<PathSegment<'_>>> {
     while !rest.is_empty() {
         if let Some(after_dot) = rest.strip_prefix('.') {
             let end = after_dot
-                .find(|character: char| character == '.' || character == '[')
+                .find(['.', '['])
                 .unwrap_or(after_dot.len());
             let name = &after_dot[..end];
             if name.is_empty() || name == "*" {
@@ -29,7 +29,8 @@ fn parse_json_path(path: &str) -> Option<Vec<PathSegment<'_>>> {
             }
             segments.push(PathSegment::Field(name));
             rest = &after_dot[end..];
-        } else if let Some(after_bracket) = rest.strip_prefix('[') {
+        } else if rest.starts_with('[') {
+            let after_bracket = rest.strip_prefix('[')?;
             if let Some(quote @ ('\'' | '"')) = after_bracket.chars().next() {
                 let contents = &after_bracket[quote.len_utf8()..];
                 let end = contents.find(quote)?;
@@ -171,7 +172,7 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| match args {
             [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => Ok(ColumnarValue::Scalar(
-                ScalarValue::Boolean(value.as_deref().map(|text| is_valid_json(text))),
+                ScalarValue::Boolean(value.as_deref().map(is_valid_json)),
             )),
             [ColumnarValue::Array(array)] => {
                 let input = array
@@ -180,7 +181,7 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
                     .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
                 let result: BooleanArray = input
                     .iter()
-                    .map(|text| text.map(|text| is_valid_json(text)))
+                    .map(|text| text.map(is_valid_json))
                     .collect();
                 Ok(ColumnarValue::Array(Arc::new(result)))
             }

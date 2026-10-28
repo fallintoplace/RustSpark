@@ -461,7 +461,7 @@ mod path_collision_tests {
                 .join("subdirectory")
                 .join("output.csv")
         );
-        assert!(overlaps_input_path(&source, &normalized));
+        assert!(overlaps_input_path(&source, &normalized, true));
 
         let unrelated = temp.path().join("other/subdirectory/output.csv");
         let normalized = canonical_output_path(&unrelated).unwrap();
@@ -474,7 +474,7 @@ mod path_collision_tests {
                 .join("subdirectory")
                 .join("output.csv")
         );
-        assert!(!overlaps_input_path(&source, &normalized));
+        assert!(!overlaps_input_path(&source, &normalized, true));
     }
 }
 
