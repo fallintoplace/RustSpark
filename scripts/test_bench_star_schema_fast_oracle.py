@@ -11,7 +11,7 @@ class FastStarOracleTests(unittest.TestCase):
                 grouped = {}
                 for index in range(rows):
                     region = (index % products) % regions
-                    grouped[region] = grouped.get(region, 0) + (index * 17) % 100
+                    grouped[region] = grouped.get(region, 0) + ((index * 17) % 100)
                 self.assertEqual(out["region_revenue"], [
                     {"region": key, "total": value} for key, value in sorted(grouped.items())
                 ])
