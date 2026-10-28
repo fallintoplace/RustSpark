@@ -69,3 +69,5 @@ pub mod transport;
 pub mod task_scheduler;
 
 pub mod metrics;
+
+pub mod optimizer;
