@@ -126,6 +126,8 @@ mod sql_compat_sec;
 mod sql_compat_csc;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
+#[path = "features/fixed_width_histogram.rs"]
+mod feature_fixed_width_histogram;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
 #[path = "sql_compat/url_encode.rs"]
