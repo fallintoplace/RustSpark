@@ -4,6 +4,7 @@ Requires optional `polars` and a built RustSpark CLI. Export the SQL
 result once as an Arrow IPC **file**, then scan lazily from Polars.
 
 ```python
+import polars as pl
 from integrations.polars.query_lazy import rustspark_lazy_frame
 
 with rustspark_lazy_frame(
@@ -11,7 +12,7 @@ with rustspark_lazy_frame(
     csv="tests/fixtures/sales.csv",
     binary="target/release/rustspark",
 ) as frame:
-    print(frame.filter(frame["total"] > 10).collect())
+    print(frame.filter(pl.col("total") > 10).collect())
 ```
 
 **Keep the LazyFrame inside the `with` block.** Its backing temporary
