@@ -71,7 +71,11 @@ mod tests {
     #[tokio::test]
     async fn handles_nullable_column_values() -> datafusion::error::Result<()> {
         let rows = RustSparkSession::new()
-            .sql("SELECT MASK(value) FROM (VALUES (0, 'Ab3'), (1, CAST(NULL AS VARCHAR)), (2, 'a-b')) AS t(idx, value) ORDER BY idx")
+            .sql(concat!(
+                "SELECT MASK(value) FROM ",
+                "(VALUES (0, 'Ab3'), (1, CAST(NULL AS VARCHAR)), (2, 'a-b')) ",
+                "AS t(idx, value) ORDER BY idx"
+            ))
             .await?
             .collect()
             .await?;
