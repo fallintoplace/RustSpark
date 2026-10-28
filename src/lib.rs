@@ -223,6 +223,8 @@ mod sql_compat_url_encode;
 mod sql_compat_width_bucket;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "sql_compat/spark_dates.rs"]
+mod sql_compat_spark_dates;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
