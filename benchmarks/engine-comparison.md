@@ -13,6 +13,11 @@ runs identical SQL and must return identical normalized JSON results.
 Any mismatch fails the benchmark before results are recorded.
 Samples, medians, p95, query texts and environment details are saved in JSON.
 
+For more balanced cold measurements, pass `--balanced-order`. It runs one
+sample per engine for each workload, reversing engine order on alternate
+rounds. The scheduled comparison uses this mode to reduce time-of-run bias.
+Correctness is checked for every sample before its duration is recorded.
+
 Every sample starts a new process. Results include initialization, input
 registration, query and serialization, not warmed engine-only throughput.
 Spark runs local[2], not a remote cluster. The comparison GitHub workflow
