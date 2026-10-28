@@ -42,6 +42,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(rows) = args.output_rows_per_file {
         config = config.set_usize("datafusion.execution.soft_max_rows_per_output_file", rows);
     }
+    if args.piecewise_merge_join {
+        config.options_mut().optimizer.enable_piecewise_merge_join = true;
+    }
     if let Some(files) = args.metadata_fetch_concurrency {
         config = config.set_usize("datafusion.execution.meta_fetch_concurrency", files);
     }

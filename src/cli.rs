@@ -279,6 +279,10 @@ struct Args {
     #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
     target_partitions: Option<usize>,
 
+    /// Piecewise merge join planning (opt-in for benchmarking).
+    #[arg(long = "piecewise-merge-join")]
+    piecewise_merge_join: bool,
+
     /// Minimum total file-group size before DataFusion splits a scan across workers.
     #[arg(long = "scan-split-min-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
     scan_split_min_bytes: Option<usize>,
