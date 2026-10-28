@@ -33,6 +33,8 @@ mod sql_compat_bin;
 mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "sql_compat/sin.rs"]
+mod sql_compat_sin;
 #[path = "features/numeric_column_summary.rs"]
 mod feature_numeric_column_summary;
 #[path = "sql_compat/nullifzero.rs"]
@@ -195,6 +197,7 @@ impl RustSparkSession {
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
         context.register_udf(sql_compat_endswith::udf());
+        context.register_udf(sql_compat_sin::udf());
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_oct::udf());
         context.register_udf(sql_compat_space::udf());
