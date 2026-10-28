@@ -253,3 +253,62 @@ mod tests {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlacementLoad {
+    pub node_id: String,
+    pub assigned_objects: usize,
+}
+
+impl ReplicaStore {
+    /// Predict the number of replica assignments per node without reading or
+    /// writing any objects. Duplicate keys count as separate planned writes.
+    pub fn placement_load(&self, keys: &[&str]) -> io::Result<Vec<PlacementLoad>> {
+        let mut counts = vec![0usize; self.nodes.len()];
+        for key in keys {
+            for node in self.placements(key)? {
+                let index = self
+                    .nodes
+                    .binary_search_by(|entry| entry.id.as_str().cmp(node.id.as_str()))
+                    .expect("placement nodes belong to the store");
+                counts[index] = counts[index]
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("Placement count overflow"))?;
+            }
+        }
+        Ok(self
+            .nodes
+            .iter()
+            .zip(counts)
+            .map(|(node, assigned_objects)| PlacementLoad {
+                node_id: node.id.clone(),
+                assigned_objects,
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod placement_load_feature_tests {
+    use super::*;
+
+    #[test]
+    fn reports_all_nodes_and_counts_replication_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect();
+        let store = ReplicaStore::new(nodes, 2).unwrap();
+        let report = store.placement_load(&["one", "two", "three"]).unwrap();
+        assert_eq!(report.len(), 3);
+        assert_eq!(report.iter().map(|node| node.assigned_objects).sum::<usize>(), 6);
+        assert!(report.windows(2).all(|pair| pair[0].node_id < pair[1].node_id));
+        assert!(store.placement_load(&["../escape"]).is_err());
+        assert!(store.list_keys().unwrap().is_empty());
+    }
+}
