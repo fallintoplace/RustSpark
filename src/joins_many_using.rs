@@ -28,7 +28,7 @@ fn validate_using_source_columns(
     table: &str,
 ) -> Result<HashSet<String>> {
     let mut seen: HashSet<String> = HashSet::new();
-    for name in &names {
+    for name in names {
         if !seen.insert(name.to_ascii_lowercase()) {
             return Err(DataFusionError::Plan(format!(
                 "Duplicate source column name: {name}"
