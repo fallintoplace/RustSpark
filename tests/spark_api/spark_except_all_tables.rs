@@ -1,5 +1,5 @@
-use rustspark::RustSparkSession;
 use datafusion::arrow::array::Int64Array;
+use rustspark::RustSparkSession;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -9,7 +9,11 @@ async fn except_all_tables_matches_spark_row_multiplicity() -> TestResult {
     session
         .register_sql_view(
             "spark_set_left",
-            "SELECT CAST(1 AS BIGINT) AS value UNION ALL SELECT 1 UNION ALL              SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 2",
+            concat!(
+                "SELECT CAST(1 AS BIGINT) AS value ",
+                "UNION ALL SELECT 1 UNION ALL SELECT 1 ",
+                "UNION ALL SELECT 2 UNION ALL SELECT 2",
+            ),
         )
         .await?;
     session
@@ -34,8 +38,32 @@ async fn except_all_tables_matches_spark_row_multiplicity() -> TestResult {
     }
     actual.sort_unstable();
     assert_eq!(actual, vec![1, 2, 2]);
-    assert!(session.except_all_tables("", "spark_set_right").await.is_err());
-    assert!(session.except_all_tables("spark_set_left; DROP TABLE spark_set_right", "spark_set_right").await.is_err());
-    assert!(session.except_all_tables("spark_set_left", "missing_table").await.is_err());
+    assert!(
+        session
+            .except_all_tables(
+                "",
+                "spark_set_right",
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .except_all_tables(
+                "spark_set_left; DROP TABLE spark_set_right",
+                "spark_set_right",
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .except_all_tables(
+                "spark_set_left",
+                "missing_table",
+            )
+            .await
+            .is_err()
+    );
     Ok(())
 }
