@@ -209,6 +209,8 @@ mod sql_compat_try_divide;
 mod sql_compat_try_mod;
 #[path = "sql_compat/try_multiply.rs"]
 mod sql_compat_try_multiply;
+#[path = "sql_compat/time_from_millis.rs"]
+mod sql_compat_time_from_millis;
 #[path = "sql_compat/try_negate.rs"]
 mod sql_compat_try_negate;
 #[path = "sql_compat/try_subtract.rs"]
@@ -349,6 +351,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_atanh::udf());
         context.register_udf(sql_compat_try_multiply::udf());
+        context.register_udf(sql_compat_time_from_millis::udf());
         context.register_udf(sql_compat_cosh::udf());
         context.register_udf(sql_compat_bitwise_not::udf());
         context.register_udf(sql_compat_try_negate::udf());
