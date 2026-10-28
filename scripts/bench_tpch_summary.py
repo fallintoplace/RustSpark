@@ -21,6 +21,8 @@ def checked_medians(entries):
 
 def complete_query_rows(report):
     """Require one valid result for every TPC-H query ID."""
+    if not isinstance(report, dict):
+        raise ValueError("TPC-H summary report must be a JSON object")
     entries = report.get("results")
     if not isinstance(entries, list) or len(entries) != 22:
         raise ValueError("A summary requires exactly 22 TPC-H queries")
