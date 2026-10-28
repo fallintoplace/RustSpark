@@ -29,6 +29,8 @@ mod sources;
 mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
+#[path = "sql_compat/cos.rs"]
+mod sql_compat_cos;
 #[path = "features/unpivot_columns.rs"]
 mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
@@ -203,6 +205,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_pmod::udf());
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_bin::udf());
+        context.register_udf(sql_compat_cos::udf());
         context.register_udf(sql_compat_try_divide::udf());
         context.register_udf(sql_compat_try_add::udf());
         context.register_udf(sql_compat_try_subtract::udf());
