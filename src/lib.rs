@@ -83,6 +83,8 @@ mod set_operations;
 mod sources;
 #[path = "sql_compat/acos.rs"]
 mod sql_compat_acos;
+#[path = "sql_compat/dayofweek.rs"]
+mod sql_compat_dayofweek;
 #[path = "sql_compat/acosh.rs"]
 mod sql_compat_acosh;
 #[path = "sql_compat/asin.rs"]
@@ -319,6 +321,7 @@ impl RustSparkSession {
     pub fn from_context(context: SessionContext) -> Self {
         context.register_udf(sql_compat_endswith::udf());
         context.register_udf(sql_compat_lcase::udf());
+        context.register_udf(sql_compat_dayofweek::udf());
         context.register_udf(sql_compat_sin::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
