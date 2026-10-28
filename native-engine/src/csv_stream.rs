@@ -115,6 +115,18 @@ pub struct CsvStream<R> {
 
 impl<R: BufRead> CsvStream<R> {
     pub fn new(input: R, batch_rows: usize, max_record_bytes: usize) -> Result<Self> {
+        Self::open(input, batch_rows, max_record_bytes, None)
+    }
+
+    pub fn new_typed(
+        input: R, batch_rows: usize, max_record_bytes: usize, schema: Schema,
+    ) -> Result<Self> {
+        Self::open(input, batch_rows, max_record_bytes, Some(schema))
+    }
+
+    fn open(
+        input: R, batch_rows: usize, max_record_bytes: usize, typed: Option<Schema>,
+    ) -> Result<Self> {
         if batch_rows == 0 || max_record_bytes == 0 {
             return Err(Error::Execution("CSV batch rows and record bytes must be positive".into()));
         }
@@ -122,8 +134,17 @@ impl<R: BufRead> CsvStream<R> {
             input, max_record_bytes, pending: None, skip_lf: false,
         };
         let names = records.record()?.ok_or_else(|| Error::Parse("CSV header missing".into()))?;
-        let schema = Schema::new(names.into_iter()
-            .map(|name| Field::new(name, DataType::Text, true)).collect())?;
+        let schema = if let Some(schema) = typed {
+            if schema.len() != names.len() ||
+                !schema.fields().iter().zip(&names).all(|(field, name)|
+                    field.name.eq_ignore_ascii_case(name)) {
+                return Err(Error::Schema("typed CSV schema does not match header".into()));
+            }
+            schema
+        } else {
+            Schema::new(names.into_iter()
+                .map(|name| Field::new(name, DataType::Text, true)).collect())?
+        };
         Ok(Self { records, schema, batch_rows, exhausted: false })
     }
 
@@ -147,9 +168,42 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                         self.exhausted = true;
                         return Some(Err(Error::Parse("CSV row width differs from header".into())));
                     }
-                    rows.push(fields.into_iter().map(|value| {
-                        if value.is_empty() { Value::Null } else { Value::Text(value) }
-                    }).collect());
+                    let converted = fields.into_iter().enumerate().map(|(index, text)| {
+                        if text.is_empty() {
+                            return Ok(Value::Null);
+                        }
+                        let kind = self.schema.field(index)?.data_type;
+                        match kind {
+                            DataType::Text => Ok(Value::Text(text)),
+                            DataType::Boolean => {
+                                if text.eq_ignore_ascii_case("true") {
+                                    Ok(Value::Boolean(true))
+                                } else if text.eq_ignore_ascii_case("false") {
+                                    Ok(Value::Boolean(false))
+                                } else {
+                                    Err(Error::Parse("invalid boolean in CSV stream".into()))
+                                }
+                            }
+                            DataType::Integer => text.parse::<i64>()
+                                .map(Value::Integer)
+                                .map_err(|_| Error::Parse("invalid integer in CSV stream".into())),
+                            DataType::Float => {
+                                let value = text.parse::<f64>()
+                                    .map_err(|_| Error::Parse("invalid float in CSV stream".into()))?;
+                                if !value.is_finite() {
+                                    return Err(Error::Parse("nonfinite float in CSV stream".into()));
+                                }
+                                Ok(Value::Float(value))
+                            }
+                        }
+                    }).collect::<Result<Vec<_>>>();
+                    match converted {
+                        Ok(row) => rows.push(row),
+                        Err(error) => {
+                            self.exhausted = true;
+                            return Some(Err(error));
+                        }
+                    }
                 }
                 Ok(None) => {
                     self.exhausted = true;
@@ -194,4 +248,34 @@ mod tests {
         let mut stream = CsvStream::new(Cursor::new(b"a,b\n1\n"), 1, 100).unwrap();
         assert!(stream.next().unwrap().is_err());
     }
+    #[test]
+    fn typed_scan_preserves_integer_and_float_values() {
+        let schema = Schema::new(vec![
+            Field::new("city", DataType::Text, false),
+            Field::new("amount", DataType::Integer, true),
+            Field::new("ratio", DataType::Float, true),
+        ]).unwrap();
+        let mut source = CsvStream::new_typed(
+            Cursor::new(b"city,amount,ratio\nBerlin,12,1.25\nParis,,2.5\n"),
+            1, 256, schema,
+        ).unwrap();
+        assert_eq!(source.next().unwrap().unwrap().row(0).unwrap(), vec![
+            Value::Text("Berlin".into()), Value::Integer(12), Value::Float(1.25),
+        ]);
+        assert_eq!(source.next().unwrap().unwrap().row(0).unwrap()[1], Value::Null);
+        assert!(source.next().is_none());
+    }
+
+    #[test]
+    fn typed_scan_rejects_inconsistent_schema_and_bad_numbers() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        assert!(CsvStream::new_typed(
+            Cursor::new(b"other\n3\n"), 2, 256, schema.clone(),
+        ).is_err());
+        let mut stream = CsvStream::new_typed(
+            Cursor::new(b"n\nabc\n"), 2, 256, schema,
+        ).unwrap();
+        assert!(stream.next().unwrap().is_err());
+    }
+
 }
