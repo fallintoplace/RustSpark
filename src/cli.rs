@@ -250,6 +250,10 @@ struct Args {
     #[arg(long = "query-timeout", value_name = "SECONDS", value_parser = parse_query_timeout)]
     query_timeout: Option<u64>,
 
+    /// DISTINCT soft-limit pushdown (opt-in for benchmarking).
+    #[arg(long = "distinct-soft-limit")]
+    distinct_soft_limit: bool,
+
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 

@@ -16,6 +16,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
     }
+    if args.distinct_soft_limit {
+        config.options_mut().optimizer.enable_distinct_aggregation_soft_limit = true;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
