@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark SQL FORMAT_NUMBER escapes single format_numbers with a backslash.
+/// Spark FORMAT_NUMBER groups thousands in fixed-precision numeric text.
 fn evaluate(number: f64, digits: i64) -> Option<String> {
     if !(0..=18).contains(&digits) {
         return None;
@@ -84,6 +84,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
 
     #[test]
     fn reference_vectors() {
@@ -95,11 +96,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT FORMAT_NUMBER('Spark SQL')")
+            .sql("SELECT FORMAT_NUMBER(CAST(12345.67 AS DOUBLE), CAST(2 AS BIGINT))")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "12,345.67");
         Ok(())
     }
 }
