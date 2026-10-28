@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Allow larger literal IN lists to participate in Parquet pruning.
+    #[arg(long = "parquet-max-in-list-size", value_name = "VALUES", value_parser = parse_target_partitions)]
+    parquet_max_in_list_size: Option<usize>,
+
     /// Read Parquet Bloom filters to skip row groups for selective predicates.
     #[arg(long = "parquet-bloom-filters")]
     parquet_bloom_filters: bool,
