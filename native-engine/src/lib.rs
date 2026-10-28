@@ -13,3 +13,5 @@ pub mod scalar;
 pub mod schema;
 
 pub mod batch;
+
+pub mod catalog;
