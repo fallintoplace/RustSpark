@@ -38,11 +38,24 @@ class SmokeTests(unittest.TestCase):
             def run_side_effect(command, **kwargs):
                 if "--json-out" in command:
                     report.write_text(json.dumps({"results": [
-                        {"id": n, "status": "ok"} for n in range(1, 23)
+                        {"id": n, "status": "ok", "median_ms": 1.0,
+                         "p95_ms": 1.0, "result_rows": 1,
+                         "result_sha256": "a" * 64, "sql_sha256": "b" * 64}
+                        for n in range(1, 23)
                     ]}))
                 return mock.Mock(returncode=0)
             with mock.patch.object(smoke.subprocess, "run", side_effect=run_side_effect):
                 self.assertTrue(smoke.run_smoke("rs", fixture, report))
+
+    def test_status_only_or_nonfinite_measurements_fail(self):
+        rows = [{"id": n, "status": "ok"} for n in range(1, 23)]
+        self.assertFalse(smoke.complete_query_results(rows))
+        for entry in rows:
+            entry.update({"median_ms": 1.0, "p95_ms": 1.0, "result_rows": 0,
+                          "sql_sha256": "a" * 64, "result_sha256": "b" * 64})
+        self.assertTrue(smoke.complete_query_results(rows))
+        rows[0]["median_ms"] = float("nan")
+        self.assertFalse(smoke.complete_query_results(rows))
 
     def test_rejects_existing_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
