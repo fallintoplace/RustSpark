@@ -184,6 +184,12 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
     )
 }
 
+// IgnoredAny consumes nested JSON without allocating per element or building a Value tree.
+fn json_array_length(input: &str) -> Option<i64> {
+    let elements: Vec<serde::de::IgnoredAny> = serde_json::from_str(input).ok()?;
+    i64::try_from(elements.len()).ok()
+}
+
 pub(crate) fn json_array_length_udf() -> ScalarUDF {
     create_udf(
         "json_array_length",
@@ -191,15 +197,10 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            fn length(input: &str) -> Option<i64> {
-                let value: serde_json::Value = serde_json::from_str(input).ok()?;
-                let array = value.as_array()?;
-                i64::try_from(array.len()).ok()
-            }
             match args {
                 [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
                     Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                        value.as_deref().and_then(length),
+                        value.as_deref().and_then(json_array_length),
                     )))
                 }
                 [ColumnarValue::Array(array)] => {
@@ -207,7 +208,7 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
                         .as_any()
                         .downcast_ref::<StringArray>()
                         .ok_or_else(|| DataFusionError::Internal("json_array_length expects UTF-8".into()))?;
-                    let result: Int64Array = input.iter().map(|value| value.and_then(length)).collect();
+                    let result: Int64Array = input.iter().map(|value| value.and_then(json_array_length)).collect();
                     Ok(ColumnarValue::Array(Arc::new(result)))
                 }
                 _ => Err(DataFusionError::Internal("json_array_length expects UTF-8".into())),
@@ -218,7 +219,16 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_json, query_json};
+    use super::{is_valid_json, json_array_length, query_json};
+
+    #[test]
+    fn json_array_length_streams_nested_values_without_parsing_a_value_tree() {
+        assert_eq!(json_array_length(r#"[{"nested":[1,2]},null,true,42]"#), Some(4));
+        assert_eq!(json_array_length("[]"), Some(0));
+        assert_eq!(json_array_length("{}"), None);
+        assert_eq!(json_array_length("null"), None);
+        assert_eq!(json_array_length("[1,]"), None);
+    }
 
     #[tokio::test]
     async fn constant_path_extracts_from_each_row_with_nulls() -> datafusion::error::Result<()> {
