@@ -433,6 +433,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Stop preferring hash joins for eligible large joins.
+    #[arg(long = "prefer-sort-merge-join")]
+    prefer_sort_merge_join: bool,
+
     /// Disable file-scan work stealing for predictable layouts.
     #[arg(long = "disable-file-work-stealing")]
     disable_file_work_stealing: bool,
@@ -546,6 +550,50 @@ struct Args {
     /// Tune max-spill-file-bytes for large Parquet datasets.
     #[arg(long = "max-spill-file-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     max_spill_file_bytes: Option<usize>,
+
+    /// Compress spilled intermediate data when disk bandwidth is limited.
+    #[arg(long = "spill-compression", value_name = "CODEC", value_parser = ["uncompressed", "lz4_frame", "zstd"])]
+    spill_compression: Option<String>,
+
+    /// Maximum queued RecordBatches per output file, at least two.
+    #[arg(long = "max-buffered-output-batches", value_name = "COUNT", value_parser = parse_output_buffer_batches)]
+    max_buffered_output_batches: Option<usize>,
+
+    /// Override estimated fallback filter selectivity, from 0 to 100.
+    #[arg(long = "default-filter-selectivity", value_name = "PERCENT", value_parser = parse_filter_selectivity)]
+    default_filter_selectivity: Option<u8>,
+
+    /// Tune Parquet writer statistics for selective queries.
+    #[arg(long = "parquet-column-index-truncate", value_name = "LENGTH", value_parser = parse_positive_tuning_usize)]
+    parquet_column_index_truncate: Option<usize>,
+
+    /// Tune Parquet writer statistics for selective queries.
+    #[arg(long = "parquet-statistics-truncate", value_name = "LENGTH", value_parser = parse_positive_tuning_usize)]
+    parquet_statistics_truncate: Option<usize>,
+
+    /// Opt-in Parquet writer tuning for analytical data.
+    #[arg(long = "parquet-bloom-ndv", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_bloom_ndv: Option<usize>,
+
+    /// Opt-in Parquet writer tuning for analytical data.
+    #[arg(long = "parquet-dictionary-page-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_dictionary_page_bytes: Option<usize>,
+
+    /// Optional performance tuning for Parquet-backed analytics.
+    #[arg(long = "parquet-row-group-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_bytes: Option<usize>,
+
+    /// Optional performance tuning for Parquet-backed analytics.
+    #[arg(long = "optimizer-passes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    optimizer_passes: Option<usize>,
+
+    /// Opt-in configuration for large analytical workloads.
+    #[arg(long = "parquet-serial-file-write")]
+    parquet_serial_file_write: bool,
+
+    /// Tune min-parallel-output-files for large Parquet datasets.
+    #[arg(long = "min-parallel-output-files", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    min_parallel_output_files: Option<usize>,
 
     /// Retain UNION execution instead of planning an Interleave.
     #[arg(long = "prefer-existing-union")]
@@ -1017,6 +1065,22 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_output_buffer_batches(value: &str) -> Result<usize, String> {
+    let count = parse_positive_usize(value, "--max-buffered-output-batches")?;
+    if count < 2 {
+        return Err("--max-buffered-output-batches must be at least 2".to_owned());
+    }
+    Ok(count)
+}
+
+fn parse_filter_selectivity(value: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .ok_or_else(|| "--default-filter-selectivity must be between 0 and 100".to_owned())
 }
 
 fn parse_positive_tuning_usize(value: &str) -> Result<usize, String> {

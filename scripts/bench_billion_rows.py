@@ -105,7 +105,14 @@ def load_manifest(root):
     rows = manifest.get("rows")
     if type(rows) is not int or rows < 1 or manifest.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("Invalid or incompatible dataset manifest")
-    parquet_parts(root / "data")
+    if manifest.get("day_modulus") != DAYS or manifest.get("customer_modulus") != CUSTOMERS:
+        raise ValueError("Dataset generator constants do not match the benchmark oracle")
+    expected_files = manifest.get("files")
+    if type(expected_files) is not int or expected_files < 1:
+        raise ValueError("Invalid Parquet part count in dataset manifest")
+    actual_files = len(parquet_parts(root / "data"))
+    if actual_files != expected_files:
+        raise ValueError(f"Incomplete dataset: expected {expected_files} Parquet parts, got {actual_files}")
     return manifest
 
 

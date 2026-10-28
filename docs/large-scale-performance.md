@@ -7,6 +7,18 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 ## Available tuning knobs
 
 - `--max-spill-file-bytes 268435456`: Set the maximum file size for spilled intermediate data. Larger files reduce rotations but increase I/O burst size.
+- `--prefer-sort-merge-join`: Stop preferring hash joins so the planner can use alternatives when appropriate. Compare CPU, memory, and spill usage.
+- `--spill-compression lz4_frame`: Compress intermediate spill files with Arrow IPC LZ4 frames or `zstd`, or choose `uncompressed`. Compression saves disk I/O but adds CPU; compare on the same hardware.
+- `--max-buffered-output-batches 8`: Set buffered batches per output file, minimum 2. More buffering uses additional RAM.
+- `--default-filter-selectivity 10`: Set assumed filter selectivity from 0 to 100 percent when exact statistics are unavailable. Incorrect values can worsen plans.
+- `--parquet-column-index-truncate 256`: Tune Parquet page-index truncation for string columns. Larger indexes use more storage and can increase metadata I/O.
+- `--parquet-statistics-truncate 256`: Set Parquet min/max statistics truncation length on writes. Longer values may improve pruning but increase footer size.
+- `--parquet-bloom-ndv 10000`: Set estimated distinct values for written Parquet bloom filters. Pair with `--parquet-write-bloom-filters`; incorrect estimates can inflate filters or false positives.
+- `--parquet-dictionary-page-bytes 2097152`: Tune Parquet dictionary pages when writing compressed analytics tables. Larger dictionaries consume memory and may hurt high-cardinality data.
+- `--parquet-row-group-bytes 134217728`: Limit Parquet output row-group size by bytes. Requires `--parquet-serial-file-write`; otherwise the parallel writer may ignore this limit.
+- `--optimizer-passes 5`: Set the maximum logical optimization passes. More passes can improve some plans but add planning latency.
+- `--parquet-serial-file-write`: Disable parallel encoding within a single Parquet file. Required for byte-based row-group limits, but can reduce write throughput.
+- `--min-parallel-output-files 8`: Set a lower bound on concurrent export files. Higher counts increase memory and file management overhead.
 - `--disable-file-work-stealing`: Disable file-scan work stealing for prebalanced file groups. Leave enabled for skewed inputs.
 - `--enforce-join-batch-size`: Enforce target batch size on joins to reduce memory spikes. It can add CPU overhead.
 - `--skip-table-statistics`: Skip initial table statistics. Can reduce cold metadata work but may worsen join and aggregation plans.
