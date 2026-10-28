@@ -67,7 +67,10 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.partial_agg_skip_ratio {
         config.options_mut().execution.skip_partial_aggregation_probe_ratio_threshold = value;
     }
-    if let Some(value) = args.subset_repartition_min_partitions.or(args.subset_repartition_threshold) {
+    if let Some(value) = args
+        .subset_repartition_min_partitions
+        .or(args.subset_repartition_threshold)
+    {
         config.options_mut().optimizer.subset_repartition_threshold = value;
     }
     if let Some(batch_size) = args.batch_size {
@@ -129,19 +132,35 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_write_buffered_batches {
         config.options_mut().execution.parquet.maximum_buffered_record_batches_per_stream = value;
     }
-    if let Some(value) = args.perfect_hash_key_range.or(args.perfect_hash_small_range.or(args.perfect_hash_small_build_rows)) {
+    if let Some(value) = args
+        .perfect_hash_key_range
+        .or(args.perfect_hash_small_range)
+        .or(args.perfect_hash_small_build_rows)
+    {
         config.options_mut().execution.perfect_hash_join_small_build_threshold = value;
     }
     if let Some(value) = args.hash_join_probe_buffer_bytes.or(args.hash_join_probe_buffer_mb) {
         config.options_mut().execution.hash_join_buffering_capacity = value;
     }
-    if let Some(value) = args.join_inlist_pushdown_bytes.or(args.join_dynamic_inlist_bytes.or(args.hash_join_inlist_max_bytes)) {
+    if let Some(value) = args
+        .join_inlist_pushdown_bytes
+        .or(args.join_dynamic_inlist_bytes)
+        .or(args.hash_join_inlist_max_bytes)
+    {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = value;
     }
-    if let Some(value) = args.join_inlist_pushdown_values.or(args.join_dynamic_inlist_distinct.or(args.hash_join_inlist_max_values)) {
+    if let Some(value) = args
+        .join_inlist_pushdown_values
+        .or(args.join_dynamic_inlist_distinct)
+        .or(args.hash_join_inlist_max_values)
+    {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = value;
     }
-    if let Some(value) = args.sort_in_place_bytes.or(args.sort_in_place_threshold_bytes.or(args.sort_in_place_kb)) {
+    if let Some(value) = args
+        .sort_in_place_bytes
+        .or(args.sort_in_place_threshold_bytes)
+        .or(args.sort_in_place_kb)
+    {
         config.options_mut().execution.sort_in_place_threshold_bytes = value;
     }
     if args.window_topn {
