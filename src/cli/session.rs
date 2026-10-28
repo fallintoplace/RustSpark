@@ -64,6 +64,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.partial_agg_probe_rows {
         config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
     }
+    if let Some(value) = args.partial_agg_skip_ratio {
+        config.options_mut().execution.skip_partial_aggregation_probe_ratio_threshold = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -249,6 +252,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--partial-agg-probe-rows", "50000"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_rows_threshold, 50000);
+    }
+
+    #[test]
+    fn configures_partial_agg_skip_ratio() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--partial-agg-skip-ratio", "0.85"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_ratio_threshold, 0.85);
     }
 
     #[test]
