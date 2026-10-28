@@ -36,6 +36,11 @@ def check_matching_fingerprints(baseline, candidate):
         for key in ("sql_sha256", "result_sha256"):
             left = first[number].get(key)
             right = second[number].get(key)
+            for value in (left, right):
+                if value is not None and (not isinstance(value, str)
+                        or len(value) != 64
+                        or any(char not in "0123456789abcdef" for char in value)):
+                    raise ValueError(f"Query {number} invalid {key} fingerprint")
             if (left is None) != (right is None) or (
                     left is not None and left != right):
                 raise ValueError(f"Query {number} {key} mismatch between benchmark runs")
