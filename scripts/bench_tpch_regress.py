@@ -40,6 +40,15 @@ def check_matching_fingerprints(baseline, candidate):
                 raise ValueError(f"Query {number} {key} mismatch between benchmark runs")
 
 
+def calculate_suite_speedup(old, new):
+    full_suite = set(old) == set(range(1, 23))
+    suite_speedup = None
+    if full_suite:
+        log_ratio = math.fsum(math.log(old[q]) - math.log(new[q]) for q in old) / 22
+        suite_speedup = round(math.exp(log_ratio), 4)
+    return full_suite, suite_speedup
+
+
 def compare(baseline, candidate, max_regression=0.20):
     if not math.isfinite(max_regression) or max_regression < 0:
         raise ValueError("Regression threshold must be nonnegative")
