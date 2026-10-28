@@ -14,6 +14,15 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Boolean,
         Volatility::Immutable,
         Arc::new(|args| {
+            // Keep a constant left argument as a scalar for the entire batch.
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
+                let right = right.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("equal_null expects Int64".into()))?;
+                let result: BooleanArray = right.iter()
+                    .map(|value| *lhs == value)
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(result)));
+            }
             // Keep a literal right operand scalar across an entire input batch.
             if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
                 let left = left.as_any().downcast_ref::<Int64Array>()
@@ -49,4 +58,25 @@ pub(crate) fn udf() -> ScalarUDF {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod constant_left_regression {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::BooleanArray;
+
+    #[tokio::test]
+    async fn evaluates_scalar_left_with_nullable_column() -> datafusion::error::Result<()> {
+        let session = RustSparkSession::new();
+        let rows = session
+            .sql("SELECT EQUAL_NULL(CAST(3 AS BIGINT), v) FROM (VALUES (0, CAST(3 AS BIGINT)), (1, CAST(NULL AS BIGINT)), (2, CAST(4 AS BIGINT))) AS t(idx, v) ORDER BY idx")
+            .await?.collect().await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let column = batch.column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+            actual.extend(column.iter());
+        }
+        assert_eq!(actual, vec![Some(true), Some(false), Some(false)]);
+        Ok(())
+    }
 }
