@@ -37,6 +37,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(bytes) = args.hash_join_probe_buffer_bytes {
         config.options_mut().execution.hash_join_buffering_capacity = bytes;
     }
+    if let Some(bytes) = args.hash_join_single_partition_bytes {
+        config.options_mut().optimizer.hash_join_single_partition_threshold = bytes;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -159,6 +162,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--hash-join-probe-buffer-mb", "32"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().execution.hash_join_buffering_capacity, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_hash_join_single_partition_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--hash-join-single-partition-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_single_partition_threshold, 64 * 1024 * 1024);
     }
 
     #[test]
