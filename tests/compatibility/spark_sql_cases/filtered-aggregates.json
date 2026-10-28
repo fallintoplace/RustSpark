@@ -1,0 +1,10 @@
+[
+  {
+    "id": "sum_and_count_filtered",
+    "sql": "SELECT SUM(v) FILTER (WHERE v > 0) AS positive_sum, COUNT(*) FILTER (WHERE v IS NULL) AS missing FROM (VALUES (CAST(-1 AS BIGINT)), (2), (CAST(NULL AS BIGINT)), (3)) AS t(v)"
+  },
+  {
+    "id": "filtered_aggregate_empty_subset",
+    "sql": "SELECT COUNT(*) FILTER (WHERE v > 99) AS count_empty, SUM(v) FILTER (WHERE v > 99) AS sum_empty FROM (VALUES (1), (2)) AS t(v)"
+  }
+]
