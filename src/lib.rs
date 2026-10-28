@@ -67,6 +67,8 @@ mod sql_compat_try_subtract;
 mod sql_compat_try_multiply;
 #[path = "sql_compat/try_negate.rs"]
 mod sql_compat_try_negate;
+#[path = "sql_compat/sinh.rs"]
+mod sql_compat_sinh;
 #[path = "sql_compat/try_abs.rs"]
 mod sql_compat_try_abs;
 #[path = "sql_compat/bit_count.rs"]
@@ -208,6 +210,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_try_multiply::udf());
         context.register_udf(sql_compat_try_negate::udf());
+        context.register_udf(sql_compat_sinh::udf());
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_bit_count::udf());
         context.register_udf(sql_compat_shiftleft::udf());
