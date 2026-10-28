@@ -34,10 +34,7 @@ async fn existence_flag_keeps_each_left_row_once_even_with_duplicates() -> TestR
             .await?;
         assert_eq!(flagged.schema().fields().len(), 3);
         assert_eq!(flagged.clone().count().await?, 3);
-        assert_eq!(
-            flagged.filter(col("has_match"))?.count().await?,
-            expected
-        );
+        assert_eq!(flagged.filter(col("has_match"))?.count().await?, expected);
     }
     Ok(())
 }
@@ -48,9 +45,7 @@ async fn existence_flag_rejects_invalid_inputs() -> TestResult {
     session
         .register_sql_view("l", "SELECT 1 AS id, false AS flag")
         .await?;
-    session
-        .register_sql_view("r", "SELECT 1 AS id")
-        .await?;
+    session.register_sql_view("r", "SELECT 1 AS id").await?;
     assert!(
         session
             .join_tables_with_existence_flag("l", "r", &[], "matched", false)

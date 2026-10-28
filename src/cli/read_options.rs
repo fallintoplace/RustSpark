@@ -61,8 +61,7 @@ pub(super) fn csv_read_options(args: &Args) -> CsvReadOptions<'_> {
 }
 
 fn parquet_partition_columns(args: &Args) -> Vec<(String, DataType)> {
-    args
-        .parquet_partitions
+    args.parquet_partitions
         .as_ref()
         .map(|schema| {
             schema

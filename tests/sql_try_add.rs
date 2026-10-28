@@ -26,7 +26,11 @@ async fn try_add_handles_rows_overflow_and_nulls() -> Result<(), Box<dyn std::er
         actual.extend(values.iter());
     }
     assert_eq!(actual, vec![Some(3), None, None, Some(-3)]);
-    let scalar = session.sql("SELECT TRY_ADD(20, 22)").await?.collect().await?;
+    let scalar = session
+        .sql("SELECT TRY_ADD(20, 22)")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

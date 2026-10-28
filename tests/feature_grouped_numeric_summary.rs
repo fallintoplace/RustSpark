@@ -13,12 +13,22 @@ async fn grouped_numeric_summary_aggregates_without_collect() -> TestResult {
              UNION ALL SELECT 'b', 5, 1",
         )
         .await?;
-    let result = session.numeric_summary_per_group("events", "segment", "metric").await?;
+    let result = session
+        .numeric_summary_per_group("events", "segment", "metric")
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT SUM(non_null_count) FROM analytics").await?.to_string(),
+        session
+            .sql_scalar("SELECT SUM(non_null_count) FROM analytics")
+            .await?
+            .to_string(),
         "3"
     );
-    assert!(session.numeric_summary_per_group("events", "segment", "missing").await.is_err());
+    assert!(
+        session
+            .numeric_summary_per_group("events", "segment", "missing")
+            .await
+            .is_err()
+    );
     Ok(())
 }

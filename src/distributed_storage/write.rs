@@ -179,14 +179,24 @@ mod tests {
         });
         let store = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
         let content = vec![0x5a_u8; 3 * 1024 * 1024 + 37];
-        let bytes = store.put_reader("large.parquet", Cursor::new(&content)).unwrap();
+        let bytes = store
+            .put_reader("large.parquet", Cursor::new(&content))
+            .unwrap();
         assert_eq!(bytes, content.len() as u64);
-        assert_eq!(store.put_reader("large.parquet", Cursor::new(&content)).unwrap(), bytes);
+        assert_eq!(
+            store
+                .put_reader("large.parquet", Cursor::new(&content))
+                .unwrap(),
+            bytes
+        );
         assert_eq!(store.verify("large.parquet").unwrap().healthy, 2);
         let mut changed = content.clone();
         changed[1024 * 1024] ^= 1;
         assert_eq!(
-            store.put_reader("large.parquet", Cursor::new(changed)).unwrap_err().kind(),
+            store
+                .put_reader("large.parquet", Cursor::new(changed))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(store.get("large.parquet").unwrap(), content);
@@ -203,10 +213,8 @@ mod tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        ).unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         assert!(store.put_reader("failed.parquet", FailedReader).is_err());
         assert!(store.get("failed.parquet").is_err());
     }
@@ -214,11 +222,8 @@ mod tests {
     #[test]
     fn idempotent_large_write_detects_same_length_divergence() {
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        )
-        .unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         let payload = vec![7_u8; 2 * 1024 * 1024];
         store.put("large.parquet", &payload).unwrap();
         store.put("large.parquet", &payload).unwrap();

@@ -119,19 +119,28 @@ pub(crate) fn get_json_object_udf() -> ScalarUDF {
                 }
                 return Ok(ColumnarValue::Array(Arc::new(result.finish())));
             }
-            let all_scalars = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            let all_scalars = args
+                .iter()
+                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| DataFusionError::Internal("get_json_object expects UTF-8 JSON".into()))?;
+                .ok_or_else(|| {
+                    DataFusionError::Internal("get_json_object expects UTF-8 JSON".into())
+                })?;
             let paths = arrays[1]
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| DataFusionError::Internal("get_json_object expects UTF-8 path".into()))?;
+                .ok_or_else(|| {
+                    DataFusionError::Internal("get_json_object expects UTF-8 path".into())
+                })?;
             let mut result = StringBuilder::new();
             for (input, path) in input.iter().zip(paths.iter()) {
-                match input.zip(path).and_then(|(input, path)| query_json(input, path)) {
+                match input
+                    .zip(path)
+                    .and_then(|(input, path)| query_json(input, path))
+                {
                     Some(value) => result.append_value(value),
                     None => result.append_null(),
                 }
@@ -160,26 +169,22 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
         vec![DataType::Utf8],
         DataType::Boolean,
         Volatility::Immutable,
-        Arc::new(|args| {
-            match args {
-                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
-                    Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
-                        value.as_deref().map(|text| is_valid_json(text)),
-                    )))
-                }
-                [ColumnarValue::Array(array)] => {
-                    let input = array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
-                    let result: BooleanArray = input
-                        .iter()
-                        .map(|text| text.map(|text| is_valid_json(text)))
-                        .collect();
-                    Ok(ColumnarValue::Array(Arc::new(result)))
-                }
-                _ => Err(DataFusionError::Internal("json_valid expects UTF-8".into())),
+        Arc::new(|args| match args {
+            [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => Ok(ColumnarValue::Scalar(
+                ScalarValue::Boolean(value.as_deref().map(|text| is_valid_json(text))),
+            )),
+            [ColumnarValue::Array(array)] => {
+                let input = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
+                let result: BooleanArray = input
+                    .iter()
+                    .map(|text| text.map(|text| is_valid_json(text)))
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
+            _ => Err(DataFusionError::Internal("json_valid expects UTF-8".into())),
         }),
     )
 }
@@ -196,23 +201,26 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
         vec![DataType::Utf8],
         DataType::Int64,
         Volatility::Immutable,
-        Arc::new(|args| {
-            match args {
-                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
-                    Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                        value.as_deref().and_then(json_array_length),
-                    )))
-                }
-                [ColumnarValue::Array(array)] => {
-                    let input = array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| DataFusionError::Internal("json_array_length expects UTF-8".into()))?;
-                    let result: Int64Array = input.iter().map(|value| value.and_then(json_array_length)).collect();
-                    Ok(ColumnarValue::Array(Arc::new(result)))
-                }
-                _ => Err(DataFusionError::Internal("json_array_length expects UTF-8".into())),
+        Arc::new(|args| match args {
+            [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => Ok(ColumnarValue::Scalar(
+                ScalarValue::Int64(value.as_deref().and_then(json_array_length)),
+            )),
+            [ColumnarValue::Array(array)] => {
+                let input = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("json_array_length expects UTF-8".into())
+                    })?;
+                let result: Int64Array = input
+                    .iter()
+                    .map(|value| value.and_then(json_array_length))
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
+            _ => Err(DataFusionError::Internal(
+                "json_array_length expects UTF-8".into(),
+            )),
         }),
     )
 }
@@ -223,7 +231,10 @@ mod tests {
 
     #[test]
     fn json_array_length_streams_nested_values_without_parsing_a_value_tree() {
-        assert_eq!(json_array_length(r#"[{"nested":[1,2]},null,true,42]"#), Some(4));
+        assert_eq!(
+            json_array_length(r#"[{"nested":[1,2]},null,true,42]"#),
+            Some(4)
+        );
         assert_eq!(json_array_length("[]"), Some(0));
         assert_eq!(json_array_length("{}"), None);
         assert_eq!(json_array_length("null"), None);
@@ -248,12 +259,22 @@ mod tests {
             .await?;
         let mut actual = Vec::new();
         for batch in batches {
-            let column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
             actual.extend(column.iter().map(|value| value.map(str::to_owned)));
         }
         assert_eq!(
             actual,
-            vec![Some("first".into()), Some("second".into()), None, None, None]
+            vec![
+                Some("first".into()),
+                Some("second".into()),
+                None,
+                None,
+                None
+            ]
         );
         Ok(())
     }
@@ -299,12 +320,23 @@ mod tests {
             .await?;
         let mut actual = Vec::new();
         for batch in batches {
-            let column = batch.column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(
             actual,
-            [Some(true), Some(false), None, Some(true), Some(true), Some(false)]
+            [
+                Some(true),
+                Some(false),
+                None,
+                Some(true),
+                Some(true),
+                Some(false)
+            ]
         );
         Ok(())
     }
@@ -314,7 +346,10 @@ mod tests {
         let doc = r#"{"outer":{"items":[{"x":1},{"x":"two"}]},"hyphen-key":true}"#;
         assert_eq!(query_json(doc, "$.outer.items[1].x"), Some("two".into()));
         assert_eq!(query_json(doc, "$['hyphen-key']"), Some("true".into()));
-        assert_eq!(query_json(doc, "$.outer.items[0]"), Some(r#"{"x":1}"#.into()));
+        assert_eq!(
+            query_json(doc, "$.outer.items[0]"),
+            Some(r#"{"x":1}"#.into())
+        );
         assert_eq!(query_json(doc, "$.outer.items[9]"), None);
     }
 

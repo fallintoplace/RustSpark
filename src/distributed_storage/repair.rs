@@ -11,7 +11,10 @@ impl ReplicaStore {
     pub fn repair_missing(&self, key: &str) -> io::Result<usize> {
         let nodes = self.placements(key)?;
         let statuses = self.inspect(key)?;
-        let missing = statuses.iter().filter(|entry| entry.bytes.is_none()).count();
+        let missing = statuses
+            .iter()
+            .filter(|entry| entry.bytes.is_none())
+            .count();
         if missing == 0 {
             return Ok(0);
         }
@@ -32,7 +35,10 @@ impl ReplicaStore {
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "No surviving replica"))?;
         let source_path = source_node.root.join("objects").join(key);
         if !fs::symlink_metadata(&source_path)?.file_type().is_file() {
-            return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe source replica"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Unsafe source replica",
+            ));
         }
         let mut source = File::open(&source_path)?;
         for (node, status) in nodes.iter().zip(statuses) {

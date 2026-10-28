@@ -58,11 +58,15 @@ mod tests {
             assert_eq!(inventory_key(&entry.unwrap()).unwrap(), None);
         }
         fs::create_dir(root.path().join("valid.parquet")).unwrap();
-        let entry = fs::read_dir(root.path()).unwrap()
+        let entry = fs::read_dir(root.path())
+            .unwrap()
             .map(Result::unwrap)
             .find(|entry| entry.file_name() == "valid.parquet")
             .unwrap();
-        assert_eq!(inventory_key(&entry).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            inventory_key(&entry).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -90,7 +94,9 @@ mod tests {
         });
         let store = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
         for index in (0..256).rev() {
-            store.put(&format!("part-{index:04}.parquet"), b"test").unwrap();
+            store
+                .put(&format!("part-{index:04}.parquet"), b"test")
+                .unwrap();
         }
         let keys = store.list_keys().unwrap();
         assert_eq!(keys.len(), 256);

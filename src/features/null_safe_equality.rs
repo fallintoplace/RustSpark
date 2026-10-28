@@ -14,7 +14,8 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         let dataframe = self.table(table).await?;
         Self::validate_selected_columns(&dataframe, &[column])?;
-        let source = quote_catalog_table(table, "filter_rows_null_safe_equal requires a table path")?;
+        let source =
+            quote_catalog_table(table, "filter_rows_null_safe_equal requires a table path")?;
         let key = quote_join_identifier(column);
         self.sql_read_only_with_params(
             &format!("SELECT * FROM {source} WHERE {key} IS NOT DISTINCT FROM $1"),

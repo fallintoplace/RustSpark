@@ -178,59 +178,131 @@ fn validate_tuning_aliases(args: &Args) -> Result<(), Box<dyn std::error::Error>
 
     for group in [
         &[
-            ("--hash-join-inlist-max-kb", args.hash_join_inlist_max_bytes.is_some()),
-            ("--join-dynamic-inlist-kb", args.join_dynamic_inlist_bytes.is_some()),
-            ("--join-inlist-pushdown-bytes", args.join_inlist_pushdown_bytes.is_some()),
+            (
+                "--hash-join-inlist-max-kb",
+                args.hash_join_inlist_max_bytes.is_some(),
+            ),
+            (
+                "--join-dynamic-inlist-kb",
+                args.join_dynamic_inlist_bytes.is_some(),
+            ),
+            (
+                "--join-inlist-pushdown-bytes",
+                args.join_inlist_pushdown_bytes.is_some(),
+            ),
         ][..],
         &[
-            ("--hash-join-inlist-max-values", args.hash_join_inlist_max_values.is_some()),
-            ("--join-dynamic-inlist-distinct", args.join_dynamic_inlist_distinct.is_some()),
-            ("--join-inlist-pushdown-values", args.join_inlist_pushdown_values.is_some()),
+            (
+                "--hash-join-inlist-max-values",
+                args.hash_join_inlist_max_values.is_some(),
+            ),
+            (
+                "--join-dynamic-inlist-distinct",
+                args.join_dynamic_inlist_distinct.is_some(),
+            ),
+            (
+                "--join-inlist-pushdown-values",
+                args.join_inlist_pushdown_values.is_some(),
+            ),
         ],
         &[
-            ("--perfect-hash-small-build-rows", args.perfect_hash_small_build_rows.is_some()),
-            ("--perfect-hash-small-range", args.perfect_hash_small_range.is_some()),
-            ("--perfect-hash-key-range", args.perfect_hash_key_range.is_some()),
+            (
+                "--perfect-hash-small-build-rows",
+                args.perfect_hash_small_build_rows.is_some(),
+            ),
+            (
+                "--perfect-hash-small-range",
+                args.perfect_hash_small_range.is_some(),
+            ),
+            (
+                "--perfect-hash-key-range",
+                args.perfect_hash_key_range.is_some(),
+            ),
         ],
         &[
             ("--sort-read-ahead-mb", args.sort_read_ahead_bytes.is_some()),
-            ("--sort-pushdown-buffer-mb", args.sort_pushdown_buffer_bytes.is_some()),
+            (
+                "--sort-pushdown-buffer-mb",
+                args.sort_pushdown_buffer_bytes.is_some(),
+            ),
         ],
         &[
-            ("--partial-aggregate-probe-rows", args.partial_aggregate_probe_rows.is_some()),
-            ("--partial-agg-probe-rows", args.partial_agg_probe_rows.is_some()),
+            (
+                "--partial-aggregate-probe-rows",
+                args.partial_aggregate_probe_rows.is_some(),
+            ),
+            (
+                "--partial-agg-probe-rows",
+                args.partial_agg_probe_rows.is_some(),
+            ),
         ],
         &[
-            ("--subset-repartition-threshold", args.subset_repartition_threshold.is_some()),
+            (
+                "--subset-repartition-threshold",
+                args.subset_repartition_threshold.is_some(),
+            ),
             (
                 "--subset-repartition-min-partitions",
                 args.subset_repartition_min_partitions.is_some(),
             ),
         ],
         &[
-            ("--hash-join-probe-buffer-mb", args.hash_join_probe_buffer_mb.is_some()),
-            ("--hash-join-probe-buffer-bytes", args.hash_join_probe_buffer_bytes.is_some()),
+            (
+                "--hash-join-probe-buffer-mb",
+                args.hash_join_probe_buffer_mb.is_some(),
+            ),
+            (
+                "--hash-join-probe-buffer-bytes",
+                args.hash_join_probe_buffer_bytes.is_some(),
+            ),
         ],
         &[
             ("--sort-in-place-kb", args.sort_in_place_kb.is_some()),
-            ("--sort-in-place-max-mb", args.sort_in_place_threshold_bytes.is_some()),
+            (
+                "--sort-in-place-max-mb",
+                args.sort_in_place_threshold_bytes.is_some(),
+            ),
             ("--sort-in-place-bytes", args.sort_in_place_bytes.is_some()),
         ],
         &[
-            ("--parquet-predicate-cache-mb", args.parquet_predicate_cache_mb_bytes.is_some()),
-            ("--parquet-predicate-cache-bytes", args.parquet_predicate_cache_bytes.is_some()),
+            (
+                "--parquet-predicate-cache-mb",
+                args.parquet_predicate_cache_mb_bytes.is_some(),
+            ),
+            (
+                "--parquet-predicate-cache-bytes",
+                args.parquet_predicate_cache_bytes.is_some(),
+            ),
         ],
         &[
-            ("--parquet-metadata-hint-kb", args.parquet_metadata_hint_kb_bytes.is_some()),
-            ("--parquet-metadata-hint-bytes", args.parquet_metadata_hint_bytes.is_some()),
+            (
+                "--parquet-metadata-hint-kb",
+                args.parquet_metadata_hint_kb_bytes.is_some(),
+            ),
+            (
+                "--parquet-metadata-hint-bytes",
+                args.parquet_metadata_hint_bytes.is_some(),
+            ),
         ],
         &[
-            ("--parquet-force-filter-selections", args.parquet_force_filter_selections),
-            ("--parquet-force-row-selection", args.parquet_force_row_selection),
+            (
+                "--parquet-force-filter-selections",
+                args.parquet_force_filter_selections,
+            ),
+            (
+                "--parquet-force-row-selection",
+                args.parquet_force_row_selection,
+            ),
         ],
         &[
-            ("--parquet-max-in-list-size", args.parquet_max_in_list_size.is_some()),
-            ("--parquet-in-list-pruning-limit", args.parquet_in_list_pruning_limit.is_some()),
+            (
+                "--parquet-max-in-list-size",
+                args.parquet_max_in_list_size.is_some(),
+            ),
+            (
+                "--parquet-in-list-pruning-limit",
+                args.parquet_in_list_pruning_limit.is_some(),
+            ),
         ],
     ] {
         only_one(group)?;

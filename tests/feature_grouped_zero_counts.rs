@@ -11,12 +11,22 @@ async fn grouped_zero_counts_uses_sql_null_semantics() -> TestResult {
             "SELECT 'a' AS segment, 0 AS metric UNION ALL SELECT 'a', 3 UNION ALL SELECT 'b', CAST(NULL AS INT) UNION ALL SELECT 'b', 5",
         )
         .await?;
-    let result = session.zero_counts_per_group("events", "segment", "metric").await?;
+    let result = session
+        .zero_counts_per_group("events", "segment", "metric")
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT SUM(zero_count) FROM analytics").await?.to_string(),
+        session
+            .sql_scalar("SELECT SUM(zero_count) FROM analytics")
+            .await?
+            .to_string(),
         "1"
     );
-    assert!(session.zero_counts_per_group("events", "segment", "missing").await.is_err());
+    assert!(
+        session
+            .zero_counts_per_group("events", "segment", "missing")
+            .await
+            .is_err()
+    );
     Ok(())
 }

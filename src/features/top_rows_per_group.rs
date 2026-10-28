@@ -1,5 +1,8 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
+use datafusion::{
+    error::{DataFusionError, Result},
+    prelude::DataFrame,
+};
 
 impl RustSparkSession {
     /// Keep at most `limit` rows per partition using a SQL window plan.
@@ -25,8 +28,15 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, &keys)?;
 
         let internal = "__rustspark_partition_row_number";
-        if dataframe.schema().fields().iter().any(|field| field.name().eq_ignore_ascii_case(internal)) {
-            return Err(DataFusionError::Plan("top_rows_per_group internal column name conflicts with the input".into()));
+        if dataframe
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name().eq_ignore_ascii_case(internal))
+        {
+            return Err(DataFusionError::Plan(
+                "top_rows_per_group internal column name conflicts with the input".into(),
+            ));
         }
         if limit == 0 {
             return dataframe.limit(0, Some(0));
@@ -45,7 +55,11 @@ impl RustSparkSession {
                 ordering.push_str(", ");
             }
             ordering.push_str(&quote_join_identifier(name));
-            ordering.push_str(if *ascending { " ASC NULLS FIRST" } else { " DESC NULLS LAST" });
+            ordering.push_str(if *ascending {
+                " ASC NULLS FIRST"
+            } else {
+                " DESC NULLS LAST"
+            });
         }
         let mut projection = String::new();
         for field in dataframe.schema().fields() {

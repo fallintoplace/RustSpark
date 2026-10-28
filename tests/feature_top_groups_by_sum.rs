@@ -12,7 +12,9 @@ async fn top_groups_by_sum_runs_grouped_native_aggregate() -> TestResult {
              SELECT 'b', CAST(NULL AS INT) UNION ALL SELECT 'b', 5",
         )
         .await?;
-    let result = session.top_groups_by_sum("events", "segment", "metric", 1).await?;
+    let result = session
+        .top_groups_by_sum("events", "segment", "metric", 1)
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
         session
@@ -21,6 +23,11 @@ async fn top_groups_by_sum_runs_grouped_native_aggregate() -> TestResult {
             .to_string(),
         "1"
     );
-    assert!(session.top_groups_by_sum("events", "missing", "metric", 1).await.is_err());
+    assert!(
+        session
+            .top_groups_by_sum("events", "missing", "metric", 1)
+            .await
+            .is_err()
+    );
     Ok(())
 }

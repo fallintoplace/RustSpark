@@ -127,7 +127,10 @@ struct Args {
     parquet_view_arrays: bool,
 
     /// Force row selections for Parquet filter pushdown instead of auto choice.
-    #[arg(long = "parquet-force-filter-selections", requires = "parquet_pushdown_filters")]
+    #[arg(
+        long = "parquet-force-filter-selections",
+        requires = "parquet_pushdown_filters"
+    )]
     parquet_force_filter_selections: bool,
 
     /// Predicate cache capacity in MiB for selective Parquet decoding.
@@ -145,7 +148,6 @@ struct Args {
     /// Read Parquet Bloom filters to skip row groups for selective predicates.
     #[arg(long = "parquet-bloom-filters")]
     parquet_bloom_filters: bool,
-
 
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
@@ -492,7 +494,10 @@ struct Args {
     parquet_metadata_hint_bytes: Option<usize>,
 
     /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
-    #[arg(long = "parquet-force-row-selection", requires = "parquet_pushdown_filters")]
+    #[arg(
+        long = "parquet-force-row-selection",
+        requires = "parquet_pushdown_filters"
+    )]
     parquet_force_row_selection: bool,
 
     /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
@@ -1079,8 +1084,7 @@ fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
 
 fn parse_parquet_bloom_fpp(value: &str) -> Result<f64, String> {
     let probability = value.parse::<f64>().map_err(|_| {
-        "--parquet-bloom-fpp must be a finite probability greater than 0 and less than 1"
-            .to_owned()
+        "--parquet-bloom-fpp must be a finite probability greater than 0 and less than 1".to_owned()
     })?;
     if !probability.is_finite() || probability <= 0.0 || probability >= 1.0 {
         return Err(
@@ -1148,7 +1152,8 @@ fn parse_partial_agg_probe_rows(value: &str) -> Result<usize, String> {
 }
 
 fn parse_partial_agg_skip_ratio(value: &str) -> Result<f64, String> {
-    let ratio = value.parse::<f64>()
+    let ratio = value
+        .parse::<f64>()
         .map_err(|_| "--partial-agg-skip-ratio requires a finite ratio between 0 and 1")?;
     if ratio.is_finite() && (0.0..=1.0).contains(&ratio) {
         Ok(ratio)

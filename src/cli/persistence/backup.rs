@@ -135,7 +135,6 @@ pub(crate) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

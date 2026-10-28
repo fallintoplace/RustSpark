@@ -30,7 +30,17 @@ async fn regex_filter_matches_text_and_ignores_nulls() -> TestResult {
             .await?,
         0
     );
-    assert!(session.filter_rows_regex("items", "missing", ".").await.is_err());
-    assert!(session.filter_rows_regex("missing", "label text", ".").await.is_err());
+    assert!(
+        session
+            .filter_rows_regex("items", "missing", ".")
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .filter_rows_regex("missing", "label text", ".")
+            .await
+            .is_err()
+    );
     Ok(())
 }

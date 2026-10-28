@@ -53,11 +53,20 @@ impl RustSparkSession {
         }
         let fact = "\"__rustspark_fact\"";
         let fact_frame = self.table(fact_table).await?;
-        let fact_columns: HashSet<&str> = fact_frame.schema().fields()
-            .iter().map(|f| f.name().as_str()).collect();
-        let projected_columns = dimensions.iter().map(|dimension| dimension.columns.len()).sum();
-        let mut output_names: HashSet<String> = fact_columns.iter()
-            .map(|name| name.to_ascii_lowercase()).collect();
+        let fact_columns: HashSet<&str> = fact_frame
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        let projected_columns = dimensions
+            .iter()
+            .map(|dimension| dimension.columns.len())
+            .sum();
+        let mut output_names: HashSet<String> = fact_columns
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
         output_names.reserve(projected_columns);
         let mut seen_aliases = HashSet::with_capacity(dimensions.len() + 1);
         seen_aliases.insert("__rustspark_fact".to_string());
@@ -71,37 +80,45 @@ impl RustSparkSession {
         for dimension in dimensions {
             if dimension.alias.trim().is_empty() {
                 return Err(DataFusionError::Plan(
-                    "Dimension alias cannot be blank".into()
+                    "Dimension alias cannot be blank".into(),
                 ));
             }
             if !seen_aliases.insert(dimension.alias.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate star join alias: {}", dimension.alias
+                    "Duplicate star join alias: {}",
+                    dimension.alias
                 )));
             }
             let operator = star_join_operator(dimension.join_type)?;
             if dimension.keys.is_empty() {
                 return Err(DataFusionError::Plan(
-                    "Every star join dimension needs at least one equality key".into()
+                    "Every star join dimension needs at least one equality key".into(),
                 ));
             }
             if dimension.columns.is_empty() {
                 return Err(DataFusionError::Plan(
-                    "Every star join dimension needs at least one projected column".into()
+                    "Every star join dimension needs at least one projected column".into(),
                 ));
             }
             let dimension_frame = self.table(dimension.table).await?;
-            let dimension_columns: HashSet<&str> = dimension_frame.schema().fields()
-                .iter().map(|f| f.name().as_str()).collect();
+            let dimension_columns: HashSet<&str> = dimension_frame
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect();
             let right_alias = quote_join_identifier(dimension.alias);
-            let right_table = quote_catalog_table(
-                dimension.table, "Invalid star dimension table name"
-            )?;
+            let right_table =
+                quote_catalog_table(dimension.table, "Invalid star dimension table name")?;
 
-            write!(&mut query, " {operator} JOIN {right_table} AS {right_alias} ON ")
-                .expect("writing to a String cannot fail");
+            write!(
+                &mut query,
+                " {operator} JOIN {right_table} AS {right_alias} ON "
+            )
+            .expect("writing to a String cannot fail");
             for (index, (fact_key, dimension_key)) in dimension.keys.iter().enumerate() {
-                if !fact_columns.contains(*fact_key) || !dimension_columns.contains(*dimension_key) {
+                if !fact_columns.contains(*fact_key) || !dimension_columns.contains(*dimension_key)
+                {
                     return Err(DataFusionError::Plan(format!(
                         "Missing star join key: {fact_key} or {dimension_key}"
                     )));
@@ -110,9 +127,12 @@ impl RustSparkSession {
                     query.push_str(" AND ");
                 }
                 write!(
-                    &mut query, "{fact}.{} = {right_alias}.{}",
-                    quote_join_identifier(fact_key), quote_join_identifier(dimension_key)
-                ).expect("writing to a String cannot fail");
+                    &mut query,
+                    "{fact}.{} = {right_alias}.{}",
+                    quote_join_identifier(fact_key),
+                    quote_join_identifier(dimension_key)
+                )
+                .expect("writing to a String cannot fail");
             }
             for column in dimension.columns {
                 if !dimension_columns.contains(*column) {
@@ -127,9 +147,12 @@ impl RustSparkSession {
                     )));
                 }
                 write!(
-                    &mut projection, ", {right_alias}.{} AS {}",
-                    quote_join_identifier(column), quote_join_identifier(&output_name)
-                ).expect("writing to a String cannot fail");
+                    &mut projection,
+                    ", {right_alias}.{} AS {}",
+                    quote_join_identifier(column),
+                    quote_join_identifier(&output_name)
+                )
+                .expect("writing to a String cannot fail");
             }
         }
         self.sql(&format!("SELECT {projection}{query}")).await

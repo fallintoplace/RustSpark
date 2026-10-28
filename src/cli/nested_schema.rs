@@ -141,11 +141,16 @@ mod tests {
     #[test]
     fn rejects_invalid_nested_schemas() {
         for input in [
-            "", "tags:array<>", "tags:array<int32",
-            "tags:array<int32>>", "map:map<utf8>",
-            "map:map<,int32>", "thing:struct<>",
+            "",
+            "tags:array<>",
+            "tags:array<int32",
+            "tags:array<int32>>",
+            "map:map<utf8>",
+            "map:map<,int32>",
+            "thing:struct<>",
             "thing:struct<id:int32,ID:utf8>",
-            "x:array<int32>,X:array<int64>", "x:unknown<int32>",
+            "x:array<int32>,X:array<int64>",
+            "x:unknown<int32>",
             "x:map<utf8,array<int32>",
         ] {
             assert!(parse_json_schema(input).is_err(), "{input}");

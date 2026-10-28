@@ -21,8 +21,15 @@ async fn equal_null_supports_rows_and_nulls() -> Result<(), Box<dyn std::error::
             .unwrap();
         actual.extend(column.iter());
     }
-    assert_eq!(actual, vec![Some(true), Some(false), Some(true), Some(false)]);
-    let scalar = session.sql("SELECT EQUAL_NULL(2, 2)").await?.collect().await?;
+    assert_eq!(
+        actual,
+        vec![Some(true), Some(false), Some(true), Some(false)]
+    );
+    let scalar = session
+        .sql("SELECT EQUAL_NULL(2, 2)")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

@@ -21,8 +21,15 @@ async fn luhn_check_handles_rows_and_nulls() -> Result<(), Box<dyn std::error::E
             .unwrap();
         actual.extend(column.iter());
     }
-    assert_eq!(actual, vec![Some(true), Some(false), Some(false), None, Some(false)]);
-    let scalar = session.sql("SELECT LUHN_CHECK('0')").await?.collect().await?;
+    assert_eq!(
+        actual,
+        vec![Some(true), Some(false), Some(false), None, Some(false)]
+    );
+    let scalar = session
+        .sql("SELECT LUHN_CHECK('0')")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

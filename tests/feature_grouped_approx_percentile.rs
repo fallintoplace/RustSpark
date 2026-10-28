@@ -12,7 +12,9 @@ async fn grouped_approx_percentile_returns_grouped_results() -> TestResult {
              SELECT 'b', CAST(NULL AS INT) UNION ALL SELECT 'b', 5",
         )
         .await?;
-    let result = session.approx_percentile_per_group("events", "segment", "metric", 0.5).await?;
+    let result = session
+        .approx_percentile_per_group("events", "segment", "metric", 0.5)
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
         session
