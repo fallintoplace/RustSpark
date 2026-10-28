@@ -323,6 +323,10 @@ struct Args {
     #[arg(long = "hash-join-probe-buffer-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     hash_join_probe_buffer_bytes: Option<usize>,
 
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "join-inlist-pushdown-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    join_inlist_pushdown_bytes: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",

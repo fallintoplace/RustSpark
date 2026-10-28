@@ -19,3 +19,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--parquet-write-buffered-batches 8`: Maximum buffered record batches per Parquet stream. Increasing this uses more memory.
 - `--perfect-hash-key-range 65536`: Allow perfect-hash joins for smaller build-side integer key ranges. Only helps eligible joins; a larger threshold may waste memory.
 - `--hash-join-probe-buffer-bytes 4194304`: Set bytes buffered on hash-join probe side during concurrent build. Increasing it consumes more RAM.
+- `--join-inlist-pushdown-bytes 262144`: Increase per-partition join build-side bytes eligible for dynamic IN-list pushdown. More memory and filter setup cost.
