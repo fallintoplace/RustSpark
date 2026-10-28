@@ -13,6 +13,13 @@ def checked_time(value, label):
     return float(value)
 
 
+def markdown_inline(value):
+    """Keep report metadata and errors within one safe Markdown line."""
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace("\\r", " ").replace("\\n", " ")
+            .replace("|", "/"))
+
+
 def render_query_row(row):
     status = row.get("status")
     if status == "ok":
@@ -59,7 +66,7 @@ def render(report):
         "# TPC-H execution report", "",
         f"**Coverage:** {len(ok)}/{len(results)} queries successful",
         f"**Complete 22-query run:** {'yes' if len(ok) == 22 and len(results) == 22 else 'no'}",
-        f"**Metric:** {report.get('metric', 'cold process wall-clock latency')}", "",
+        f"**Metric:** {markdown_inline(report.get('metric', 'cold process wall-clock latency'))}", "",
         "| Query | Status | Median (ms) | p95 (ms) |",
         "| ---: | --- | ---: | ---: |",
     ]
@@ -70,7 +77,7 @@ def render(report):
     if failures:
         lines.extend(["", "## Failures", ""])
         for row in failures:
-            error = str(row.get("error", "unknown error")).replace("\n", " ").replace("|", "/")
+            error = markdown_inline(row.get("error", "unknown error"))
             lines.append(f"- Q{row['id']:02}: {error[:280]}")
     lines.extend(["", "Cold CLI wall time includes startup, input registration, and result serialization.",
                   "These are local measurements, not TPC-certified benchmark scores.", ""])
