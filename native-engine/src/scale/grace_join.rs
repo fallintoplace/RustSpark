@@ -108,7 +108,10 @@ where L: IntoIterator<Item = Result<Batch>>,
             control.check()?;
             for piece in BatchChunks::new(&batch, io_batch_rows.min(256))? {
                 let joined = join::hash_join(&piece?, &build, left_key, right_key, kind)?;
-                if joined.num_rows() != 0 { writer.write_batch(&joined)?; }
+                for output_chunk in BatchChunks::new(&joined, io_batch_rows)? {
+                    let output_chunk = output_chunk?;
+                    if output_chunk.num_rows() != 0 { writer.write_batch(&output_chunk)?; }
+                }
             }
         }
         writer.finish()?;
