@@ -129,6 +129,8 @@ mod sql_compat_cbrt;
 mod sql_compat_len;
 #[path = "sql_compat/monthname.rs"]
 mod sql_compat_monthname;
+#[path = "sql_compat/months_between.rs"]
+mod sql_compat_months_between;
 #[path = "sql_compat/bitwise_or.rs"]
 mod sql_compat_bitwise_or;
 #[path = "sql_compat/cos.rs"]
@@ -448,6 +450,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_space::udf());
         context.register_udf(sql_compat_timestamp_millis::udf());
         context.register_udf(sql_compat_monthname::udf());
+        context.register_udf(sql_compat_months_between::udf());
         context.register_udf(sql_compat_acos::udf());
         context.register_udf(sql_compat_is_valid_utf8::udf());
         context.register_udf(sql_compat_dayname::udf());
