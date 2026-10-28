@@ -17,3 +17,5 @@ pub mod batch;
 pub mod catalog;
 
 pub mod expr;
+
+pub mod filter;
