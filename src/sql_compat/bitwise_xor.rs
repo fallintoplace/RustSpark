@@ -117,11 +117,16 @@ mod tests {
         assert_eq!(values.value(0), 6);
         Ok(())
     }
+
     #[tokio::test]
     async fn scalar_column_batches_preserve_nulls() -> datafusion::error::Result<()> {
         let session = RustSparkSession::new();
         let batches = session
-            .sql("SELECT BITWISE_XOR(CAST(12 AS BIGINT), v) FROM (VALUES (0, CAST(10 AS BIGINT)), (1, CAST(NULL AS BIGINT))) AS t(id, v) ORDER BY id")
+            .sql(concat!(
+                "SELECT BITWISE_XOR(CAST(12 AS BIGINT), v) FROM ",
+                "(VALUES (0, CAST(10 AS BIGINT)), (1, CAST(NULL AS BIGINT))) ",
+                "AS t(id, v) ORDER BY id"
+            ))
             .await?
             .collect()
             .await?;
@@ -133,5 +138,4 @@ mod tests {
         assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(6), None]);
         Ok(())
     }
-
 }
