@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -14,6 +15,26 @@ __all__ = ["RustSpark", "RustSparkError"]
 
 class RustSparkError(RuntimeError):
     """The RustSpark CLI reported a query or execution failure."""
+
+
+def _unique_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON result key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value):
+    raise ValueError(f"Nonfinite JSON value: {value}")
+
+
+def _finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Nonfinite JSON number: {value}")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -92,8 +113,11 @@ class RustSpark:
             message = completed.stderr.strip() or f"RustSpark exited with {completed.returncode}"
             raise RustSparkError(message)
         try:
-            rows = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
+            rows = json.loads(
+                completed.stdout, object_pairs_hook=_unique_json_keys,
+                parse_constant=_reject_nonfinite, parse_float=_finite_json_float,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
             raise RustSparkError("RustSpark returned invalid JSON") from exc
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise RustSparkError("RustSpark returned an unexpected JSON result shape")
