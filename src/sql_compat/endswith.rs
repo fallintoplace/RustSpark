@@ -28,17 +28,17 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("endswith expects Utf8".into()))?;
-            let result: Vec<Option<bool>> = input
+            let result: BooleanArray = input
                 .iter()
                 .zip(suffix.iter())
                 .map(|(value, suffix)| value.zip(suffix).map(|(s, p)| s.ends_with(p)))
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )
