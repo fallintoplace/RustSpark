@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use datafusion::{
     arrow::{
-        array::{Array, BinaryArray, BinaryBuilder, StringArray},
+        array::{Array, BinaryBuilder, StringArray},
         datatypes::DataType,
     },
     common::{DataFusionError, ScalarValue},
@@ -54,7 +54,10 @@ pub(crate) fn udf() -> ScalarUDF {
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("unhex expects Utf8".into()))?;
             let mut result =
-                BinaryBuilder::with_capacity(input.len(), input.value_data().len() / 2 + input.len());
+                BinaryBuilder::with_capacity(
+                    input.len(),
+                    input.value_data().len() / 2 + input.len(),
+                );
             for value in input.iter() {
                 match value.and_then(evaluate) {
                     Some(value) => result.append_value(value),
@@ -83,11 +86,19 @@ mod tests {
     #[tokio::test]
     async fn sql_nulls_and_invalid_hex() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT UNHEX(v) FROM (VALUES (0, '4142'), (1, CAST(NULL AS VARCHAR)), (2, 'GG')) AS t(idx, v) ORDER BY idx")
+            .sql(concat!(
+                "SELECT UNHEX(v) FROM ",
+                "(VALUES (0, '4142'), (1, CAST(NULL AS VARCHAR)), (2, 'GG')) ",
+                "AS t(idx, v) ORDER BY idx"
+            ))
             .await?
             .collect()
             .await?;
-        let column = batches[0].column(0).as_any().downcast_ref::<BinaryArray>().unwrap();
+        let column = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
         assert_eq!(column.value(0), b"AB");
         assert!(column.is_null(1));
         assert!(column.is_null(2));
