@@ -21,3 +21,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--hash-join-probe-buffer-bytes 4194304`: Set bytes buffered on hash-join probe side during concurrent build. Increasing it consumes more RAM.
 - `--join-inlist-pushdown-bytes 262144`: Increase per-partition join build-side bytes eligible for dynamic IN-list pushdown. More memory and filter setup cost.
 - `--join-inlist-pushdown-values 256`: Limit distinct join keys pushed as IN lists. High values cost more planning and probe memory.
+- `--sort-in-place-bytes 8388608`: Sort data in a single RecordBatch below this byte threshold. Higher values can increase peak memory.
