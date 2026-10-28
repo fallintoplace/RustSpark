@@ -1,32 +1,9 @@
 use std::{
     fs::{self, File},
-    io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom},
-    path::Path,
+    io::{self, ErrorKind, Seek, SeekFrom},
 };
 
-use super::ReplicaStore;
-
-// Race fallback: a second writer may publish identical immutable bytes while
-// we are repairing. Compare bounded buffers instead of collecting the object.
-fn equal_files(source: &Path, target: &Path) -> io::Result<bool> {
-    let mut from = BufReader::new(File::open(source)?);
-    let mut to = BufReader::new(File::open(target)?);
-    if from.get_ref().metadata()?.len() != to.get_ref().metadata()?.len() {
-        return Ok(false);
-    }
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut other = [0_u8; 64 * 1024];
-    loop {
-        let bytes = from.read(&mut buffer)?;
-        if bytes == 0 {
-            return Ok(true);
-        }
-        to.read_exact(&mut other[..bytes])?;
-        if buffer[..bytes] != other[..bytes] {
-            return Ok(false);
-        }
-    }
-}
+use super::{ReplicaStore, verify::same_bytes};
 
 impl ReplicaStore {
     /// Restore missing copies without overwriting any divergent replica.
@@ -63,7 +40,7 @@ impl ReplicaStore {
                 Ok(_) => {}
                 Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
                     if !fs::symlink_metadata(&target)?.file_type().is_file()
-                        || !equal_files(&source_path, &target)?
+                        || !same_bytes(&source_path, &target)?
                     {
                         return Err(io::Error::new(
                             ErrorKind::AlreadyExists,
