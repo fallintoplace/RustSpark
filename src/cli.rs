@@ -363,6 +363,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Opt-in configuration for large analytical workloads.
+    #[arg(long = "parquet-serial-file-write")]
+    parquet_serial_file_write: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
