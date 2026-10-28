@@ -50,6 +50,17 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             regress.medians(report((1, float("inf"))))
 
+    def test_rejects_one_sided_fingerprint(self):
+        old = report((1, 100))
+        new = report((1, 50))
+        old["results"][0]["sql_sha256"] = "a" * 64
+        with self.assertRaisesRegex(ValueError, "sql_sha256 mismatch"):
+            regress.compare(old, new)
+        old["results"][0].pop("sql_sha256")
+        new["results"][0]["result_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "result_sha256 mismatch"):
+            regress.compare(old, new)
+
 
 if __name__ == "__main__":
     unittest.main()
