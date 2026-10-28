@@ -15,9 +15,17 @@ async fn grouped_approx_percentile_returns_grouped_results() -> TestResult {
     let result = session.approx_percentile_per_group("events", "segment", "metric", 0.5).await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE estimated_percentile IS NOT NULL").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE estimated_percentile IS NOT NULL")
+            .await?
+            .to_string(),
         "2"
     );
-    assert!(session.approx_percentile_per_group("events", "segment", "missing", 0.5).await.is_err());
+    assert!(
+        session
+            .approx_percentile_per_group("events", "segment", "missing", 0.5)
+            .await
+            .is_err()
+    );
     Ok(())
 }
