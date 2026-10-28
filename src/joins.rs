@@ -933,6 +933,46 @@ impl RustSparkSession {
         );
         self.sql(&query).await
     }
+    /// Join rows where a string value starts with a right-table prefix.
+    ///
+    /// Prefixes are treated as literal text, not LIKE patterns. SQL NULLs
+    /// do not match. Empty prefixes match all non-NULL strings.
+    pub async fn join_tables_on_prefix(
+        &self,
+        values_table: &str,
+        prefixes_table: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        value_column: &str,
+        prefix_column: &str,
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+
+        if value_column.trim().is_empty() || prefix_column.trim().is_empty() {
+            return Err(DataFusionError::Plan(
+                "Prefix joins require non-empty column names".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "Prefix joins support inner and left joins only".into(),
+                ));
+            }
+        };
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let query = format!(
+            "SELECT * FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON startswith({left_alias}.{}, {right_alias}.{})",
+            quote_join_table(values_table)?,
+            quote_join_table(prefixes_table)?,
+            quote_join_identifier(value_column),
+            quote_join_identifier(prefix_column),
+        );
+        self.sql(&query).await
+    }
+
 }
 
 #[cfg(test)]
