@@ -77,3 +77,5 @@ pub mod scale;
 pub mod stream_scan;
 
 pub mod vector_filter;
+
+pub mod topk;
