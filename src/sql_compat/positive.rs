@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{
-        array::Int64Array,
-        datatypes::DataType,
-    },
+    arrow::{array::Int64Array, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -62,16 +59,28 @@ mod tests {
         assert_eq!(values.value(0), 12);
         Ok(())
     }
+
     #[tokio::test]
     async fn identity_keeps_nulls_and_signed_limits() -> datafusion::error::Result<()> {
         let rows = RustSparkSession::new()
-            .sql("SELECT POSITIVE(v) FROM (VALUES (0, CAST(NULL AS BIGINT)), (1, CAST(-9223372036854775807 AS BIGINT)), (2, CAST(0 AS BIGINT))) AS t(id, v) ORDER BY id")
+            .sql(concat!(
+                "SELECT POSITIVE(v) FROM ",
+                "(VALUES (0, CAST(NULL AS BIGINT)), ",
+                "(1, CAST(-9223372036854775807 AS BIGINT)), ",
+                "(2, CAST(0 AS BIGINT))) AS t(id, v) ORDER BY id"
+            ))
             .await?
             .collect()
             .await?;
-        let values = rows[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(values.iter().collect::<Vec<_>>(), vec![None, Some(-9223372036854775807), Some(0)]);
+        let values = rows[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(
+            values.iter().collect::<Vec<_>>(),
+            vec![None, Some(-9223372036854775807), Some(0)]
+        );
         Ok(())
     }
-
 }
