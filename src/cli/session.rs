@@ -46,6 +46,30 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(count) = args.join_dynamic_inlist_distinct {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = count;
     }
+    if let Some(count) = args.perfect_hash_small_range {
+        config.options_mut().execution.perfect_hash_join_small_build_threshold = count;
+    }
+    if let Some(count) = args.hash_join_single_partition_rows {
+        config.options_mut().optimizer.hash_join_single_partition_threshold_rows = count;
+    }
+    if let Some(bytes) = args.sort_spill_reserve_bytes {
+        config.options_mut().execution.sort_spill_reservation_bytes = bytes;
+    }
+    if let Some(bytes) = args.sort_in_place_threshold_bytes {
+        config.options_mut().execution.sort_in_place_threshold_bytes = bytes;
+    }
+    if let Some(bytes) = args.sort_pushdown_buffer_bytes {
+        config.options_mut().execution.sort_pushdown_buffer_capacity = bytes;
+    }
+    if let Some(value) = args.partial_agg_probe_rows {
+        config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
+    }
+    if let Some(value) = args.partial_agg_skip_ratio {
+        config.options_mut().execution.skip_partial_aggregation_probe_ratio_threshold = value;
+    }
+    if let Some(value) = args.subset_repartition_min_partitions {
+        config.options_mut().optimizer.subset_repartition_threshold = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -189,6 +213,62 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--join-dynamic-inlist-distinct", "512"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_inlist_pushdown_max_distinct_values, 512);
+    }
+
+    #[test]
+    fn configures_perfect_hash_small_range() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--perfect-hash-small-range", "16384"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.perfect_hash_join_small_build_threshold, 16384);
+    }
+
+    #[test]
+    fn configures_hash_join_single_partition_rows() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--hash-join-single-partition-rows", "1000000"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_single_partition_threshold_rows, 1000000);
+    }
+
+    #[test]
+    fn configures_sort_spill_reserve_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-spill-reserve-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_spill_reservation_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_sort_in_place_threshold_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-in-place-max-mb", "16"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_in_place_threshold_bytes, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_sort_pushdown_buffer_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-pushdown-buffer-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_pushdown_buffer_capacity, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_partial_agg_probe_rows() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--partial-agg-probe-rows", "50000"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_rows_threshold, 50000);
+    }
+
+    #[test]
+    fn configures_partial_agg_skip_ratio() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--partial-agg-skip-ratio", "0.85"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_ratio_threshold, 0.85);
+    }
+
+    #[test]
+    fn configures_subset_repartition_min_partitions() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--subset-repartition-min-partitions", "8"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.subset_repartition_threshold, 8);
     }
 
     #[test]
