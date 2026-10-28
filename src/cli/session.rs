@@ -192,6 +192,42 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.prefer_sort_merge_join {
         config.options_mut().optimizer.prefer_hash_join = false;
     }
+    if let Some(codec) = args.spill_compression.as_deref() {
+        config = config.set_str("datafusion.execution.spill_compression", codec);
+    }
+    if let Some(value) = args.max_buffered_output_batches {
+        config = config.set_usize("datafusion.execution.max_buffered_batches_per_output_file", value);
+    }
+    if let Some(value) = args.default_filter_selectivity {
+        config.options_mut().optimizer.default_filter_selectivity = value;
+    }
+    if let Some(value) = args.parquet_column_index_truncate {
+        config = config.set_usize("datafusion.execution.parquet.column_index_truncate_length", value);
+    }
+    if let Some(value) = args.parquet_statistics_truncate {
+        config = config.set_usize("datafusion.execution.parquet.statistics_truncate_length", value);
+    }
+    if let Some(value) = args.parquet_bloom_ndv {
+        config = config.set_usize("datafusion.execution.parquet.bloom_filter_ndv", value);
+    }
+    if let Some(value) = args.parquet_dictionary_page_bytes {
+        config = config.set_usize("datafusion.execution.parquet.dictionary_page_size_limit", value);
+    }
+    if let Some(value) = args.parquet_row_group_bytes {
+        config = config.set_usize("datafusion.execution.parquet.max_row_group_bytes", value);
+    }
+    if let Some(value) = args.optimizer_passes {
+        config = config.set_usize("datafusion.optimizer.max_passes", value);
+    }
+    if args.parquet_serial_file_write {
+        config.options_mut().execution.parquet.allow_single_file_parallelism = false;
+    }
+    if let Some(value) = args.min_parallel_output_files {
+        config = config.set_usize("datafusion.execution.minimum_parallel_output_files", value);
+    }
+    if args.disable_file_work_stealing {
+        config.options_mut().execution.enable_file_stream_work_stealing = false;
+    }
     if args.enforce_join_batch_size {
         config.options_mut().execution.enforce_batch_size_in_joins = true;
     }
@@ -419,6 +455,280 @@ mod tests {
             datafusion_default.options().optimizer.prefer_hash_join
         );
         assert_eq!(configured.options().optimizer.prefer_hash_join, false);
+    }
+
+    #[test]
+    fn supports_opt_in_spill_compression_codecs() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--spill-compression",
+            "lz4_frame",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.spill_compression.to_string(),
+            defaults.options().execution.spill_compression.to_string()
+        );
+        assert_eq!(
+            configured.options().execution.spill_compression.to_string(),
+            "lz4_frame"
+        );
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--spill-compression",
+            "not-a-codec",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn validates_and_configures_max_buffered_output_batches() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--max-buffered-output-batches",
+            "8",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().execution.max_buffered_batches_per_output_file.get(), defaults.options().execution.max_buffered_batches_per_output_file.get());
+        assert_eq!(configured.options().execution.max_buffered_batches_per_output_file.get(), 8);
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--max-buffered-output-batches",
+            "1",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn validates_and_configures_default_filter_selectivity() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--default-filter-selectivity",
+            "10",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().optimizer.default_filter_selectivity, defaults.options().optimizer.default_filter_selectivity);
+        assert_eq!(configured.options().optimizer.default_filter_selectivity, 10);
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--default-filter-selectivity",
+            "101",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn configures_parquet_column_index_truncate_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-column-index-truncate",
+            "256",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.column_index_truncate_length,
+            defaults.options().execution.parquet.column_index_truncate_length
+        );
+        assert_eq!(configured.options().execution.parquet.column_index_truncate_length, Some(256));
+    }
+
+    #[test]
+    fn configures_parquet_statistics_truncate_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-statistics-truncate",
+            "256",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.statistics_truncate_length,
+            defaults.options().execution.parquet.statistics_truncate_length
+        );
+        assert_eq!(configured.options().execution.parquet.statistics_truncate_length, Some(256));
+    }
+
+    #[test]
+    fn configures_parquet_bloom_ndv_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-bloom-ndv",
+            "10000",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.bloom_filter_ndv,
+            defaults.options().execution.parquet.bloom_filter_ndv
+        );
+        assert_eq!(configured.options().execution.parquet.bloom_filter_ndv, Some(10000));
+    }
+
+    #[test]
+    fn configures_parquet_dictionary_page_bytes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-dictionary-page-bytes",
+            "2097152",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.dictionary_page_size_limit,
+            defaults.options().execution.parquet.dictionary_page_size_limit
+        );
+        assert_eq!(configured.options().execution.parquet.dictionary_page_size_limit, 2097152);
+    }
+
+    #[test]
+    fn configures_parquet_row_group_bytes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-row-group-bytes",
+            "134217728",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.max_row_group_bytes.map(|v| v.get()),
+            defaults.options().execution.parquet.max_row_group_bytes.map(|v| v.get())
+        );
+        assert_eq!(
+            configured.options().execution.parquet.max_row_group_bytes.map(|v| v.get()),
+            Some(134217728)
+        );
+    }
+
+    #[test]
+    fn configures_optimizer_passes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--optimizer-passes",
+            "5",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().optimizer.max_passes,
+            defaults.options().optimizer.max_passes
+        );
+        assert_eq!(
+            configured.options().optimizer.max_passes,
+            5
+        );
+    }
+
+    #[test]
+    fn toggles_parquet_serial_file_write_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-serial-file-write",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().execution.parquet.allow_single_file_parallelism, defaults.options().execution.parquet.allow_single_file_parallelism);
+        assert_eq!(configured.options().execution.parquet.allow_single_file_parallelism, false);
+    }
+
+    #[test]
+    fn configures_min_parallel_output_files_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--min-parallel-output-files",
+            "8",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.minimum_parallel_output_files.get(),
+            defaults.options().execution.minimum_parallel_output_files.get()
+        );
+        assert_eq!(configured.options().execution.minimum_parallel_output_files.get(), 8);
+    }
+
+    #[test]
+    fn toggles_disable_file_work_stealing_only_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--disable-file-work-stealing",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.enable_file_stream_work_stealing,
+            defaults.options().execution.enable_file_stream_work_stealing
+        );
+        assert_eq!(configured.options().execution.enable_file_stream_work_stealing, false);
     }
 
     #[test]
