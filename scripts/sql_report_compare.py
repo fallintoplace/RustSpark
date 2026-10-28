@@ -84,13 +84,17 @@ def _compare_query(number, before, after, max_slowdown):
     baseline_ms, candidate_ms = before.get("median_ms"), after.get("median_ms")
     if not is_duration(baseline_ms) or not is_duration(candidate_ms):
         return None, f"Query {number}: invalid latency", False
-    ratio = candidate_ms / baseline_ms if baseline_ms > 0 else None
+    raw_ratio = candidate_ms / baseline_ms if baseline_ms > 0 else None
+    overflow = raw_ratio is not None and not math.isfinite(raw_ratio)
+    ratio = None if overflow else raw_ratio
     timing = {
         "id": number, "reference_ms": baseline_ms,
         "candidate_ms": candidate_ms, "slowdown": ratio,
+        "ratio_overflow": overflow,
     }
     slowed = max_slowdown is not None and (
         (baseline_ms == 0 and candidate_ms > 0)
+        or overflow
         or (ratio is not None and ratio > max_slowdown)
     )
     return timing, None, slowed
