@@ -1,6 +1,7 @@
 use crate::{
     aggregate::{AggregateItem, AggregateOp},
     expr::{BinaryOp, Expr},
+    join::JoinKind,
     lexer::{Token, tokenize},
     plan::Plan,
     project::Selection,
@@ -232,7 +233,7 @@ impl Parser {
         Ok(SelectItem::Scalar(Selection::new(expr, alias)))
     }
 
-    fn select(&mut self) -> Result<Plan> {
+    fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
         let mut select = Vec::new();
@@ -244,6 +245,35 @@ impl Parser {
         }
         self.expect_word("FROM")?;
         let mut plan = Plan::scan(self.identifier()?);
+        loop {
+            let kind = if self.take_word("JOIN") {
+                Some(JoinKind::Inner)
+            } else if self.take_word("INNER") {
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Inner)
+            } else if self.take_word("LEFT") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Left)
+            } else {
+                None
+            };
+            let Some(kind) = kind else { break };
+            let right = self.identifier()?;
+            self.expect_word("ON")?;
+            let left_key = self.identifier()?;
+            if self.next() != Some(Token::Operator("=".into())) {
+                return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
+            }
+            let right_key = self.identifier()?;
+            plan = Plan::Join {
+                left: Box::new(plan),
+                right: Box::new(Plan::scan(right)),
+                left_key,
+                right_key,
+                kind,
+            };
+        }
         if self.take_word("WHERE") {
             plan = plan.filter(self.expression(0)?);
         }
@@ -259,6 +289,7 @@ impl Parser {
             }
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let grouped = has_aggregates || !group_columns.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
         if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
@@ -304,10 +335,20 @@ impl Parser {
                 .collect();
             plan = plan.project(selections);
         }
+        if self.take_word("HAVING") {
+            if !grouped {
+                return Err(Error::Unsupported("HAVING requires aggregation or GROUP BY".into()));
+            }
+            plan = plan.filter(self.expression(0)?);
+        }
         if is_distinct {
             plan = Plan::Distinct { input: Box::new(plan) };
         }
 
+        Ok(plan)
+    }
+
+    fn finish_query(&mut self, mut plan: Plan) -> Result<Plan> {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
@@ -361,7 +402,13 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let plan = parser.select()?;
+    let mut plan = parser.select_body()?;
+    while parser.take_word("UNION") {
+        parser.expect_word("ALL")?;
+        let right = parser.select_body()?;
+        plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+    }
+    let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');
     if parser.peek().is_some() {
         return Err(Error::Unsupported(format!(
@@ -437,7 +484,7 @@ mod tests {
     #[test]
     fn reject_unsupported_or_multiple_statements() {
         assert!(parse_sql("SELECT * FROM sales; DROP TABLE sales").is_err());
-        assert!(parse_sql("SELECT * FROM sales JOIN customers ON id = id").is_err());
+        assert!(parse_sql("SELECT * FROM sales JOIN customers ON id > id").is_err());
         assert!(parse_sql("SELECT city, SUM(amount) FROM sales").is_err());
     }
 }
