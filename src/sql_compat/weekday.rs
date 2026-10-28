@@ -33,7 +33,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::weekday;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::{Array, Int32Array};
 
     #[test]
     fn monday_zero_and_sunday_six_across_epoch() {
