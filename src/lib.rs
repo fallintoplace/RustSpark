@@ -105,6 +105,8 @@ mod sql_compat_bitwise_and;
 mod sql_compat_bit_get;
 #[path = "sql_compat/cbrt.rs"]
 mod sql_compat_cbrt;
+#[path = "sql_compat/monthname.rs"]
+mod sql_compat_monthname;
 #[path = "sql_compat/bitwise_or.rs"]
 mod sql_compat_bitwise_or;
 #[path = "sql_compat/cos.rs"]
@@ -328,6 +330,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_rint::udf());
         context.register_udf(sql_compat_space::udf());
+        context.register_udf(sql_compat_monthname::udf());
         context.register_udf(sql_compat_acos::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
