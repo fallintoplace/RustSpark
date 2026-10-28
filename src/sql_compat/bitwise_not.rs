@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark BITWISE_NOT rounds floating point values to the nearest even integer.
+/// Spark BITWISE_NOT inverts the bits of a signed 64-bit integer.
 fn evaluate(value: i64) -> Option<i64> {
     Some(!value)
 }
@@ -51,6 +51,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
 
     #[test]
     fn reference_vectors() {
@@ -61,11 +62,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT BITWISE_NOT(CAST(2.5 AS DOUBLE))")
+            .sql("SELECT BITWISE_NOT(CAST(12 AS BIGINT))")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), -13);
         Ok(())
     }
 }
