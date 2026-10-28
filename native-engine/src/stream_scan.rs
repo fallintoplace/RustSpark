@@ -1,0 +1,100 @@
+//! Bounded scan cursor over a native table without materializing full results.
+use crate::{
+    batch::Batch, expr::Expr, scalar::Value, schema::Schema,
+    Error, Result,
+};
+
+pub struct ScanCursor<'a> {
+    source: &'a Batch,
+    predicate: Option<Expr>,
+    columns: Vec<usize>,
+    output_schema: Schema,
+    target_rows: usize,
+    next_row: usize,
+}
+
+pub fn scan<'a>(
+    source: &'a Batch,
+    predicate: Option<Expr>,
+    projected_columns: &[&str],
+    target_rows: usize,
+) -> Result<ScanCursor<'a>> {
+    if target_rows == 0 {
+        return Err(Error::Execution("scan batch size must be positive".into()));
+    }
+    let columns = if projected_columns.is_empty() {
+        (0..source.schema().len()).collect::<Vec<_>>()
+    } else {
+        projected_columns.iter().map(|name| source.schema().column(name))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let output_schema = Schema::new(columns.iter()
+        .map(|&index| Ok(source.schema().field(index)?.clone()))
+        .collect::<Result<Vec<_>>>()?)?;
+    Ok(ScanCursor {
+        source, predicate, columns, output_schema, target_rows, next_row: 0,
+    })
+}
+
+impl Iterator for ScanCursor<'_> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
+        while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
+            let row = self.next_row;
+            self.next_row += 1;
+            let include = match &self.predicate {
+                Some(predicate) => match predicate.evaluate(self.source, row)
+                    .and_then(|value| value.as_boolean()) {
+                    Ok(result) => result == Some(true),
+                    Err(error) => return Some(Err(error)),
+                },
+                None => true,
+            };
+            if include { selected.push(row); }
+        }
+        if selected.is_empty() {
+            return None;
+        }
+        let output = self.columns.iter().map(|&column| {
+            selected.iter()
+                .map(|&row| self.source.value(row, column).cloned())
+                .collect::<Result<Vec<Value>>>()
+        }).collect::<Result<Vec<_>>>()
+            .and_then(|columns| Batch::new(self.output_schema.clone(), columns));
+        Some(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field}};
+
+    #[test]
+    fn scan_filters_before_materializing_projected_columns() {
+        let source = Batch::from_rows(
+            Schema::new(vec![
+                Field::new("id", DataType::Integer, false),
+                Field::new("flag", DataType::Boolean, true),
+            ]).unwrap(),
+            vec![
+                vec![Value::Integer(1), Value::Boolean(true)],
+                vec![Value::Integer(2), Value::Null],
+                vec![Value::Integer(3), Value::Boolean(false)],
+                vec![Value::Integer(4), Value::Boolean(true)],
+            ],
+        ).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("flag".into()), BinaryOp::Equal,
+            Expr::Literal(Value::Boolean(true)),
+        );
+        let chunks = scan(&source, Some(predicate), &["id"], 1).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].rows().unwrap(), vec![vec![Value::Integer(1)]]);
+        assert_eq!(chunks[1].rows().unwrap(), vec![vec![Value::Integer(4)]]);
+        assert!(scan(&source, None, &[], 0).is_err());
+    }
+}
