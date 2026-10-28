@@ -235,6 +235,8 @@ mod sql_compat_datediff;
 mod sql_compat_unix_date;
 #[path = "sql_compat/date_from_unix_date.rs"]
 mod sql_compat_date_from_unix_date;
+#[path = "sql_compat/dayofweek.rs"]
+mod sql_compat_dayofweek;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -407,6 +409,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_datediff::udf());
         context.register_udf(sql_compat_unix_date::udf());
         context.register_udf(sql_compat_date_from_unix_date::udf());
+        context.register_udf(sql_compat_dayofweek::udf());
         Self { context }
     }
 
