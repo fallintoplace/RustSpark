@@ -14,13 +14,11 @@ impl ReplicaStore {
     pub fn list_snapshots(&self, table: &str) -> io::Result<Vec<u64>> {
         validate_key(table)?;
         let prefix = format!("_snapshot_{table}_");
-        let mut generations = self
+        let generations = self
             .list_keys()?
             .into_iter()
             .filter_map(|key| parse_snapshot_generation(&key, &prefix))
             .collect::<Vec<_>>();
-        generations.sort_unstable();
-        generations.dedup();
         Ok(generations)
     }
 }
