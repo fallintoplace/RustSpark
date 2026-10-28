@@ -1,0 +1,104 @@
+use std::collections::{HashMap, HashSet};
+
+use crate::{
+    batch::Batch,
+    scalar::Value,
+    schema::{Field, Schema},
+    Error,
+    Result,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+}
+
+const MAX_JOIN_ROWS: usize = 1_000_000;
+
+pub fn hash_join(
+    left: &Batch,
+    right: &Batch,
+    left_key: &str,
+    right_key: &str,
+    kind: JoinKind,
+) -> Result<Batch> {
+    let left_column = left.schema().column(left_key)?;
+    let right_column = right.schema().column(right_key)?;
+    if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
+        return Err(Error::Type("join key types must match".into()));
+    }
+    let mut used: HashSet<String> = left
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name.to_ascii_lowercase())
+        .collect();
+    let mut fields = left.schema().fields().to_vec();
+    for field in right.schema().fields() {
+        let mut name = field.name.clone();
+        while used.contains(&name.to_ascii_lowercase()) {
+            name = format!("right_{name}");
+        }
+        used.insert(name.to_ascii_lowercase());
+        fields.push(Field::new(name, field.data_type, true));
+    }
+    let schema = Schema::new(fields)?;
+    let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
+    for row in 0..right.num_rows() {
+        let key = right.value(row, right_column)?;
+        if !key.is_null() {
+            right_hash.entry(key.clone()).or_default().push(row);
+        }
+    }
+    let mut output = Vec::new();
+    for left_row in 0..left.num_rows() {
+        let key = left.value(left_row, left_column)?;
+        let right_rows = if key.is_null() { None } else { right_hash.get(key) };
+        if let Some(right_rows) = right_rows {
+            for &right_row in right_rows {
+                if output.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("join output exceeds safety limit".into()));
+                }
+                let mut row = left.row(left_row)?;
+                row.extend(right.row(right_row)?);
+                output.push(row);
+            }
+        } else if kind == JoinKind::Left {
+            if output.len() >= MAX_JOIN_ROWS {
+                return Err(Error::Execution("join output exceeds safety limit".into()));
+            }
+            let mut row = left.row(left_row)?;
+            row.extend(vec![Value::Null; right.schema().len()]);
+            output.push(row);
+        }
+    }
+    Batch::from_rows(schema, output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn table(values: &[Value], name: &str) -> Batch {
+        Batch::from_rows(
+            Schema::new(vec![Field::new(name, DataType::Integer, true)]).unwrap(),
+            values.iter().cloned().map(|value| vec![value]).collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn left_join_preserves_unmatched_rows_and_never_matches_nulls() {
+        let left = table(&[Value::Integer(1), Value::Null, Value::Integer(2)], "id");
+        let right = table(&[Value::Integer(1), Value::Null], "id");
+        let result = hash_join(&left, &right, "id", "id", JoinKind::Left).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(1)],
+            vec![Value::Null, Value::Null],
+            vec![Value::Integer(2), Value::Null],
+        ]);
+        assert_eq!(result.schema().column("right_id").unwrap(), 1);
+    }
+}

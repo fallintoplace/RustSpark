@@ -29,3 +29,5 @@ pub mod sort;
 pub mod aggregate;
 
 pub mod distinct;
+
+pub mod join;
