@@ -16,6 +16,15 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // Reuse a scalar left operand without expanding it to an Arrow array.
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
+                let right = right.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("try_divide expects Int64".into()))?;
+                let result: Float64Array = right.iter()
+                    .map(|right| (*lhs).zip(right).and_then(|(left, right)| (right != 0).then(|| left as f64 / right as f64)))
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(result)));
+            }
             // A SQL literal remains a scalar. Avoid expanding it into a full input array.
             if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(rhs))] = args {
                 let left = left.as_any().downcast_ref::<Int64Array>()
@@ -54,4 +63,24 @@ pub(crate) fn udf() -> ScalarUDF {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod constant_left_regression {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::Float64Array;
+
+    #[tokio::test]
+    async fn evaluates_scalar_left_with_nulls_and_boundaries() -> datafusion::error::Result<()> {
+        let rows = RustSparkSession::new()
+            .sql("SELECT TRY_DIVIDE(CAST(10 AS BIGINT), v) FROM (VALUES (0, CAST(2 AS BIGINT)), (1, CAST(-4 AS BIGINT)), (2, CAST(0 AS BIGINT)), (3, CAST(NULL AS BIGINT))) AS t(idx, v) ORDER BY idx")
+            .await?.collect().await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let column = batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+            actual.extend(column.iter());
+        }
+        assert_eq!(actual, vec![Some(5.0), Some(-2.5), None, None]);
+        Ok(())
+    }
 }
