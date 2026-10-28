@@ -66,7 +66,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| match (left, right) {
-                    (Some(left), Some(right)) => pmod_value(left, right)
+                    (Some(left), Some(right)) => pmod_value(left, right),
                     _ => None,
                 })
                 .collect();
