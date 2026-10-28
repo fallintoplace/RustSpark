@@ -279,6 +279,10 @@ struct Args {
     #[arg(long = "parquet-predicate-cache-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     parquet_predicate_cache_bytes: Option<usize>,
 
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-metadata-hint-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_metadata_hint_bytes: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
