@@ -21,6 +21,11 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    value.and_then(evaluate),
+                )));
+            }
             let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
@@ -74,4 +79,9 @@ mod tests {
         assert_eq!(values.value(0), -12);
         Ok(())
     }
+    #[test]
+    fn negating_minimum_wraps_without_panicking() {
+        assert_eq!(evaluate(i64::MIN), Some(i64::MIN));
+    }
+
 }
