@@ -172,6 +172,7 @@ mod repair_inventory_feature_tests {
         }
         assert_eq!(store.repair_all_missing().unwrap(), 2);
         assert_eq!(store.repair_all_missing().unwrap(), 0);
-        assert_eq!(store.verify_all().unwrap().len(), 2);
+        assert_eq!(store.verify("a.parquet").unwrap().healthy, 2);
+        assert_eq!(store.verify("b.parquet").unwrap().healthy, 2);
     }
 }
