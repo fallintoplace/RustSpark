@@ -79,10 +79,10 @@ mod tests {
         assert_eq!(values.value(0), -13);
         Ok(())
     }
+
     #[test]
     fn complement_preserves_signed_boundaries() {
         assert_eq!(evaluate(0), Some(-1));
         assert_eq!(evaluate(i64::MIN), Some(i64::MAX));
     }
-
 }
