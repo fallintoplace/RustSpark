@@ -12,7 +12,7 @@ def check_samples(entry):
     samples = entry.get("samples_ms")
     if not isinstance(samples, list) or len(samples) < 3:
         raise ValueError("At least three measured samples are required")
-    if any(type(x) not in (int, float) or not math.isfinite(x) or x < 0 for x in samples):
+    if any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0 for x in samples):
         raise ValueError("Invalid timing sample")
     median = statistics.median(samples)
     recorded = entry.get("median_ms")
