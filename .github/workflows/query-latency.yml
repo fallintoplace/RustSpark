@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - scripts/bench_query_latency.py
+      - src/sql_results.rs
+      - src/cli/query.rs
       - scripts/test_bench_query_latency.py
       - benchmarks/README.md
       - .github/workflows/query-latency.yml
