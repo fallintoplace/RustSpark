@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Control read-ahead memory per partition after sort pushdown.
+    #[arg(long = "sort-pushdown-buffer-mb", value_name = "MIB", value_parser = parse_sort_pushdown_buffer_bytes)]
+    sort_pushdown_buffer_bytes: Option<usize>,
+
     /// Expose the threshold for sorting in a single RecordBatch.
     #[arg(long = "sort-in-place-max-mb", value_name = "MIB", value_parser = parse_sort_in_place_threshold_bytes)]
     sort_in_place_threshold_bytes: Option<usize>,
@@ -773,6 +777,12 @@ fn parse_sort_in_place_threshold_bytes(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--sort-in-place-max-mb")?
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "--sort-in-place-max-mb exceeds the supported range".into())
+}
+
+fn parse_sort_pushdown_buffer_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-pushdown-buffer-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-pushdown-buffer-mb exceeds the supported range".into())
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
