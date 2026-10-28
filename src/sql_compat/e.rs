@@ -31,8 +31,16 @@ mod tests {
 
     #[tokio::test]
     async fn e_is_available_as_sql_constant() -> datafusion::error::Result<()> {
-        let batches = RustSparkSession::new().sql("SELECT E()").await?.collect().await?;
-        let values = batches[0].column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let batches = RustSparkSession::new()
+            .sql("SELECT E()")
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
         assert_eq!(values.value(0), std::f64::consts::E);
         Ok(())
     }
