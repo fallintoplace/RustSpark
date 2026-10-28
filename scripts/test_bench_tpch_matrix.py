@@ -47,6 +47,18 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(report["best_complete_partitions"], 2)
             self.assertEqual(report["configurations"][1]["sum_median_ms"], 44.0)
 
+    def test_sql_fingerprints_must_match_across_partitions(self):
+        known = {}
+        matrix.verify_sql_fingerprints([
+            {"id": 1, "status": "ok", "sql_sha256": "a" * 64},
+        ], known)
+        with self.assertRaisesRegex(ValueError, "changed SQL"):
+            matrix.verify_sql_fingerprints([
+                {"id": 1, "status": "ok", "sql_sha256": "b" * 64},
+            ], known)
+        with self.assertRaisesRegex(ValueError, "lost its SQL fingerprint"):
+            matrix.verify_sql_fingerprints([{"id": 1, "status": "ok"}], known)
+
     def test_creates_runner_command(self):
         args = matrix.run_command("rs", "queries", "data", 8, "report.json", 2, 1)
         self.assertEqual(args[args.index("--target-partitions") + 1], "8")
