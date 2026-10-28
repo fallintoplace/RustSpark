@@ -79,3 +79,53 @@ mod tests {
         assert!(migrated.is_file());
     }
 }
+
+impl ReplicaStore {
+    /// Remove older snapshot manifests by generation cutoff while always
+    /// preserving the newest one. Object data is not removed. Run only in a
+    /// maintenance window, not concurrently with snapshot readers.
+    pub fn retain_snapshots_since(&self, table: &str, first_to_keep: u64) -> io::Result<Vec<u64>> {
+        let generations = self.list_snapshots(table)?;
+        let latest = generations.last().copied();
+        let mut removed = Vec::new();
+        for generation in generations {
+            if generation >= first_to_keep || Some(generation) == latest {
+                continue;
+            }
+            if self.delete(&snapshot_key(table, generation)?)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Snapshot was not present in assigned replica placements",
+                ));
+            }
+            removed.push(generation);
+        }
+        Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod retention_cutoff_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn respects_generation_cutoff_but_keeps_latest() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        store.put("part.parquet", b"data").unwrap();
+        for generation in 1..=4 {
+            store
+                .create_snapshot("sales", generation, vec!["part.parquet".into()])
+                .unwrap();
+        }
+        assert_eq!(store.retain_snapshots_since("sales", 3).unwrap(), [1, 2]);
+        assert_eq!(store.retain_snapshots_since("sales", 99).unwrap(), [3]);
+        assert_eq!(store.list_snapshots("sales").unwrap(), [4]);
+        assert_eq!(store.get("part.parquet").unwrap(), b"data");
+    }
+}
