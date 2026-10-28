@@ -543,6 +543,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Override estimated fallback filter selectivity, from 0 to 100.
+    #[arg(long = "default-filter-selectivity", value_name = "PERCENT", value_parser = parse_filter_selectivity)]
+    default_filter_selectivity: Option<u8>,
+
     /// Tune Parquet writer statistics for selective queries.
     #[arg(long = "parquet-column-index-truncate", value_name = "LENGTH", value_parser = parse_positive_tuning_usize)]
     parquet_column_index_truncate: Option<usize>,
@@ -1045,6 +1049,14 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_filter_selectivity(value: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .ok_or_else(|| "--default-filter-selectivity must be between 0 and 100".to_owned())
 }
 
 fn parse_positive_tuning_usize(value: &str) -> Result<usize, String> {
