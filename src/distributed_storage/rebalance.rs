@@ -127,3 +127,58 @@ mod tests {
         assert_eq!(original.get("large.parquet").unwrap(), bytes);
     }
 }
+
+impl ReplicaStore {
+    /// Return keys whose assigned replica node IDs differ in the destination
+    /// topology. This is a dry-run inventory report; it copies no bytes.
+    pub fn placement_migration_keys(&self, destination: &ReplicaStore) -> io::Result<Vec<String>> {
+        let mut changed = Vec::new();
+        for key in self.list_keys()? {
+            let mut current = self
+                .placements(&key)?
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>();
+            let mut next = destination
+                .placements(&key)?
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>();
+            current.sort_unstable();
+            next.sort_unstable();
+            if current != next {
+                changed.push(key);
+            }
+        }
+        Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod migration_plan_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn predicts_replica_expansion_without_copying_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let original = ReplicaStore::new(vec![nodes[0].clone()], 1).unwrap();
+        original.put("a.parquet", b"a").unwrap();
+        original.put("b.parquet", b"b").unwrap();
+        let expanded = ReplicaStore::new(nodes, 2).unwrap();
+        assert_eq!(
+            original.placement_migration_keys(&expanded).unwrap(),
+            ["a.parquet", "b.parquet"]
+        );
+        assert_eq!(original.placement_migration_keys(&original).unwrap(), Vec::<String>::new());
+        assert_eq!(expanded.list_keys().unwrap().len(), 2);
+    }
+}
