@@ -83,6 +83,30 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Tune how many existing partitions are needed before avoiding a subset repartition.
+    #[arg(long = "subset-repartition-min-partitions", value_name = "COUNT", value_parser = parse_subset_repartition_min_partitions)]
+    subset_repartition_min_partitions: Option<usize>,
+
+    /// Expose the group-to-row ratio that triggers skipping partial aggregation.
+    #[arg(long = "partial-agg-skip-ratio", value_name = "RATIO", value_parser = parse_partial_agg_skip_ratio)]
+    partial_agg_skip_ratio: Option<f64>,
+
+    /// Control when an aggregate samples group cardinality before bypassing partial aggregation.
+    #[arg(long = "partial-agg-probe-rows", value_name = "COUNT", value_parser = parse_partial_agg_probe_rows)]
+    partial_agg_probe_rows: Option<usize>,
+
+    /// Control read-ahead memory per partition after sort pushdown.
+    #[arg(long = "sort-pushdown-buffer-mb", value_name = "MIB", value_parser = parse_sort_pushdown_buffer_bytes)]
+    sort_pushdown_buffer_bytes: Option<usize>,
+
+    /// Expose the threshold for sorting in a single RecordBatch.
+    #[arg(long = "sort-in-place-max-mb", value_name = "MIB", value_parser = parse_sort_in_place_threshold_bytes)]
+    sort_in_place_threshold_bytes: Option<usize>,
+
+    /// Expose the memory reservation for spillable sort merges.
+    #[arg(long = "sort-spill-reserve-mb", value_name = "MIB", value_parser = parse_sort_spill_reserve_bytes)]
+    sort_spill_reserve_bytes: Option<usize>,
+
     /// Expose the estimated build-side row threshold for single-partition joins.
     #[arg(long = "hash-join-single-partition-rows", value_name = "COUNT", value_parser = parse_hash_join_single_partition_rows)]
     hash_join_single_partition_rows: Option<usize>,
@@ -753,6 +777,42 @@ fn parse_perfect_hash_small_range(value: &str) -> Result<usize, String> {
 
 fn parse_hash_join_single_partition_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--hash-join-single-partition-rows")
+}
+
+fn parse_sort_spill_reserve_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-spill-reserve-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-spill-reserve-mb exceeds the supported range".into())
+}
+
+fn parse_sort_in_place_threshold_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-in-place-max-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-in-place-max-mb exceeds the supported range".into())
+}
+
+fn parse_sort_pushdown_buffer_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-pushdown-buffer-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-pushdown-buffer-mb exceeds the supported range".into())
+}
+
+fn parse_partial_agg_probe_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--partial-agg-probe-rows")
+}
+
+fn parse_partial_agg_skip_ratio(value: &str) -> Result<f64, String> {
+    let ratio = value.parse::<f64>()
+        .map_err(|_| "--partial-agg-skip-ratio requires a finite ratio between 0 and 1")?;
+    if ratio.is_finite() && (0.0..=1.0).contains(&ratio) {
+        Ok(ratio)
+    } else {
+        Err("--partial-agg-skip-ratio requires a finite ratio between 0 and 1".into())
+    }
+}
+
+fn parse_subset_repartition_min_partitions(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--subset-repartition-min-partitions")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
