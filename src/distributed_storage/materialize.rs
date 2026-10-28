@@ -16,6 +16,9 @@ impl ReplicaStore {
         destination: &Path,
     ) -> io::Result<Vec<PathBuf>> {
         let manifest = self.read_snapshot(table, generation)?;
+        if manifest.objects().iter().any(|key| !key.ends_with(".parquet")) {
+            return Err(invalid("Snapshot contains a non-Parquet object"));
+        }
         match fs::symlink_metadata(destination) {
             Ok(_) => return Err(io::Error::new(ErrorKind::AlreadyExists, "Destination exists")),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -27,18 +30,17 @@ impl ReplicaStore {
             .tempdir_in(parent)?;
         let private = stage.path().join("parts");
         fs::create_dir(&private)?;
-        let mut filenames = Vec::new();
+        let mut filenames = Vec::with_capacity(manifest.objects().len());
         for (index, key) in manifest.objects().iter().enumerate() {
-            if !key.ends_with(".parquet") {
-                return Err(invalid("Snapshot contains a non-Parquet object"));
-            }
             let filename = format!("part-{index:06}.parquet");
             self.export(key, &private.join(&filename))?;
             filenames.push(filename);
         }
         // This directory rename is atomic on the destination filesystem.
-        if fs::symlink_metadata(destination).is_ok() {
-            return Err(io::Error::new(ErrorKind::AlreadyExists, "Destination appeared"));
+        match fs::symlink_metadata(destination) {
+            Ok(_) => return Err(io::Error::new(ErrorKind::AlreadyExists, "Destination appeared")),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
         fs::rename(private, destination)?;
         Ok(filenames
@@ -76,5 +78,23 @@ mod tests {
         assert_eq!(fs::read(&paths[0]).unwrap(), b"first");
         assert_eq!(fs::read(&paths[1]).unwrap(), b"second");
         assert!(store.materialize_snapshot("sales", 1, &destination).is_err());
+    }
+
+    #[test]
+    fn rejects_non_parquet_manifest_before_publishing_any_parts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        ).unwrap();
+        store.put("good.parquet", b"big source").unwrap();
+        store.create_snapshot(
+            "mixed",
+            1,
+            vec!["good.parquet".into(), "not-parquet.csv".into()],
+        ).unwrap();
+        let destination = root.path().join("should-not-exist");
+        assert!(store.materialize_snapshot("mixed", 1, &destination).is_err());
+        assert!(!destination.exists());
     }
 }
