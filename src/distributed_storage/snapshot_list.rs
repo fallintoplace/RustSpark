@@ -2,6 +2,14 @@ use std::io;
 
 use super::{ReplicaStore, validate_key};
 
+fn parse_snapshot_generation(key: &str, prefix: &str) -> Option<u64> {
+    let suffix = key.strip_prefix(prefix)?;
+    if suffix.len() != 20 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u64>().ok().filter(|generation| *generation > 0)
+}
+
 impl ReplicaStore {
     pub fn list_snapshots(&self, table: &str) -> io::Result<Vec<u64>> {
         validate_key(table)?;
@@ -9,12 +17,7 @@ impl ReplicaStore {
         let mut generations = self
             .list_keys()?
             .into_iter()
-            .filter_map(|key| {
-                key.strip_prefix(&prefix)
-                    .filter(|suffix| suffix.len() == 20 && suffix.bytes().all(|b| b.is_ascii_digit()))
-                    .and_then(|suffix| suffix.parse::<u64>().ok())
-                    .filter(|generation| *generation > 0)
-            })
+            .filter_map(|key| parse_snapshot_generation(&key, &prefix))
             .collect::<Vec<_>>();
         generations.sort_unstable();
         generations.dedup();
@@ -26,6 +29,23 @@ impl ReplicaStore {
 mod tests {
     use super::*;
     use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn parses_only_positive_padded_generations() {
+        let prefix = "_snapshot_sales_";
+        assert_eq!(
+            parse_snapshot_generation("_snapshot_sales_00000000000000000007", prefix),
+            Some(7)
+        );
+        for key in [
+            "_snapshot_sales_7",
+            "_snapshot_sales_00000000000000000000",
+            "_snapshot_other_00000000000000000007",
+            "_snapshot_sales_0000000000000000000a",
+        ] {
+            assert_eq!(parse_snapshot_generation(key, prefix), None);
+        }
+    }
 
     #[test]
     fn discovers_snapshots_without_mixing_tables() {
