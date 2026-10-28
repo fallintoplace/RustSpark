@@ -114,7 +114,10 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader, resolve_manifest_path};
+    use super::{
+        earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader,
+        resolve_manifest_path,
+    };
     use std::{fs, io::Cursor, path::Path};
 
     #[test]
