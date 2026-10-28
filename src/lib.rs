@@ -83,6 +83,8 @@ mod set_operations;
 mod sources;
 #[path = "sql_compat/acos.rs"]
 mod sql_compat_acos;
+#[path = "sql_compat/ascii.rs"]
+mod sql_compat_ascii;
 #[path = "sql_compat/acosh.rs"]
 mod sql_compat_acosh;
 #[path = "sql_compat/asin.rs"]
@@ -329,6 +331,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_rint::udf());
         context.register_udf(sql_compat_space::udf());
         context.register_udf(sql_compat_acos::udf());
+        context.register_udf(sql_compat_ascii::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
         context.register_udf(sql_compat_nullifzero::udf());
