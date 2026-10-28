@@ -195,6 +195,8 @@ mod sql_compat_locate;
 mod sql_compat_space;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
+#[path = "sql_compat/timestamp_micros.rs"]
+mod sql_compat_timestamp_micros;
 #[path = "sql_compat/tan.rs"]
 mod sql_compat_tan;
 #[path = "sql_compat/tanh.rs"]
@@ -322,6 +324,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_sin::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_timestamp_micros::udf());
         context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
         context.register_udf(sql_compat_conv::udf());
