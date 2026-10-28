@@ -111,6 +111,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.default_filter_selectivity {
+        config.options_mut().optimizer.default_filter_selectivity = value;
+    }
     config
 }
 
@@ -306,6 +309,32 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn validates_and_configures_default_filter_selectivity() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--default-filter-selectivity",
+            "10",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().optimizer.default_filter_selectivity, defaults.options().optimizer.default_filter_selectivity);
+        assert_eq!(configured.options().optimizer.default_filter_selectivity, 10);
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--default-filter-selectivity",
+            "101",
+        ])
+        .is_err());
     }
 
     #[test]
