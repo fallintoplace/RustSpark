@@ -28,6 +28,8 @@ mod session_filters;
 mod sources;
 #[path = "features/top_rows_per_group.rs"]
 mod feature_top_rows_per_group;
+#[path = "features/grouped_weighted_mean.rs"]
+mod feature_grouped_weighted_mean;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/cos.rs"]
