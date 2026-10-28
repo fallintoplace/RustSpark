@@ -275,6 +275,10 @@ struct Args {
     #[arg(long = "parquet-in-list-pruning-limit", value_name = "VALUES", value_parser = parse_positive_tuning_usize)]
     parquet_in_list_pruning_limit: Option<usize>,
 
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-predicate-cache-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_predicate_cache_bytes: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",

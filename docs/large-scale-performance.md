@@ -7,3 +7,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 ## Available tuning knobs
 
 - `--parquet-in-list-pruning-limit 128`: consider up to 128 literal values for Parquet min/max file, row-group, and page pruning. Larger lists add planning and pruning work; compare against default.
+- `--parquet-predicate-cache-bytes 67108864`: Cache predicate evaluations during pushdown, trading memory for reduced CPU and I/O; requires --parquet-pushdown-filters.

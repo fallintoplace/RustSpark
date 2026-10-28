@@ -36,6 +36,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(limit) = args.parquet_in_list_pruning_limit {
         config.options_mut().execution.parquet.max_in_list_size = limit;
     }
+    if let Some(value) = args.parquet_predicate_cache_bytes {
+        config.options_mut().execution.parquet.max_predicate_cache_size = Some(value);
+    }
     config
 }
 
@@ -105,6 +108,13 @@ mod tests {
         assert!(Args::try_parse_from([
             "rustspark", "--sql", "SELECT 1", "--parquet-in-list-pruning-limit", "0",
         ]).is_err());
+    }
+
+    #[test]
+    fn sets_parquet_predicate_cache_bytes_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-predicate-cache-bytes", "67108864"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.max_predicate_cache_size, Some(67108864));
     }
 
     #[test]
