@@ -51,6 +51,17 @@ class FootprintTests(unittest.TestCase):
             self.assertEqual(len(changed["changed_tables"]), 8)
             self.assertTrue(changed["identical_sql"])
 
+    def test_conflicting_physical_size_is_not_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_fixture(root / "first")
+            before = footprint.profile(root / "first")
+            after = copy.deepcopy(before)
+            after["tables"]["customer"]["physical_bytes"] += 1
+            comparison = footprint.compare(before, after)
+            self.assertFalse(comparison["identical_parquet_inputs"])
+            self.assertEqual(comparison["changed_tables"], ["customer"])
+
     def test_streamed_sha_matches_known_digest(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "big.parquet"
