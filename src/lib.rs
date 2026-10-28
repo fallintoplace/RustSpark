@@ -145,6 +145,8 @@ mod sql_compat_weekofyear;
 mod sql_compat_positive;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
+#[path = "sql_compat/dayname.rs"]
+mod sql_compat_dayname;
 #[path = "sql_compat/negative.rs"]
 mod sql_compat_negative;
 #[path = "sql_compat/csc.rs"]
@@ -408,6 +410,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_timestamp_millis::udf());
         context.register_udf(sql_compat_monthname::udf());
         context.register_udf(sql_compat_acos::udf());
+        context.register_udf(sql_compat_dayname::udf());
         context.register_udf(sql_compat_year::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
