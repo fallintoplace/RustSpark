@@ -20,7 +20,9 @@ pub(crate) fn udf() -> ScalarUDF {
                 )));
             }
             let [ColumnarValue::Array(array)] = args else {
-                return Err(DataFusionError::Internal("degrees expects a Float64 array".into()));
+                return Err(DataFusionError::Internal(
+                    "degrees expects a Float64 array".into(),
+                ));
             };
             let values = array
                 .as_any()
@@ -55,7 +57,10 @@ mod array_fast_path_tests {
                 .unwrap();
             actual.extend(values.iter());
         }
-        assert_eq!(actual, vec![Some(0.25_f64.to_degrees()), None, Some(0.5_f64.to_degrees())]);
+        assert_eq!(
+            actual,
+            vec![Some(0.25_f64.to_degrees()), None, Some(0.5_f64.to_degrees())]
+        );
         Ok(())
     }
 }
