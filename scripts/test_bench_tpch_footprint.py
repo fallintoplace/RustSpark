@@ -67,6 +67,17 @@ class FootprintTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "scale factors"):
                 footprint.compare(report, other)
 
+    def test_changed_row_metadata_is_not_an_identical_fixture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_fixture(root / "first")
+            before = footprint.profile(root / "first")
+            after = json.loads(json.dumps(before))
+            after["tables"]["customer"]["rows"] += 1
+            difference = footprint.compare(before, after)
+            self.assertFalse(difference["identical_parquet_inputs"])
+            self.assertEqual(difference["changed_tables"], ["customer"])
+
 
 if __name__ == "__main__":
     unittest.main()
