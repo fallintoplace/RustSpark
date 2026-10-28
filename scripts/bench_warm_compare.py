@@ -73,10 +73,13 @@ for request in requests:
 
 
 def parse_result_line(line):
-    return json.loads(
+    value = json.loads(
         line, object_pairs_hook=_unique_json_keys, parse_constant=_reject_nonfinite_json,
         parse_float=_finite_json_float,
     )
+    if not isinstance(value, dict):
+        raise ValueError("Warm SQL worker must emit JSON objects")
+    return value
 
 
 def requests_for(warmup, repeat):
