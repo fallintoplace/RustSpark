@@ -49,6 +49,13 @@ class SmokeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not already exist"):
                 smoke.run_smoke("rs", Path(tmp), Path(tmp) / "out.json")
 
+    def test_full_suite_rejects_boolean_and_non_object_ids(self):
+        records = [{"id": n, "status": "ok"} for n in range(1, 23)]
+        records[0]["id"] = True
+        self.assertFalse(smoke.complete_query_results(records))
+        records[0] = None
+        self.assertFalse(smoke.complete_query_results(records))
+
 
 if __name__ == "__main__":
     unittest.main()
