@@ -1,0 +1,12 @@
+[
+  {
+    "id": "rank_dense_rank_ties",
+    "ordered": true,
+    "sql": "SELECT id, RANK() OVER (ORDER BY v DESC) AS rank_v, DENSE_RANK() OVER (ORDER BY v DESC) AS dense_v FROM (VALUES (1, 20), (2, 20), (3, 10)) AS t(id, v) ORDER BY id"
+  },
+  {
+    "id": "row_number_partition_order",
+    "ordered": true,
+    "sql": "SELECT id, ROW_NUMBER() OVER (PARTITION BY (id % 2) ORDER BY v DESC, id) AS rn FROM (VALUES (1, 5), (2, 6), (3, 7), (4, 2)) AS t(id, v) ORDER BY id"
+  }
+]
