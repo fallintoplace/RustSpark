@@ -25,7 +25,8 @@ fn evaluate(input: &str, matching: &str, replacement: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for character in input.chars() {
         match dictionary.get(&character) {
-            Some(Some(mapped)) => output.push(*mapped),
+            Some(Some(mapped)) if *mapped != '\0' => output.push(*mapped),
+            Some(Some(_)) => {}
             Some(None) => {}
             None => output.push(character),
         }
@@ -99,6 +100,7 @@ mod tests {
         assert_eq!(evaluate("spark", "sa", "12"), "1p2rk");
         assert_eq!(evaluate("spark", "ss", "12"), "1park");
         assert_eq!(evaluate("café", "é", "e"), "cafe");
+        assert_eq!(evaluate("ab", "ab", "\\0Z"), "ab");
     }
 
     #[tokio::test]
