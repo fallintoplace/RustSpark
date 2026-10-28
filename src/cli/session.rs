@@ -105,6 +105,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.use_row_count_estimates {
+        config.options_mut().execution.use_row_number_estimates_to_optimize_partitioning = true;
+    }
     config
 }
 
@@ -300,6 +303,26 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_use_row_count_estimates_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--use-row-count-estimates",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.use_row_number_estimates_to_optimize_partitioning,
+            datafusion_default.options().execution.use_row_number_estimates_to_optimize_partitioning
+        );
+        assert_eq!(configured.options().execution.use_row_number_estimates_to_optimize_partitioning, true);
     }
 
     #[test]
