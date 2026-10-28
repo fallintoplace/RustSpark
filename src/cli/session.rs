@@ -61,6 +61,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(bytes) = args.sort_pushdown_buffer_bytes {
         config.options_mut().execution.sort_pushdown_buffer_capacity = bytes;
     }
+    if let Some(value) = args.partial_agg_probe_rows {
+        config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -239,6 +242,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--sort-pushdown-buffer-mb", "64"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().execution.sort_pushdown_buffer_capacity, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_partial_agg_probe_rows() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--partial-agg-probe-rows", "50000"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_rows_threshold, 50000);
     }
 
     #[test]
