@@ -56,12 +56,14 @@ impl RustSparkSession {
                 "Range join fact alias cannot be blank".into(),
             ));
         }
-        let mut seen = HashSet::from([fact_alias.to_ascii_lowercase()]);
+        let mut seen = HashSet::with_capacity(ranges.len() + 1);
+        seen.insert(fact_alias.to_ascii_lowercase());
         let fact = quote_join_identifier(fact_alias);
         let mut query = format!(
             "SELECT * FROM {} AS {fact}",
             quote_catalog_table(fact_table, "Invalid range join fact table name")?
         );
+        query.reserve(ranges.len().saturating_mul(128));
 
         for range in ranges {
             if range.alias.trim().is_empty() || !seen.insert(range.alias.to_ascii_lowercase()) {
