@@ -17,19 +17,23 @@ def streamed_sha256(path):
     return digest.hexdigest()
 
 
+def profile_table(fixture, manifest, table):
+    path = inside(fixture, manifest["tables"][table])
+    rows = manifest["rows"][table]
+    size = path.stat().st_size
+    return {
+        "rows": rows, "physical_bytes": size, "sha256": streamed_sha256(path),
+        "physical_bytes_per_row": round(size / rows, 3) if rows else None,
+    }
+
+
 def profile(fixture):
     fixture = Path(fixture)
     check(fixture)
     manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
     tables = {}
     for table in sorted(TABLES):
-        path = inside(fixture, manifest["tables"][table])
-        rows = manifest["rows"][table]
-        size = path.stat().st_size
-        tables[table] = {
-            "rows": rows, "physical_bytes": size, "sha256": streamed_sha256(path),
-            "physical_bytes_per_row": round(size / rows, 3) if rows else None,
-        }
+        tables[table] = profile_table(fixture, manifest, table)
     return {
         "metric": "physical Parquet fixture size and exact file identity",
         "warning": "Disk bytes are not scan bytes or decompressed data size",
