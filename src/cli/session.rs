@@ -36,6 +36,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
             .with_repartition_file_scans(true)
             .with_repartition_file_min_size(min_bytes);
     }
+    if args.row_count_partition_estimates {
+        config.options_mut().execution.use_row_number_estimates_to_optimize_partitioning = true;
+    }
     if let Some(rows) = args.output_rows_per_file {
         config = config.set_usize("datafusion.execution.soft_max_rows_per_output_file", rows);
     }

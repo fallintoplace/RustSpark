@@ -272,6 +272,10 @@ struct Args {
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
+    /// Statistics-aware partition planning (opt-in for benchmarking).
+    #[arg(long = "row-count-partition-estimates")]
+    row_count_partition_estimates: bool,
+
     #[arg(long = "target-partitions", value_name = "PARTITIONS", value_parser = parse_target_partitions)]
     target_partitions: Option<usize>,
 
