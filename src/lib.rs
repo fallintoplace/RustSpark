@@ -187,6 +187,8 @@ mod sql_compat_bround;
 mod sql_compat_sinh;
 #[path = "sql_compat/format_number.rs"]
 mod sql_compat_format_number;
+#[path = "sql_compat/date_add.rs"]
+mod sql_compat_date_add;
 #[path = "sql_compat/soundex.rs"]
 mod sql_compat_soundex;
 #[path = "sql_compat/locate.rs"]
@@ -337,6 +339,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_pmod::udf());
         context.register_udf(sql_compat_quote::udf());
         context.register_udf(sql_compat_degrees::udf());
+        context.register_udf(sql_compat_date_add::udf());
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_atan2::udf());
         context.register_udf(sql_compat_bin::udf());
