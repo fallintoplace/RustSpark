@@ -27,6 +27,8 @@ mod list;
 
 mod export;
 
+mod manifest;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
