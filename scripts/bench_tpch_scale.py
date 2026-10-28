@@ -45,19 +45,23 @@ def run_scale(prepare, run, report):
             "status": "ok" if len(rows) == 22 and ok == 22 and process.returncode == 0 else "error"}
 
 
+def measure_scale(factor, binary, output):
+    fixture, report, prepare, run = commands(factor, binary, output)
+    item = {"scale_factor": factor, "fixture": fixture.name, "report": report.name}
+    try:
+        item.update(run_scale(prepare, run, report))
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        item.update({"status": "error", "error": str(error)[-500:]})
+    return item
+
+
 def measure(binary, output, factors):
     if output.exists():
         raise ValueError("Output directory must not exist")
     output.mkdir(parents=True)
     results = []
     for factor in factors:
-        fixture, report, prepare, run = commands(factor, binary, output)
-        item = {"scale_factor": factor, "fixture": fixture.name, "report": report.name}
-        try:
-            item.update(run_scale(prepare, run, report))
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-            item.update({"status": "error", "error": str(error)[-500:]})
-        results.append(item)
+        results.append(measure_scale(factor, binary, output))
     summary = {"metric": "cold RustSpark process per query", "scales": results}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary
