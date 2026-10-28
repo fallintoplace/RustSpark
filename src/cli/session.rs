@@ -40,6 +40,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.planning_concurrency_override {
         config.options_mut().execution.planning_concurrency = value;
     }
+    if let Some(value) = args.partial_aggregate_probe_rows {
+        config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -444,5 +447,18 @@ mod perf_parallel_planning {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--planning-concurrency", "8"]).unwrap();
         assert_eq!(build_session_config(&args).options().execution.planning_concurrency, 8);
         assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--planning-concurrency", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_partial_aggregate_probe {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_flag_updates_optimizer_config() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--partial-aggregate-probe-rows", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.skip_partial_aggregation_probe_rows_threshold, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--partial-aggregate-probe-rows", "0"]).is_err());
     }
 }
