@@ -19,6 +19,8 @@ mod verify;
 
 mod repair;
 
+mod remove;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
