@@ -34,7 +34,7 @@ fn percent_decode(input: &str) -> datafusion::error::Result<String> {
             result.push((high << 4) | low);
             index += 3;
         } else {
-            result.push(bytes[index]);
+            result.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
             index += 1;
         }
     }
