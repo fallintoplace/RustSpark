@@ -32,7 +32,11 @@ fn existing_matches(path: &Path, expected: &[u8]) -> io::Result<Option<bool>> {
 }
 
 // Compare an existing object with a staged stream using bounded buffers.
-fn existing_matches_staged(path: &Path, source: &mut File, length: u64) -> io::Result<Option<bool>> {
+fn existing_matches_staged(
+    path: &Path,
+    source: &mut File,
+    length: u64,
+) -> io::Result<Option<bool>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => {
