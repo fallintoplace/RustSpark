@@ -367,6 +367,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Use estimated row counts when choosing parallel operators.
+    #[arg(long = "use-row-count-estimates")]
+    use_row_count_estimates: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
