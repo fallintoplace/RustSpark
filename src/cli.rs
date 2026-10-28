@@ -373,6 +373,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Skip listing-time table statistics for cold-start latency.
+    #[arg(long = "skip-table-statistics")]
+    skip_table_statistics: bool,
+
     /// Keep distinct Hive partitions grouped when this many values are present.
     #[arg(
         long = "preserve-file-partitions",

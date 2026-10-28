@@ -144,6 +144,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.skip_table_statistics {
+        config.options_mut().execution.collect_statistics = false;
+    }
     if let Some(count) = args.preserve_file_partitions {
         config = config.set_usize("datafusion.optimizer.preserve_file_partitions", count);
     }
@@ -345,6 +348,26 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_skip_table_statistics_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--skip-table-statistics",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.collect_statistics,
+            datafusion_default.options().execution.collect_statistics
+        );
+        assert_eq!(configured.options().execution.collect_statistics, false);
     }
 
     #[test]
