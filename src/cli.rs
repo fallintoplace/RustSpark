@@ -327,6 +327,26 @@ struct Args {
     #[arg(long = "join-inlist-pushdown-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     join_inlist_pushdown_bytes: Option<usize>,
 
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "join-inlist-pushdown-values", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    join_inlist_pushdown_values: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "sort-in-place-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    sort_in_place_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "window-topn")]
+    window_topn: bool,
+
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "prefer-existing-sort")]
+    prefer_existing_sort: bool,
+
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "split-file-groups-by-statistics")]
+    split_file_groups_by_statistics: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
