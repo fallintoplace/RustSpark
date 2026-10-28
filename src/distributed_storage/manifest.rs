@@ -101,3 +101,32 @@ mod tests {
         assert_eq!(TableManifest::decode(&encoded).unwrap(), manifest);
     }
 }
+
+impl TableManifest {
+    /// Construct an expanded manifest without mutating the original.
+    /// Duplicate or invalid new object names are rejected.
+    pub fn with_appended_objects(&self, appended: &[String]) -> io::Result<Self> {
+        let mut objects = Vec::with_capacity(self.objects.len() + appended.len());
+        objects.extend(self.objects.iter().cloned());
+        objects.extend(appended.iter().cloned());
+        Self::new(self.table.clone(), objects)
+    }
+}
+
+#[cfg(test)]
+mod append_manifest_feature_tests {
+    use super::*;
+
+    #[test]
+    fn appended_manifest_is_immutable_and_checks_duplicates() {
+        let first = TableManifest::new("sales", vec!["a.parquet".into()]).unwrap();
+        let second = first
+            .with_appended_objects(&["b.parquet".into(), "c.parquet".into()])
+            .unwrap();
+        assert_eq!(first.objects(), ["a.parquet"]);
+        assert_eq!(second.objects(), ["a.parquet", "b.parquet", "c.parquet"]);
+        assert!(first.with_appended_objects(&["a.parquet".into()]).is_err());
+        assert!(first.with_appended_objects(&["../bad".into()]).is_err());
+        assert_eq!(second, TableManifest::decode(&second.encode()).unwrap());
+    }
+}
