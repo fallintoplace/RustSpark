@@ -1,0 +1,12 @@
+[
+  {
+    "id": "theta_inner_join",
+    "ordered": true,
+    "sql": "SELECT a.i, b.j FROM (VALUES (1), (3)) AS a(i) JOIN (VALUES (2), (4)) AS b(j) ON a.i < b.j ORDER BY a.i, b.j"
+  },
+  {
+    "id": "theta_left_join",
+    "ordered": true,
+    "sql": "SELECT a.i, b.j FROM (VALUES (1), (2)) AS a(i) LEFT JOIN (VALUES (1), (3)) AS b(j) ON a.i > b.j ORDER BY a.i, b.j"
+  }
+]

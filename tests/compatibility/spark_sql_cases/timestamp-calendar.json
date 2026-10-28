@@ -1,0 +1,10 @@
+[
+  {
+    "id": "date_trunc_day_leap_year",
+    "sql": "SELECT DATE_TRUNC('day', CAST('2024-02-29 13:14:15' AS TIMESTAMP)) AS truncated"
+  },
+  {
+    "id": "extract_leap_year_parts",
+    "sql": "SELECT EXTRACT(YEAR FROM DATE '2024-02-29') AS year_value, EXTRACT(MONTH FROM DATE '2024-02-29') AS month_value, EXTRACT(DAY FROM DATE '2024-02-29') AS day_value"
+  }
+]

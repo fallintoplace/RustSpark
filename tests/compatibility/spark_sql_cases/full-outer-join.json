@@ -1,0 +1,12 @@
+[
+  {
+    "id": "full_join_unmatched_rows",
+    "ordered": true,
+    "sql": "SELECT COALESCE(l.k, r.k) AS k, l.a, r.b FROM (VALUES (1, 10), (2, 20)) AS l(k, a) FULL OUTER JOIN (VALUES (2, 200), (3, 300)) AS r(k, b) ON l.k = r.k ORDER BY k"
+  },
+  {
+    "id": "full_join_disjoint_keys",
+    "ordered": true,
+    "sql": "SELECT l.k AS lk, r.k AS rk FROM (VALUES (1), (2)) AS l(k) FULL OUTER JOIN (VALUES (3), (4)) AS r(k) ON l.k = r.k ORDER BY COALESCE(l.k, r.k)"
+  }
+]

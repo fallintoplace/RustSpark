@@ -1,32 +1,27 @@
 use std::sync::Arc;
 
-use chrono::Datelike;
 use datafusion::{
     arrow::{array::{Date32Array, StringArray}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-
-/// Spark 4 abbreviated month names are English and independent of machine locale.
-fn calculate(days: i32) -> Option<&'static str> {
-    let date = sql_compat_spark_dates::date_from_days(days)?;
-    Some(match date.month() {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => return None,
-    })
+fn civil_from_days(days: i32) -> (i32, u32, u32) {
+    let z = i64::from(days) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    (year as i32, month as u32, day as u32)
+}
+fn value(days: i32) -> Option<String> {
+    let month = civil_from_days(days).1;
+    Some(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(month - 1) as usize].to_owned())
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -36,15 +31,13 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            if let [ColumnarValue::Scalar(ScalarValue::Date32(value))] = args {
-                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    (*value).and_then(calculate).map(str::to_owned),
-                )));
+            if let [ColumnarValue::Scalar(ScalarValue::Date32(date))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(date.and_then(value))));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0].as_any().downcast_ref::<Date32Array>()
+            let dates = arrays[0].as_any().downcast_ref::<Date32Array>()
                 .ok_or_else(|| DataFusionError::Internal("monthname expects Date32".into()))?;
-            let result: StringArray = input.iter().map(|v| v.and_then(calculate)).collect();
+            let result: StringArray = dates.iter().map(|date| date.and_then(value)).collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -52,18 +45,23 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::value;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::{Array, StringArray};
+
+    #[test]
+    fn follows_spark_calendar_rules() {
+        assert_eq!(value(0).as_deref(), Some("Jan")); assert_eq!(value(31).as_deref(), Some("Feb")); assert_eq!(value(334).as_deref(), Some("Dec"));
+    }
 
     #[tokio::test]
-    async fn uses_english_abbreviations_and_preserves_nulls() -> datafusion::error::Result<()> {
-        let query = "SELECT MONTHNAME(d) FROM (VALUES (0, DATE '2024-02-29'), (1, DATE '2024-12-01'), (2, CAST(NULL AS DATE))) AS t(id,d) ORDER BY id";
-        let batches = RustSparkSession::new().sql(query).await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            values.iter().map(|v| v.map(str::to_owned)).collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some("Feb".to_owned()), Some("Dec".to_owned()), None]);
+    async fn sql_supports_column_and_null() -> datafusion::error::Result<()> {
+        let batches = RustSparkSession::new()
+            .sql("SELECT monthname(d) FROM (VALUES (DATE '1970-01-01'), (CAST(NULL AS DATE))) AS t(d) ORDER BY d NULLS LAST")
+            .await?.collect().await?;
+        let actual = batches[0].column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(actual.value(0), "Jan");
+        assert!(actual.is_null(1));
         Ok(())
     }
 }

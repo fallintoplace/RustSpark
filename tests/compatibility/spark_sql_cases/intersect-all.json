@@ -1,0 +1,12 @@
+[
+  {
+    "id": "intersect_all_duplicate_counts",
+    "ordered": true,
+    "sql": "SELECT v FROM (SELECT v FROM (VALUES (1), (1), (2)) AS t(v) INTERSECT ALL SELECT v FROM (VALUES (1), (2), (2)) AS u(v)) AS combined ORDER BY v"
+  },
+  {
+    "id": "intersect_all_null_matches",
+    "ordered": true,
+    "sql": "SELECT v FROM (SELECT v FROM (VALUES (CAST(NULL AS BIGINT)), (CAST(NULL AS BIGINT)), (1)) AS t(v) INTERSECT ALL SELECT v FROM (VALUES (CAST(NULL AS BIGINT)), (2)) AS u(v)) AS combined ORDER BY v NULLS FIRST"
+  }
+]

@@ -102,6 +102,28 @@ class SparkCompatibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "id must not be empty"):
                 mod.load_cases(path)
 
+    def test_discover_case_fragments_in_sorted_order_and_reject_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp) / "spark_sql.json"
+            base.write_text(json.dumps([{"id": "base", "sql": "SELECT 0"}]))
+            fragments = pathlib.Path(tmp) / "spark_sql_cases"
+            fragments.mkdir()
+            (fragments / "02-window.json").write_text(
+                json.dumps({"id": "window", "sql": "SELECT 2"})
+            )
+            (fragments / "01-null.json").write_text(
+                json.dumps([{"id": "null", "sql": "SELECT 1"}])
+            )
+            self.assertEqual(
+                [case["id"] for case in mod.load_cases(base)],
+                ["base", "null", "window"],
+            )
+            (fragments / "03-duplicate.json").write_text(
+                json.dumps({"id": "null", "sql": "SELECT 3"})
+            )
+            with self.assertRaisesRegex(ValueError, "Duplicate SQL case id"):
+                mod.load_cases(base)
+
     def test_case_runner_reports_pass_diff_and_error(self):
         cases = [
             {"id": "ok", "sql": "SELECT 1"},

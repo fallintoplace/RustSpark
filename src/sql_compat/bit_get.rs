@@ -1,17 +1,26 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::Int64Array, datatypes::DataType},
+    arrow::{array::{Int8Array, Int64Array}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// bit position in the 64-bit integer.
+/// Bit position in the 64-bit integer.
+/// Spark BIT_GET and GETBIT return a ByteType (INT8) result.
 pub(crate) fn udf() -> ScalarUDF {
+    udf_named("bit_get")
+}
+
+pub(crate) fn getbit_udf() -> ScalarUDF {
+    udf_named("getbit")
+}
+
+fn udf_named(name: &str) -> ScalarUDF {
     create_udf(
-        "bit_get",
+        name,
         vec![DataType::Int64, DataType::Int64],
-        DataType::Int64,
+        DataType::Int8,
         Volatility::Immutable,
         Arc::new(|args| {
             if let [
@@ -26,11 +35,11 @@ pub(crate) fn udf() -> ScalarUDF {
                         ));
                     }
                     (Some(left), Some(position)) => {
-                        Some(((left as u64 >> (position as u32)) & 1) as i64)
+                        Some(((left as u64 >> (position as u32)) & 1) as i8)
                     }
                     _ => None,
                 };
-                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(value)));
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int8(value)));
             }
             // Keep a constant left argument as a scalar for the entire batch.
             if let [
@@ -51,13 +60,13 @@ pub(crate) fn udf() -> ScalarUDF {
                             ));
                         }
                         (Some(value), Some(position)) => {
-                            Some(((value as u64 >> (position as u32)) & 1) as i64)
+                            Some(((value as u64 >> (position as u32)) & 1) as i8)
                         }
                         _ => None,
                     };
                     result.push(value);
                 }
-                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(Int8Array::from(result))));
             }
             // Keep constant SQL operands as scalars instead of broadcasting a new Arrow array.
             if let [
@@ -78,12 +87,12 @@ pub(crate) fn udf() -> ScalarUDF {
                             ));
                         }
                         (Some(left), Some(right)) => {
-                            Some(((left as u64 >> (right as u32)) & 1) as i64)
+                            Some(((left as u64 >> (right as u32)) & 1) as i8)
                         }
                         _ => None,
                     });
                 }
-                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(Int8Array::from(result))));
             }
             let scalar = args
                 .iter()
@@ -105,17 +114,17 @@ pub(crate) fn udf() -> ScalarUDF {
                             "BIT_GET position must be between 0 and 63".into(),
                         ));
                     }
-                    (Some(left), Some(right)) => Some(((left as u64 >> (right as u32)) & 1) as i64),
+                    (Some(left), Some(right)) => Some(((left as u64 >> (right as u32)) & 1) as i8),
                     _ => None,
                 };
                 result.push(value);
             }
             if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                Ok(ColumnarValue::Scalar(ScalarValue::Int8(
                     result.into_iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(Int8Array::from(result))))
             }
         }),
     )
@@ -124,7 +133,7 @@ pub(crate) fn udf() -> ScalarUDF {
 #[cfg(test)]
 mod constant_left_regression {
     use crate::RustSparkSession;
-    use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::array::Int8Array;
 
     #[tokio::test]
     async fn evaluates_scalar_left_with_nullable_column() -> datafusion::error::Result<()> {
@@ -137,7 +146,7 @@ mod constant_left_regression {
             let column = batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<Int8Array>()
                 .unwrap();
             actual.extend(column.iter());
         }

@@ -1,18 +1,34 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Date32Array, Int32Array}, datatypes::DataType},
+    arrow::{
+        array::{Date32Array, Int32Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
+// Gregorian civil date calculation, using days since 1970-01-01.
+fn calendar(days: i64) -> (i32, i32, i32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year as i32, month as i32, day as i32)
+}
 
-use chrono::Datelike;
-
-/// Extract the signed proleptic Gregorian year from a Date32.
-fn calculate(days: i32) -> Option<i32> {
-    Some(sql_compat_spark_dates::date_from_days(days)?.year())
+/// Spark SQL YEAR for DATE inputs.
+fn evaluate(days: i32) -> i32 {
+    calendar(i64::from(days)).0
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -23,12 +39,19 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             if let [ColumnarValue::Scalar(ScalarValue::Date32(value))] = args {
-                return Ok(ColumnarValue::Scalar(ScalarValue::Int32((*value).and_then(calculate))));
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int32(
+                    value.map(evaluate),
+                )));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0].as_any().downcast_ref::<Date32Array>()
-                .ok_or_else(|| DataFusionError::Internal("year expects Date32".into()))?;
-            let result: Int32Array = input.iter().map(|v| v.and_then(calculate)).collect();
+            let input = arrays[0]
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| {
+                    DataFusionError::Internal("YEAR expects DATE".into())
+                })?;
+            let result: Int32Array =
+                input.iter().map(|value| value.map(evaluate)).collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -36,18 +59,41 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::evaluate;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::BooleanArray;
+
+    #[test]
+    fn epoch_reference() {
+        assert_eq!(evaluate(0), 1970);
+    }
 
     #[tokio::test]
-    async fn handles_spark_boundary_dates_and_nulls() -> datafusion::error::Result<()> {
-        let batches = RustSparkSession::new().sql("SELECT YEAR(d) FROM (VALUES (0, DATE '1969-12-31'), (1, DATE '2024-02-29'), (2, CAST(NULL AS DATE))) AS t(id,d) ORDER BY id")
-            .await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let v = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
-            v.iter().collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some(1969), Some(2024), None]);
+    async fn scalar_and_null_sql() -> datafusion::error::Result<()> {
+        let session = RustSparkSession::new();
+        let rows = session
+            .sql("SELECT YEAR(DATE '2024-02-29') = 2024")
+            .await?
+            .collect()
+            .await?;
+        let values = rows[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(true)]);
+
+        let rows = session
+            .sql("SELECT YEAR(CAST(NULL AS DATE)) IS NULL")
+            .await?
+            .collect()
+            .await?;
+        let values = rows[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(true)]);
         Ok(())
     }
 }

@@ -1,18 +1,17 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Date32Array, Int32Array}, datatypes::DataType},
+    arrow::{
+        array::{Date32Array, Int32Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-use chrono::Datelike;
-
-/// Spark weekday numbering is Sunday=1 through Saturday=7.
-fn calculate(days: i32) -> Option<i32> {
-    let weekday = sql_compat_spark_dates::date_from_days(days)?.weekday();
-    i32::try_from(weekday.number_from_sunday()).ok()
+/// Spark DAYOFWEEK: Sunday is 1, Saturday is 7.
+fn evaluate(days: i32) -> i32 {
+    ((i64::from(days) + 4).rem_euclid(7) + 1) as i32
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -24,13 +23,15 @@ pub(crate) fn udf() -> ScalarUDF {
         Arc::new(|args| {
             if let [ColumnarValue::Scalar(ScalarValue::Date32(value))] = args {
                 return Ok(ColumnarValue::Scalar(ScalarValue::Int32(
-                    (*value).and_then(calculate),
+                    value.map(evaluate),
                 )));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0].as_any().downcast_ref::<Date32Array>()
-                .ok_or_else(|| DataFusionError::Internal("dayofweek expects Date32".into()))?;
-            let result: Int32Array = input.iter().map(|value| value.and_then(calculate)).collect();
+            let input = arrays[0]
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| DataFusionError::Internal("DAYOFWEEK expects DATE".into()))?;
+            let result: Int32Array = input.iter().map(|value| value.map(evaluate)).collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -38,19 +39,35 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::evaluate;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::BooleanArray;
+
+    #[test]
+    fn epoch_and_negative_days() {
+        assert_eq!(evaluate(0), 5);
+        assert_eq!(evaluate(-1), 4);
+        assert_eq!(evaluate(3), 1);
+    }
 
     #[tokio::test]
-    async fn respects_spark_calendar_values_and_nulls() -> datafusion::error::Result<()> {
-        let batches = RustSparkSession::new()
-            .sql("SELECT DAYOFWEEK(d) FROM (VALUES (0, DATE '1970-01-01'), (1, DATE '1969-12-28'), (2, DATE '2024-02-29'), (3, CAST(NULL AS DATE))) AS t(id,d) ORDER BY id")
-            .await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let values = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
-            values.iter().collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some(5), Some(1), Some(5), None]);
+    async fn sql_scalar_and_null_input() -> datafusion::error::Result<()> {
+        let session = RustSparkSession::new();
+        let scalar = session
+            .sql("SELECT DAYOFWEEK(DATE '2024-02-29') = 5")
+            .await?
+            .collect()
+            .await?;
+        let value = scalar[0].column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(value.iter().collect::<Vec<_>>(), vec![Some(true)]);
+
+        let nulls = session
+            .sql("SELECT DAYOFWEEK(CAST(NULL AS DATE)) IS NULL")
+            .await?
+            .collect()
+            .await?;
+        let value = nulls[0].column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(value.iter().collect::<Vec<_>>(), vec![Some(true)]);
         Ok(())
     }
 }

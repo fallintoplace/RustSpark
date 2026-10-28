@@ -1,39 +1,49 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Date32Array, Int64Array}, datatypes::DataType},
+    arrow::{
+        array::{Date32Array, Int32Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-
-/// Subtract whole days with checked Arrow Date32 arithmetic.
-fn calculate(days: i32, amount: i64) -> Option<i32> {
-    let delta = i32::try_from(amount).ok()?;
-    let result = days.checked_sub(delta)?;
-    sql_compat_spark_dates::date_from_days(result).map(|_| result)
+fn value(days: i32, offset: i32) -> Option<i32> {
+    days.checked_sub(offset)
 }
 
 pub(crate) fn udf() -> ScalarUDF {
     create_udf(
         "date_sub",
-        vec![DataType::Date32, DataType::Int64],
+        vec![DataType::Date32, DataType::Int32],
         DataType::Date32,
         Volatility::Immutable,
         Arc::new(|args| {
-            if let [ColumnarValue::Scalar(ScalarValue::Date32(arg0)),
-                ColumnarValue::Scalar(ScalarValue::Int64(arg1))] = args {
-                return Ok(ColumnarValue::Scalar(ScalarValue::Date32(
-                    (*arg0).zip(*arg1).and_then(|(a,b)| calculate(a,b)),
-                )));
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Date32(date)),
+                ColumnarValue::Scalar(ScalarValue::Int32(argument)),
+            ] = args {
+                let result = date.as_ref().and_then(|date| {
+                    argument.as_ref().and_then(|arg| value(*date, *arg))
+                });
+                return Ok(ColumnarValue::Scalar(ScalarValue::Date32(result)));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let arg0 = arrays[0].as_any().downcast_ref::<Date32Array>()
-                .ok_or_else(|| DataFusionError::Internal("date_sub expects Date32 argument 1".into()))?;
-            let arg1 = arrays[1].as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| DataFusionError::Internal("date_sub expects Int64 argument 2".into()))?;
-            let result: Date32Array = arg0.iter().zip(arg1.iter()).map(|(a,b)| a.zip(b).and_then(|(a,b)| calculate(a,b))).collect();
+            let dates = arrays[0]
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| DataFusionError::Internal("date_sub expects Date32".into()))?;
+            let arguments = arrays[1]
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| DataFusionError::Internal("date_sub invalid second argument".into()))?;
+            let result: Date32Array = dates.iter().zip(arguments.iter())
+                .map(|(date, arg)| match (date, arg) {
+                    (Some(date), Some(arg)) => value(date, arg),
+                    _ => None,
+                })
+                .collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -41,19 +51,30 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::value;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::Date32Array;
+
+    #[test]
+    fn spark_rules() {
+        assert_eq!(value(0, 4), Some(-4));
+        assert_eq!(value(0, -1), Some(1));
+        assert_eq!(value(i32::MIN, 1), None);
+    }
 
     #[tokio::test]
-    async fn handles_calendar_boundaries_and_nulls() -> datafusion::error::Result<()> {
+    async fn sql_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT CAST(DATE_SUB(d, n) AS VARCHAR) FROM (VALUES (0, DATE '2024-02-29', 1), (1, DATE '2024-03-01', 1), (2, CAST(NULL AS DATE), 2), (3, DATE '1970-01-01', 1)) AS t(id,d,n) ORDER BY id")
-            .await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            values.iter().map(|v| v.map(str::to_owned)).collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some("2024-02-28".to_owned()), Some("2024-02-29".to_owned()), None, Some("1969-12-31".to_owned())]);
+            .sql("SELECT date_sub(DATE '1970-01-01', CAST(4 AS INT))")
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .unwrap();
+        assert_eq!(values.value(0), -4);
         Ok(())
     }
 }

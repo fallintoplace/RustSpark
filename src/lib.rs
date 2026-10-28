@@ -83,28 +83,52 @@ mod set_operations;
 mod sources;
 #[path = "sql_compat/acos.rs"]
 mod sql_compat_acos;
+#[path = "sql_compat/is_valid_utf8.rs"]
+mod sql_compat_is_valid_utf8;
+#[path = "sql_compat/year.rs"]
+mod sql_compat_year;
 #[path = "sql_compat/acosh.rs"]
 mod sql_compat_acosh;
 #[path = "sql_compat/asin.rs"]
 mod sql_compat_asin;
 #[path = "sql_compat/asinh.rs"]
 mod sql_compat_asinh;
+#[path = "sql_compat/make_valid_utf8.rs"]
+mod sql_compat_make_valid_utf8;
+#[path = "sql_compat/month.rs"]
+mod sql_compat_month;
 #[path = "sql_compat/atan.rs"]
 mod sql_compat_atan;
 #[path = "sql_compat/atan2.rs"]
 mod sql_compat_atan2;
+#[path = "sql_compat/try_validate_utf8.rs"]
+mod sql_compat_try_validate_utf8;
 #[path = "sql_compat/atanh.rs"]
 mod sql_compat_atanh;
+#[path = "sql_compat/dayofyear.rs"]
+mod sql_compat_dayofyear;
+#[path = "sql_compat/day.rs"]
+mod sql_compat_day;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+#[path = "sql_compat/validate_utf8.rs"]
+mod sql_compat_validate_utf8;
+#[path = "sql_compat/quarter.rs"]
+mod sql_compat_quarter;
 #[path = "sql_compat/bitwise_and.rs"]
 mod sql_compat_bitwise_and;
+#[path = "sql_compat/dayofmonth.rs"]
+mod sql_compat_dayofmonth;
 #[path = "sql_compat/bit_get.rs"]
 mod sql_compat_bit_get;
 #[path = "sql_compat/cbrt.rs"]
 mod sql_compat_cbrt;
+#[path = "sql_compat/len.rs"]
+mod sql_compat_len;
+#[path = "sql_compat/monthname.rs"]
+mod sql_compat_monthname;
 #[path = "sql_compat/bitwise_or.rs"]
 mod sql_compat_bitwise_or;
 #[path = "sql_compat/cos.rs"]
@@ -113,50 +137,100 @@ mod sql_compat_cos;
 mod sql_compat_bitwise_xor;
 #[path = "sql_compat/cosh.rs"]
 mod sql_compat_cosh;
+#[path = "sql_compat/base64.rs"]
+mod sql_compat_base64;
 #[path = "sql_compat/bitwise_not.rs"]
 mod sql_compat_bitwise_not;
 #[path = "sql_compat/cot.rs"]
 mod sql_compat_cot;
+#[path = "sql_compat/weekofyear.rs"]
+mod sql_compat_weekofyear;
 #[path = "sql_compat/positive.rs"]
 mod sql_compat_positive;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
+#[path = "sql_compat/dayname.rs"]
+mod sql_compat_dayname;
 #[path = "sql_compat/negative.rs"]
 mod sql_compat_negative;
+#[path = "sql_compat/parse_url.rs"]
+mod sql_compat_parse_url;
 #[path = "sql_compat/csc.rs"]
 mod sql_compat_csc;
 #[path = "sql_compat/degrees.rs"]
 mod sql_compat_degrees;
+#[path = "sql_compat/last_day.rs"]
+mod sql_compat_last_day;
+#[path = "sql_compat/decode.rs"]
+mod sql_compat_decode;
+#[path = "sql_compat/unbase64.rs"]
+mod sql_compat_unbase64;
+#[path = "sql_compat/dayofweek.rs"]
+mod sql_compat_dayofweek;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
 #[path = "sql_compat/lcase.rs"]
 mod sql_compat_lcase;
 #[path = "sql_compat/equal_null.rs"]
 mod sql_compat_equal_null;
+#[path = "sql_compat/encode.rs"]
+mod sql_compat_encode;
+#[path = "sql_compat/assert_true.rs"]
+mod sql_compat_assert_true;
+#[path = "sql_compat/next_day.rs"]
+mod sql_compat_next_day;
 #[path = "sql_compat/ucase.rs"]
 mod sql_compat_ucase;
 #[path = "sql_compat/exp.rs"]
 mod sql_compat_exp;
+#[path = "sql_compat/unix_seconds.rs"]
+mod sql_compat_unix_seconds;
+#[path = "sql_compat/isnan.rs"]
+mod sql_compat_isnan;
 #[path = "sql_compat/e.rs"]
 mod sql_compat_e;
 #[path = "sql_compat/expm1.rs"]
 mod sql_compat_expm1;
+#[path = "sql_compat/raise_error.rs"]
+mod sql_compat_raise_error;
+#[path = "sql_compat/unix_date.rs"]
+mod sql_compat_unix_date;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
+#[path = "sql_compat/unix_millis.rs"]
+mod sql_compat_unix_millis;
+#[path = "sql_compat/add_months.rs"]
+mod sql_compat_add_months;
 #[path = "sql_compat/hex.rs"]
 mod sql_compat_hex;
+#[path = "sql_compat/unix_micros.rs"]
+mod sql_compat_unix_micros;
+#[path = "sql_compat/date_sub.rs"]
+mod sql_compat_date_sub;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
+#[path = "sql_compat/to_binary.rs"]
+mod sql_compat_to_binary;
+#[path = "sql_compat/datediff.rs"]
+mod sql_compat_datediff;
 #[path = "sql_compat/log1p.rs"]
 mod sql_compat_log1p;
+#[path = "sql_compat/try_to_binary.rs"]
+mod sql_compat_try_to_binary;
 #[path = "sql_compat/json.rs"]
 mod sql_compat_json;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "sql_compat/spark_left.rs"]
+mod sql_compat_spark_left;
 #[path = "sql_compat/mask.rs"]
 mod sql_compat_mask;
+#[path = "sql_compat/make_date.rs"]
+mod sql_compat_make_date;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
+#[path = "sql_compat/nanvl.rs"]
+mod sql_compat_nanvl;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
 #[path = "sql_compat/conv.rs"]
@@ -169,6 +243,8 @@ mod sql_compat_quote;
 mod sql_compat_radians;
 #[path = "sql_compat/rint.rs"]
 mod sql_compat_rint;
+#[path = "sql_compat/spark_right.rs"]
+mod sql_compat_spark_right;
 #[path = "sql_compat/sec.rs"]
 mod sql_compat_sec;
 #[path = "sql_compat/shiftleft.rs"]
@@ -181,40 +257,66 @@ mod sql_compat_shiftright;
 mod sql_compat_shiftrightunsigned;
 #[path = "sql_compat/sin.rs"]
 mod sql_compat_sin;
+#[path = "sql_compat/timestamp_seconds.rs"]
+mod sql_compat_timestamp_seconds;
 #[path = "sql_compat/bround.rs"]
 mod sql_compat_bround;
 #[path = "sql_compat/sinh.rs"]
 mod sql_compat_sinh;
 #[path = "sql_compat/format_number.rs"]
 mod sql_compat_format_number;
+#[path = "sql_compat/initcap.rs"]
+mod sql_compat_initcap;
+#[path = "sql_compat/date_add.rs"]
+mod sql_compat_date_add;
+#[path = "sql_compat/date_from_unix_date.rs"]
+mod sql_compat_date_from_unix_date;
 #[path = "sql_compat/soundex.rs"]
 mod sql_compat_soundex;
 #[path = "sql_compat/locate.rs"]
 mod sql_compat_locate;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
+#[path = "sql_compat/timestamp_millis.rs"]
+mod sql_compat_timestamp_millis;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
+#[path = "sql_compat/timestamp_micros.rs"]
+mod sql_compat_timestamp_micros;
 #[path = "sql_compat/tan.rs"]
 mod sql_compat_tan;
 #[path = "sql_compat/tanh.rs"]
 mod sql_compat_tanh;
+#[path = "sql_compat/translate.rs"]
+mod sql_compat_translate;
 #[path = "sql_compat/try_abs.rs"]
 mod sql_compat_try_abs;
+#[path = "sql_compat/time_to_micros.rs"]
+mod sql_compat_time_to_micros;
 #[path = "sql_compat/try_add.rs"]
 mod sql_compat_try_add;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
+#[path = "sql_compat/time_from_seconds.rs"]
+mod sql_compat_time_from_seconds;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
 #[path = "sql_compat/try_multiply.rs"]
 mod sql_compat_try_multiply;
+#[path = "sql_compat/time_from_millis.rs"]
+mod sql_compat_time_from_millis;
 #[path = "sql_compat/try_negate.rs"]
 mod sql_compat_try_negate;
+#[path = "sql_compat/time_to_seconds.rs"]
+mod sql_compat_time_to_seconds;
 #[path = "sql_compat/try_subtract.rs"]
 mod sql_compat_try_subtract;
+#[path = "sql_compat/time_from_micros.rs"]
+mod sql_compat_time_from_micros;
 #[path = "sql_compat/url_decode.rs"]
 mod sql_compat_url_decode;
+#[path = "sql_compat/try_url_decode.rs"]
+mod sql_compat_try_url_decode;
 #[path = "sql_compat/unhex.rs"]
 mod sql_compat_unhex;
 #[path = "sql_compat/url_encode.rs"]
@@ -225,42 +327,16 @@ mod sql_compat_width_bucket;
 mod sql_compat_zeroifnull;
 #[path = "sql_compat/spark_dates.rs"]
 mod sql_compat_spark_dates;
-#[path = "sql_compat/date_add.rs"]
-mod sql_compat_date_add;
-#[path = "sql_compat/date_sub.rs"]
-mod sql_compat_date_sub;
-#[path = "sql_compat/datediff.rs"]
-mod sql_compat_datediff;
-#[path = "sql_compat/unix_date.rs"]
-mod sql_compat_unix_date;
-#[path = "sql_compat/date_from_unix_date.rs"]
-mod sql_compat_date_from_unix_date;
-#[path = "sql_compat/dayofweek.rs"]
-mod sql_compat_dayofweek;
 #[path = "sql_compat/weekday.rs"]
 mod sql_compat_weekday;
-#[path = "sql_compat/dayofyear.rs"]
-mod sql_compat_dayofyear;
-#[path = "sql_compat/quarter.rs"]
-mod sql_compat_quarter;
-#[path = "sql_compat/weekofyear.rs"]
-mod sql_compat_weekofyear;
-#[path = "sql_compat/last_day.rs"]
-mod sql_compat_last_day;
-#[path = "sql_compat/next_day.rs"]
-mod sql_compat_next_day;
-#[path = "sql_compat/add_months.rs"]
-mod sql_compat_add_months;
-#[path = "sql_compat/year.rs"]
-mod sql_compat_year;
-#[path = "sql_compat/month.rs"]
-mod sql_compat_month;
-#[path = "sql_compat/dayofmonth.rs"]
-mod sql_compat_dayofmonth;
-#[path = "sql_compat/dayname.rs"]
-mod sql_compat_dayname;
-#[path = "sql_compat/monthname.rs"]
-mod sql_compat_monthname;
+#[path = "sql_compat/trunc.rs"]
+mod sql_compat_trunc;
+#[path = "sql_compat/try_parse_url.rs"]
+mod sql_compat_try_parse_url;
+#[path = "sql_compat/time_to_millis.rs"]
+mod sql_compat_time_to_millis;
+#[path = "sql_compat/months_between.rs"]
+mod sql_compat_months_between;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -358,65 +434,115 @@ impl RustSparkSession {
         context.register_udf(sql_compat_endswith::udf());
         context.register_udf(sql_compat_lcase::udf());
         context.register_udf(sql_compat_sin::udf());
+        context.register_udf(sql_compat_timestamp_seconds::udf());
+        context.register_udf(sql_compat_weekday::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_timestamp_micros::udf());
+        context.register_udf(sql_compat_dayofyear::udf());
         context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
+        context.register_udf(sql_compat_quarter::udf());
         context.register_udf(sql_compat_conv::udf());
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_rint::udf());
+        context.register_udf(sql_compat_spark_right::udf());
         context.register_udf(sql_compat_space::udf());
+        context.register_udf(sql_compat_timestamp_millis::udf());
+        context.register_udf(sql_compat_monthname::udf());
         context.register_udf(sql_compat_acos::udf());
+        context.register_udf(sql_compat_is_valid_utf8::udf());
+        context.register_udf(sql_compat_dayname::udf());
+        context.register_udf(sql_compat_year::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
+        context.register_udf(sql_compat_last_day::udf());
         context.register_udf(sql_compat_nullifzero::udf());
+        context.register_udf(sql_compat_nanvl::udf());
         context.register_udf(sql_compat_exp::udf());
+        context.register_udf(sql_compat_unix_seconds::udf());
+        context.register_udf(sql_compat_isnan::udf());
         context.register_udf(sql_compat_e::udf());
         context.register_udf(sql_compat_pmod::udf());
+        context.register_udf(sql_compat_next_day::udf());
         context.register_udf(sql_compat_quote::udf());
+        context.register_udf(sql_compat_add_months::udf());
         context.register_udf(sql_compat_degrees::udf());
+        context.register_udf(sql_compat_date_add::udf());
+        context.register_udf(sql_compat_decode::udf());
+        context.register_udf(sql_compat_unbase64::udf());
+        context.register_udf(sql_compat_dayofweek::udf());
         context.register_udf(sql_compat_try_mod::udf());
+        context.register_udf(sql_compat_date_sub::udf());
         context.register_udf(sql_compat_atan2::udf());
+        context.register_udf(sql_compat_try_validate_utf8::udf());
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_cos::udf());
         context.register_udf(sql_compat_bitwise_xor::udf());
         context.register_udf(sql_compat_try_divide::udf());
+        context.register_udf(sql_compat_time_from_seconds::udf());
         context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
+        context.register_udf(sql_compat_datediff::udf());
         context.register_udf(sql_compat_asinh::udf());
+        context.register_udf(sql_compat_make_valid_utf8::udf());
+        context.register_udf(sql_compat_month::udf());
         context.register_udf(sql_compat_try_subtract::udf());
+        context.register_udf(sql_compat_time_from_micros::udf());
         context.register_udf(sql_compat_atanh::udf());
+        context.register_udf(sql_compat_day::udf());
         context.register_udf(sql_compat_try_multiply::udf());
+        context.register_udf(sql_compat_time_from_millis::udf());
         context.register_udf(sql_compat_cosh::udf());
+        context.register_udf(sql_compat_base64::udf());
         context.register_udf(sql_compat_bitwise_not::udf());
         context.register_udf(sql_compat_try_negate::udf());
+        context.register_udf(sql_compat_time_to_seconds::udf());
         context.register_udf(sql_compat_sinh::udf());
         context.register_udf(sql_compat_format_number::udf());
+        context.register_udf(sql_compat_initcap::udf());
+        context.register_udf(sql_compat_date_from_unix_date::udf());
         context.register_udf(sql_compat_try_abs::udf());
+        context.register_udf(sql_compat_time_to_micros::udf());
         context.register_udf(sql_compat_tanh::udf());
+        context.register_udf(sql_compat_translate::udf());
         context.register_udf(sql_compat_bit_count::udf());
+        context.register_udf(sql_compat_validate_utf8::udf());
         context.register_udf(sql_compat_bitwise_and::udf());
+        context.register_udf(sql_compat_dayofmonth::udf());
         context.register_udf(sql_compat_tan::udf());
         context.register_udf(sql_compat_shiftleft::udf());
         context.register_udf(sql_compat_chr::udf());
+        context.register_udf(sql_compat_chr::char_udf());
         context.register_udf(sql_compat_cot::udf());
+        context.register_udf(sql_compat_weekofyear::udf());
         context.register_udf(sql_compat_positive::udf());
         context.register_udf(sql_compat_shiftright::udf());
         context.register_udf(sql_compat_cbrt::udf());
+        context.register_udf(sql_compat_len::udf());
         context.register_udf(sql_compat_bitwise_or::udf());
         context.register_udf(sql_compat_bit_get::udf());
+        context.register_udf(sql_compat_bit_get::getbit_udf());
         context.register_udf(sql_compat_expm1::udf());
+        context.register_udf(sql_compat_raise_error::udf());
+        context.register_udf(sql_compat_unix_date::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
+        context.register_udf(sql_compat_encode::udf());
+        context.register_udf(sql_compat_assert_true::udf());
         context.register_udf(sql_compat_ucase::udf());
         context.register_udf(sql_compat_sec::udf());
         context.register_udf(sql_compat_csc::udf());
         context.register_udf(sql_compat_hypot::udf());
+        context.register_udf(sql_compat_to_binary::udf());
         context.register_udf(sql_compat_log1p::udf());
+        context.register_udf(sql_compat_try_to_binary::udf());
         context.register_udf(sql_compat_crc32::udf());
         context.register_udf(sql_compat_negative::udf());
+        context.register_udf(sql_compat_parse_url::udf());
         context.register_udf(sql_compat_url_encode::udf());
         context.register_udf(sql_compat_url_decode::udf());
+        context.register_udf(sql_compat_try_url_decode::udf());
         context.register_udf(sql_compat_unhex::udf());
         context.register_udf(sql_compat_json::get_json_object_udf());
         context.register_udf(sql_compat_json::json_valid_udf());
@@ -425,27 +551,17 @@ impl RustSparkSession {
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_locate::udf());
         context.register_udf(sql_compat_luhn_check::udf());
+        context.register_udf(sql_compat_spark_left::udf());
         context.register_udf(sql_compat_mask::udf());
+        context.register_udf(sql_compat_make_date::udf());
         context.register_udf(sql_compat_factorial::udf());
+        context.register_udf(sql_compat_unix_millis::udf());
         context.register_udf(sql_compat_hex::udf());
-        context.register_udf(sql_compat_date_add::udf());
-        context.register_udf(sql_compat_date_sub::udf());
-        context.register_udf(sql_compat_datediff::udf());
-        context.register_udf(sql_compat_unix_date::udf());
-        context.register_udf(sql_compat_date_from_unix_date::udf());
-        context.register_udf(sql_compat_dayofweek::udf());
-        context.register_udf(sql_compat_weekday::udf());
-        context.register_udf(sql_compat_dayofyear::udf());
-        context.register_udf(sql_compat_quarter::udf());
-        context.register_udf(sql_compat_weekofyear::udf());
-        context.register_udf(sql_compat_last_day::udf());
-        context.register_udf(sql_compat_next_day::udf());
-        context.register_udf(sql_compat_add_months::udf());
-        context.register_udf(sql_compat_year::udf());
-        context.register_udf(sql_compat_month::udf());
-        context.register_udf(sql_compat_dayofmonth::udf());
-        context.register_udf(sql_compat_dayname::udf());
-        context.register_udf(sql_compat_monthname::udf());
+        context.register_udf(sql_compat_unix_micros::udf());
+        context.register_udf(sql_compat_trunc::udf());
+        context.register_udf(sql_compat_try_parse_url::udf());
+        context.register_udf(sql_compat_time_to_millis::udf());
+        context.register_udf(sql_compat_months_between::udf());
         Self { context }
     }
 
@@ -1501,6 +1617,54 @@ impl RustSparkSession {
             };
         }
         Ok(dataframe)
+    }
+
+    /// Spark-style distinct intersection for two registered tables.
+    ///
+    /// Column order, not column name, defines row equality. Planning is lazy.
+    pub async fn intersect_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let left = quote_catalog_table(left, "intersect_tables requires a left table")?;
+        let right = quote_catalog_table(right, "intersect_tables requires a right table")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {left} INTERSECT SELECT * FROM {right}"
+        ))
+        .await
+    }
+
+    /// Spark-style duplicate-preserving intersection for two registered tables.
+    ///
+    /// Column order, not column name, defines row equality. Planning is lazy.
+    pub async fn intersect_all_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let left = quote_catalog_table(left, "intersect_all_tables requires a left table")?;
+        let right = quote_catalog_table(right, "intersect_all_tables requires a right table")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {left} INTERSECT ALL SELECT * FROM {right}"
+        ))
+        .await
+    }
+
+    /// Spark-style distinct row subtraction for two registered tables.
+    ///
+    /// Column order, not column name, defines row equality. Planning is lazy.
+    pub async fn except_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let left = quote_catalog_table(left, "except_tables requires a left table")?;
+        let right = quote_catalog_table(right, "except_tables requires a right table")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {left} EXCEPT SELECT * FROM {right}"
+        ))
+        .await
+    }
+
+    /// Spark-style duplicate-preserving row subtraction for two registered tables.
+    ///
+    /// Column order, not column name, defines row equality. Planning is lazy.
+    pub async fn except_all_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let left = quote_catalog_table(left, "except_all_tables requires a left table")?;
+        let right = quote_catalog_table(right, "except_all_tables requires a right table")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {left} EXCEPT ALL SELECT * FROM {right}"
+        ))
+        .await
     }
 
     /// Union registered tables with matching schemas by column position.

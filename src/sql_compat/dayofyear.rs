@@ -6,13 +6,32 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-use chrono::Datelike;
-
-/// Number the days of a year from January 1 = 1, including leap days.
-fn calculate(days: i32) -> Option<i32> {
-    let date = sql_compat_spark_dates::date_from_days(days)?;
-    i32::try_from(date.ordinal()).ok()
+fn civil_from_days(days: i32) -> (i32, u32, u32) {
+    let z = i64::from(days) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    (year as i32, month as u32, day as u32)
+}
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => 0,
+    }
+}
+fn value(days: i32) -> Option<i32> {
+    let (year, month, day) = civil_from_days(days);
+    Some(day as i32 + (1..month).map(|m| days_in_month(year, m) as i32).sum::<i32>())
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -22,15 +41,13 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int32,
         Volatility::Immutable,
         Arc::new(|args| {
-            if let [ColumnarValue::Scalar(ScalarValue::Date32(value))] = args {
-                return Ok(ColumnarValue::Scalar(ScalarValue::Int32(
-                    (*value).and_then(calculate),
-                )));
+            if let [ColumnarValue::Scalar(ScalarValue::Date32(date))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int32(date.and_then(value))));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0].as_any().downcast_ref::<Date32Array>()
+            let dates = arrays[0].as_any().downcast_ref::<Date32Array>()
                 .ok_or_else(|| DataFusionError::Internal("dayofyear expects Date32".into()))?;
-            let result: Int32Array = input.iter().map(|value| value.and_then(calculate)).collect();
+            let result: Int32Array = dates.iter().map(|date| date.and_then(value)).collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -38,19 +55,23 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::value;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::{Array, Int32Array};
+
+    #[test]
+    fn follows_spark_calendar_rules() {
+        assert_eq!(value(0), Some(1)); assert_eq!(value(364), Some(365)); assert_eq!(value(1095), Some(366));
+    }
 
     #[tokio::test]
-    async fn respects_spark_calendar_values_and_nulls() -> datafusion::error::Result<()> {
+    async fn sql_supports_column_and_null() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT DAYOFYEAR(d) FROM (VALUES (0, DATE '2024-02-29'), (1, DATE '2023-12-31'), (2, DATE '2025-01-01'), (3, CAST(NULL AS DATE))) AS t(id,d) ORDER BY id")
+            .sql("SELECT dayofyear(d) FROM (VALUES (DATE '1970-01-01'), (CAST(NULL AS DATE))) AS t(d) ORDER BY d NULLS LAST")
             .await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let values = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
-            values.iter().collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some(60), Some(365), Some(1), None]);
+        let actual = batches[0].column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(actual.value(0), 1);
+        assert!(actual.is_null(1));
         Ok(())
     }
 }

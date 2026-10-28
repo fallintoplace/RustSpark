@@ -1,26 +1,13 @@
 use std::sync::Arc;
 
-use chrono::Datelike;
 use datafusion::{
     arrow::{array::{Date32Array, StringArray}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-
-/// Spark 4 returns the abbreviated English weekday name.
-fn calculate(days: i32) -> Option<&'static str> {
-    let day = sql_compat_spark_dates::date_from_days(days)?;
-    Some(match day.weekday() {
-        chrono::Weekday::Mon => "Mon",
-        chrono::Weekday::Tue => "Tue",
-        chrono::Weekday::Wed => "Wed",
-        chrono::Weekday::Thu => "Thu",
-        chrono::Weekday::Fri => "Fri",
-        chrono::Weekday::Sat => "Sat",
-        chrono::Weekday::Sun => "Sun",
-    })
+fn value(days: i32) -> Option<String> {
+    Some(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][(i64::from(days) + 3).rem_euclid(7) as usize].to_owned())
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -30,15 +17,13 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            if let [ColumnarValue::Scalar(ScalarValue::Date32(value))] = args {
-                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    (*value).and_then(calculate).map(str::to_owned),
-                )));
+            if let [ColumnarValue::Scalar(ScalarValue::Date32(date))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(date.and_then(value))));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0].as_any().downcast_ref::<Date32Array>()
+            let dates = arrays[0].as_any().downcast_ref::<Date32Array>()
                 .ok_or_else(|| DataFusionError::Internal("dayname expects Date32".into()))?;
-            let result: StringArray = input.iter().map(|value| value.and_then(calculate)).collect();
+            let result: StringArray = dates.iter().map(|date| date.and_then(value)).collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -46,18 +31,23 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::value;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::{Array, StringArray};
+
+    #[test]
+    fn follows_spark_calendar_rules() {
+        assert_eq!(value(0).as_deref(), Some("Thu")); assert_eq!(value(3).as_deref(), Some("Sun")); assert_eq!(value(4).as_deref(), Some("Mon"));
+    }
 
     #[tokio::test]
-    async fn yields_spark_date_values_and_preserves_nulls() -> datafusion::error::Result<()> {
-        let batches = RustSparkSession::new().sql("SELECT DAYNAME(d) FROM (VALUES (0, DATE '2024-02-29'), (1, DATE '2024-03-03'), (2, CAST(NULL AS DATE))) AS t(id,d) ORDER BY id")
+    async fn sql_supports_column_and_null() -> datafusion::error::Result<()> {
+        let batches = RustSparkSession::new()
+            .sql("SELECT dayname(d) FROM (VALUES (DATE '1970-01-01'), (CAST(NULL AS DATE))) AS t(d) ORDER BY d NULLS LAST")
             .await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            values.iter().map(|v| v.map(str::to_owned)).collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some("Thu".to_owned()), Some("Sun".to_owned()), None]);
+        let actual = batches[0].column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(actual.value(0), "Thu");
+        assert!(actual.is_null(1));
         Ok(())
     }
 }

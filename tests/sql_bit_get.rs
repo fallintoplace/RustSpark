@@ -1,4 +1,4 @@
-use datafusion::arrow::array::Int64Array;
+use datafusion::arrow::array::Int8Array;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
@@ -17,7 +17,7 @@ async fn bit_get_supports_rows_and_nulls() -> Result<(), Box<dyn std::error::Err
         let column = batch
             .column(0)
             .as_any()
-            .downcast_ref::<Int64Array>()
+            .downcast_ref::<Int8Array>()
             .unwrap();
         actual.extend(column.iter());
     }
@@ -26,9 +26,13 @@ async fn bit_get_supports_rows_and_nulls() -> Result<(), Box<dyn std::error::Err
     let values = scalar[0]
         .column(0)
         .as_any()
-        .downcast_ref::<Int64Array>()
+        .downcast_ref::<Int8Array>()
         .unwrap();
     assert_eq!(values.value(0), 1);
+    assert_eq!(
+        scalar[0].schema().field(0).data_type(),
+        &datafusion::arrow::datatypes::DataType::Int8,
+    );
     if let Ok(invalid) = session.sql("SELECT BIT_GET(1, 64)").await {
         assert!(invalid.collect().await.is_err());
     }

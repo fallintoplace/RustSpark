@@ -1,0 +1,12 @@
+[
+  {
+    "id": "lag_with_default",
+    "ordered": true,
+    "sql": "SELECT id, LAG(v, 1, 99) OVER (ORDER BY id) AS prior FROM (VALUES (1, 10), (2, 20), (3, 30)) AS t(id, v) ORDER BY id"
+  },
+  {
+    "id": "lead_with_default",
+    "ordered": true,
+    "sql": "SELECT id, LEAD(v, 2, 88) OVER (ORDER BY id) AS next_value FROM (VALUES (1, 10), (2, 20), (3, 30)) AS t(id, v) ORDER BY id"
+  }
+]

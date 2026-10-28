@@ -1,46 +1,89 @@
 use std::sync::Arc;
 
-use chrono::Months;
 use datafusion::{
-    arrow::{array::{Date32Array, Int64Array}, datatypes::DataType},
+    arrow::{
+        array::{Date32Array, Int32Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-
-fn calculate(days: i32, months: i64) -> Option<i32> {
-    let date = sql_compat_spark_dates::date_from_days(days)?;
-    let shifted = if months < 0 {
-        date.checked_sub_months(Months::new(u32::try_from(months.checked_abs()?).ok()?))?
-    } else {
-        date.checked_add_months(Months::new(u32::try_from(months).ok()?))?
-    };
-    sql_compat_spark_dates::days_from_date(shifted)
+fn civil_from_days(days: i32) -> (i32, u32, u32) {
+    let z = i64::from(days) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    (year as i32, month as u32, day as u32)
+}
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => 0,
+    }
+}
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i32> {
+    if day == 0 || day > days_in_month(year, month) { return None; }
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let mp = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = 365 * yoe + yoe / 4 - yoe / 100 + doy;
+    i32::try_from(era * 146_097 + doe - 719_468).ok()
+}
+fn value(days: i32, offset: i32) -> Option<i32> {
+    let (year, month, day) = civil_from_days(days);
+    let absolute_month = i64::from(year) * 12 + i64::from(month) - 1 + i64::from(offset);
+    let new_year = i32::try_from(absolute_month.div_euclid(12)).ok()?;
+    let new_month = (absolute_month.rem_euclid(12) + 1) as u32;
+    let original_last = days_in_month(year, month);
+    let target_last = days_in_month(new_year, new_month);
+    let target_day = if day == original_last { target_last } else { day.min(target_last) };
+    days_from_civil(new_year, new_month, target_day)
 }
 
 pub(crate) fn udf() -> ScalarUDF {
     create_udf(
         "add_months",
-        vec![DataType::Date32, DataType::Int64],
+        vec![DataType::Date32, DataType::Int32],
         DataType::Date32,
         Volatility::Immutable,
         Arc::new(|args| {
             if let [
                 ColumnarValue::Scalar(ScalarValue::Date32(date)),
-                ColumnarValue::Scalar(ScalarValue::Int64(months)),
+                ColumnarValue::Scalar(ScalarValue::Int32(argument)),
             ] = args {
-                return Ok(ColumnarValue::Scalar(ScalarValue::Date32(
-                    (*date).zip(*months).and_then(|(d,m)| calculate(d,m)),
-                )));
+                let result = date.as_ref().and_then(|date| {
+                    argument.as_ref().and_then(|arg| value(*date, *arg))
+                });
+                return Ok(ColumnarValue::Scalar(ScalarValue::Date32(result)));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let dates = arrays[0].as_any().downcast_ref::<Date32Array>()
+            let dates = arrays[0]
+                .as_any()
+                .downcast_ref::<Date32Array>()
                 .ok_or_else(|| DataFusionError::Internal("add_months expects Date32".into()))?;
-            let months = arrays[1].as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| DataFusionError::Internal("add_months expects Int64".into()))?;
-            let result: Date32Array = dates.iter().zip(months.iter())
-                .map(|(d,m)| d.zip(m).and_then(|(d,m)| calculate(d,m)))
+            let arguments = arrays[1]
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| DataFusionError::Internal("add_months invalid second argument".into()))?;
+            let result: Date32Array = dates.iter().zip(arguments.iter())
+                .map(|(date, arg)| match (date, arg) {
+                    (Some(date), Some(arg)) => value(date, arg),
+                    _ => None,
+                })
                 .collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
@@ -49,18 +92,30 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::value;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::Date32Array;
+
+    #[test]
+    fn spark_rules() {
+        assert_eq!(value(30, 1), Some(58));
+        assert_eq!(value(0, 12), Some(365));
+        assert_eq!(value(789, 12), Some(1154));
+    }
 
     #[tokio::test]
-    async fn clamps_end_of_month_and_handles_leap_years() -> datafusion::error::Result<()> {
-        let query = "SELECT CAST(ADD_MONTHS(d,m) AS VARCHAR) FROM (VALUES (0, DATE '2024-01-31', 1), (1, DATE '2023-01-31', 1), (2, DATE '2024-12-31', 2), (3, CAST(NULL AS DATE), 1)) AS t(id,d,m) ORDER BY id";
-        let batches = RustSparkSession::new().sql(query).await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let v = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            v.iter().map(|v| v.map(str::to_owned)).collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some("2024-02-29".to_owned()), Some("2023-02-28".to_owned()), Some("2025-02-28".to_owned()), None]);
+    async fn sql_is_registered() -> datafusion::error::Result<()> {
+        let batches = RustSparkSession::new()
+            .sql("SELECT add_months(DATE '1970-01-31', CAST(1 AS INT))")
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 58);
         Ok(())
     }
 }

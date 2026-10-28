@@ -143,6 +143,20 @@ def load_cases(path: pathlib.Path):
     ids = set()
     for case in cases:
         validate_case(case, ids)
+
+    # Additional suites live in separate files to avoid changing one large
+    # manifest for every Spark compatibility test. Keep a deterministic order.
+    fragment_dir = path.with_name(f"{path.stem}_cases")
+    if fragment_dir.is_dir():
+        for fragment_path in sorted(fragment_dir.glob("*.json")):
+            fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+            if isinstance(fragment, dict):
+                fragment = [fragment]
+            if not isinstance(fragment, list) or not fragment:
+                raise ValueError(f"Invalid SQL case fragment: {fragment_path.name}")
+            for case in fragment:
+                validate_case(case, ids)
+            cases.extend(fragment)
     return cases
 
 

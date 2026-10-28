@@ -1,0 +1,10 @@
+[
+  {
+    "id": "boolean_short_circuit_null",
+    "sql": "SELECT TRUE OR CAST(NULL AS BOOLEAN) AS true_or_null, FALSE AND CAST(NULL AS BOOLEAN) AS false_and_null"
+  },
+  {
+    "id": "boolean_null_propagation",
+    "sql": "SELECT FALSE OR CAST(NULL AS BOOLEAN) AS false_or_null, TRUE AND CAST(NULL AS BOOLEAN) AS true_and_null"
+  }
+]

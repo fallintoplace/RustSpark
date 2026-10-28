@@ -1,0 +1,11 @@
+[
+  {
+    "id": "group_multiple_nulls",
+    "ordered": true,
+    "sql": "SELECT k, COUNT(*) AS n FROM (VALUES (CAST(NULL AS BIGINT)), (CAST(NULL AS BIGINT)), (1)) AS t(k) GROUP BY k ORDER BY k NULLS FIRST"
+  },
+  {
+    "id": "count_distinct_excludes_null",
+    "sql": "SELECT COUNT(DISTINCT k) AS distinct_non_null FROM (VALUES (1), (1), (CAST(NULL AS BIGINT)), (2)) AS t(k)"
+  }
+]

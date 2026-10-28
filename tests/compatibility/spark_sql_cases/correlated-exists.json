@@ -1,0 +1,12 @@
+[
+  {
+    "id": "correlated_exists_values",
+    "ordered": true,
+    "sql": "SELECT a.id FROM (VALUES (1), (2), (3)) AS a(id) WHERE EXISTS (SELECT 1 FROM (VALUES (2), (3)) AS b(id) WHERE b.id = a.id) ORDER BY a.id"
+  },
+  {
+    "id": "correlated_not_exists_values",
+    "ordered": true,
+    "sql": "SELECT a.id FROM (VALUES (1), (2), (3)) AS a(id) WHERE NOT EXISTS (SELECT 1 FROM (VALUES (2), (3)) AS b(id) WHERE b.id = a.id) ORDER BY a.id"
+  }
+]

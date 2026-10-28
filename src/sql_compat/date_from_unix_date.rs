@@ -1,17 +1,16 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Int64Array, Date32Array}, datatypes::DataType},
+    arrow::{
+        array::{Date32Array, Int64Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-use crate::sql_compat_spark_dates;
-
-/// Construct a Date32 from Unix epoch days.
-fn calculate(days: i64) -> Option<i32> {
-    let days = i32::try_from(days).ok()?;
-    sql_compat_spark_dates::date_from_days(days).map(|_| days)
+fn evaluate(days: i64) -> Option<i32> {
+    i32::try_from(days).ok()
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -23,13 +22,18 @@ pub(crate) fn udf() -> ScalarUDF {
         Arc::new(|args| {
             if let [ColumnarValue::Scalar(ScalarValue::Int64(value))] = args {
                 return Ok(ColumnarValue::Scalar(ScalarValue::Date32(
-                    (*value).and_then(calculate),
+                    value.and_then(evaluate),
                 )));
             }
             let arrays = ColumnarValue::values_to_arrays(args)?;
-            let input = arrays[0].as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| DataFusionError::Internal("date_from_unix_date expects Int64".into()))?;
-            let result: Date32Array = input.iter().map(|value| value.and_then(calculate)).collect();
+            let input = arrays[0]
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| DataFusionError::Internal("Expected Int64".into()))?;
+            let result: Date32Array = input
+                .iter()
+                .map(|value| value.and_then(evaluate))
+                .collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
@@ -37,19 +41,40 @@ pub(crate) fn udf() -> ScalarUDF {
 
 #[cfg(test)]
 mod tests {
+    use super::evaluate;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::BooleanArray;
+
+    #[test]
+    fn reference_vector() {
+        assert_eq!(evaluate(-1), Some(-1));
+    }
 
     #[tokio::test]
-    async fn respects_spark_calendar_values_and_nulls() -> datafusion::error::Result<()> {
-        let batches = RustSparkSession::new()
-            .sql("SELECT CAST(DATE_FROM_UNIX_DATE(days) AS VARCHAR) FROM (VALUES (0, CAST(0 AS BIGINT)), (1, CAST(-1 AS BIGINT)), (2, CAST(1 AS BIGINT)), (3, CAST(NULL AS BIGINT))) AS t(id,days) ORDER BY id")
-            .await?.collect().await?;
-        let actual: Vec<_> = batches.iter().flat_map(|batch| {
-            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            values.iter().map(|value| value.map(str::to_owned)).collect::<Vec<_>>()
-        }).collect();
-        assert_eq!(actual, vec![Some("1970-01-01".to_owned()), Some("1969-12-31".to_owned()), Some("1970-01-02".to_owned()), None]);
+    async fn sql_scalar_and_null() -> datafusion::error::Result<()> {
+        let session = RustSparkSession::new();
+        let rows = session
+            .sql("SELECT DATE_FROM_UNIX_DATE(1) = DATE '1970-01-02'")
+            .await?
+            .collect()
+            .await?;
+        let values = rows[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(true)]);
+        let rows = session
+            .sql("SELECT DATE_FROM_UNIX_DATE(CAST(NULL AS BIGINT)) IS NULL")
+            .await?
+            .collect()
+            .await?;
+        let values = rows[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(true)]);
         Ok(())
     }
 }
