@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Control when an aggregate samples group cardinality before bypassing partial aggregation.
+    #[arg(long = "partial-agg-probe-rows", value_name = "COUNT", value_parser = parse_partial_agg_probe_rows)]
+    partial_agg_probe_rows: Option<usize>,
+
     /// Control read-ahead memory per partition after sort pushdown.
     #[arg(long = "sort-pushdown-buffer-mb", value_name = "MIB", value_parser = parse_sort_pushdown_buffer_bytes)]
     sort_pushdown_buffer_bytes: Option<usize>,
@@ -783,6 +787,10 @@ fn parse_sort_pushdown_buffer_bytes(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--sort-pushdown-buffer-mb")?
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "--sort-pushdown-buffer-mb exceeds the supported range".into())
+}
+
+fn parse_partial_agg_probe_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--partial-agg-probe-rows")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
