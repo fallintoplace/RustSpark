@@ -200,7 +200,10 @@ fn validate_tuning_aliases(args: &Args) -> Result<(), Box<dyn std::error::Error>
         ],
         &[
             ("--subset-repartition-threshold", args.subset_repartition_threshold.is_some()),
-            ("--subset-repartition-min-partitions", args.subset_repartition_min_partitions.is_some()),
+            (
+                "--subset-repartition-min-partitions",
+                args.subset_repartition_min_partitions.is_some(),
+            ),
         ],
         &[
             ("--hash-join-probe-buffer-mb", args.hash_join_probe_buffer_mb.is_some()),
