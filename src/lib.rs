@@ -99,6 +99,8 @@ mod sql_compat_width_bucket;
 mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "sql_compat/factorial.rs"]
+mod sql_compat_factorial;
 mod sql_results;
 mod joins_multi_range;
 pub use joins_multi_range::RangeTableJoin;
@@ -224,6 +226,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_luhn_check::udf());
+        context.register_udf(sql_compat_factorial::udf());
         Self { context }
     }
 
