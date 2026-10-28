@@ -49,3 +49,5 @@ pub mod memory;
 pub mod batch_utils;
 
 pub mod cancel;
+
+pub mod pipeline;
