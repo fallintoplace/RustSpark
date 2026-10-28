@@ -1,6 +1,7 @@
 use std::{
-    fs,
-    io::{self, ErrorKind},
+    fs::{self, File},
+    io::{self, BufRead, BufReader, ErrorKind},
+    path::Path,
 };
 
 use super::ReplicaStore;
@@ -12,20 +13,58 @@ pub struct ReplicaVerification {
     pub divergent: usize,
 }
 
+/// Compare two replica files without allocating buffers proportional to object size.
+fn same_bytes(left: &Path, right: &Path) -> io::Result<bool> {
+    let mut left = BufReader::with_capacity(64 * 1024, File::open(left)?);
+    let mut right = BufReader::with_capacity(64 * 1024, File::open(right)?);
+    if left.get_ref().metadata()?.len() != right.get_ref().metadata()?.len() {
+        return Ok(false);
+    }
+    loop {
+        let a = left.fill_buf()?;
+        let b = right.fill_buf()?;
+        if a.is_empty() || b.is_empty() {
+            return Ok(a.is_empty() && b.is_empty());
+        }
+        let length = a.len().min(b.len());
+        if a[..length] != b[..length] {
+            return Ok(false);
+        }
+        left.consume(length);
+        right.consume(length);
+    }
+}
+
 impl ReplicaStore {
     /// Compare copies byte-for-byte; no replica is assumed to be authoritative.
     pub fn verify(&self, key: &str) -> io::Result<ReplicaVerification> {
-        let reference = self.get(key)?;
+        let placements = self.placements(key)?;
+        let mut reference = None;
+        // Preserve the existing first-surviving-replica semantics.
+        for node in &placements {
+            let path = node.root.join("objects").join(key);
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_file() => {
+                    reference = Some(path);
+                    break;
+                }
+                Ok(_) => return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe replica")),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let reference = reference
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found"))?;
         let mut result = ReplicaVerification {
             healthy: 0,
             missing: 0,
             divergent: 0,
         };
-        for node in self.placements(key)? {
+        for node in placements {
             let path = node.root.join("objects").join(key);
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.file_type().is_file() => {
-                    if fs::read(path)? == reference {
+                    if path == reference || same_bytes(&path, &reference)? {
                         result.healthy += 1;
                     } else {
                         result.divergent += 1;
@@ -67,5 +106,25 @@ mod tests {
         assert_eq!(result.healthy, 1);
         assert_eq!(result.missing, 1);
         assert_eq!(result.divergent, 1);
+    }
+
+    #[test]
+    fn checks_large_equal_and_same_length_divergent_replicas() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"].map(|id| {
+            let path = root.path().join(id);
+            fs::create_dir(&path).unwrap();
+            StorageNode::new(id, path).unwrap()
+        });
+        let store = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
+        let bytes = vec![19_u8; 2 * 1024 * 1024 + 7];
+        store.put("large.parquet", &bytes).unwrap();
+        assert_eq!(store.verify("large.parquet").unwrap().healthy, 2);
+        let replica = store.placements("large.parquet").unwrap()[1];
+        let mut different = bytes;
+        different[1024 * 1024] ^= 1;
+        fs::write(replica.root.join("objects/large.parquet"), different).unwrap();
+        let result = store.verify("large.parquet").unwrap();
+        assert_eq!((result.healthy, result.divergent), (1, 1));
     }
 }

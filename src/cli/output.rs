@@ -125,6 +125,16 @@ fn display_cell<'a>(
     {
         // Borrow UTF-8 values from the batch instead of allocating a String per cell.
         Ok(std::borrow::Cow::Borrowed(strings.value(row)))
+    } else if let Some(strings) = column
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
+    {
+        Ok(std::borrow::Cow::Borrowed(strings.value(row)))
+    } else if let Some(strings) = column
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
+    {
+        Ok(std::borrow::Cow::Borrowed(strings.value(row)))
     } else {
         datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)
             .map(std::borrow::Cow::Owned)
@@ -490,6 +500,29 @@ mod tests {
             display_cell(&column, 1).unwrap(),
             std::borrow::Cow::Borrowed("plain")
         ));
+    }
+
+    #[test]
+    fn large_and_view_utf8_cells_borrow_arrow_storage() {
+        use datafusion::arrow::array::{ArrayRef, LargeStringArray, StringViewArray};
+        let large: ArrayRef = std::sync::Arc::new(LargeStringArray::from(vec![
+            Some("large UTF-8 value"),
+            None,
+        ]));
+        let view: ArrayRef = std::sync::Arc::new(StringViewArray::from(vec![
+            Some("view value"),
+            None,
+        ]));
+        assert!(matches!(
+            display_cell(&large, 0).unwrap(),
+            std::borrow::Cow::Borrowed("large UTF-8 value")
+        ));
+        assert!(matches!(
+            display_cell(&view, 0).unwrap(),
+            std::borrow::Cow::Borrowed("view value")
+        ));
+        assert_eq!(display_cell(&large, 1).unwrap(), "NULL");
+        assert_eq!(display_cell(&view, 1).unwrap(), "NULL");
     }
 
     #[test]
