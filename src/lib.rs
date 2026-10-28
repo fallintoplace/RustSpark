@@ -113,6 +113,8 @@ mod sql_compat_cos;
 mod sql_compat_bitwise_xor;
 #[path = "sql_compat/cosh.rs"]
 mod sql_compat_cosh;
+#[path = "sql_compat/bitwise_not.rs"]
+mod sql_compat_bitwise_not;
 #[path = "sql_compat/cot.rs"]
 mod sql_compat_cot;
 #[path = "sql_compat/crc32.rs"]
@@ -320,6 +322,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_atanh::udf());
         context.register_udf(sql_compat_try_multiply::udf());
         context.register_udf(sql_compat_cosh::udf());
+        context.register_udf(sql_compat_bitwise_not::udf());
         context.register_udf(sql_compat_try_negate::udf());
         context.register_udf(sql_compat_sinh::udf());
         context.register_udf(sql_compat_try_abs::udf());
