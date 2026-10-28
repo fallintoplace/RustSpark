@@ -80,6 +80,17 @@ pub(crate) fn get_json_object_udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Utf8(input)),
+                ColumnarValue::Scalar(ScalarValue::Utf8(path)),
+            ] = args
+            {
+                let value = input
+                    .as_deref()
+                    .zip(path.as_deref())
+                    .and_then(|(input, path)| query_json(input, path));
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(value)));
+            }
             // A literal JSON path is shared by the entire input batch.
             // Parse it once rather than once for every JSON document.
             if let [
