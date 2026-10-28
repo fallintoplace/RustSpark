@@ -16,6 +16,8 @@ class EvidenceP95Tests(unittest.TestCase):
     def test_accepts_nearest_rank_p95(self):
         manifest, benchmark, verification = fixtures()
         benchmark["repeat"] = 4
+        for row in benchmark["results"]:
+            row["samples_ms"] = [row["median_ms"]] * 4
         benchmark["results"][0]["samples_ms"] = [1.0, 1.0, 1.0, 2.0]
         benchmark["results"][0]["p95_ms"] = 2.0
         evidence.qualify(manifest, benchmark, verification)
