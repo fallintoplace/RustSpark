@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark BROUND supports signed 64-bit bitwise conjunction.
+/// Spark BROUND rounds floating-point numbers to a scale using ties-to-even.
 fn evaluate(value: f64, digits: i64) -> Option<f64> {
     if !(-15..=15).contains(&digits) {
         return None;
@@ -59,6 +59,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::Float64Array;
 
     #[test]
     fn reference_vectors() {
@@ -71,11 +72,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT BROUND(CAST(12 AS BIGINT), CAST(10 AS BIGINT))")
+            .sql("SELECT BROUND(CAST(2.5 AS DOUBLE), CAST(0 AS BIGINT))")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 2.0);
         Ok(())
     }
 }
