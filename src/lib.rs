@@ -48,6 +48,8 @@ mod sql_compat_nullifzero;
 mod sql_compat_exp;
 #[path = "features/approx_distinct_count.rs"]
 mod feature_approx_distinct_count;
+#[path = "features/grouped_approx_distinct.rs"]
+mod feature_grouped_approx_distinct;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
 #[path = "sql_compat/radians.rs"]
