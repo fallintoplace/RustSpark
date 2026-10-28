@@ -6,6 +6,25 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
+// Positive divisors do not need 128-bit widening or the normalization branch.
+fn pmod_value(left: i64, right: i64) -> Option<i64> {
+    if right == 0 {
+        return None;
+    }
+    if right > 0 {
+        return Some(left.rem_euclid(right));
+    }
+    // Preserve signed-divisor behavior, including MIN / -1.
+    let divisor = i128::from(right);
+    let remainder = i128::from(left) % divisor;
+    let normalized = if remainder < 0 {
+        (remainder + divisor) % divisor
+    } else {
+        remainder
+    };
+    i64::try_from(normalized).ok()
+}
+
 pub(crate) fn udf() -> ScalarUDF {
     create_udf(
         "pmod",
@@ -29,16 +48,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| match (left, right) {
-                    (Some(left), Some(right)) if right != 0 => {
-                        let divisor = i128::from(right);
-                        let remainder = i128::from(left) % divisor;
-                        let normalized = if remainder < 0 {
-                            (remainder + divisor) % divisor
-                        } else {
-                            remainder
-                        };
-                        i64::try_from(normalized).ok()
-                    }
+                    (Some(left), Some(right)) => pmod_value(left, right)
                     _ => None,
                 })
                 .collect();
@@ -51,4 +61,20 @@ pub(crate) fn udf() -> ScalarUDF {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pmod_value;
+
+    #[test]
+    fn preserves_signed_divisors_and_boundaries() {
+        assert_eq!(pmod_value(-5, 3), Some(1));
+        assert_eq!(pmod_value(5, 3), Some(2));
+        assert_eq!(pmod_value(-5, -3), Some(-2));
+        assert_eq!(pmod_value(5, -3), Some(2));
+        assert_eq!(pmod_value(0, 0), None);
+        assert_eq!(pmod_value(i64::MIN, -1), Some(0));
+        assert_eq!(pmod_value(i64::MIN, i64::MAX), Some(i64::MAX - 1));
+    }
 }
