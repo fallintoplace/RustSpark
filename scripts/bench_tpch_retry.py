@@ -54,6 +54,8 @@ def retry_completed(replay, ids):
 
 
 def execute_retry(args):
+    if args.previous.resolve() == args.json_out.resolve():
+        raise ValueError("Retry output must differ from previous report")
     ids = failed_ids(json.loads(args.previous.read_text(encoding="utf-8")))
     if not ids:
         print("All recorded TPC-H queries succeeded; nothing to retry")
