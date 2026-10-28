@@ -49,6 +49,30 @@ fn parse_fields(specification: &str) -> Result<Vec<Field>, String> {
     Ok(fields)
 }
 
+fn parse_map_type(inner: &str) -> Result<DataType, String> {
+    let types = split_top_level(inner)?;
+    if types.len() != 2 {
+        return Err("JSON map type must be map<KEY,VALUE>".into());
+    }
+    let key = parse_type(types[0])?;
+    let value = parse_type(types[1])?;
+    // Arrow maps require a non-null key in a non-null entries struct.
+    Ok(DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new("key", key, false)),
+                    Arc::new(Field::new("value", value, true)),
+                ]
+                .into(),
+            ),
+            false,
+        )),
+        false,
+    ))
+}
+
 fn parse_type(specification: &str) -> Result<DataType, String> {
     let name = specification.trim();
     let Some(open) = name.find('<') else {
@@ -72,29 +96,7 @@ fn parse_type(specification: &str) -> Result<DataType, String> {
                 .collect::<Vec<_>>()
                 .into(),
         )),
-        "map" => {
-            let types = split_top_level(inner)?;
-            if types.len() != 2 {
-                return Err("JSON map type must be map<KEY,VALUE>".into());
-            }
-            let key = parse_type(types[0])?;
-            let value = parse_type(types[1])?;
-            // Arrow maps require a non-null key in a non-null entries struct.
-            Ok(DataType::Map(
-                Arc::new(Field::new(
-                    "entries",
-                    DataType::Struct(
-                        vec![
-                            Arc::new(Field::new("key", key, false)),
-                            Arc::new(Field::new("value", value, true)),
-                        ]
-                        .into(),
-                    ),
-                    false,
-                )),
-                false,
-            ))
-        }
+        "map" => parse_map_type(inner),
         _ => Err(format!("Unsupported JSON type: {name}")),
     }
 }
