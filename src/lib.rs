@@ -149,6 +149,8 @@ mod sql_compat_hex;
 mod sql_compat_hypot;
 #[path = "sql_compat/log1p.rs"]
 mod sql_compat_log1p;
+#[path = "sql_compat/try_to_binary.rs"]
+mod sql_compat_try_to_binary;
 #[path = "sql_compat/json.rs"]
 mod sql_compat_json;
 #[path = "sql_compat/luhn_check.rs"]
@@ -375,6 +377,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_csc::udf());
         context.register_udf(sql_compat_hypot::udf());
         context.register_udf(sql_compat_log1p::udf());
+        context.register_udf(sql_compat_try_to_binary::udf());
         context.register_udf(sql_compat_crc32::udf());
         context.register_udf(sql_compat_negative::udf());
         context.register_udf(sql_compat_url_encode::udf());
