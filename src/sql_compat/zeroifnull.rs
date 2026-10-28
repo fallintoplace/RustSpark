@@ -21,14 +21,14 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("zeroifnull expects Int64".into()))?;
-            let result: Vec<Option<i64>> =
-                input.iter().map(|value| Some(value.unwrap_or(0))).collect();
+            let result: Int64Array =
+                input.iter().map(|value| value.unwrap_or(0)).collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )
