@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Force row selections for Parquet filter pushdown instead of auto choice.
+    #[arg(long = "parquet-force-filter-selections", requires = "parquet_pushdown_filters")]
+    parquet_force_filter_selections: bool,
+
     /// Predicate cache capacity in MiB for selective Parquet decoding.
     #[arg(long = "parquet-predicate-cache-mb", value_name = "MIB", value_parser = parse_memory_limit_mib, requires = "parquet_pushdown_filters")]
     parquet_predicate_cache_bytes: Option<usize>,
