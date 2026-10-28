@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{
-        array::Int64Array,
-        datatypes::DataType,
-    },
+    arrow::{array::Int64Array, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -17,7 +14,9 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            let scalar = args
+                .iter()
+                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let values = arrays[0]
                 .as_any()
@@ -25,7 +24,9 @@ pub(crate) fn udf() -> ScalarUDF {
                 .ok_or_else(|| DataFusionError::Internal("factorial expects Int64".into()))?;
             let result: Vec<Option<i64>> = values
                 .iter()
-                .map(|value| value.and_then(|n| (0..=20).contains(&n).then(|| (1..=n).product::<i64>())))
+                .map(|value| {
+                    value.and_then(|n| (0..=20).contains(&n).then(|| (1..=n).product::<i64>()))
+                })
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Int64(
