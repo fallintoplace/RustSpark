@@ -127,6 +127,8 @@ mod sql_compat_negative;
 mod sql_compat_csc;
 #[path = "sql_compat/degrees.rs"]
 mod sql_compat_degrees;
+#[path = "sql_compat/decode.rs"]
+mod sql_compat_decode;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
 #[path = "sql_compat/lcase.rs"]
@@ -337,6 +339,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_pmod::udf());
         context.register_udf(sql_compat_quote::udf());
         context.register_udf(sql_compat_degrees::udf());
+        context.register_udf(sql_compat_decode::udf());
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_atan2::udf());
         context.register_udf(sql_compat_bin::udf());
