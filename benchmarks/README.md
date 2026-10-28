@@ -14,7 +14,7 @@ python3 scripts/quality.py bench cold --engines rustspark duckdb --rows 100000
 python3 scripts/quality.py bench report benchmarks/engine-comparison.json
 ```
 
-The modes are `local`, `cold`, `warm`, `tpch`, `tpch-prepare`,
+The modes are `local`, `cold`, `warm`, `tpch`, `tpch-prepare`, `billion`,
 `clickbench`, `clickbench-fetch`, `report`, and `compare-reports`.
 To get a tool's own help, use `bench <mode> -- --help`. Direct script
 entry points remain supported.
@@ -51,6 +51,15 @@ treat the runtime numbers of this harness as Spark-versus-RustSpark results.
 
 To view the verified RustSpark vs DuckDB/Spark benchmark results as Markdown,
 see [Reading benchmark results](engine-comparison.md#reading-benchmark-results).
+
+## Billion-row Parquet benchmark
+
+See [the billion-row reproducibility runbook](../docs/billion-row-performance.md)
+before preparing the large TPC-H fixture. Use `python3 scripts/quality.py bench billion
+--fixture /data/tpch-sf167 --binary ./target/release/rustspark` after
+generation. This benchmark scans columns and aggregates data, not just
+Parquet metadata. Its result fingerprints detect nondeterministic outputs
+between samples. Runs are manual because the dataset is too large for PR CI.
 
 ## 12-query end-to-end latency suite
 
