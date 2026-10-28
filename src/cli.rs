@@ -543,6 +543,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Opt-in configuration for large analytical workloads.
+    #[arg(long = "parquet-serial-file-write")]
+    parquet_serial_file_write: bool,
+
     /// Tune min-parallel-output-files for large Parquet datasets.
     #[arg(long = "min-parallel-output-files", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     min_parallel_output_files: Option<usize>,
