@@ -27,3 +27,5 @@ pub mod limit;
 pub mod sort;
 
 pub mod aggregate;
+
+pub mod distinct;
