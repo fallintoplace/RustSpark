@@ -23,7 +23,9 @@ def summarize(report):
     entries = report.get("results")
     if not isinstance(entries, list) or len(entries) != 22:
         raise ValueError("A summary requires exactly 22 TPC-H queries")
-    if {row.get("id") for row in entries} != set(range(1, 23)):
+    if (any(not isinstance(row, dict) or type(row.get("id")) is not int
+            for row in entries)
+            or {row["id"] for row in entries} != set(range(1, 23))):
         raise ValueError("Missing or duplicate TPC-H query ID")
     medians = checked_medians(entries)
     return {

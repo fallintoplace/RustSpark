@@ -1,6 +1,27 @@
 // Lazy row and predicate operations on registered tables.
 use super::*;
 
+#[derive(Clone, Copy)]
+enum PredicateCombination {
+    All,
+    Any,
+}
+
+fn combine_predicates(
+    predicates: &[datafusion::logical_expr::Expr],
+    mode: PredicateCombination,
+    error_message: &str,
+) -> Result<datafusion::logical_expr::Expr> {
+    let mut expressions = predicates.iter().cloned();
+    let first = expressions
+        .next()
+        .ok_or_else(|| DataFusionError::Plan(error_message.into()))?;
+    Ok(expressions.fold(first, |combined, expression| match mode {
+        PredicateCombination::All => combined.and(expression),
+        PredicateCombination::Any => combined.or(expression),
+    }))
+}
+
 impl RustSparkSession {
     fn validate_dropna_columns(dataframe: &DataFrame, selected: &[&str]) -> Result<()> {
         Self::validate_named_columns(dataframe, selected, "dropna")
@@ -113,13 +134,12 @@ impl RustSparkSession {
         table: &str,
         predicates: &[datafusion::logical_expr::Expr],
     ) -> Result<DataFrame> {
-        let mut predicates = predicates.iter().cloned();
-        let first = predicates
-            .next()
-            .ok_or_else(|| DataFusionError::Plan("filter_rows_all requires a predicate".into()))?;
-        self.table(table)
-            .await?
-            .filter(predicates.fold(first, |combined, predicate| combined.and(predicate)))
+        let combined = combine_predicates(
+            predicates,
+            PredicateCombination::All,
+            "filter_rows_all requires a predicate",
+        )?;
+        self.table(table).await?.filter(combined)
     }
 
     /// Keep rows matching at least one typed filter expression.
@@ -131,13 +151,12 @@ impl RustSparkSession {
         table: &str,
         predicates: &[datafusion::logical_expr::Expr],
     ) -> Result<DataFrame> {
-        let mut predicates = predicates.iter().cloned();
-        let first = predicates
-            .next()
-            .ok_or_else(|| DataFusionError::Plan("filter_rows_any requires a predicate".into()))?;
-        self.table(table)
-            .await?
-            .filter(predicates.fold(first, |combined, predicate| combined.or(predicate)))
+        let combined = combine_predicates(
+            predicates,
+            PredicateCombination::Any,
+            "filter_rows_any requires a predicate",
+        )?;
+        self.table(table).await?.filter(combined)
     }
 
     /// Filter a registered table with a typed DataFusion expression.
@@ -335,5 +354,16 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, &[column])?;
         let key = Expr::Column(Column::from_name(column));
         dataframe.filter(key.clone().lt(lit(lower)).or(key.gt(lit(upper))))
+    }
+}
+
+#[cfg(test)]
+mod predicate_combination_tests {
+    use super::{PredicateCombination, combine_predicates};
+
+    #[test]
+    fn empty_predicates_fail_for_both_combinations() {
+        assert!(combine_predicates(&[], PredicateCombination::All, "all").is_err());
+        assert!(combine_predicates(&[], PredicateCombination::Any, "any").is_err());
     }
 }

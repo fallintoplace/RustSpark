@@ -42,6 +42,15 @@ def execute_count(binary, fixture, table, timeout):
     return parse_count(output.stdout)
 
 
+def compare_table_count(binary, fixture, timeout, table, expected_count):
+    count = expected_count
+    if type(count) is not int or count < 0:
+        raise ValueError(f"Invalid expected row count for {table}")
+    actual = execute_count(binary, fixture, table, timeout)
+    return {"table": table, "expected": count, "actual": actual,
+                    "status": "ok" if count == actual else "mismatch"}
+
+
 def check(binary, fixture, timeout=120):
     if timeout < 1:
         raise ValueError("Timeout must be positive")
@@ -51,12 +60,7 @@ def check(binary, fixture, timeout=120):
         raise ValueError("Expected row counts for all eight TPC-H tables")
     results = []
     for table in TABLES:
-        count = expected[table]
-        if type(count) is not int or count < 0:
-            raise ValueError(f"Invalid expected row count for {table}")
-        actual = execute_count(binary, fixture, table, timeout)
-        results.append({"table": table, "expected": count, "actual": actual,
-                        "status": "ok" if count == actual else "mismatch"})
+        results.append(compare_table_count(binary, fixture, timeout, table, expected[table]))
     return {"results": results}
 
 

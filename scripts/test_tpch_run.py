@@ -148,6 +148,24 @@ class QueryRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing"):
                 runner.query_paths(queries, [3])
 
+    def test_missing_sql_file_is_reported_without_skipping_next_query(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = root / "data"
+            data.mkdir()
+            for table in runner.TABLES:
+                (data / f"{table}.parquet").touch()
+            second = root / "02.sql"
+            second.write_text("SELECT 2;")
+            with mock.patch.object(runner, "measure", return_value={
+                "status": "ok", "median_ms": 1.0,
+            }) as execute:
+                result = runner.benchmark("rs", [(1, root / "01.sql"), (2, second)],
+                                          data, repeat=1, warmup=0)
+            self.assertEqual([row["status"] for row in result["results"]],
+                             ["error", "ok"])
+            self.assertEqual(execute.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

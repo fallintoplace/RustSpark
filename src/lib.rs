@@ -8,6 +8,7 @@ use datafusion::{
 };
 
 mod export;
+pub mod distributed_storage;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
 mod joins;
@@ -29,54 +30,92 @@ mod sources;
 mod feature_top_rows_per_group;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
+#[path = "sql_compat/cos.rs"]
+mod sql_compat_cos;
 #[path = "features/unpivot_columns.rs"]
 mod feature_unpivot_columns;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "sql_compat/sin.rs"]
+mod sql_compat_sin;
 #[path = "features/numeric_column_summary.rs"]
 mod feature_numeric_column_summary;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
+#[path = "sql_compat/exp.rs"]
+mod sql_compat_exp;
 #[path = "features/approx_distinct_count.rs"]
 mod feature_approx_distinct_count;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
+#[path = "sql_compat/radians.rs"]
+mod sql_compat_radians;
 #[path = "features/approx_percentile.rs"]
 mod feature_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
+#[path = "sql_compat/degrees.rs"]
+mod sql_compat_degrees;
 #[path = "features/substring_filter.rs"]
 mod feature_substring_filter;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
+#[path = "sql_compat/acos.rs"]
+mod sql_compat_acos;
 #[path = "features/group_ranks.rs"]
 mod feature_group_ranks;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
+#[path = "sql_compat/asin.rs"]
+mod sql_compat_asin;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
+#[path = "sql_compat/atan.rs"]
+mod sql_compat_atan;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
+#[path = "sql_compat/atan2.rs"]
+mod sql_compat_atan2;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "sql_compat/acosh.rs"]
+mod sql_compat_acosh;
 #[path = "sql_compat/try_add.rs"]
 mod sql_compat_try_add;
+#[path = "sql_compat/asinh.rs"]
+mod sql_compat_asinh;
 #[path = "sql_compat/try_subtract.rs"]
 mod sql_compat_try_subtract;
+#[path = "sql_compat/atanh.rs"]
+mod sql_compat_atanh;
 #[path = "sql_compat/try_multiply.rs"]
 mod sql_compat_try_multiply;
+#[path = "sql_compat/cosh.rs"]
+mod sql_compat_cosh;
 #[path = "sql_compat/try_negate.rs"]
 mod sql_compat_try_negate;
+#[path = "sql_compat/sinh.rs"]
+mod sql_compat_sinh;
 #[path = "sql_compat/try_abs.rs"]
 mod sql_compat_try_abs;
+#[path = "sql_compat/tanh.rs"]
+mod sql_compat_tanh;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+#[path = "sql_compat/tan.rs"]
+mod sql_compat_tan;
 #[path = "sql_compat/shiftleft.rs"]
 mod sql_compat_shiftleft;
+#[path = "sql_compat/cot.rs"]
+mod sql_compat_cot;
 #[path = "sql_compat/shiftright.rs"]
 mod sql_compat_shiftright;
+#[path = "sql_compat/cbrt.rs"]
+mod sql_compat_cbrt;
 #[path = "sql_compat/bit_get.rs"]
 mod sql_compat_bit_get;
+#[path = "sql_compat/expm1.rs"]
+mod sql_compat_expm1;
 #[path = "sql_compat/shiftrightunsigned.rs"]
 mod sql_compat_shiftrightunsigned;
 #[path = "sql_compat/equal_null.rs"]
@@ -99,6 +138,8 @@ mod sql_compat_width_bucket;
 mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "sql_compat/factorial.rs"]
+mod sql_compat_factorial;
 mod sql_results;
 mod joins_multi_range;
 pub use joins_multi_range::RangeTableJoin;
@@ -195,24 +236,43 @@ impl RustSparkSession {
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
         context.register_udf(sql_compat_endswith::udf());
+        context.register_udf(sql_compat_sin::udf());
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
+        context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_space::udf());
+        context.register_udf(sql_compat_acos::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
+        context.register_udf(sql_compat_acosh::udf());
         context.register_udf(sql_compat_nullifzero::udf());
+        context.register_udf(sql_compat_exp::udf());
         context.register_udf(sql_compat_pmod::udf());
+        context.register_udf(sql_compat_degrees::udf());
         context.register_udf(sql_compat_try_mod::udf());
+        context.register_udf(sql_compat_atan2::udf());
         context.register_udf(sql_compat_bin::udf());
+        context.register_udf(sql_compat_cos::udf());
         context.register_udf(sql_compat_try_divide::udf());
+        context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
+        context.register_udf(sql_compat_asinh::udf());
         context.register_udf(sql_compat_try_subtract::udf());
+        context.register_udf(sql_compat_atanh::udf());
         context.register_udf(sql_compat_try_multiply::udf());
+        context.register_udf(sql_compat_cosh::udf());
         context.register_udf(sql_compat_try_negate::udf());
+        context.register_udf(sql_compat_sinh::udf());
         context.register_udf(sql_compat_try_abs::udf());
+        context.register_udf(sql_compat_tanh::udf());
         context.register_udf(sql_compat_bit_count::udf());
+        context.register_udf(sql_compat_tan::udf());
         context.register_udf(sql_compat_shiftleft::udf());
+        context.register_udf(sql_compat_cot::udf());
         context.register_udf(sql_compat_shiftright::udf());
+        context.register_udf(sql_compat_cbrt::udf());
         context.register_udf(sql_compat_bit_get::udf());
+        context.register_udf(sql_compat_expm1::udf());
         context.register_udf(sql_compat_shiftrightunsigned::udf());
         context.register_udf(sql_compat_equal_null::udf());
         context.register_udf(sql_compat_sec::udf());
@@ -224,6 +284,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_luhn_check::udf());
+        context.register_udf(sql_compat_factorial::udf());
         Self { context }
     }
 

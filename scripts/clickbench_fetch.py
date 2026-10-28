@@ -28,7 +28,12 @@ def _verify_query_statements(data: bytes) -> None:
     lines = [line.strip() for line in data.decode("utf-8").splitlines() if line.strip()]
     if len(lines) != QUERY_COUNT:
         raise ValueError(f"Expected {QUERY_COUNT} queries, found {len(lines)}")
-    if any(not line.upper().startswith("SELECT ") or not line.endswith(";") for line in lines):
+    if any(
+        not line.upper().startswith("SELECT ")
+        or not line.endswith(";")
+        or line.count(";") != 1
+        for line in lines
+    ):
         raise ValueError("ClickBench corpus must contain one SELECT statement per line")
 
 

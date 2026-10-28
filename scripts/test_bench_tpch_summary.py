@@ -34,6 +34,12 @@ class SuiteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             suite.summarize(data)
 
+    def test_boolean_query_id_is_not_a_complete_suite(self):
+        data = report()
+        data["results"][0]["id"] = True
+        with self.assertRaisesRegex(ValueError, "query ID"):
+            suite.summarize(data)
+
 
 if __name__ == "__main__":
     unittest.main()

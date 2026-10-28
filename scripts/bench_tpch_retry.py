@@ -33,12 +33,32 @@ def retry_command(binary, queries, parquet, ids, report, repeat=1, timeout=120):
 
 
 def retry_completed(replay, ids):
+    if not isinstance(replay, dict):
+        return False
     new = replay.get("results", [])
-    return (isinstance(new, list) and len(new) == len(ids)
+    return (isinstance(new, list)
+            and len(new) == len(ids)
             and all(isinstance(row, dict) and type(row.get("id")) is int
                     for row in new)
             and {row["id"] for row in new} == set(ids)
             and all(row.get("status") == "ok" for row in new))
+
+
+def execute_retry(args):
+    ids = failed_ids(json.loads(args.previous.read_text(encoding="utf-8")))
+    if not ids:
+        print("All recorded TPC-H queries succeeded; nothing to retry")
+        return 0
+    args.json_out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = retry_command(args.binary, args.queries_dir, args.parquet_dir,
+                        ids, args.json_out, args.repeat, args.timeout)
+    # A previous report must never be reused as fresh retry output.
+    args.json_out.unlink(missing_ok=True)
+    result = subprocess.run(cmd, check=False)
+    # Original runner versions can exit 0 even if some queries failed.
+    replay = json.loads(args.json_out.read_text(encoding="utf-8"))
+    completed = retry_completed(replay, ids)
+    return 0 if completed and result.returncode == 0 else 1
 
 
 def main(argv=None):
@@ -52,22 +72,9 @@ def main(argv=None):
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
     try:
-        ids = failed_ids(json.loads(args.previous.read_text(encoding="utf-8")))
-        if not ids:
-            print("All recorded TPC-H queries succeeded; nothing to retry")
-            return 0
-        args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        cmd = retry_command(args.binary, args.queries_dir, args.parquet_dir,
-                            ids, args.json_out, args.repeat, args.timeout)
-        # Remove prior results so a successful process without output cannot pass.
-        args.json_out.unlink(missing_ok=True)
-        result = subprocess.run(cmd, check=False)
-        # Original runner versions can exit 0 even if some queries failed.
-        replay = json.loads(args.json_out.read_text(encoding="utf-8"))
-        completed = retry_completed(replay, ids)
+        return execute_retry(args)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"retry failed: {error}\n")
-    return 0 if completed and result.returncode == 0 else 1
 
 
 if __name__ == "__main__":

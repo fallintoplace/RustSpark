@@ -1,9 +1,24 @@
 name: Spark SQL typed differential
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/spark-sql-typed.yml'
+      - 'scripts/spark_compat.py'
+      - 'scripts/spark_typed_compat.py'
+      - 'scripts/test_spark_compat.py'
+      - 'scripts/test_spark_typed_compat.py'
+      - 'tests/compatibility/**'
+      - 'src/sql_compat/**'
+      - 'src/sql_results.rs'
+      - 'src/sources.rs'
   workflow_dispatch:
   schedule:
     - cron: '37 3 * * 3'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::StringArray, datatypes::DataType},
+    arrow::{array::{StringArray, StringBuilder}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
 /// ASCII Soundex phonetic codes for approximate matching.
-fn soundex(input: &str) -> String {
+fn soundex_bytes(input: &str) -> Option<[u8; 4]> {
     fn digit(letter: u8) -> u8 {
         match letter {
             b'B' | b'F' | b'P' | b'V' => b'1',
@@ -20,12 +20,10 @@ fn soundex(input: &str) -> String {
         }
     }
     let mut letters = input.bytes().filter(u8::is_ascii_alphabetic);
-    let Some(first) = letters.next() else {
-        return String::new();
-    };
-    let first = first.to_ascii_uppercase();
-    let mut result = String::with_capacity(4);
-    result.push(char::from(first));
+    let first = letters.next()?.to_ascii_uppercase();
+    let mut result = [b'0'; 4];
+    result[0] = first;
+    let mut length = 1;
     let mut previous = digit(first);
     for letter in letters {
         let letter = letter.to_ascii_uppercase();
@@ -37,17 +35,15 @@ fn soundex(input: &str) -> String {
             continue;
         }
         if code != previous {
-            result.push(char::from(code));
-            if result.len() == 4 {
+            result[length] = code;
+            length += 1;
+            if length == 4 {
                 break;
             }
         }
         previous = code;
     }
-    while result.len() < 4 {
-        result.push('0');
-    }
-    result
+    Some(result)
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -65,17 +61,26 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("soundex expects Utf8".into()))?;
-            let result: Vec<Option<String>> = input
-                .iter()
-                .map(|value| value.map(soundex))
-                .collect();
             if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(StringArray::from(result))))
+                let value = input.iter().next().flatten().map(|name| {
+                    soundex_bytes(name)
+                        .map(|digits| std::str::from_utf8(&digits).unwrap().to_owned())
+                        .unwrap_or_default()
+                });
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(value)));
             }
+            // Produce four ASCII bytes directly in Arrow's contiguous output buffer.
+            let mut result = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(4));
+            for value in input.iter() {
+                match value {
+                    None => result.append_null(),
+                    Some(name) => match soundex_bytes(name) {
+                        Some(digits) => result.append_value(std::str::from_utf8(&digits).unwrap()),
+                        None => result.append_value(""),
+                    },
+                }
+            }
+            Ok(ColumnarValue::Array(Arc::new(result.finish())))
         }),
     )
 }

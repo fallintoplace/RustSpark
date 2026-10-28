@@ -50,6 +50,10 @@ def main(argv=None):
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.json_out is not None and args.json_out.resolve() in (
+            args.parquet.resolve(), args.queries.resolve(),
+        ):
+            raise ValueError("Report output must differ from Parquet and SQL inputs")
         report = inspect(args.parquet, args.queries)
         output = json.dumps(report, indent=2) + "\n"
         if args.json_out:

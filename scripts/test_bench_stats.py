@@ -25,6 +25,12 @@ class BenchmarkSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one"):
             bench_stats.summarize_samples([])
 
+    def test_statistics_use_unrounded_samples(self):
+        result = bench_stats.summarize_samples([0.0001, 0.0005])
+        self.assertEqual(result["samples_ms"], [0.0, 0.001])
+        self.assertEqual(result["median_ms"], 0.0)
+        self.assertEqual(result["p95_ms"], 0.001)
+
 
 if __name__ == "__main__":
     unittest.main()

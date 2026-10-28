@@ -39,7 +39,7 @@ def normalize(value):
 def fingerprint(result: QueryResult, ordered: bool = False):
     # Preserve column names and value types. Compare row multisets by default:
     # SQL without ORDER BY has no stable row order.
-    encoded = [json.dumps(normalize(row), sort_keys=True, ensure_ascii=False) for row in result.rows]
+    encoded = [json.dumps(normalize(row), sort_keys=True, ensure_ascii=False, allow_nan=False) for row in result.rows]
     if not ordered:
         encoded.sort()
     return (result.columns, encoded)

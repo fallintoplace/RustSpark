@@ -6,9 +6,10 @@ not an official TPC-H certification.
 """
 
 import argparse
-from collections import Counter
+from collections import Counter, deque
 import datetime
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -78,14 +79,38 @@ def equal_rows(actual, expected, tolerance, ordered):
             return True
     except TypeError:
         pass
-    remaining = list(expected)
-    for row in actual:
-        matching = next((i for i, candidate in enumerate(remaining)
-                         if same_row(row, candidate, tolerance)), None)
-        if matching is None:
+    # A greedy first match can consume the only reference row that a later
+    # result can match. Find an augmenting path instead of fixing early choices.
+    reference_owner = [None] * len(expected)
+    actual_match = [None] * len(actual)
+    for start in range(len(actual)):
+        queue = deque([start])
+        visited_actual = {start}
+        parent = {}
+        found = None
+        while queue and found is None:
+            actual_index = queue.popleft()
+            for reference_index, reference_row in enumerate(expected):
+                if (reference_index in parent or not same_row(
+                        actual[actual_index], reference_row, tolerance)):
+                    continue
+                parent[reference_index] = actual_index
+                owner = reference_owner[reference_index]
+                if owner is None:
+                    found = reference_index
+                    break
+                if owner not in visited_actual:
+                    visited_actual.add(owner)
+                    queue.append(owner)
+        if found is None:
             return False
-        remaining.pop(matching)
-    return not remaining
+        while found is not None:
+            actual_index = parent[found]
+            previous_reference = actual_match[actual_index]
+            reference_owner[found] = actual_index
+            actual_match[actual_index] = found
+            found = previous_reference
+    return True
 
 
 def parse_rows(stdout):
@@ -124,7 +149,9 @@ def verify(binary, parquet, queries, timeout=120, partitions=2, tolerance=Decima
         for number, path in queries:
             result = {"id": number}
             try:
-                sql = path.read_text(encoding="utf-8")
+                sql_bytes = path.read_bytes()
+                sql = sql_bytes.decode("utf-8")
+                result["sql_sha256"] = hashlib.sha256(sql_bytes).hexdigest()
                 cursor = con.execute(sql)
                 columns = [item[0] for item in cursor.description]
                 if len(set(columns)) != len(columns):

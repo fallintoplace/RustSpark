@@ -8,15 +8,15 @@ def summarize_samples(samples):
     """Return rounded samples, median and nearest-rank p95 in milliseconds."""
     if not samples:
         raise ValueError("Benchmark must have at least one timing sample")
-    checked = []
+    measured = []
     for duration in samples:
         if (isinstance(duration, bool) or not isinstance(duration, (int, float))
                 or not math.isfinite(duration) or duration < 0):
             raise ValueError(f"Invalid benchmark duration: {duration}")
-        checked.append(round(float(duration), 3))
-    ordered = sorted(checked)
+        measured.append(float(duration))
+    ordered = sorted(measured)
     return {
-        "samples_ms": checked,
-        "median_ms": round(statistics.median(checked), 3),
-        "p95_ms": ordered[math.ceil(len(ordered) * 0.95) - 1],
+        "samples_ms": [round(value, 3) for value in measured],
+        "median_ms": round(statistics.median(measured), 3),
+        "p95_ms": round(ordered[math.ceil(len(ordered) * 0.95) - 1], 3),
     }

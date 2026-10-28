@@ -101,7 +101,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         run_smoke(args.mode, args.client, args.timeout)
-    except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"FAIL: {error}\n")
     return 0
 
