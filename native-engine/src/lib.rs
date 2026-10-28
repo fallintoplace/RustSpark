@@ -51,3 +51,5 @@ pub mod batch_utils;
 pub mod cancel;
 
 pub mod pipeline;
+
+pub mod hash_partition;
