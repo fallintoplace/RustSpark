@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark SQL CHR escapes single chrs with a backslash.
+/// Spark CHR converts an integer modulo 256 into a single character.
 fn evaluate(value: i64) -> Option<String> {
     char::from_u32(value.rem_euclid(256) as u32).map(|character| character.to_string())
 }
@@ -56,6 +56,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
 
     #[test]
     fn reference_vectors() {
@@ -66,11 +67,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT CHR('Spark SQL')")
+            .sql("SELECT CHR(CAST(65 AS BIGINT))")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "A");
         Ok(())
     }
 }
