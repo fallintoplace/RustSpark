@@ -47,7 +47,7 @@ def validate_variant(variant, seen):
     if len(options) != len(set(options)) or any(option not in OPTIONS for option in options):
         raise ValueError(f"Unsupported or repeated flag in {label}")
     for option, raw in zip(options, flags[1::2]):
-        if not raw.isdecimal() or int(raw) < 1:
+        if re.fullmatch(r"[0-9]+", raw) is None or int(raw) < 1:
             raise ValueError(f"{option} needs a positive integer")
 
 
