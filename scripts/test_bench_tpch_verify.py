@@ -26,6 +26,17 @@ class ComparisonTests(unittest.TestCase):
     def test_unhashable_values_use_tolerance_aware_path(self):
         self.assertTrue(verify.equal_rows([{"a": [1, 2]}], [{"a": [1, 2]}], Decimal(0), False))
 
+    def test_multiset_fast_path_never_confuses_boolean_with_integer(self):
+        self.assertFalse(verify.equal_rows(
+            [{"v": True}, {"v": 2}], [{"v": 1}, {"v": 2}], Decimal(0), False,
+        ))
+        self.assertFalse(verify.equal_rows(
+            [{"v": False}], [{"v": 0}], Decimal(0), False,
+        ))
+        self.assertTrue(verify.equal_rows(
+            [{"v": 1}], [{"v": 1.0}], Decimal(0), False,
+        ))
+
     def test_numeric_tolerance(self):
         self.assertTrue(verify.same_value(Decimal("1.000001"), 1, Decimal("0.000002")))
         self.assertFalse(verify.same_value(1.1, 1, Decimal("0.01")))

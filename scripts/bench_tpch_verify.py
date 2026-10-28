@@ -73,8 +73,14 @@ def equal_rows(actual, expected, tolerance, ordered):
     # check avoids quadratic matching for this common case. Fall back to the
     # tolerance-aware matcher for differing representations or nested values.
     try:
-        actual_counts = Counter(tuple(sorted(row.items())) for row in actual)
-        expected_counts = Counter(tuple(sorted(row.items())) for row in expected)
+        # Python considers True == 1 and hashes them identically. The fast
+        # path must not declare boolean and numeric SQL values equivalent.
+        # Other cross-type representations can use the typed slow matcher.
+        def typed_key(row):
+            return tuple(sorted((key, type(value), value) for key, value in row.items()))
+
+        actual_counts = Counter(typed_key(row) for row in actual)
+        expected_counts = Counter(typed_key(row) for row in expected)
         if actual_counts == expected_counts:
             return True
     except TypeError:
