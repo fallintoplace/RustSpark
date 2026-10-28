@@ -287,6 +287,10 @@ struct Args {
     #[arg(long = "parquet-force-row-selection", requires = "parquet_pushdown_filters")]
     parquet_force_row_selection: bool,
 
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-write-bloom-filters")]
+    parquet_write_bloom_filters: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",

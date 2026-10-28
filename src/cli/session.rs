@@ -45,6 +45,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.parquet_force_row_selection {
         config.options_mut().execution.parquet.force_filter_selections = true;
     }
+    if args.parquet_write_bloom_filters {
+        config.options_mut().execution.parquet.bloom_filter_on_write = true;
+    }
     config
 }
 
@@ -135,6 +138,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-pushdown-filters", "--parquet-force-row-selection"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.force_filter_selections, true);
+    }
+
+    #[test]
+    fn sets_parquet_write_bloom_filters_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-write-bloom-filters"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.bloom_filter_on_write, true);
     }
 
     #[test]

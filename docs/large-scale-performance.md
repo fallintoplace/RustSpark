@@ -10,3 +10,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--parquet-predicate-cache-bytes 67108864`: Cache predicate evaluations during pushdown, trading memory for reduced CPU and I/O; requires --parquet-pushdown-filters.
 - `--parquet-metadata-hint-bytes 1048576`: Read this many bytes optimistically at the end of each Parquet file; tune for footer sizes, do not assume a larger hint is faster.
 - `--parquet-force-row-selection`: Force RowSelection for Parquet filter results with pushdown enabled. May regress dense filters.
+- `--parquet-write-bloom-filters`: Write Parquet bloom filters when the DataFusion writer uses session settings. More storage and write CPU; benefit depends on filter selectivity.
