@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -21,7 +21,11 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
+                    value.and_then(evaluate),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
                 .as_any()
@@ -30,24 +34,16 @@ pub(crate) fn udf() -> ScalarUDF {
             let mut result =
                 StringBuilder::with_capacity(input0.len(), input0.len().saturating_mul(16));
             for row in 0..input0.len() {
-                let value = if input0.is_null(row) {
-                    None
+                if input0.is_null(row) {
+                    result.append_null();
                 } else {
-                    evaluate(input0.value(row))
-                };
-                match value {
-                    Some(value) => result.append_value(value),
-                    None => result.append_null(),
+                    write!(&mut result, "{:X}", input0.value(row))
+                        .expect("Arrow string writes cannot fail");
+                    result.append_value("");
                 }
             }
             let result = result.finish();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    (!result.is_null(0)).then(|| result.value(0).to_owned()),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }
