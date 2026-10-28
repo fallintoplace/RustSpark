@@ -1643,6 +1643,18 @@ impl RustSparkSession {
         .await
     }
 
+    /// Spark-style duplicate-preserving row subtraction for two registered tables.
+    ///
+    /// Column order, not column name, defines row equality. Planning is lazy.
+    pub async fn except_all_tables(&self, left: &str, right: &str) -> Result<DataFrame> {
+        let left = quote_catalog_table(left, "except_all_tables requires a left table")?;
+        let right = quote_catalog_table(right, "except_all_tables requires a right table")?;
+        self.sql_read_only(&format!(
+            "SELECT * FROM {left} EXCEPT ALL SELECT * FROM {right}"
+        ))
+        .await
+    }
+
     /// Union registered tables with matching schemas by column position.
     ///
     /// Duplicate rows are preserved. All sources must have compatible schemas.
