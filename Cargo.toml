@@ -9,7 +9,7 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-arrow-ipc = { version = "59.3.1", features = ["lz4", "zstd"] }
+arrow-ipc = { version = "60.0.0", features = ["lz4", "zstd"] }
 clap = { version = "4.5", features = ["derive"] }
 datafusion = { version = "55.1.0", default-features = false, features = ["datetime_expressions", "nested_expressions", "parquet", "regex_expressions", "sql", "string_expressions", "unicode_expressions"] }
 futures = "0.3"
