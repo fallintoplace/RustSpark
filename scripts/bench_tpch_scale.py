@@ -35,6 +35,18 @@ def commands(scale, binary, output):
     return fixture, report, prepare, run
 
 
+def valid_query_measurement(row):
+    median = row.get("median_ms")
+    rows = row.get("result_rows")
+    hashes = (row.get("sql_sha256"), row.get("result_sha256"))
+    return (row.get("status") == "ok"
+            and type(median) in (int, float) and math.isfinite(median) and median > 0
+            and type(rows) is int and rows >= 0
+            and all(type(value) is str and len(value) == 64
+                    and all(char in "0123456789abcdef" for char in value)
+                    for value in hashes))
+
+
 def run_scale(prepare, run, report):
     subprocess.run(prepare, check=True, timeout=1800)
     # Never consume a report left by an earlier invocation.
@@ -49,7 +61,8 @@ def run_scale(prepare, run, report):
     ids = [row.get("id") for row in rows]
     complete = (len(rows) == 22 and ok == 22 and process.returncode == 0
                 and all(type(number) is int for number in ids)
-                and set(ids) == set(range(1, 23)))
+                and set(ids) == set(range(1, 23))
+                and all(valid_query_measurement(row) for row in rows))
     return {"attempted": len(rows), "passed": ok,
             "status": "ok" if complete else "error"}
 
