@@ -38,6 +38,43 @@ fn outer_join_operator(
 }
 
 impl RustSparkSession {
+    /// Spark LEFT ANTI key join on one or more named key pairs.
+    ///
+    /// Returns only left-side columns and preserves left duplicates.
+    /// Identifiers are quoted, and SQL execution remains lazy.
+    pub async fn left_anti_join_tables(
+        &self,
+        left: &str,
+        right: &str,
+        keys: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        validate_join_key_pairs(
+            keys,
+            "left_anti_join_tables requires one or more non-empty key pairs",
+        )?;
+        let left_name = quote_join_table(left)?;
+        let right_name = quote_join_table(right)?;
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let predicates = keys
+            .iter()
+            .map(|(left_key, right_key)| {
+                format!(
+                    "{left_alias}.{} = {right_alias}.{}",
+                    quote_join_identifier(left_key),
+                    quote_join_identifier(right_key),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        self.sql_read_only(&format!(
+            "SELECT {left_alias}.* FROM {left_name} AS {left_alias} \
+             WHERE NOT EXISTS (SELECT 1 FROM {right_name} AS {right_alias} \
+             WHERE {predicates})"
+        ))
+        .await
+    }
+
     /// Keep left rows whose half-open intervals overlap no right interval.
     ///
     /// Equality key pairs optionally restrict comparisons to matching groups.
