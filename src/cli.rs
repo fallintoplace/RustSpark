@@ -363,6 +363,14 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Keep distinct Hive partitions grouped when this many values are present.
+    #[arg(
+        long = "preserve-file-partitions",
+        value_name = "COUNT",
+        value_parser = parse_positive_tuning_usize
+    )]
+    preserve_file_partitions: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
