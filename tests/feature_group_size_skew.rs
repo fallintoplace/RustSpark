@@ -13,9 +13,27 @@ async fn summarizes_partition_skew_without_collecting_group_rows() -> TestResult
         .await?;
     let result = session.group_size_skew("events", "segment").await?;
     session.register_dataframe("skew", result)?;
-    assert_eq!(session.sql_scalar("SELECT group_count FROM skew").await?.to_string(), "2");
-    assert_eq!(session.sql_scalar("SELECT min_rows FROM skew").await?.to_string(), "1");
-    assert_eq!(session.sql_scalar("SELECT max_rows FROM skew").await?.to_string(), "2");
+    assert_eq!(
+        session
+            .sql_scalar("SELECT group_count FROM skew")
+            .await?
+            .to_string(),
+        "2"
+    );
+    assert_eq!(
+        session
+            .sql_scalar("SELECT min_rows FROM skew")
+            .await?
+            .to_string(),
+        "1"
+    );
+    assert_eq!(
+        session
+            .sql_scalar("SELECT max_rows FROM skew")
+            .await?
+            .to_string(),
+        "2"
+    );
     assert!(session.group_size_skew("events", "missing").await.is_err());
     Ok(())
 }
