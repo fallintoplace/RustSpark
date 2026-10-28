@@ -32,24 +32,23 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // A constant left argument does not need an Arrow broadcast array.
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
+                let right = right.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("pmod expects Int64".into()))?;
+                let result: Int64Array = right.iter()
+                    .map(|right| (*lhs).zip(right).and_then(|(a, b)| pmod_value(a, b)))
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(result)));
+            }
             // Reuse the scalar right argument without making a repeated Arrow array.
             if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(rhs))] = args {
                 let left = left.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("pmod expects Int64".into()))?;
-                let mut result = Vec::with_capacity(left.len());
-                for value in left.iter() {
-                    let next = match (value, *rhs) {
-                        (Some(left), Some(right)) if right != 0 => {
-                            let divisor = i128::from(right);
-                            let remainder = i128::from(left) % divisor;
-                            let normalized = if remainder < 0 { (remainder + divisor) % divisor } else { remainder };
-                            i64::try_from(normalized).ok()
-                        }
-                        _ => None,
-                    };
-                    result.push(next);
-                }
-                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+                let result: Int64Array = left.iter()
+                    .map(|left| left.zip(*rhs).and_then(|(left, right)| pmod_value(left, right)))
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             let scalar = args
                 .iter()
@@ -95,5 +94,25 @@ mod tests {
         assert_eq!(pmod_value(0, 0), None);
         assert_eq!(pmod_value(i64::MIN, -1), Some(0));
         assert_eq!(pmod_value(i64::MIN, i64::MAX), Some(i64::MAX - 1));
+    }
+}
+
+#[cfg(test)]
+mod constant_left_regression {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
+
+    #[tokio::test]
+    async fn handles_nulls_and_zero_divisors_with_scalar_left() -> datafusion::error::Result<()> {
+        let rows = RustSparkSession::new()
+            .sql("SELECT PMOD(CAST(-5 AS BIGINT), v) FROM (VALUES (0, CAST(3 AS BIGINT)), (1, CAST(-3 AS BIGINT)), (2, CAST(0 AS BIGINT)), (3, CAST(NULL AS BIGINT))) AS t(idx, v) ORDER BY idx")
+            .await?.collect().await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let column = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            actual.extend(column.iter());
+        }
+        assert_eq!(actual, vec![Some(1), Some(-2), None, None]);
+        Ok(())
     }
 }
