@@ -6,6 +6,18 @@ use std::{
 
 use super::ReplicaStore;
 
+// A source that shrinks or grows during export must not be published as
+// a valid immutable object. This checks size stability, not content hashes.
+fn require_complete_copy(before: u64, copied: u64, after: u64) -> io::Result<()> {
+    if before != copied || before != after {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Source replica changed size during export",
+        ));
+    }
+    Ok(())
+}
+
 impl ReplicaStore {
     /// Export a replica to an existing local directory without overwrites.
     pub fn export(&self, key: &str, destination: &Path) -> io::Result<()> {
@@ -18,9 +30,11 @@ impl ReplicaStore {
                     return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe replica"));
                 }
                 let mut source = File::open(&source_path)?;
+                let original_size = source.metadata()?.len();
                 let mut staged = tempfile::NamedTempFile::new_in(parent)?;
                 // Stream bounded chunks instead of collecting a multi-GB object.
-                io::copy(&mut source, &mut staged)?;
+                let bytes = io::copy(&mut source, &mut staged)?;
+                require_complete_copy(original_size, bytes, source.metadata()?.len())?;
                 staged.as_file().sync_all()?;
                 staged.persist_noclobber(destination).map_err(|error| error.error)?;
                 Ok(())
@@ -41,6 +55,23 @@ mod tests {
     use super::*;
     use crate::distributed_storage::StorageNode;
     use std::fs;
+
+    #[test]
+    fn does_not_accept_short_or_growing_object_copies() {
+        assert!(require_complete_copy(100, 100, 100).is_ok());
+        assert_eq!(
+            require_complete_copy(100, 99, 100).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            require_complete_copy(100, 100, 101).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            require_complete_copy(100, 101, 101).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn export_is_atomic_and_does_not_clobber_a_file() {
