@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -21,7 +21,11 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Utf8(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
+                    value.as_deref().and_then(evaluate),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
                 .as_any()
@@ -30,24 +34,21 @@ pub(crate) fn udf() -> ScalarUDF {
             let mut result =
                 StringBuilder::with_capacity(input0.len(), input0.len().saturating_mul(16));
             for row in 0..input0.len() {
-                let value = if input0.is_null(row) {
-                    None
+                if input0.is_null(row) {
+                    result.append_null();
                 } else {
-                    evaluate(input0.value(row))
-                };
-                match value {
-                    Some(value) => result.append_value(value),
-                    None => result.append_null(),
+                    for character in input0.value(row).chars() {
+                        for converted in character.to_uppercase() {
+                            result
+                                .write_char(converted)
+                                .expect("writing to an Arrow string buffer cannot fail");
+                        }
+                    }
+                    result.append_value("");
                 }
             }
             let result = result.finish();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    (!result.is_null(0)).then(|| result.value(0).to_owned()),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }
@@ -56,7 +57,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::{Array, StringArray};
 
     #[test]
     fn reference_vectors() {
@@ -79,4 +80,22 @@ mod tests {
         assert_eq!(values.value(0), "RUST");
         Ok(())
     }
+    #[tokio::test]
+    async fn unicode_and_null_batches() -> datafusion::error::Result<()> {
+        let batches = RustSparkSession::new()
+            .sql("SELECT UCASE(v) FROM (VALUES (0, 'É'), (1, CAST(NULL AS VARCHAR)), (2, 'Rust')) AS t(idx, v) ORDER BY idx")
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "É");
+        assert!(values.is_null(1));
+        assert_eq!(values.value(2), "RUST");
+        Ok(())
+    }
+
 }
