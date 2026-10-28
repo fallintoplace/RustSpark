@@ -29,6 +29,12 @@ def complete_query_results(records):
             and all(entry.get("status") == "ok" for entry in records))
 
 
+def smoke_report_succeeded(report, exit_code):
+    data = json.loads(report.read_text(encoding="utf-8"))
+    records = data.get("results", [])
+    return complete_query_results(records) and exit_code == 0
+
+
 def run_smoke(binary, fixture, report, scale=0.01, partitions=2, timeout=120):
     if fixture.exists():
         raise ValueError("Fixture output must not already exist")
@@ -40,10 +46,7 @@ def run_smoke(binary, fixture, report, scale=0.01, partitions=2, timeout=120):
     result = subprocess.run(run, check=False, timeout=22 * timeout + 120)
     if not report.is_file():
         raise RuntimeError(f"TPC-H runner did not produce {report} (exit {result.returncode})")
-    data = json.loads(report.read_text(encoding="utf-8"))
-    records = data.get("results", [])
-    return complete_query_results(records) and result.returncode == 0
-
+    return smoke_report_succeeded(report, result.returncode)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
