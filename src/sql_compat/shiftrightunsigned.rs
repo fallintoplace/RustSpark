@@ -14,6 +14,15 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // Keep a literal right operand scalar across an entire input batch.
+            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
+                let left = left.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("shiftrightunsigned expects Int64".into()))?;
+                let result: Vec<Option<i64>> = left.iter()
+                    .map(|left| left.zip(*right).map(|(value, shift)| (value as u64).wrapping_shr(shift as u32) as i64))
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+            }
             let scalar = args
                 .iter()
                 .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
