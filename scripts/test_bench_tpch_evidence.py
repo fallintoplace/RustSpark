@@ -1,6 +1,5 @@
 """Reject incomplete or misleading billion-row benchmark artifacts."""
 
-import copy
 import hashlib
 import unittest
 
