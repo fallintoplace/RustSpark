@@ -321,6 +321,14 @@ struct Args {
     )]
     planning_concurrency_override: Option<usize>,
 
+    /// tune adaptive partial-aggregation sampling.
+    #[arg(
+        long = "partial-aggregate-probe-rows",
+        value_name = "ROWS",
+        value_parser = parse_partial_aggregate_probe_rows
+    )]
+    partial_aggregate_probe_rows: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -804,6 +812,10 @@ fn parse_planning_concurrency_override(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--planning-concurrency")?
         .checked_mul(1)
         .ok_or_else(|| "--planning-concurrency is too large".to_owned())
+}
+
+fn parse_partial_aggregate_probe_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--partial-aggregate-probe-rows")
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
