@@ -35,6 +35,8 @@ mod snapshot_list;
 
 mod retention;
 
+mod materialize;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
