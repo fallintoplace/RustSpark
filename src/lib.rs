@@ -203,6 +203,8 @@ mod sql_compat_tanh;
 mod sql_compat_try_abs;
 #[path = "sql_compat/try_add.rs"]
 mod sql_compat_try_add;
+#[path = "sql_compat/time_to_millis.rs"]
+mod sql_compat_time_to_millis;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
 #[path = "sql_compat/try_mod.rs"]
@@ -345,6 +347,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_divide::udf());
         context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
+        context.register_udf(sql_compat_time_to_millis::udf());
         context.register_udf(sql_compat_asinh::udf());
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_atanh::udf());
