@@ -297,6 +297,14 @@ struct Args {
     )]
     hash_join_single_partition_rows: Option<usize>,
 
+    /// tune dense small-key perfect hash joins, in key-range entries.
+    #[arg(
+        long = "perfect-hash-small-build-rows",
+        value_name = "SIZE",
+        value_parser = parse_perfect_hash_small_build_rows
+    )]
+    perfect_hash_small_build_rows: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -762,6 +770,12 @@ fn parse_hash_join_single_partition_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--hash-join-single-partition-rows")?
         .checked_mul(1)
         .ok_or_else(|| "--hash-join-single-partition-rows is too large".to_owned())
+}
+
+fn parse_perfect_hash_small_build_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--perfect-hash-small-build-rows")?
+        .checked_mul(1)
+        .ok_or_else(|| "--perfect-hash-small-build-rows is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
