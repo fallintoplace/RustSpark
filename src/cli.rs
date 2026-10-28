@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Expose the estimated build-side row threshold for single-partition joins.
+    #[arg(long = "hash-join-single-partition-rows", value_name = "COUNT", value_parser = parse_hash_join_single_partition_rows)]
+    hash_join_single_partition_rows: Option<usize>,
+
     /// Tune the build-side integer key range for the perfect-hash fast path.
     #[arg(long = "perfect-hash-small-range", value_name = "COUNT", value_parser = parse_perfect_hash_small_range)]
     perfect_hash_small_range: Option<usize>,
@@ -745,6 +749,10 @@ fn parse_join_dynamic_inlist_distinct(value: &str) -> Result<usize, String> {
 
 fn parse_perfect_hash_small_range(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--perfect-hash-small-range")
+}
+
+fn parse_hash_join_single_partition_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--hash-join-single-partition-rows")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
