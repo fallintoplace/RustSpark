@@ -1,0 +1,12 @@
+[
+  {
+    "id": "correlated_scalar_max",
+    "ordered": true,
+    "sql": "SELECT a.id, (SELECT MAX(b.v) FROM (VALUES (1, 10), (1, 20), (2, 30)) AS b(id, v) WHERE b.id = a.id) AS max_v FROM (VALUES (1), (2), (3)) AS a(id) ORDER BY a.id"
+  },
+  {
+    "id": "correlated_scalar_count",
+    "ordered": true,
+    "sql": "SELECT a.id, (SELECT COUNT(*) FROM (VALUES (1), (1), (2)) AS b(id) WHERE b.id = a.id) AS n FROM (VALUES (1), (2), (3)) AS a(id) ORDER BY a.id"
+  }
+]
