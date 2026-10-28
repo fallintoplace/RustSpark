@@ -144,3 +144,44 @@ mod tests {
         assert_eq!((result.healthy, result.divergent), (1, 1));
     }
 }
+
+impl ReplicaStore {
+    /// Verify every inventoried object and return reports in key order.
+    /// This reads replica contents and may be expensive on large stores.
+    pub fn verify_all(&self) -> io::Result<Vec<(String, ReplicaVerification)>> {
+        self.list_keys()?
+            .into_iter()
+            .map(|key| self.verify(&key).map(|report| (key, report)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod verify_all_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn detects_missing_copies_across_multiple_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect();
+        let store = ReplicaStore::new(nodes, 2).unwrap();
+        store.put("a.parquet", b"abc").unwrap();
+        store.put("b.parquet", b"def").unwrap();
+        let first = store.placements("a.parquet").unwrap()[0];
+        fs::remove_file(first.root.join("objects/a.parquet")).unwrap();
+        let reports = store.verify_all().unwrap();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].0, "a.parquet");
+        assert_eq!(reports[0].1.missing, 1);
+        assert_eq!(reports[1].0, "b.parquet");
+        assert_eq!(reports[1].1.healthy, 2);
+    }
+}
