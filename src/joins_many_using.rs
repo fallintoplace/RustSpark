@@ -22,6 +22,29 @@ fn multi_using_operator(kind: JoinType) -> Result<&'static str> {
     }
 }
 
+fn validate_using_source_columns(
+    names: &[String],
+    columns: &[&str],
+    table: &str,
+) -> Result<HashSet<String>> {
+    let mut seen: HashSet<String> = HashSet::new();
+    for name in &names {
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return Err(DataFusionError::Plan(format!(
+                "Duplicate source column name: {name}"
+            )));
+        }
+    }
+    for column in columns {
+        if !names.iter().any(|name| name == column) {
+            return Err(DataFusionError::Plan(format!(
+                "Join column {column} does not exist in table {table}"
+            )));
+        }
+    }
+    Ok(seen)
+}
+
 impl RustSparkSession {
     /// Join at least two registered tables on shared, identically named keys.
     ///
@@ -63,22 +86,7 @@ impl RustSparkSession {
             .iter()
             .map(|field| field.name().to_string())
             .collect();
-        let mut seen: HashSet<String> = HashSet::new();
-        for name in &names {
-            if !seen.insert(name.to_ascii_lowercase()) {
-                return Err(DataFusionError::Plan(format!(
-                    "Duplicate source column name: {name}"
-                )));
-            }
-        }
-        for column in columns {
-            if !names.iter().any(|name| name == column) {
-                return Err(DataFusionError::Plan(format!(
-                    "Join column {column} does not exist in table {first}"
-                )));
-            }
-        }
-
+        let mut seen = validate_using_source_columns(&names, columns, first)?;
         let mut query = format!(
             "SELECT * FROM {}",
             quote_catalog_table(first, "Invalid multi-way USING table name")?
@@ -94,21 +102,7 @@ impl RustSparkSession {
                 .iter()
                 .map(|field| field.name().to_string())
                 .collect();
-            let mut right_seen = HashSet::new();
-            for name in &right_names {
-                if !right_seen.insert(name.to_ascii_lowercase()) {
-                    return Err(DataFusionError::Plan(format!(
-                        "Duplicate source column name: {name}"
-                    )));
-                }
-            }
-            for key in columns {
-                if !right_names.iter().any(|name| name == key) {
-                    return Err(DataFusionError::Plan(format!(
-                        "Join column {key} does not exist in table {table}"
-                    )));
-                }
-            }
+            validate_using_source_columns(&right_names, columns, table)?;
             let mut new_names = Vec::new();
             for name in &right_names {
                 if !key_names.contains(&name.to_ascii_lowercase()) {
@@ -164,4 +158,19 @@ fn projection_names(
         }
     }
     output
+}
+
+#[cfg(test)]
+mod column_validation_tests {
+    use super::validate_using_source_columns;
+
+    #[test]
+    fn detects_duplicate_and_missing_source_columns() {
+        let names = vec!["id".to_owned(), "payload".to_owned()];
+        let seen = validate_using_source_columns(&names, &["id"], "items").unwrap();
+        assert!(seen.contains("payload"));
+        assert!(validate_using_source_columns(&names, &["missing"], "items").is_err());
+        let duplicate = vec!["id".to_owned(), "ID".to_owned()];
+        assert!(validate_using_source_columns(&duplicate, &["id"], "items").is_err());
+    }
 }
