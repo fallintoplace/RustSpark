@@ -75,3 +75,5 @@ pub mod optimizer;
 pub mod scale;
 
 pub mod stream_scan;
+
+pub mod vector_filter;
