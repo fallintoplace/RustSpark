@@ -98,6 +98,8 @@ mod sql_compat_try_negate;
 mod sql_compat_sinh;
 #[path = "sql_compat/try_abs.rs"]
 mod sql_compat_try_abs;
+#[path = "features/grouped_positive_counts.rs"]
+mod feature_grouped_positive_counts;
 #[path = "sql_compat/tanh.rs"]
 mod sql_compat_tanh;
 #[path = "sql_compat/bit_count.rs"]
