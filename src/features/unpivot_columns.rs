@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
 use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
 
@@ -47,12 +49,20 @@ impl RustSparkSession {
         let id_prefix = if ids.is_empty() { String::new() } else { format!("{}, ", ids.join(", ")) };
         let label_alias = quote_join_identifier(name_column);
         let value_alias = quote_join_identifier(value_column);
-        let queries = value_columns.iter().map(|name| {
+        let mut query = String::new();
+        for (index, name) in value_columns.iter().enumerate() {
+            if index != 0 {
+                query.push_str(" UNION ALL ");
+            }
             let label = name.replace('\'', "''");
             let key = quote_join_identifier(name);
-            format!("SELECT {id_prefix}'{label}' AS {label_alias}, CAST({key} AS VARCHAR) AS {value_alias} FROM {source}")
-        }).collect::<Vec<_>>();
-        self.sql_read_only(&queries.join(" UNION ALL ")).await
+            write!(
+                &mut query,
+                "SELECT {id_prefix}'{label}' AS {label_alias}, CAST({key} AS VARCHAR) AS {value_alias} FROM {source}"
+            )
+            .expect("writing to a String cannot fail");
+        }
+        self.sql_read_only(&query).await
     }
 }
 
