@@ -27,7 +27,7 @@ fn valid_luhn(input: &str) -> bool {
         }
         sum += digit;
     }
-    has_digits && sum % 10 == 0
+    has_digits && sum.is_multiple_of(10)
 }
 
 pub(crate) fn udf() -> ScalarUDF {
