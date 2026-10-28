@@ -253,6 +253,10 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
+    /// enable optimizer statistics registry.
+    #[arg(long = "use-statistics-registry")]
+    use_statistics_registry: bool,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
