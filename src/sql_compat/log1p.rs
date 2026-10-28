@@ -21,7 +21,11 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Float64(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Float64(
+                    value.and_then(evaluate),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
                 .as_any()
@@ -36,13 +40,7 @@ pub(crate) fn udf() -> ScalarUDF {
                     }
                 })
                 .collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Float64(
-                    result.iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }
@@ -74,4 +72,11 @@ mod tests {
         assert_eq!(values.value(0), 0.0);
         Ok(())
     }
+    #[test]
+    fn preserves_logarithm_domain_and_precision() {
+        assert_eq!(evaluate(-1.0), Some(f64::NEG_INFINITY));
+        assert!(evaluate(-2.0).unwrap().is_nan());
+        assert_eq!(evaluate(0.0), Some(0.0));
+    }
+
 }
