@@ -16,22 +16,38 @@ fn resolve_manifest_path(directory: &Path, name: &str) -> PathBuf {
 }
 
 fn parse_manifest_reader(
-    reader: impl BufRead,
+    mut reader: impl BufRead,
     directory: &Path,
 ) -> Result<Vec<(usize, PathBuf)>> {
     let mut paths = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|error| DataFusionError::External(Box::new(error)))?;
-        let line = if index == 0 {
+    let mut line = String::new();
+    let mut line_number = 0;
+    loop {
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
+            == 0
+        {
+            break;
+        }
+        line_number += 1;
+        let content = if line_number == 1 {
             line.strip_prefix('\u{feff}').unwrap_or(&line)
         } else {
             &line
         };
-        let name = line.trim();
+        let name = content.trim();
         if name.is_empty() || name.starts_with('#') {
             continue;
         }
-        paths.push((index + 1, resolve_manifest_path(directory, name)));
+        let candidate = Path::new(name);
+        let path = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            directory.join(candidate)
+        };
+        paths.push((line_number, path));
     }
     Ok(paths)
 }
