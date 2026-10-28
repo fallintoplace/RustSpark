@@ -86,6 +86,66 @@ struct Args {
 
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
+    /// Tune how many existing partitions are needed before avoiding a subset repartition.
+    #[arg(long = "subset-repartition-min-partitions", value_name = "COUNT", value_parser = parse_subset_repartition_min_partitions)]
+    subset_repartition_min_partitions: Option<usize>,
+
+    /// Expose the group-to-row ratio that triggers skipping partial aggregation.
+    #[arg(long = "partial-agg-skip-ratio", value_name = "RATIO", value_parser = parse_partial_agg_skip_ratio)]
+    partial_agg_skip_ratio: Option<f64>,
+
+    /// Control when an aggregate samples group cardinality before bypassing partial aggregation.
+    #[arg(long = "partial-agg-probe-rows", value_name = "COUNT", value_parser = parse_partial_agg_probe_rows)]
+    partial_agg_probe_rows: Option<usize>,
+
+    /// Control read-ahead memory per partition after sort pushdown.
+    #[arg(long = "sort-pushdown-buffer-mb", value_name = "MIB", value_parser = parse_sort_pushdown_buffer_bytes)]
+    sort_pushdown_buffer_bytes: Option<usize>,
+
+    /// Expose the threshold for sorting in a single RecordBatch.
+    #[arg(long = "sort-in-place-max-mb", value_name = "MIB", value_parser = parse_sort_in_place_threshold_bytes)]
+    sort_in_place_threshold_bytes: Option<usize>,
+
+    /// Expose the memory reservation for spillable sort merges.
+    #[arg(long = "sort-spill-reserve-mb", value_name = "MIB", value_parser = parse_sort_spill_reserve_bytes)]
+    sort_spill_reserve_bytes: Option<usize>,
+
+    /// Tune the build-side integer key range for the perfect-hash fast path.
+    #[arg(long = "perfect-hash-small-range", value_name = "COUNT", value_parser = parse_perfect_hash_small_range)]
+    perfect_hash_small_range: Option<usize>,
+
+    /// Expose the maximum number of distinct build-side join keys for IN-list dynamic filtering.
+    #[arg(long = "join-dynamic-inlist-distinct", value_name = "COUNT", value_parser = parse_join_dynamic_inlist_distinct)]
+    join_dynamic_inlist_distinct: Option<usize>,
+
+    /// Tune maximum per-partition IN-list dynamic filter bytes.
+    #[arg(long = "join-dynamic-inlist-kb", value_name = "KIB", value_parser = parse_join_dynamic_inlist_bytes)]
+    join_dynamic_inlist_bytes: Option<usize>,
+
+    /// Read Parquet strings and binary data as Arrow view types.
+    #[arg(long = "parquet-view-arrays")]
+    parquet_view_arrays: bool,
+
+    /// Force row selections for Parquet filter pushdown instead of auto choice.
+    #[arg(long = "parquet-force-filter-selections", requires = "parquet_pushdown_filters")]
+    parquet_force_filter_selections: bool,
+
+    /// Predicate cache capacity in MiB for selective Parquet decoding.
+    #[arg(long = "parquet-predicate-cache-mb", value_name = "MIB", value_parser = parse_memory_limit_mib, requires = "parquet_pushdown_filters")]
+    parquet_predicate_cache_mb_bytes: Option<usize>,
+
+    /// Bytes to prefetch from each Parquet footer, supplied in KiB.
+    #[arg(long = "parquet-metadata-hint-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
+    parquet_metadata_hint_kb_bytes: Option<usize>,
+
+    /// Allow larger literal IN lists to participate in Parquet pruning.
+    #[arg(long = "parquet-max-in-list-size", value_name = "VALUES", value_parser = parse_target_partitions)]
+    parquet_max_in_list_size: Option<usize>,
+
+    /// Read Parquet Bloom filters to skip row groups for selective predicates.
+    #[arg(long = "parquet-bloom-filters")]
+    parquet_bloom_filters: bool,
+
 
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
@@ -329,6 +389,42 @@ struct Args {
     )]
     partial_aggregate_probe_rows: Option<usize>,
 
+    /// tune subset-aware repartition threshold.
+    #[arg(
+        long = "subset-repartition-threshold",
+        value_name = "ROWS",
+        value_parser = parse_subset_repartition_threshold
+    )]
+    subset_repartition_threshold: Option<usize>,
+
+    /// enable optimizer statistics registry.
+    #[arg(long = "use-statistics-registry")]
+    use_statistics_registry: bool,
+
+    /// push computed leaf expressions toward scans.
+    #[arg(long = "leaf-expression-pushdown")]
+    leaf_expression_pushdown: bool,
+
+    /// combine compatible UNION DISTINCT filters.
+    #[arg(long = "union-filter-rewrite")]
+    union_filter_rewrite: bool,
+
+    /// Configure buffer hash-join probe input while building in MiB.
+    #[arg(
+        long = "hash-join-probe-buffer-mb",
+        value_name = "SIZE",
+        value_parser = parse_hash_join_probe_buffer_bytes
+    )]
+    hash_join_probe_buffer_mb: Option<usize>,
+
+    /// tune in-place sort size threshold, measured in KiB.
+    #[arg(
+        long = "sort-in-place-kb",
+        value_name = "SIZE",
+        value_parser = parse_sort_in_place_bytes
+    )]
+    sort_in_place_kb: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -336,6 +432,26 @@ struct Args {
     /// Statistics-aware file-group sorting (opt-in for benchmarking).
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
+
+    /// Disable file-scan work stealing for predictable layouts.
+    #[arg(long = "disable-file-work-stealing")]
+    disable_file_work_stealing: bool,
+
+    /// Enforce the target RecordBatch size at join outputs.
+    #[arg(long = "enforce-join-batch-size")]
+    enforce_join_batch_size: bool,
+
+    /// Skip listing-time table statistics for cold-start latency.
+    #[arg(long = "skip-table-statistics")]
+    skip_table_statistics: bool,
+
+    /// Keep distinct Hive partitions grouped when this many values are present.
+    #[arg(
+        long = "preserve-file-partitions",
+        value_name = "COUNT",
+        value_parser = parse_positive_tuning_usize
+    )]
+    preserve_file_partitions: Option<usize>,
 
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
@@ -430,6 +546,50 @@ struct Args {
     /// False-positive probability for Parquet bloom filters written on export.
     #[arg(long = "parquet-bloom-fpp", value_name = "PROBABILITY", value_parser = parse_parquet_bloom_fpp)]
     parquet_bloom_fpp: Option<f64>,
+
+    /// Maximum queued RecordBatches per output file, at least two.
+    #[arg(long = "max-buffered-output-batches", value_name = "COUNT", value_parser = parse_output_buffer_batches)]
+    max_buffered_output_batches: Option<usize>,
+
+    /// Override estimated fallback filter selectivity, from 0 to 100.
+    #[arg(long = "default-filter-selectivity", value_name = "PERCENT", value_parser = parse_filter_selectivity)]
+    default_filter_selectivity: Option<u8>,
+
+    /// Tune Parquet writer statistics for selective queries.
+    #[arg(long = "parquet-column-index-truncate", value_name = "LENGTH", value_parser = parse_positive_tuning_usize)]
+    parquet_column_index_truncate: Option<usize>,
+
+    /// Tune Parquet writer statistics for selective queries.
+    #[arg(long = "parquet-statistics-truncate", value_name = "LENGTH", value_parser = parse_positive_tuning_usize)]
+    parquet_statistics_truncate: Option<usize>,
+
+    /// Opt-in Parquet writer tuning for analytical data.
+    #[arg(long = "parquet-bloom-ndv", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_bloom_ndv: Option<usize>,
+
+    /// Opt-in Parquet writer tuning for analytical data.
+    #[arg(long = "parquet-dictionary-page-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_dictionary_page_bytes: Option<usize>,
+
+    /// Optional performance tuning for Parquet-backed analytics.
+    #[arg(long = "parquet-row-group-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_bytes: Option<usize>,
+
+    /// Optional performance tuning for Parquet-backed analytics.
+    #[arg(long = "optimizer-passes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    optimizer_passes: Option<usize>,
+
+    /// Opt-in configuration for large analytical workloads.
+    #[arg(long = "parquet-serial-file-write")]
+    parquet_serial_file_write: bool,
+
+    /// Tune min-parallel-output-files for large Parquet datasets.
+    #[arg(long = "min-parallel-output-files", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    min_parallel_output_files: Option<usize>,
+
+    /// Retain UNION execution instead of planning an Interleave.
+    #[arg(long = "prefer-existing-union")]
+    prefer_existing_union: bool,
 
     #[arg(
         long = "output-parquet",
@@ -822,6 +982,22 @@ fn parse_partial_aggregate_probe_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--partial-aggregate-probe-rows")
 }
 
+fn parse_subset_repartition_threshold(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--subset-repartition-threshold")
+}
+
+fn parse_hash_join_probe_buffer_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--hash-join-probe-buffer-mb")?
+        .checked_mul(1048576)
+        .ok_or_else(|| "--hash-join-probe-buffer-mb is too large".to_owned())
+}
+
+fn parse_sort_in_place_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-in-place-kb")?
+        .checked_mul(1024)
+        .ok_or_else(|| "--sort-in-place-kb is too large".to_owned())
+}
+
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -897,8 +1073,74 @@ fn parse_parquet_bloom_fpp(value: &str) -> Result<f64, String> {
     Ok(probability)
 }
 
+fn parse_output_buffer_batches(value: &str) -> Result<usize, String> {
+    let count = parse_positive_usize(value, "--max-buffered-output-batches")?;
+    if count < 2 {
+        return Err("--max-buffered-output-batches must be at least 2".to_owned());
+    }
+    Ok(count)
+}
+
+fn parse_filter_selectivity(value: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .ok_or_else(|| "--default-filter-selectivity must be between 0 and 100".to_owned())
+}
+
 fn parse_positive_tuning_usize(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "Performance tuning value")
+}
+
+fn parse_join_dynamic_inlist_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--join-dynamic-inlist-kb")?
+        .checked_mul(1024)
+        .ok_or_else(|| "--join-dynamic-inlist-kb exceeds the supported range".into())
+}
+
+fn parse_join_dynamic_inlist_distinct(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--join-dynamic-inlist-distinct")
+}
+
+fn parse_perfect_hash_small_range(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--perfect-hash-small-range")
+}
+
+fn parse_sort_spill_reserve_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-spill-reserve-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-spill-reserve-mb exceeds the supported range".into())
+}
+
+fn parse_sort_in_place_threshold_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-in-place-max-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-in-place-max-mb exceeds the supported range".into())
+}
+
+fn parse_sort_pushdown_buffer_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-pushdown-buffer-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-pushdown-buffer-mb exceeds the supported range".into())
+}
+
+fn parse_partial_agg_probe_rows(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--partial-agg-probe-rows")
+}
+
+fn parse_partial_agg_skip_ratio(value: &str) -> Result<f64, String> {
+    let ratio = value.parse::<f64>()
+        .map_err(|_| "--partial-agg-skip-ratio requires a finite ratio between 0 and 1")?;
+    if ratio.is_finite() && (0.0..=1.0).contains(&ratio) {
+        Ok(ratio)
+    } else {
+        Err("--partial-agg-skip-ratio requires a finite ratio between 0 and 1".into())
+    }
+}
+
+fn parse_subset_repartition_min_partitions(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--subset-repartition-min-partitions")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
