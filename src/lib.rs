@@ -117,6 +117,8 @@ mod sql_compat_csc;
 mod sql_compat_degrees;
 #[path = "sql_compat/endswith.rs"]
 mod sql_compat_endswith;
+#[path = "sql_compat/lcase.rs"]
+mod sql_compat_lcase;
 #[path = "sql_compat/equal_null.rs"]
 mod sql_compat_equal_null;
 #[path = "sql_compat/exp.rs"]
@@ -278,6 +280,7 @@ impl RustSparkSession {
     /// RustSpark does not take ownership of any scheduler or executor process.
     pub fn from_context(context: SessionContext) -> Self {
         context.register_udf(sql_compat_endswith::udf());
+        context.register_udf(sql_compat_lcase::udf());
         context.register_udf(sql_compat_sin::udf());
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_asin::udf());
