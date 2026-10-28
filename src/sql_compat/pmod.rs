@@ -13,6 +13,25 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // Reuse the scalar right argument without making a repeated Arrow array.
+            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(rhs))] = args {
+                let left = left.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("pmod expects Int64".into()))?;
+                let mut result = Vec::with_capacity(left.len());
+                for value in left.iter() {
+                    let next = match (value, *rhs) {
+                        (Some(left), Some(right)) if right != 0 => {
+                            let divisor = i128::from(right);
+                            let remainder = i128::from(left) % divisor;
+                            let normalized = if remainder < 0 { (remainder + divisor) % divisor } else { remainder };
+                            i64::try_from(normalized).ok()
+                        }
+                        _ => None,
+                    };
+                    result.push(next);
+                }
+                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+            }
             let scalar = args
                 .iter()
                 .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
