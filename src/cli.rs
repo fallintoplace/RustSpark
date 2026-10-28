@@ -341,6 +341,10 @@ struct Args {
     #[arg(long = "use-statistics-registry")]
     use_statistics_registry: bool,
 
+    /// push computed leaf expressions toward scans.
+    #[arg(long = "leaf-expression-pushdown")]
+    leaf_expression_pushdown: bool,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
