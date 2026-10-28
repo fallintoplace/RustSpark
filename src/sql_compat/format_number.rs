@@ -45,6 +45,43 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Float64(number)),
+                ColumnarValue::Scalar(ScalarValue::Int64(digits)),
+            ] = args
+            {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
+                    number
+                        .zip(*digits)
+                        .and_then(|(number, digits)| evaluate(number, digits)),
+                )));
+            }
+            if let [
+                ColumnarValue::Array(number),
+                ColumnarValue::Scalar(ScalarValue::Int64(digits)),
+            ] = args
+            {
+                let number = number
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("format_number expects Float64".into())
+                    })?;
+                let mut result = StringBuilder::with_capacity(
+                    number.len(),
+                    number.len().saturating_mul(16),
+                );
+                for number in number.iter() {
+                    match number
+                        .zip(*digits)
+                        .and_then(|(number, digits)| evaluate(number, digits))
+                    {
+                        Some(value) => result.append_value(value),
+                        None => result.append_null(),
+                    }
+                }
+                return Ok(ColumnarValue::Array(Arc::new(result.finish())));
+            }
             let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
@@ -84,7 +121,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::{Array, StringArray};
 
     #[test]
     fn reference_vectors() {
@@ -108,4 +145,27 @@ mod tests {
         assert_eq!(values.value(0), "12,345.67");
         Ok(())
     }
+    #[tokio::test]
+    async fn formats_nullable_column_with_constant_digits() -> datafusion::error::Result<()> {
+        let batches = RustSparkSession::new()
+            .sql(concat!(
+                "SELECT FORMAT_NUMBER(v, CAST(2 AS BIGINT)) FROM ",
+                "(VALUES (0, CAST(12345.5 AS DOUBLE)), ",
+                "(1, CAST(NULL AS DOUBLE)), (2, CAST(-1.2 AS DOUBLE))) ",
+                "AS t(id, v) ORDER BY id"
+            ))
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "12,345.50");
+        assert!(values.is_null(1));
+        assert_eq!(values.value(2), "-1.20");
+        Ok(())
+    }
+
 }
