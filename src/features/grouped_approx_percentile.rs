@@ -1,5 +1,8 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
+use datafusion::{
+    error::{DataFusionError, Result},
+    prelude::DataFrame,
+};
 
 impl RustSparkSession {
     /// Estimate a per-group percentile without sorting each group in the caller.
