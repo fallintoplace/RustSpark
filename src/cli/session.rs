@@ -105,6 +105,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.enforce_join_batch_size {
+        config.options_mut().execution.enforce_batch_size_in_joins = true;
+    }
     config
 }
 
@@ -300,6 +303,26 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_enforce_join_batch_size_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--enforce-join-batch-size",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.enforce_batch_size_in_joins,
+            datafusion_default.options().execution.enforce_batch_size_in_joins
+        );
+        assert_eq!(configured.options().execution.enforce_batch_size_in_joins, true);
     }
 
     #[test]
