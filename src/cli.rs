@@ -281,6 +281,14 @@ struct Args {
     )]
     hash_join_inlist_max_values: Option<usize>,
 
+    /// tune single-partition hash-join byte cutoff, in MiB.
+    #[arg(
+        long = "hash-join-single-partition-mb",
+        value_name = "SIZE",
+        value_parser = parse_hash_join_single_partition_bytes
+    )]
+    hash_join_single_partition_bytes: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -734,6 +742,12 @@ fn parse_hash_join_inlist_max_values(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--hash-join-inlist-max-values")?
         .checked_mul(1)
         .ok_or_else(|| "--hash-join-inlist-max-values is too large".to_owned())
+}
+
+fn parse_hash_join_single_partition_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--hash-join-single-partition-mb")?
+        .checked_mul(1048576)
+        .ok_or_else(|| "--hash-join-single-partition-mb is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
