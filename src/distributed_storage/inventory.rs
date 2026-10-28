@@ -70,3 +70,55 @@ mod tests {
         assert_eq!(store.inspect("part.parquet").unwrap()[0].bytes, Some(4));
     }
 }
+
+impl ReplicaStore {
+    /// Return the object length without reading its contents. Missing copies
+    /// are tolerated; conflicting surviving lengths are an error. Equal lengths
+    /// do not prove that the contents are equal; use verify() for that.
+    pub fn object_size(&self, key: &str) -> io::Result<u64> {
+        let mut length = None;
+        for replica in self.inspect(key)? {
+            if let Some(bytes) = replica.bytes {
+                match length {
+                    Some(previous) if previous != bytes => {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            "Surviving replicas disagree on object length",
+                        ));
+                    }
+                    None => length = Some(bytes),
+                    _ => {}
+                }
+            }
+        }
+        length.ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found"))
+    }
+}
+
+#[cfg(test)]
+mod object_size_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn reports_length_and_rejects_divergent_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect();
+        let store = ReplicaStore::new(nodes, 2).unwrap();
+        store.put("p.parquet", b"12345").unwrap();
+        assert_eq!(store.object_size("p.parquet").unwrap(), 5);
+        let first = store.placements("p.parquet").unwrap()[0];
+        fs::remove_file(first.root.join("objects/p.parquet")).unwrap();
+        assert_eq!(store.object_size("p.parquet").unwrap(), 5);
+        fs::write(first.root.join("objects/p.parquet"), b"no").unwrap();
+        assert_eq!(store.object_size("p.parquet").unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(store.object_size("missing").unwrap_err().kind(), ErrorKind::NotFound);
+    }
+}
