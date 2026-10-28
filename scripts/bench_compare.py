@@ -130,7 +130,39 @@ def _benchmark_engine(binary, engine, csv, expected, repeat, warmup, timeout):
     return results
 
 
-def benchmark(binary, engines, rows, repeat, warmup, timeout):
+def benchmark_interleaved(binary, engines, csv, expected, repeat, warmup, timeout):
+    """Alternate engine order each round to reduce time-of-run bias."""
+    results = {engine: {} for engine in engines}
+    for workload, sql in WORKLOADS.items():
+        commands = {
+            engine: command_for(engine, binary, csv, sql)
+            for engine in engines
+        }
+        samples = {engine: [] for engine in engines}
+        for iteration in range(warmup + repeat):
+            order = engines if iteration % 2 == 0 else list(reversed(engines))
+            for engine in order:
+                elapsed, digest, actual = execute(commands[engine], timeout)
+                if (isinstance(elapsed, bool) or not isinstance(elapsed, (float, int))
+                        or not math.isfinite(elapsed) or elapsed < 0):
+                    raise ValueError(
+                        f"Invalid benchmark duration for {engine}/{workload}: {elapsed}"
+                    )
+                if digest != expected[workload]:
+                    raise RuntimeError(
+                        f"Incorrect result for {engine}/{workload}: {actual!r}"
+                    )
+                if iteration >= warmup:
+                    samples[engine].append(round(elapsed, 3))
+        for engine in engines:
+            results[engine][workload] = {
+                **summarize_samples(samples[engine]),
+                "result_sha256": expected[workload],
+            }
+    return results
+
+
+def benchmark(binary, engines, rows, repeat, warmup, timeout, balanced_order=False):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
     if (not engines or len(engines) != len(set(engines))
@@ -144,16 +176,22 @@ def benchmark(binary, engines, rows, repeat, warmup, timeout):
             name: output_signature("\n".join(json.dumps(row) for row in results))[0]
             for name, results in expected_results(rows).items()
         }
-        results = {
-            engine: _benchmark_engine(binary, engine, csv, expected, repeat, warmup, timeout)
-            for engine in engines
-        }
+        if balanced_order:
+            results = benchmark_interleaved(
+                binary, engines, csv, expected, repeat, warmup, timeout
+            )
+        else:
+            results = {
+                engine: _benchmark_engine(binary, engine, csv, expected, repeat, warmup, timeout)
+                for engine in engines
+            }
         ratios = competitor_median_ratios(results, engines)
         return {
             "metric": "cold process startup + typed CSV registration + SQL + JSON output",
             "warning": "Not warm engine or distributed Spark throughput",
             "rows": rows, "csv_bytes": csv.stat().st_size,
             "warmup": warmup, "repeat": repeat,
+            "sampling_order": "interleaved_rounds" if balanced_order else "grouped_by_engine",
             "platform": platform.platform(), "python": platform.python_version(),
             "engines": engines, "workloads": WORKLOADS, "results": results,
             "competitor_median_over_rustspark_median": ratios,
@@ -169,10 +207,12 @@ def main(argv=None):
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--balanced-order", action="store_true",
+                        help="alternate engine order across sampling rounds")
     parser.add_argument("--json-out", type=pathlib.Path)
     args = parser.parse_args(argv)
     result = benchmark(args.binary, args.engines, args.rows, args.repeat,
-                       args.warmup, args.timeout)
+                       args.warmup, args.timeout, args.balanced_order)
     rendered = json.dumps(result, indent=2) + "\n"
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
