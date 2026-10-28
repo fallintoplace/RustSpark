@@ -52,6 +52,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(count) = args.hash_join_single_partition_rows {
         config.options_mut().optimizer.hash_join_single_partition_threshold_rows = count;
     }
+    if let Some(bytes) = args.sort_spill_reserve_bytes {
+        config.options_mut().execution.sort_spill_reservation_bytes = bytes;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -209,6 +212,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--hash-join-single-partition-rows", "1000000"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_single_partition_threshold_rows, 1000000);
+    }
+
+    #[test]
+    fn configures_sort_spill_reserve_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-spill-reserve-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_spill_reservation_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
