@@ -1,6 +1,27 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
 use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
 
+fn validate_unpivot_names(
+    id_columns: &[&str],
+    name_column: &str,
+    value_column: &str,
+) -> Result<()> {
+    if name_column.trim().is_empty()
+        || value_column.trim().is_empty()
+        || name_column.trim() != name_column
+        || value_column.trim() != value_column
+        || name_column.eq_ignore_ascii_case(value_column)
+        || id_columns.iter().any(|id| {
+            id.eq_ignore_ascii_case(name_column) || id.eq_ignore_ascii_case(value_column)
+        })
+    {
+        return Err(DataFusionError::Plan(
+            "unpivot_columns output names must be distinct from id columns".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl RustSparkSession {
     /// Reshape selected columns into name/value rows, preserving id columns.
     ///
@@ -17,15 +38,7 @@ impl RustSparkSession {
         if value_columns.is_empty() {
             return Err(DataFusionError::Plan("unpivot_columns requires value columns".into()));
         }
-        if name_column.trim().is_empty()
-            || value_column.trim().is_empty()
-            || name_column.trim() != name_column
-            || value_column.trim() != value_column
-            || name_column.eq_ignore_ascii_case(value_column)
-            || id_columns.iter().any(|id| id.eq_ignore_ascii_case(name_column) || id.eq_ignore_ascii_case(value_column))
-        {
-            return Err(DataFusionError::Plan("unpivot_columns output names must be distinct from id columns".into()));
-        }
+        validate_unpivot_names(id_columns, name_column, value_column)?;
         let dataframe = self.table(table).await?;
         let selected = id_columns.iter().chain(value_columns.iter()).copied().collect::<Vec<_>>();
         Self::validate_selected_columns(&dataframe, &selected)?;
@@ -40,5 +53,18 @@ impl RustSparkSession {
             format!("SELECT {id_prefix}'{label}' AS {label_alias}, CAST({key} AS VARCHAR) AS {value_alias} FROM {source}")
         }).collect::<Vec<_>>();
         self.sql_read_only(&queries.join(" UNION ALL ")).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_unpivot_names;
+
+    #[test]
+    fn rejects_conflicting_unpivot_output_names() {
+        assert!(validate_unpivot_names(&["id"], "column", "value").is_ok());
+        assert!(validate_unpivot_names(&["id"], "ID", "value").is_err());
+        assert!(validate_unpivot_names(&["id"], "name", "NAME").is_err());
+        assert!(validate_unpivot_names(&[], " name", "value").is_err());
     }
 }

@@ -24,6 +24,16 @@ pub struct StarDimension<'a> {
     pub columns: &'a [&'a str],
 }
 
+fn star_join_operator(kind: JoinType) -> Result<&'static str> {
+    match kind {
+        JoinType::Left => Ok("LEFT"),
+        JoinType::Inner => Ok("INNER"),
+        _ => Err(DataFusionError::Plan(
+            "join_star_tables supports inner and left joins only".into(),
+        )),
+    }
+}
+
 impl RustSparkSession {
     /// Join one fact table to multiple dimensions without loading input rows.
     ///
@@ -68,13 +78,7 @@ impl RustSparkSession {
                     "Duplicate star join alias: {}", dimension.alias
                 )));
             }
-            let operator = match dimension.join_type {
-                JoinType::Left => "LEFT",
-                JoinType::Inner => "INNER",
-                _ => return Err(DataFusionError::Plan(
-                    "join_star_tables supports inner and left joins only".into()
-                )),
-            };
+            let operator = star_join_operator(dimension.join_type)?;
             if dimension.keys.is_empty() {
                 return Err(DataFusionError::Plan(
                     "Every star join dimension needs at least one equality key".into()
@@ -128,5 +132,17 @@ impl RustSparkSession {
             }
         }
         self.sql(&format!("SELECT {projection}{query}")).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JoinType, star_join_operator};
+
+    #[test]
+    fn rejects_unsupported_star_join_kinds() {
+        assert_eq!(star_join_operator(JoinType::Inner).unwrap(), "INNER");
+        assert_eq!(star_join_operator(JoinType::Left).unwrap(), "LEFT");
+        assert!(star_join_operator(JoinType::Full).is_err());
     }
 }

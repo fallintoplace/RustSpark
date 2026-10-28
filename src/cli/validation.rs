@@ -60,9 +60,8 @@ fn named_input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Er
         .collect()
 }
 
-fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let mut sources: Vec<PathBuf> = Vec::new();
-    for path in [
+fn direct_input_paths(args: &Args) -> Vec<PathBuf> {
+    [
         args.csv.as_ref(),
         args.parquet.as_ref(),
         args.json.as_ref(),
@@ -70,11 +69,13 @@ fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> 
     ]
     .into_iter()
     .flatten()
-    {
-        if path.as_os_str() != "-" {
-            sources.push(path.clone());
-        }
-    }
+    .filter(|path| path.as_os_str() != "-")
+    .cloned()
+    .collect()
+}
+
+fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut sources = direct_input_paths(args);
     sources.extend(named_input_paths(args)?);
     if let Some(manifest) = args.parquet_file_list.as_deref() {
         sources.push(manifest.to_path_buf());
@@ -158,7 +159,86 @@ fn validate_export_settings(args: &Args) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+// Several historical flags tune the same DataFusion field. Reject combinations
+// rather than silently making the last assignment win.
+fn validate_tuning_aliases(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    fn only_one(flags: &[(&str, bool)]) -> Result<(), Box<dyn std::error::Error>> {
+        let mut first = None;
+        for &(name, enabled) in flags {
+            if enabled {
+                if let Some(previous) = first {
+                    return Err(format!("Conflicting tuning options: {previous} and {name}").into());
+                }
+                first = Some(name);
+            }
+        }
+        Ok(())
+    }
+
+    for group in [
+        &[
+            ("--hash-join-inlist-max-kb", args.hash_join_inlist_max_bytes.is_some()),
+            ("--join-dynamic-inlist-kb", args.join_dynamic_inlist_bytes.is_some()),
+            ("--join-inlist-pushdown-bytes", args.join_inlist_pushdown_bytes.is_some()),
+        ][..],
+        &[
+            ("--hash-join-inlist-max-values", args.hash_join_inlist_max_values.is_some()),
+            ("--join-dynamic-inlist-distinct", args.join_dynamic_inlist_distinct.is_some()),
+            ("--join-inlist-pushdown-values", args.join_inlist_pushdown_values.is_some()),
+        ],
+        &[
+            ("--perfect-hash-small-build-rows", args.perfect_hash_small_build_rows.is_some()),
+            ("--perfect-hash-small-range", args.perfect_hash_small_range.is_some()),
+            ("--perfect-hash-key-range", args.perfect_hash_key_range.is_some()),
+        ],
+        &[
+            ("--sort-read-ahead-mb", args.sort_read_ahead_bytes.is_some()),
+            ("--sort-pushdown-buffer-mb", args.sort_pushdown_buffer_bytes.is_some()),
+        ],
+        &[
+            ("--partial-aggregate-probe-rows", args.partial_aggregate_probe_rows.is_some()),
+            ("--partial-agg-probe-rows", args.partial_agg_probe_rows.is_some()),
+        ],
+        &[
+            ("--subset-repartition-threshold", args.subset_repartition_threshold.is_some()),
+            (
+                "--subset-repartition-min-partitions",
+                args.subset_repartition_min_partitions.is_some(),
+            ),
+        ],
+        &[
+            ("--hash-join-probe-buffer-mb", args.hash_join_probe_buffer_mb.is_some()),
+            ("--hash-join-probe-buffer-bytes", args.hash_join_probe_buffer_bytes.is_some()),
+        ],
+        &[
+            ("--sort-in-place-kb", args.sort_in_place_kb.is_some()),
+            ("--sort-in-place-max-mb", args.sort_in_place_threshold_bytes.is_some()),
+            ("--sort-in-place-bytes", args.sort_in_place_bytes.is_some()),
+        ],
+        &[
+            ("--parquet-predicate-cache-mb", args.parquet_predicate_cache_mb_bytes.is_some()),
+            ("--parquet-predicate-cache-bytes", args.parquet_predicate_cache_bytes.is_some()),
+        ],
+        &[
+            ("--parquet-metadata-hint-kb", args.parquet_metadata_hint_kb_bytes.is_some()),
+            ("--parquet-metadata-hint-bytes", args.parquet_metadata_hint_bytes.is_some()),
+        ],
+        &[
+            ("--parquet-force-filter-selections", args.parquet_force_filter_selections),
+            ("--parquet-force-row-selection", args.parquet_force_row_selection),
+        ],
+        &[
+            ("--parquet-max-in-list-size", args.parquet_max_in_list_size.is_some()),
+            ("--parquet-in-list-pruning-limit", args.parquet_in_list_pruning_limit.is_some()),
+        ],
+    ] {
+        only_one(group)?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    validate_tuning_aliases(args)?;
     validate_export_settings(args)?;
     validate_input_selection(args)?;
     reject_output_input_collision(args)?;
@@ -355,5 +435,40 @@ mod input_selection_tests {
 
         args.csv = None;
         assert!(validate_input_selection(&args).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tuning_alias_tests {
+    use super::{Args, validate_tuning_aliases};
+    use clap::Parser;
+
+    #[test]
+    fn one_tuning_spelling_is_allowed() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.hash_join_inlist_max_bytes = Some(1024);
+        assert!(validate_tuning_aliases(&args).is_ok());
+    }
+
+    #[test]
+    fn rejects_conflicting_aliases_even_when_values_match() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.hash_join_inlist_max_bytes = Some(1024);
+        args.join_inlist_pushdown_bytes = Some(1024);
+        let error = validate_tuning_aliases(&args).unwrap_err().to_string();
+        assert!(error.contains("--hash-join-inlist-max-kb"));
+        assert!(error.contains("--join-inlist-pushdown-bytes"));
+    }
+
+    #[test]
+    fn rejects_conflicting_parquet_and_sort_aliases() {
+        let mut args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        args.parquet_force_filter_selections = true;
+        args.parquet_force_row_selection = true;
+        assert!(validate_tuning_aliases(&args).is_err());
+        args.parquet_force_row_selection = false;
+        args.sort_in_place_kb = Some(1024);
+        args.sort_in_place_bytes = Some(1024);
+        assert!(validate_tuning_aliases(&args).is_err());
     }
 }

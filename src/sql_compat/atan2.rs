@@ -14,9 +14,15 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Float64(y)),
+                ColumnarValue::Scalar(ScalarValue::Float64(x)),
+            ] = args
+            {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Float64(
+                    (*y).zip(*x).map(|(y, x)| y.atan2(x)),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let ys = arrays[0]
                 .as_any()
@@ -26,18 +32,12 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("atan2 expects Float64 x".into()))?;
-            let result: Vec<Option<f64>> = ys
+            let result: Float64Array = ys
                 .iter()
                 .zip(xs.iter())
                 .map(|(y, x)| y.zip(x).map(|(y, x)| y.atan2(x)))
                 .collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Float64(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(Float64Array::from(result))))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }

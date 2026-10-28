@@ -32,14 +32,21 @@ def git_revision(directory):
     return None
 
 
-def collect_provenance(executable, repository):
+def host_metadata():
+    """Collect platform information independently of the benchmark executable."""
     return {
-        "binary_sha256": sha256(executable),
-        "binary_bytes": executable.stat().st_size,
         "platform": platform.platform(),
         "machine": platform.machine(),
         "processor": platform.processor(),
         "python": platform.python_version(),
+    }
+
+
+def collect_provenance(executable, repository):
+    return {
+        "binary_sha256": sha256(executable),
+        "binary_bytes": executable.stat().st_size,
+        **host_metadata(),
         "git_revision": git_revision(repository),
     }
 

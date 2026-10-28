@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustspark-sample-data
+data:
+  sales.csv: |
+    city,amount
+    Berlin,10
+    Berlin,20
+    Warsaw,7
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rustspark-sample-query
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rustspark
+          # Replace with an image you built and pushed to your registry.
+          image: rustspark:replace-with-your-registry-image
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csv
+            - /data/sales.csv
+            - --sql
+            - SELECT city, SUM(amount) AS total FROM data GROUP BY city ORDER BY city
+            - --stdout-format
+            - json-array
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: sample
+              mountPath: /data
+              readOnly: true
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: sample
+          configMap:
+            name: rustspark-sample-data
+        - name: scratch
+          emptyDir:
+            sizeLimit: 256Mi

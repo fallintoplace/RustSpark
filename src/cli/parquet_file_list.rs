@@ -6,6 +6,15 @@ use std::{
 
 use datafusion::error::{DataFusionError, Result};
 
+fn resolve_manifest_path(directory: &Path, name: &str) -> PathBuf {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        directory.join(candidate)
+    }
+}
+
 fn parse_manifest_reader(
     reader: impl BufRead,
     directory: &Path,
@@ -22,13 +31,7 @@ fn parse_manifest_reader(
         if name.is_empty() || name.starts_with('#') {
             continue;
         }
-        let candidate = Path::new(name);
-        let path = if candidate.is_absolute() {
-            candidate.to_path_buf()
-        } else {
-            directory.join(candidate)
-        };
-        paths.push((index + 1, path));
+        paths.push((index + 1, resolve_manifest_path(directory, name)));
     }
     Ok(paths)
 }
@@ -111,8 +114,25 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader};
+    use super::{
+        earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader,
+        resolve_manifest_path,
+    };
     use std::{fs, io::Cursor, path::Path};
+
+    #[test]
+    fn manifest_paths_resolve_absolute_and_relative_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let absolute = directory.path().join("part.parquet");
+        assert_eq!(
+            resolve_manifest_path(Path::new("data"), "part.parquet"),
+            Path::new("data").join("part.parquet")
+        );
+        assert_eq!(
+            resolve_manifest_path(Path::new("data"), absolute.to_str().unwrap()),
+            absolute
+        );
+    }
 
     #[test]
     fn parser_keeps_source_lines_and_relative_paths() {

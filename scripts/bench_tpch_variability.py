@@ -32,6 +32,15 @@ def variability_row(number, entry, threshold):
                  "unstable": cv > threshold, "samples": len(samples)}
 
 
+def checked_query_id(entry, seen):
+    """Reject invalid or repeated TPC-H query IDs."""
+    number = entry.get("id")
+    if type(number) is not int or number not in range(1, 23) or number in seen:
+        raise ValueError("Invalid or repeated query ID")
+    seen.add(number)
+    return number
+
+
 def inspect(report, threshold=0.15):
     if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 0:
         raise ValueError("Variation threshold must be finite and nonnegative")
@@ -41,10 +50,7 @@ def inspect(report, threshold=0.15):
     seen = set()
     rows = []
     for entry in results:
-        number = entry.get("id")
-        if type(number) is not int or number not in range(1, 23) or number in seen:
-            raise ValueError("Invalid or repeated query ID")
-        seen.add(number)
+        number = checked_query_id(entry, seen)
         if entry.get("status") != "ok":
             raise ValueError(f"Query Q{number:02} did not succeed")
         rows.append(variability_row(number, entry, threshold))

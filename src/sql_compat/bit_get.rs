@@ -14,6 +14,24 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Int64(left)),
+                ColumnarValue::Scalar(ScalarValue::Int64(position)),
+            ] = args
+            {
+                let value = match (*left, *position) {
+                    (Some(_), Some(position)) if !(0..64).contains(&position) => {
+                        return Err(DataFusionError::Execution(
+                            "BIT_GET position must be between 0 and 63".into(),
+                        ));
+                    }
+                    (Some(left), Some(position)) => {
+                        Some(((left as u64 >> (position as u32)) & 1) as i64)
+                    }
+                    _ => None,
+                };
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(value)));
+            }
             // Keep a constant left argument as a scalar for the entire batch.
             if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
                 let right = right.as_any().downcast_ref::<Int64Array>()

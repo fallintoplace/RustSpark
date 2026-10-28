@@ -155,6 +155,14 @@ fn parse_preview_selection(arguments: &str) -> Option<(&str, usize)> {
     }
 }
 
+fn quote_shell_table(table: &str) -> String {
+    table
+        .split('.')
+        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 // Use quoted identifiers so a shell table name cannot change the SQL plan.
 async fn handle_preview_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
     let Some(arguments) = shell_arguments(command, ".preview") else {
@@ -172,11 +180,7 @@ async fn handle_preview_command(session: &RustSparkSession, args: &Args, command
         eprintln!("Shell error: .preview requires a valid table name");
         return true;
     }
-    let source = table
-        .split('.')
-        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(".");
+    let source = quote_shell_table(table);
     let query = format!("SELECT * FROM {source} LIMIT {rows}");
     if let Err(error) = execute_interactive_statement(session, args, &query).await {
         eprintln!("Shell error: {error}");
@@ -324,7 +328,8 @@ pub(super) async fn run_interactive(
 #[cfg(test)]
 mod tests {
     use super::{
-        SqlTerminatorScanner, is_single_table_argument, parse_preview_selection, shell_arguments,
+        SqlTerminatorScanner, is_single_table_argument, parse_preview_selection, quote_shell_table,
+        shell_arguments,
     };
 
     #[test]
@@ -349,6 +354,12 @@ mod tests {
         assert!(!is_single_table_argument(""));
         assert!(!is_single_table_argument("events logs"));
         assert!(!is_single_table_argument("  "));
+    }
+
+    #[test]
+    fn preview_table_quoting_preserves_components_and_embedded_quotes() {
+        assert_eq!(quote_shell_table("db.events"), "\"db\".\"events\"");
+        assert_eq!(quote_shell_table("d\"b.events"), "\"d\"\"b\".\"events\"");
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 Experimental local SQL over CSV and Parquet files using Apache DataFusion. Not Spark-compatible.
 
+See [architecture and product boundaries](docs/architecture.md) for the local query path, experimental integrations, performance evidence, and release expectations.
+
 ```sh
 cargo run -- --csv tests/fixtures/sales.csv --table sales --sql 'SELECT city, SUM(amount) FROM sales GROUP BY city'
 ```

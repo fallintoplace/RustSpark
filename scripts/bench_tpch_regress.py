@@ -50,9 +50,15 @@ def calculate_suite_speedup(old, new):
     return full_suite, suite_speedup
 
 
+def checked_regression_threshold(value):
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or value < 0):
+        raise ValueError("Regression threshold must be finite and nonnegative")
+    return value
+
+
 def compare(baseline, candidate, max_regression=0.20):
-    if not math.isfinite(max_regression) or max_regression < 0:
-        raise ValueError("Regression threshold must be nonnegative")
+    max_regression = checked_regression_threshold(max_regression)
     old, new = medians(baseline), medians(candidate)
     if old.keys() != new.keys():
         raise ValueError("TPC-H query coverage differs between reports")

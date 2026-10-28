@@ -12,6 +12,16 @@ on:
       - 'src/sql_compat/**'
       - 'src/sql_results.rs'
       - 'src/sources.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/lib.rs'
+      - 'src/main.rs'
+      - 'src/cli.rs'
+      - 'src/cli/**'
+      - 'src/features/**'
+      - 'src/joins*.rs'
+      - 'src/session_filters.rs'
+      - 'src/set_operations.rs'
   workflow_dispatch:
   schedule:
     - cron: '37 3 * * 3'

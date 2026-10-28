@@ -59,19 +59,23 @@ def check_queries(root, queries):
     return len(numbers)
 
 
+def require_table_mapping(manifest, key, message):
+    """Require exactly the expected TPC-H table keys."""
+    mapping = manifest.get(key)
+    if not isinstance(mapping, dict) or set(mapping) != TABLES:
+        raise ValueError(message)
+    return mapping
+
+
 def check(root):
     root = Path(root)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     scale = manifest.get("scale_factor")
     if isinstance(scale, bool) or not isinstance(scale, (float, int)) or not math.isfinite(scale) or scale <= 0:
         raise ValueError("Invalid TPC-H scale factor")
-    if set(manifest.get("tables", {})) != TABLES:
-        raise ValueError("Expected exactly eight TPC-H tables")
-    hashes = manifest.get("table_sha256")
-    if not isinstance(hashes, dict) or set(hashes) != TABLES:
-        raise ValueError("Missing TPC-H Parquet checksums")
-    if set(manifest.get("rows", {})) != TABLES:
-        raise ValueError("Missing TPC-H row counts")
+    require_table_mapping(manifest, "tables", "Expected exactly eight TPC-H tables")
+    hashes = require_table_mapping(manifest, "table_sha256", "Missing TPC-H Parquet checksums")
+    require_table_mapping(manifest, "rows", "Missing TPC-H row counts")
     for table in sorted(TABLES):
         check_table(root, manifest, hashes, table)
     query_count = check_queries(root, manifest.get("queries"))
