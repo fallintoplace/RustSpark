@@ -14,6 +14,10 @@ on:
         required: true
         default: '3'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -40,6 +44,8 @@ jobs:
           java-version: '17'
       - run: cargo build --release --locked
       - run: python3 -m pip install 'duckdb>=1,<2' 'pyspark>=4,<5'
+      - name: Record dependency versions
+        run: python3 -m pip freeze > benchmarks/engine-comparison-deps.txt
       - name: Compare output correctness and one-shot latency
         run: |
           python3 scripts/bench_compare.py --binary ./target/release/rustspark \
@@ -57,5 +63,6 @@ jobs:
           path: |
             benchmarks/engine-comparison.json
             benchmarks/reports/cold.md
+            benchmarks/engine-comparison-deps.txt
           if-no-files-found: warn
           retention-days: 90
