@@ -463,6 +463,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Retain UNION execution instead of planning an Interleave.
+    #[arg(long = "prefer-existing-union")]
+    prefer_existing_union: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
