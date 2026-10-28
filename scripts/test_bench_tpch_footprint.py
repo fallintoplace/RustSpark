@@ -1,5 +1,6 @@
 """Exact fixture comparison uses streaming hashes, not scale factor alone."""
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -72,7 +73,7 @@ class FootprintTests(unittest.TestCase):
             root = Path(tmp)
             make_fixture(root / "first")
             before = footprint.profile(root / "first")
-            after = json.loads(json.dumps(before))
+            after = copy.deepcopy(before)
             after["tables"]["customer"]["rows"] += 1
             difference = footprint.compare(before, after)
             self.assertFalse(difference["identical_parquet_inputs"])
