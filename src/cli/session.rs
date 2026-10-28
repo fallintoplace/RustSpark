@@ -40,6 +40,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(bytes) = args.hash_join_single_partition_bytes {
         config.options_mut().optimizer.hash_join_single_partition_threshold = bytes;
     }
+    if let Some(bytes) = args.join_dynamic_inlist_bytes {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = bytes;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -169,6 +172,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--hash-join-single-partition-mb", "64"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_single_partition_threshold, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_join_dynamic_inlist_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--join-dynamic-inlist-kb", "256"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_inlist_pushdown_max_size, 256 * 1024);
     }
 
     #[test]
