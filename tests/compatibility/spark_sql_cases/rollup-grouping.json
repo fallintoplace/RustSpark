@@ -1,0 +1,12 @@
+[
+  {
+    "id": "rollup_grand_total",
+    "ordered": true,
+    "sql": "SELECT k, SUM(v) AS total FROM (VALUES (1, 10), (1, 20), (2, 5)) AS t(k, v) GROUP BY ROLLUP(k) ORDER BY k NULLS LAST"
+  },
+  {
+    "id": "grouping_sets_per_key",
+    "ordered": true,
+    "sql": "SELECT k, SUM(v) AS total FROM (VALUES (1, 10), (2, 20)) AS t(k, v) GROUP BY GROUPING SETS ((k), ()) ORDER BY k NULLS LAST"
+  }
+]
