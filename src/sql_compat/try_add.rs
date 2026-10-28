@@ -20,7 +20,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .ok_or_else(|| DataFusionError::Internal("try_add expects Int64".into()))?;
             let rhs = arrays[1].as_any().downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("try_add expects Int64".into()))?;
-            let result: Vec<Option<i64>> = lhs.iter().zip(rhs.iter())
+            let result: Int64Array = lhs.iter().zip(rhs.iter())
                 .map(|(left, right)| match (left, right) {
                     (Some(left), Some(right)) => left.checked_add(right),
                     _ => None,
@@ -28,10 +28,10 @@ pub(crate) fn udf() -> ScalarUDF {
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )
