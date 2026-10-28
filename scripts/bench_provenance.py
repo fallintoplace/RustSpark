@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import re
 import subprocess
 
 
@@ -23,7 +24,7 @@ def git_revision(directory):
             ["git", "rev-parse", "HEAD"], cwd=directory, capture_output=True,
             text=True, check=False, timeout=10,
         )
-        if process.returncode == 0 and len(process.stdout.strip()) == 40:
+        if process.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40}", process.stdout.strip()):
             return process.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         pass
