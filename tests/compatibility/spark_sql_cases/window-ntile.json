@@ -1,0 +1,12 @@
+[
+  {
+    "id": "window_ntile_three_buckets",
+    "ordered": true,
+    "sql": "SELECT id, NTILE(3) OVER (ORDER BY id) AS bucket FROM (VALUES (1), (2), (3), (4), (5), (6), (7)) AS t(id) ORDER BY id"
+  },
+  {
+    "id": "window_ntile_partitioned",
+    "ordered": true,
+    "sql": "SELECT id, NTILE(2) OVER (PARTITION BY (id % 2) ORDER BY id) AS bucket FROM (VALUES (1), (2), (3), (4), (5), (6)) AS t(id) ORDER BY id"
+  }
+]
