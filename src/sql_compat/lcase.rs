@@ -80,10 +80,15 @@ mod tests {
         assert_eq!(values.value(0), "rust");
         Ok(())
     }
+
     #[tokio::test]
     async fn unicode_and_null_batches() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT LCASE(v) FROM (VALUES (0, 'É'), (1, CAST(NULL AS VARCHAR)), (2, 'Rust')) AS t(idx, v) ORDER BY idx")
+            .sql(concat!(
+                "SELECT LCASE(v) FROM ",
+                "(VALUES (0, 'É'), (1, CAST(NULL AS VARCHAR)), (2, 'Rust')) ",
+                "AS t(idx, v) ORDER BY idx"
+            ))
             .await?
             .collect()
             .await?;
@@ -97,5 +102,4 @@ mod tests {
         assert_eq!(values.value(2), "rust");
         Ok(())
     }
-
 }
