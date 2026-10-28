@@ -16,7 +16,7 @@ def checked_time(value, label):
 def markdown_inline(value):
     """Keep report metadata and errors within one safe Markdown line."""
     return (str(value).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace("\\r", " ").replace("\\n", " ")
+            .replace(">", "&gt;").replace("\r", " ").replace("\n", " ")
             .replace("|", "/"))
 
 
