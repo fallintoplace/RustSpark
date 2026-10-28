@@ -42,7 +42,9 @@ def parse_variants(raw):
             seen.add(flag)
             normalized.append(flag)
             if flag in VALUE_FLAGS:
-                if index + 1 >= len(flags) or not flags[index + 1].isdecimal() or int(flags[index + 1]) < 1:
+                if (index + 1 >= len(flags) or not flags[index + 1].isascii()
+                        or not flags[index + 1].isdecimal()
+                        or int(flags[index + 1]) < 1):
                     raise ValueError(f"{flag} requires a positive integer")
                 normalized.append(flags[index + 1])
                 index += 1
