@@ -47,6 +47,8 @@ def inspect(report, threshold=0.15):
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("TPC-H report has no query results")
+    if any(not isinstance(entry, dict) for entry in results):
+        raise ValueError("TPC-H query results must be JSON objects")
     seen = set()
     rows = []
     for entry in results:
