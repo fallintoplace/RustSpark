@@ -96,6 +96,8 @@ mod sql_compat_asin;
 mod sql_compat_try_divide;
 #[path = "sql_compat/atan.rs"]
 mod sql_compat_atan;
+#[path = "features/grouped_covariance.rs"]
+mod feature_grouped_covariance;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
 #[path = "sql_compat/atan2.rs"]
