@@ -113,13 +113,18 @@ async fn write_delimited<W: Write>(
     Ok(())
 }
 
-fn display_cell(
-    column: &datafusion::arrow::array::ArrayRef,
+fn display_cell<'a>(
+    column: &'a datafusion::arrow::array::ArrayRef,
     row: usize,
-) -> datafusion::arrow::error::Result<std::borrow::Cow<'static, str>> {
+) -> datafusion::arrow::error::Result<std::borrow::Cow<'a, str>> {
     if column.is_null(row) {
-        // NULL is repeated for every missing cell. Borrow the fixed label.
         Ok(std::borrow::Cow::Borrowed("NULL"))
+    } else if let Some(strings) = column
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+    {
+        // Borrow UTF-8 values from the batch instead of allocating a String per cell.
+        Ok(std::borrow::Cow::Borrowed(strings.value(row)))
     } else {
         datafusion::arrow::util::display::array_value_to_string(column.as_ref(), row)
             .map(std::borrow::Cow::Owned)
@@ -307,10 +312,7 @@ async fn write_html<W: Write>(
                 if column.is_null(row) {
                     write!(output, "<td class=\"null\">NULL</td>")?;
                 } else {
-                    let value = datafusion::arrow::util::display::array_value_to_string(
-                        column.as_ref(),
-                        row,
-                    )?;
+                    let value = display_cell(column, row)?;
                     write!(output, "<td>{}</td>", escape_html_cell(&value))?;
                 }
             }
@@ -466,6 +468,24 @@ mod tests {
         assert_eq!(escape_markdown_cell("<tag>&"), "&lt;tag&gt;&amp;");
         assert_eq!(escape_html_cell("\"'"), "&quot;&#39;");
         assert_eq!(escape_markdown_cell("\"'"), "\"'");
+    }
+
+    #[test]
+    fn utf8_cells_borrow_arrow_storage() {
+        let column: datafusion::arrow::array::ArrayRef = std::sync::Arc::new(
+            datafusion::arrow::array::StringArray::from(vec![
+                Some("éclair"),
+                Some("plain"),
+            ]),
+        );
+        assert!(matches!(
+            display_cell(&column, 0).unwrap(),
+            std::borrow::Cow::Borrowed("éclair")
+        ));
+        assert!(matches!(
+            display_cell(&column, 1).unwrap(),
+            std::borrow::Cow::Borrowed("plain")
+        ));
     }
 
     #[test]
