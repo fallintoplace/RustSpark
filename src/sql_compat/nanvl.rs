@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use datafusion::{
     arrow::{
-        array::{Float64Array},
+        array::{Array, Float64Array},
         datatypes::DataType,
     },
     common::{DataFusionError, ScalarValue},
