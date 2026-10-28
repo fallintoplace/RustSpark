@@ -16,9 +16,17 @@ async fn grouped_weighted_mean_aggregates_without_collect() -> TestResult {
     let result = session.weighted_mean_per_group("events", "segment", "metric", "weight").await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE weighted_mean > 1").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE weighted_mean > 1")
+            .await?
+            .to_string(),
         "2"
     );
-    assert!(session.weighted_mean_per_group("events", "segment", "missing", "weight").await.is_err());
+    assert!(
+        session
+            .weighted_mean_per_group("events", "segment", "missing", "weight")
+            .await
+            .is_err()
+    );
     Ok(())
 }
