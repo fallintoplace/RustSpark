@@ -13,4 +13,5 @@ publish = false
 [dependencies]
 arrow-array = "60.0.0"
 arrow-schema = "60.0.0"
+arrow-ipc = "60.0.0"
 parquet = "60.0.0"
