@@ -45,7 +45,7 @@ mod tests {
             .unwrap();
         // Filename parsing must agree with the canonical snapshot writer.
         store.put("_snapshot_sales_7", b"not a snapshot").unwrap();
-        store.put("_snapshot_sales_+7", b"not a snapshot").unwrap();
+        assert!(store.put("_snapshot_sales_+7", b"not a snapshot").is_err());
         store
             .put("_snapshot_sales_00000000000000000000", b"zero")
             .unwrap();
