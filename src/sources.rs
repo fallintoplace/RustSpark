@@ -5,7 +5,7 @@ use datafusion::{
     prelude::{CsvReadOptions, DataFrame, JsonReadOptions, ParquetReadOptions},
 };
 
-use crate::RustSparkSession;
+use crate::{RustSparkSession, distributed_storage::ReplicaStore};
 
 impl RustSparkSession {
     pub async fn register_csv(&self, table: &str, path: impl AsRef<Path>) -> Result<()> {
@@ -219,6 +219,28 @@ impl RustSparkSession {
         self.context
             .read_parquet(file_path(path.as_ref())?, options)
             .await
+    }
+}
+
+impl RustSparkSession {
+    /// Register an immutable replicated snapshot as a SQL table.
+    ///
+    /// The materialized directory must be mounted at the same absolute path
+    /// on every Ballista executor before running a distributed query.
+    pub async fn register_snapshot_parquet(
+        &self,
+        name: &str,
+        store: &ReplicaStore,
+        snapshot_table: &str,
+        generation: u64,
+        shared_destination: &Path,
+    ) -> Result<()> {
+        let files = store
+            .materialize_snapshot(snapshot_table, generation, shared_destination)
+            .map_err(|error| {
+                DataFusionError::Execution(format!("Cannot materialize snapshot: {error}"))
+            })?;
+        self.register_parquet_files(name, &files).await
     }
 }
 

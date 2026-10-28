@@ -45,6 +45,11 @@ mod orphan;
 
 mod topology_file;
 
+pub use health::NodeHealth;
+pub use inventory::ReplicaStatus;
+pub use manifest::TableManifest;
+pub use verify::ReplicaVerification;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
