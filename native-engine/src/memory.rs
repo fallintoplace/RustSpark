@@ -28,6 +28,14 @@ impl MemoryPool {
     }
 
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation> {
+        self.charge(bytes)?;
+        Ok(Reservation {
+            pool: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn charge(&self, bytes: usize) -> Result<()> {
         let mut current = self.used.load(Ordering::Relaxed);
         loop {
             let next = current
@@ -45,12 +53,7 @@ impl MemoryPool {
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => {
-                    return Ok(Reservation {
-                        pool: Arc::clone(self),
-                        bytes,
-                    });
-                }
+                Ok(_) => return Ok(()),
                 Err(observed) => current = observed,
             }
         }
@@ -71,8 +74,7 @@ impl Reservation {
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
-            let growth = self.pool.reserve(extra)?;
-            std::mem::forget(growth);
+            self.pool.charge(extra)?;
         } else {
             self.pool.used.fetch_sub(self.bytes - new_bytes, Ordering::AcqRel);
         }
