@@ -89,6 +89,8 @@ mod sql_compat_acosh;
 mod sql_compat_asin;
 #[path = "sql_compat/asinh.rs"]
 mod sql_compat_asinh;
+#[path = "sql_compat/make_valid_utf8.rs"]
+mod sql_compat_make_valid_utf8;
 #[path = "sql_compat/atan.rs"]
 mod sql_compat_atan;
 #[path = "sql_compat/atan2.rs"]
@@ -346,6 +348,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
         context.register_udf(sql_compat_asinh::udf());
+        context.register_udf(sql_compat_make_valid_utf8::udf());
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_atanh::udf());
         context.register_udf(sql_compat_try_multiply::udf());
