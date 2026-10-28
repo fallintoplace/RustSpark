@@ -14,6 +14,15 @@ class CountTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 counts.parse_count(value)
 
+    def test_duplicate_manifest_keys_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            (fixture / "manifest.json").write_text(
+                '{"rows": {}, "rows": {}}', encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Duplicate"):
+                counts.check("rs", fixture)
+
     def test_named_table_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp)
