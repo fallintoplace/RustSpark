@@ -371,6 +371,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Opt-in Parquet writer tuning for analytical data.
+    #[arg(long = "parquet-bloom-ndv", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_bloom_ndv: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
