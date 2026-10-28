@@ -79,9 +79,9 @@ mod tests {
         assert_eq!(values.value(0), -12);
         Ok(())
     }
+
     #[test]
     fn negating_minimum_wraps_without_panicking() {
         assert_eq!(evaluate(i64::MIN), Some(i64::MIN));
     }
-
 }
