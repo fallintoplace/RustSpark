@@ -51,6 +51,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_row_group_rows {
         config.options_mut().execution.parquet.max_row_group_size = value;
     }
+    if let Some(value) = args.parquet_page_size_bytes {
+        config.options_mut().execution.parquet.data_pagesize_limit = value;
+    }
     config
 }
 
@@ -155,6 +158,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-row-group-rows", "131072"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.max_row_group_size, 131072);
+    }
+
+    #[test]
+    fn sets_parquet_page_size_bytes_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-page-size-bytes", "65536"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.data_pagesize_limit, 65536);
     }
 
     #[test]
