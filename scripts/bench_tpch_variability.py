@@ -18,6 +18,12 @@ def check_samples(entry):
     recorded = entry.get("median_ms")
     if type(recorded) not in (int, float) or not math.isfinite(recorded) or abs(recorded - median) > 0.002:
         raise ValueError("Reported median differs from timing samples")
+    if "p95_ms" in entry:
+        p95 = entry["p95_ms"]
+        expected = sorted(samples)[math.ceil(0.95 * len(samples)) - 1]
+        if (type(p95) not in (int, float) or not math.isfinite(p95)
+                or abs(p95 - expected) > 0.002):
+            raise ValueError("Reported p95 differs from timing samples")
     return samples
 
 
