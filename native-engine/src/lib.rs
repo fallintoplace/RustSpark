@@ -59,3 +59,5 @@ pub mod csv_stream;
 pub mod statistics;
 
 pub mod pruning;
+
+pub mod partial_aggregate;
