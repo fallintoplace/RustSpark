@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Read Parquet Bloom filters to skip row groups for selective predicates.
+    #[arg(long = "parquet-bloom-filters")]
+    parquet_bloom_filters: bool,
+
     #[arg(long = "csv-quote", value_name = "CHAR", value_parser = parse_csv_char)]
     csv_quote: Option<u8>,
 
