@@ -99,6 +99,8 @@ mod sql_compat_atanh;
 mod sql_compat_bin;
 #[path = "sql_compat/bit_count.rs"]
 mod sql_compat_bit_count;
+#[path = "sql_compat/validate_utf8.rs"]
+mod sql_compat_validate_utf8;
 #[path = "sql_compat/bitwise_and.rs"]
 mod sql_compat_bitwise_and;
 #[path = "sql_compat/bit_get.rs"]
@@ -357,6 +359,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_tanh::udf());
         context.register_udf(sql_compat_bit_count::udf());
+        context.register_udf(sql_compat_validate_utf8::udf());
         context.register_udf(sql_compat_bitwise_and::udf());
         context.register_udf(sql_compat_tan::udf());
         context.register_udf(sql_compat_shiftleft::udf());
