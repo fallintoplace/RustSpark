@@ -15,11 +15,13 @@ fn quote_set_table(path: &str) -> Result<String> {
 }
 
 fn numbered_input_sql(table: &str, columns: &[String], index: &str) -> String {
-    let partition = columns
-        .iter()
-        .map(|name| super::quote_join_identifier(name))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut partition = String::new();
+    for name in columns {
+        if !partition.is_empty() {
+            partition.push_str(", ");
+        }
+        partition.push_str(&super::quote_join_identifier(name));
+    }
     format!("(SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition}) AS {index} FROM {table})")
 }
 
