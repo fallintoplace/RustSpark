@@ -43,6 +43,8 @@ mod health;
 
 mod orphan;
 
+mod topology_file;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
