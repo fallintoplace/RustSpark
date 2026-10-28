@@ -34,4 +34,4 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Check Python script syntax
         run: python -m compileall -q scripts
-      - run: python scripts/quality.py test --suite bench
+      - run: python scripts/quality.py test --suite all
