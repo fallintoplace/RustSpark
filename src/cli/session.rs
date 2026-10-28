@@ -15,6 +15,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
+        if args.parquet_view_arrays {
+            parquet.schema_force_view_types = true;
+        }
         if args.parquet_force_filter_selections {
             parquet.force_filter_selections = true;
         }
@@ -139,6 +142,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--parquet-pushdown-filters", "--parquet-force-filter-selections"]).unwrap();
         assert!(super::build_session_config(&args).options().execution.parquet.force_filter_selections);
+    }
+
+    #[test]
+    fn configures_parquet_view_arrays() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-view-arrays"]).unwrap();
+        assert!(super::build_session_config(&args).options().execution.parquet.schema_force_view_types);
     }
 
     #[test]
