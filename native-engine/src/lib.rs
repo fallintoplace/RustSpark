@@ -33,3 +33,5 @@ pub mod distinct;
 pub mod join;
 
 pub mod union;
+
+pub mod plan;
