@@ -35,6 +35,8 @@ def render(report):
     entries = report.get("results")
     if not isinstance(entries, list) or not entries:
         raise ValueError("No ClickBench query entries")
+    if any(not isinstance(row, dict) for row in entries):
+        raise ValueError("ClickBench query rows must be JSON objects")
     ids = [row.get("id") for row in entries]
     if any(type(i) is not int or i not in range(1, 44) for i in ids) or len(set(ids)) != len(ids):
         raise ValueError("Invalid or duplicated query ID")
