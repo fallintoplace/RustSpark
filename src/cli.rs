@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Tune how many existing partitions are needed before avoiding a subset repartition.
+    #[arg(long = "subset-repartition-min-partitions", value_name = "COUNT", value_parser = parse_subset_repartition_min_partitions)]
+    subset_repartition_min_partitions: Option<usize>,
+
     /// Expose the group-to-row ratio that triggers skipping partial aggregation.
     #[arg(long = "partial-agg-skip-ratio", value_name = "RATIO", value_parser = parse_partial_agg_skip_ratio)]
     partial_agg_skip_ratio: Option<f64>,
@@ -805,6 +809,10 @@ fn parse_partial_agg_skip_ratio(value: &str) -> Result<f64, String> {
     } else {
         Err("--partial-agg-skip-ratio requires a finite ratio between 0 and 1".into())
     }
+}
+
+fn parse_subset_repartition_min_partitions(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--subset-repartition-min-partitions")
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
