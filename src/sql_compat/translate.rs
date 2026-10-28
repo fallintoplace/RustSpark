@@ -65,7 +65,10 @@ pub(crate) fn udf() -> ScalarUDF {
                 ))?;
             let mut output = StringBuilder::new();
             for row in 0..input.len() {
-                let value = if input.is_null(row) || matching.is_null(row) || replacement.is_null(row) {
+                let value = if input.is_null(row)
+                    || matching.is_null(row)
+                    || replacement.is_null(row)
+                {
                     None
                 } else {
                     Some(evaluate(input.value(row), matching.value(row), replacement.value(row)))
