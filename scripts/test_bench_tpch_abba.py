@@ -7,6 +7,18 @@ import bench_tpch_abba as abba
 
 
 class AbbaTests(unittest.TestCase):
+    def test_binary_hashes_identify_compared_builds(self):
+        import hashlib
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as directory:
+            first, second = Path(directory) / "old", Path(directory) / "new"
+            first.write_bytes(b"baseline")
+            second.write_bytes(b"candidate")
+            self.assertEqual(abba.binary_sha256(first), hashlib.sha256(b"baseline").hexdigest())
+            self.assertEqual(abba.binary_sha256(second), hashlib.sha256(b"candidate").hexdigest())
+            self.assertNotEqual(abba.binary_sha256(first), abba.binary_sha256(second))
+
     def test_interleaves_engines_and_uses_measured_only(self):
         commands = {"baseline": ["old"], "candidate": ["new"]}
         seen = []
