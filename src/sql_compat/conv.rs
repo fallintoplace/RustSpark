@@ -11,16 +11,19 @@ use datafusion::{
 
 fn format_radix(mut value: u64, base: u32) -> String {
     const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let mut output = Vec::new();
+    // Every u64 fits into 64 binary digits, the longest supported encoding.
+    let mut digits = [0_u8; 64];
+    let mut start = digits.len();
     loop {
-        output.push(DIGITS[(value % u64::from(base)) as usize] as char);
+        start -= 1;
+        digits[start] = DIGITS[(value % u64::from(base)) as usize];
         value /= u64::from(base);
         if value == 0 {
             break;
         }
     }
-    output.reverse();
-    output.into_iter().collect()
+    String::from_utf8(digits[start..].to_vec())
+        .expect("the radix alphabet is always ASCII")
 }
 
 /// Convert an integer string between radices 2 to 36.
@@ -112,6 +115,8 @@ mod tests {
         assert_eq!(evaluate("-1", 10, -16), Some("-1".into()));
         assert_eq!(evaluate("xyz", 10, 16), None);
         assert_eq!(evaluate("20", 1, 10), None);
+        assert_eq!(evaluate("0", 10, 2), Some("0".into()));
+        assert_eq!(evaluate("18446744073709551615", 10, 16), Some("FFFFFFFFFFFFFFFF".into()));
     }
 
     #[tokio::test]

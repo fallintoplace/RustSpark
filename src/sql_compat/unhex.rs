@@ -19,21 +19,34 @@ fn hex_digit(value: u8) -> Option<u8> {
 }
 
 /// Decode hexadecimal text, padding an odd leading nibble with zero.
-fn evaluate(text: &str) -> Option<Vec<u8>> {
+/// A reusable scratch buffer avoids allocating once per SQL input row.
+fn decode_into(text: &str, output: &mut Vec<u8>) -> bool {
+    output.clear();
     let bytes = text.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len().div_ceil(2));
     let mut index = 0;
     if bytes.len() % 2 == 1 {
-        result.push(hex_digit(bytes[0])?);
+        let Some(nibble) = hex_digit(bytes[0]) else {
+            return false;
+        };
+        output.push(nibble);
         index = 1;
     }
     while index < bytes.len() {
-        let high = hex_digit(bytes[index])?;
-        let low = hex_digit(bytes[index + 1])?;
-        result.push((high << 4) | low);
+        let (Some(high), Some(low)) = (
+            hex_digit(bytes[index]),
+            hex_digit(bytes[index + 1]),
+        ) else {
+            return false;
+        };
+        output.push((high << 4) | low);
         index += 2;
     }
-    Some(result)
+    true
+}
+
+fn evaluate(text: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(text.len().div_ceil(2));
+    decode_into(text, &mut output).then_some(output)
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -58,10 +71,13 @@ pub(crate) fn udf() -> ScalarUDF {
                     input.len(),
                     input.value_data().len() / 2 + input.len(),
                 );
+            let mut scratch = Vec::new();
             for value in input.iter() {
-                match value.and_then(evaluate) {
-                    Some(value) => result.append_value(value),
-                    None => result.append_null(),
+                match value {
+                    Some(value) if decode_into(value, &mut scratch) => {
+                        result.append_value(&scratch);
+                    }
+                    _ => result.append_null(),
                 }
             }
             Ok(ColumnarValue::Array(Arc::new(result.finish())))
@@ -81,6 +97,8 @@ mod tests {
         assert_eq!(evaluate("ABC"), Some(vec![0x0a, 0xbc]));
         assert_eq!(evaluate("0G"), None);
         assert_eq!(evaluate(""), Some(Vec::new()));
+        assert_eq!(evaluate("f"), Some(vec![15]));
+        assert_eq!(evaluate("G1"), None);
     }
 
     #[tokio::test]
