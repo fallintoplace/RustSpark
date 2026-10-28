@@ -81,7 +81,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 }
                 _ => Err(DataFusionError::Internal("url_decode expects Utf8".into())),
             }
-        },
+        }),
     )
 }
 
