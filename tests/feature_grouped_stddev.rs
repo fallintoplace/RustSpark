@@ -15,7 +15,10 @@ async fn grouped_stddev_runs_grouped_native_aggregate() -> TestResult {
     let result = session.stddev_per_group("events", "segment", "metric").await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE sample_stddev IS NOT NULL").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE sample_stddev IS NOT NULL")
+            .await?
+            .to_string(),
         "1"
     );
     assert!(session.stddev_per_group("events", "missing", "metric").await.is_err());
