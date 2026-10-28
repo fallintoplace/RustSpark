@@ -60,9 +60,8 @@ fn named_input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Er
         .collect()
 }
 
-fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let mut sources: Vec<PathBuf> = Vec::new();
-    for path in [
+fn direct_input_paths(args: &Args) -> Vec<PathBuf> {
+    [
         args.csv.as_ref(),
         args.parquet.as_ref(),
         args.json.as_ref(),
@@ -70,11 +69,13 @@ fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> 
     ]
     .into_iter()
     .flatten()
-    {
-        if path.as_os_str() != "-" {
-            sources.push(path.clone());
-        }
-    }
+    .filter(|path| path.as_os_str() != "-")
+    .cloned()
+    .collect()
+}
+
+fn input_paths(args: &Args) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut sources = direct_input_paths(args);
     sources.extend(named_input_paths(args)?);
     if let Some(manifest) = args.parquet_file_list.as_deref() {
         sources.push(manifest.to_path_buf());
