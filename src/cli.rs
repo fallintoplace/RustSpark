@@ -337,6 +337,10 @@ struct Args {
     )]
     subset_repartition_threshold: Option<usize>,
 
+    /// enable optimizer statistics registry.
+    #[arg(long = "use-statistics-registry")]
+    use_statistics_registry: bool,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
