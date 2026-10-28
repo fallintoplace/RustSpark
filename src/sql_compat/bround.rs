@@ -103,6 +103,7 @@ mod tests {
         assert_eq!(values.value(0), 2.0);
         Ok(())
     }
+
     #[test]
     fn larger_scales_and_finite_extremes() {
         assert_eq!(evaluate(1.25, 16), Some(1.25));
@@ -111,5 +112,4 @@ mod tests {
         assert!(evaluate(f64::NAN, 2).unwrap().is_nan());
         assert_eq!(evaluate(1.0, 19), None);
     }
-
 }
