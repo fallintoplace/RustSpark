@@ -49,6 +49,8 @@ mod sql_compat_pmod;
 mod feature_substring_filter;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
+#[path = "sql_compat/acos.rs"]
+mod sql_compat_acos;
 #[path = "features/group_ranks.rs"]
 mod feature_group_ranks;
 #[path = "sql_compat/startswith.rs"]
@@ -198,6 +200,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_oct::udf());
         context.register_udf(sql_compat_space::udf());
+        context.register_udf(sql_compat_acos::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_nullifzero::udf());
         context.register_udf(sql_compat_pmod::udf());
