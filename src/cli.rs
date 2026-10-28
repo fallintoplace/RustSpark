@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Expose DataFusion's size limit for single-partition hash joins.
+    #[arg(long = "hash-join-single-partition-mb", value_name = "MIB", value_parser = parse_hash_join_single_partition_bytes)]
+    hash_join_single_partition_bytes: Option<usize>,
+
     /// Expose the hash-join probe-side byte buffer size.
     #[arg(long = "hash-join-probe-buffer-mb", value_name = "MIB", value_parser = parse_hash_join_probe_buffer_bytes)]
     hash_join_probe_buffer_bytes: Option<usize>,
@@ -709,6 +713,12 @@ fn parse_hash_join_probe_buffer_bytes(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--hash-join-probe-buffer-mb")?
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "--hash-join-probe-buffer-mb exceeds the supported range".into())
+}
+
+fn parse_hash_join_single_partition_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--hash-join-single-partition-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--hash-join-single-partition-mb exceeds the supported range".into())
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
