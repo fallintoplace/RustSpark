@@ -127,6 +127,8 @@ mod sql_compat_expm1;
 mod sql_compat_factorial;
 #[path = "sql_compat/hypot.rs"]
 mod sql_compat_hypot;
+#[path = "sql_compat/log1p.rs"]
+mod sql_compat_log1p;
 #[path = "sql_compat/json.rs"]
 mod sql_compat_json;
 #[path = "sql_compat/luhn_check.rs"]
@@ -320,6 +322,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_sec::udf());
         context.register_udf(sql_compat_csc::udf());
         context.register_udf(sql_compat_hypot::udf());
+        context.register_udf(sql_compat_log1p::udf());
         context.register_udf(sql_compat_crc32::udf());
         context.register_udf(sql_compat_url_encode::udf());
         context.register_udf(sql_compat_url_decode::udf());
