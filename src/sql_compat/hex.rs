@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark SQL HEX escapes single hexs with a backslash.
+/// Spark HEX formats a signed 64-bit integer as uppercase hexadecimal.
 fn evaluate(value: i64) -> Option<String> {
     Some(format!("{value:X}"))
 }
@@ -26,7 +26,7 @@ pub(crate) fn udf() -> ScalarUDF {
             let input0 = arrays[0]
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| DataFusionError::Internal("hex expects Utf8".into()))?;
+                .ok_or_else(|| DataFusionError::Internal("hex expects Int64".into()))?;
             let mut result =
                 StringBuilder::with_capacity(input0.len(), input0.len().saturating_mul(16));
             for row in 0..input0.len() {
@@ -56,6 +56,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
 
     #[test]
     fn reference_vectors() {
@@ -66,11 +67,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT HEX('Spark SQL')")
+            .sql("SELECT HEX(CAST(255 AS BIGINT))")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "FF");
         Ok(())
     }
 }
