@@ -79,3 +79,5 @@ pub mod stream_scan;
 pub mod vector_filter;
 
 pub mod topk;
+
+pub mod parallel_map;
