@@ -159,6 +159,8 @@ mod sql_compat_mask;
 mod sql_compat_nullifzero;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
+#[path = "sql_compat/conv.rs"]
+mod sql_compat_conv;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
 #[path = "sql_compat/quote.rs"]
@@ -322,6 +324,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
+        context.register_udf(sql_compat_conv::udf());
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_rint::udf());
         context.register_udf(sql_compat_space::udf());
