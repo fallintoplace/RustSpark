@@ -192,6 +192,18 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(probability) = args.parquet_bloom_fpp {
         config.options_mut().execution.parquet.bloom_filter_fpp = Some(probability);
     }
+    if args.disable_batch_coalescing {
+        config.options_mut().execution.coalesce_batches = false;
+    }
+    if let Some(value) = args.max_spill_file_bytes {
+        config = config.set_usize("datafusion.execution.max_spill_file_size_bytes", value);
+    }
+    if args.prefer_sort_merge_join {
+        config.options_mut().optimizer.prefer_hash_join = false;
+    }
+    if let Some(codec) = args.spill_compression.as_deref() {
+        config = config.set_str("datafusion.execution.spill_compression", codec);
+    }
     if let Some(value) = args.max_buffered_output_batches {
         config = config.set_usize("datafusion.execution.max_buffered_batches_per_output_file", value);
     }
@@ -468,6 +480,96 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn toggles_disable_batch_coalescing_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--disable-batch-coalescing",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().execution.coalesce_batches, defaults.options().execution.coalesce_batches);
+        assert_eq!(configured.options().execution.coalesce_batches, false);
+    }
+
+    #[test]
+    fn configures_max_spill_file_bytes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--max-spill-file-bytes",
+            "268435456",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.max_spill_file_size_bytes.get(),
+            defaults.options().execution.max_spill_file_size_bytes.get()
+        );
+        assert_eq!(configured.options().execution.max_spill_file_size_bytes.get(), 268435456);
+    }
+
+    #[test]
+    fn toggles_prefer_sort_merge_join_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--prefer-sort-merge-join",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().optimizer.prefer_hash_join,
+            datafusion_default.options().optimizer.prefer_hash_join
+        );
+        assert_eq!(configured.options().optimizer.prefer_hash_join, false);
+    }
+
+    #[test]
+    fn supports_opt_in_spill_compression_codecs() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--spill-compression",
+            "lz4_frame",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.spill_compression.to_string(),
+            defaults.options().execution.spill_compression.to_string()
+        );
+        assert_eq!(
+            configured.options().execution.spill_compression.to_string(),
+            "lz4_frame"
+        );
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--spill-compression",
+            "not-a-codec",
+        ])
+        .is_err());
     }
 
     #[test]

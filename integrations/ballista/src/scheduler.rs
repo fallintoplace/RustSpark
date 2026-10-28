@@ -66,6 +66,9 @@ fn scheduler_address(endpoint: &str) -> Result<String, String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("Ballista endpoint must not contain credentials".into());
     }
+    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Ballista endpoint must not contain a path, query or fragment".into());
+    }
     let host = parsed.host().ok_or("Ballista endpoint must contain a hostname")?;
     let port = parsed.port().unwrap_or(50050);
     Ok(format!("{host}:{port}"))
@@ -227,6 +230,13 @@ mod tests {
         assert!(scheduler_address("df:///no-host").is_err());
         assert!(scheduler_address("https://scheduler:50050").is_err());
         assert!(scheduler_address("df://user:password@scheduler:50050").is_err());
+        for invalid in [
+            "df://scheduler:50050/admin",
+            "df://scheduler:50050/?token=secret",
+            "df://scheduler:50050/#fragment",
+        ] {
+            assert!(scheduler_address(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[tokio::test]

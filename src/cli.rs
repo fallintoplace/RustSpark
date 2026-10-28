@@ -433,6 +433,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Stop preferring hash joins for eligible large joins.
+    #[arg(long = "prefer-sort-merge-join")]
+    prefer_sort_merge_join: bool,
+
     /// Disable file-scan work stealing for predictable layouts.
     #[arg(long = "disable-file-work-stealing")]
     disable_file_work_stealing: bool,
@@ -546,6 +550,18 @@ struct Args {
     /// False-positive probability for Parquet bloom filters written on export.
     #[arg(long = "parquet-bloom-fpp", value_name = "PROBABILITY", value_parser = parse_parquet_bloom_fpp)]
     parquet_bloom_fpp: Option<f64>,
+
+    /// Opt-in configuration for large analytical workloads.
+    #[arg(long = "disable-batch-coalescing")]
+    disable_batch_coalescing: bool,
+
+    /// Tune max-spill-file-bytes for large Parquet datasets.
+    #[arg(long = "max-spill-file-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    max_spill_file_bytes: Option<usize>,
+
+    /// Compress spilled intermediate data when disk bandwidth is limited.
+    #[arg(long = "spill-compression", value_name = "CODEC", value_parser = ["uncompressed", "lz4_frame", "zstd"])]
+    spill_compression: Option<String>,
 
     /// Maximum queued RecordBatches per output file, at least two.
     #[arg(long = "max-buffered-output-batches", value_name = "COUNT", value_parser = parse_output_buffer_batches)]

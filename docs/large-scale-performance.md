@@ -7,6 +7,10 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 ## Available tuning knobs
 
 - `--parquet-bloom-fpp 0.01`: Set written Parquet bloom filters' false-positive probability. Combine with `--parquet-write-bloom-filters` and estimate distinct values carefully. Lower probabilities create larger bloom filters and can increase write and metadata costs.
+- `--disable-batch-coalescing`: Disable coalescing small RecordBatches. Only use for input that already yields efficient batch sizes.
+- `--max-spill-file-bytes 268435456`: Set the maximum file size for spilled intermediate data. Larger files reduce rotations but increase I/O burst size.
+- `--prefer-sort-merge-join`: Stop preferring hash joins so the planner can use alternatives when appropriate. Compare CPU, memory, and spill usage.
+- `--spill-compression lz4_frame`: Compress intermediate spill files with Arrow IPC LZ4 frames or `zstd`, or choose `uncompressed`. Compression saves disk I/O but adds CPU; compare on the same hardware.
 - `--max-buffered-output-batches 8`: Set buffered batches per output file, minimum 2. More buffering uses additional RAM.
 - `--default-filter-selectivity 10`: Set assumed filter selectivity from 0 to 100 percent when exact statistics are unavailable. Incorrect values can worsen plans.
 - `--parquet-column-index-truncate 256`: Tune Parquet page-index truncation for string columns. Larger indexes use more storage and can increase metadata I/O.
