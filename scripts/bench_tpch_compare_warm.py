@@ -4,6 +4,7 @@
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 
 
@@ -31,8 +32,8 @@ def checked_sql_hashes(report):
     hashes = {}
     for row in report["results"]:
         digest = row.get("sql_sha256")
-        if type(digest) is not str or len(digest) != 64:
-            raise ValueError("Warm comparison requires per-query SQL SHA-256 hashes")
+        if type(digest) is not str or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+            raise ValueError("Warm comparison requires valid per-query SQL SHA-256 hashes")
         hashes[row["id"]] = digest
     return hashes
 

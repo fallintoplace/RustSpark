@@ -52,6 +52,15 @@ class CompareWarmTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different SQL"):
             compare.compare(rustspark, duckdb, verification())
 
+    def test_rejects_malformed_hash_even_when_all_reports_agree(self):
+        rustspark = report(10, "rs")
+        duckdb = report(20, "duckdb")
+        reference = verification()
+        for data in (rustspark, duckdb, reference):
+            data["results"][0]["sql_sha256"] = "g" * 64
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            compare.compare(rustspark, duckdb, reference)
+
     def test_no_cold_vs_warm_comparison(self):
         cold = report(20, "duckdb")
         cold["metric"] = "cold CLI SQL"
