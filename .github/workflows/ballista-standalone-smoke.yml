@@ -7,6 +7,12 @@ on:
       - 'integrations/ballista/**'
       - 'scripts/ballista_smoke.py'
       - 'scripts/test_ballista_smoke.py'
+      - 'scripts/quality.py'
+      - 'Cargo.toml'
+      - 'src/lib.rs'
+      - 'src/sources.rs'
+      - 'src/distributed_storage/**'
+      - 'src/sql_compat/**'
       - '.github/workflows/ballista-standalone-smoke.yml'
 
 concurrency:
