@@ -45,6 +45,8 @@ mod sql_compat_oct;
 mod feature_approx_percentile;
 #[path = "sql_compat/pmod.rs"]
 mod sql_compat_pmod;
+#[path = "sql_compat/degrees.rs"]
+mod sql_compat_degrees;
 #[path = "features/substring_filter.rs"]
 mod feature_substring_filter;
 #[path = "sql_compat/space.rs"]
@@ -201,6 +203,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_nullifzero::udf());
         context.register_udf(sql_compat_pmod::udf());
+        context.register_udf(sql_compat_degrees::udf());
         context.register_udf(sql_compat_try_mod::udf());
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_try_divide::udf());
