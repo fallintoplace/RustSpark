@@ -6,6 +6,7 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 
 ## Available tuning knobs
 
+- `--disable-batch-coalescing`: Disable coalescing small RecordBatches. Only use for input that already yields efficient batch sizes.
 - `--max-spill-file-bytes 268435456`: Set the maximum file size for spilled intermediate data. Larger files reduce rotations but increase I/O burst size.
 - `--prefer-sort-merge-join`: Stop preferring hash joins so the planner can use alternatives when appropriate. Compare CPU, memory, and spill usage.
 - `--spill-compression lz4_frame`: Compress intermediate spill files with Arrow IPC LZ4 frames or `zstd`, or choose `uncompressed`. Compression saves disk I/O but adds CPU; compare on the same hardware.

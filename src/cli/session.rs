@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.disable_batch_coalescing {
+        config.options_mut().execution.coalesce_batches = false;
+    }
     if let Some(value) = args.max_spill_file_bytes {
         config = config.set_usize("datafusion.execution.max_spill_file_size_bytes", value);
     }
@@ -438,6 +441,23 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_disable_batch_coalescing_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--disable-batch-coalescing",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().execution.coalesce_batches, defaults.options().execution.coalesce_batches);
+        assert_eq!(configured.options().execution.coalesce_batches, false);
     }
 
     #[test]

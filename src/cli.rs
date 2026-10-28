@@ -547,6 +547,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Opt-in configuration for large analytical workloads.
+    #[arg(long = "disable-batch-coalescing")]
+    disable_batch_coalescing: bool,
+
     /// Tune max-spill-file-bytes for large Parquet datasets.
     #[arg(long = "max-spill-file-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     max_spill_file_bytes: Option<usize>,
