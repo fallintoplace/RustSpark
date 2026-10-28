@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark LOG1P computes ln(1 + value) precisely near zero.
+/// Spark LOG1P computes the logarithm of one plus its floating point argument.
 fn evaluate(value: f64) -> Option<f64> {
     Some(value.ln_1p())
 }
@@ -51,6 +51,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::Float64Array;
 
     #[test]
     fn reference_vectors() {
@@ -61,11 +62,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT LOG1P(CAST(1 AS DOUBLE))")
+            .sql("SELECT LOG1P(CAST(0 AS DOUBLE))")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 0.0);
         Ok(())
     }
 }
