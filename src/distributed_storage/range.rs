@@ -20,6 +20,9 @@ impl ReplicaStore {
             .checked_add(length as u64)
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "Range overflow"))?;
         let mut last_error = None;
+        // A failed replica can have read part of the requested range. Reuse
+        // this allocation rather than allocating up to 64 MiB per retry.
+        let mut bytes = Vec::new();
         for node in self.placements(key)? {
             let path = node.root.join("objects").join(key);
             let attempt = (|| {
@@ -30,13 +33,15 @@ impl ReplicaStore {
                 if end > file.metadata()?.len() {
                     return Err(io::Error::new(ErrorKind::UnexpectedEof, "Range exceeds object"));
                 }
-                file.seek(SeekFrom::Start(offset))?;
-                let mut bytes = vec![0; length];
-                file.read_exact(&mut bytes)?;
-                Ok(bytes)
+                if length > 0 {
+                    file.seek(SeekFrom::Start(offset))?;
+                    bytes.resize(length, 0);
+                    file.read_exact(&mut bytes)?;
+                }
+                Ok(())
             })();
             match attempt {
-                Ok(bytes) => return Ok(bytes),
+                Ok(()) => return Ok(bytes),
                 Err(error) => last_error = Some(error),
             }
         }
@@ -62,5 +67,22 @@ mod tests {
         assert_eq!(store.read_range("part.parquet", 8, 0).unwrap(), b"");
         assert!(store.read_range("part.parquet", 7, 2).is_err());
         assert!(store.read_range("part.parquet", u64::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn range_failover_keeps_exact_bytes_after_short_primary() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"].map(|id| {
+            let path = root.path().join(id);
+            fs::create_dir(&path).unwrap();
+            StorageNode::new(id, path).unwrap()
+        });
+        let store = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
+        let data = vec![73_u8; 1024 * 1024];
+        store.put("large.parquet", &data).unwrap();
+        let first = store.placements("large.parquet").unwrap()[0];
+        fs::write(first.root.join("objects/large.parquet"), b"too short").unwrap();
+        assert_eq!(store.read_range("large.parquet", 9000, 4096).unwrap(), vec![73; 4096]);
+        assert_eq!(store.read_range("large.parquet", data.len() as u64, 0).unwrap(), b"");
     }
 }
