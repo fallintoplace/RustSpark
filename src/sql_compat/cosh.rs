@@ -20,7 +20,9 @@ pub(crate) fn udf() -> ScalarUDF {
                 )));
             }
             let [ColumnarValue::Array(array)] = args else {
-                return Err(DataFusionError::Internal("cosh expects a Float64 array".into()));
+                return Err(DataFusionError::Internal(
+                    "cosh expects a Float64 array".into(),
+                ));
             };
             let values = array
                 .as_any()
@@ -44,10 +46,17 @@ mod array_fast_path_tests {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let values = batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
             actual.extend(values.iter());
         }
-        assert_eq!(actual, vec![Some(0.25_f64.cosh()), None, Some(0.5_f64.cosh())]);
+        assert_eq!(
+            actual,
+            vec![Some(0.25_f64.cosh()), None, Some(0.5_f64.cosh())]
+        );
         Ok(())
     }
 }
