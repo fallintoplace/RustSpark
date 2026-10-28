@@ -99,6 +99,8 @@ mod sql_compat_atan;
 mod sql_compat_atan2;
 #[path = "sql_compat/atanh.rs"]
 mod sql_compat_atanh;
+#[path = "sql_compat/day.rs"]
+mod sql_compat_day;
 #[path = "sql_compat/bin.rs"]
 mod sql_compat_bin;
 #[path = "sql_compat/bit_count.rs"]
@@ -362,6 +364,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_month::udf());
         context.register_udf(sql_compat_try_subtract::udf());
         context.register_udf(sql_compat_atanh::udf());
+        context.register_udf(sql_compat_day::udf());
         context.register_udf(sql_compat_try_multiply::udf());
         context.register_udf(sql_compat_cosh::udf());
         context.register_udf(sql_compat_bitwise_not::udf());
