@@ -33,23 +33,36 @@ def compare_query(commands, ordered, repeat, warmup, timeout):
     if type(repeat) is not int or repeat < 1 or type(warmup) is not int or warmup < 0:
         raise ValueError("Repeat must be positive; warmup nonnegative")
     samples = {"baseline": [], "candidate": []}
+    paired_speedups = []
     digest = None
     result_rows = None
     for cycle in range(repeat + warmup):
+        cycle_samples = {"baseline": [], "candidate": []}
         for engine in ORDER:
             ms, current_digest, count = timed_command(commands[engine], timeout, ordered)
+            if not isinstance(ms, (int, float)) or isinstance(ms, bool) or not math.isfinite(ms) or ms <= 0:
+                raise ValueError("Invalid ABBA query duration")
             if digest is not None and (current_digest != digest or count != result_rows):
                 raise ValueError("Baseline and candidate produced different SQL results")
             digest, result_rows = current_digest, count
             if cycle >= warmup:
                 samples[engine].append(ms)
+                cycle_samples[engine].append(ms)
+        if cycle >= warmup:
+            ratio = (statistics.median(cycle_samples["baseline"])
+                     / statistics.median(cycle_samples["candidate"]))
+            if not math.isfinite(ratio):
+                raise ValueError("Invalid ABBA paired speedup")
+            paired_speedups.append(ratio)
     old = statistics.median(samples["baseline"])
     new = statistics.median(samples["candidate"])
     return {"status": "ok", "result_sha256": digest, "result_rows": result_rows,
             "baseline_samples_ms": [round(x, 3) for x in samples["baseline"]],
             "candidate_samples_ms": [round(x, 3) for x in samples["candidate"]],
             "baseline_median_ms": round(old, 3), "candidate_median_ms": round(new, 3),
-            "baseline_over_candidate": round(old / new, 4)}
+            "baseline_over_candidate": round(old / new, 4),
+            "paired_speedups": [round(x, 4) for x in paired_speedups],
+            "paired_median_speedup": round(statistics.median(paired_speedups), 4)}
 
 
 def benchmark(baseline, candidate, parquet, queries, repeat=3, warmup=1,

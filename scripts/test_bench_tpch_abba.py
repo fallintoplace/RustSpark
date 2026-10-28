@@ -19,6 +19,28 @@ class AbbaTests(unittest.TestCase):
         self.assertEqual(report["baseline_samples_ms"], [4, 4, 4, 4])
         self.assertEqual(report["candidate_samples_ms"], [2, 2, 2, 2])
         self.assertEqual(report["baseline_over_candidate"], 2.0)
+        self.assertEqual(report["paired_median_speedup"], 2.0)
+        self.assertEqual(report["paired_speedups"], [2.0, 2.0])
+
+    def test_paired_ratios_are_more_robust_to_drift_between_cycles(self):
+        commands = {"baseline": ["old"], "candidate": ["new"]}
+        observations = [
+            (10.0, "same", 1), (5.0, "same", 1),
+            (5.0, "same", 1), (10.0, "same", 1),
+            (20.0, "same", 1), (20.0, "same", 1),
+            (20.0, "same", 1), (20.0, "same", 1),
+        ]
+        with mock.patch.object(abba, "timed_command", side_effect=observations):
+            report = abba.compare_query(commands, False, repeat=2, warmup=0, timeout=120)
+        self.assertEqual(report["paired_speedups"], [2.0, 1.0])
+        self.assertEqual(report["paired_median_speedup"], 1.5)
+        self.assertEqual(report["baseline_over_candidate"], 1.2)
+
+    def test_invalid_injected_timings_do_not_produce_speedup(self):
+        commands = {"baseline": ["old"], "candidate": ["new"]}
+        with mock.patch.object(abba, "timed_command", return_value=(float("nan"), "x", 1)):
+            with self.assertRaisesRegex(ValueError, "Invalid ABBA"):
+                abba.compare_query(commands, False, repeat=1, warmup=0, timeout=120)
 
     def test_result_mismatch_blocks_score(self):
         commands = {"baseline": ["old"], "candidate": ["new"]}
