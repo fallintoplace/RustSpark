@@ -105,3 +105,42 @@ mod tests {
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }
+
+impl ReplicaStore {
+    /// List existing keys beginning with a prefix, preserving lexicographic
+    /// order. An empty prefix selects the whole inventory.
+    pub fn list_keys_with_prefix(&self, prefix: &str) -> io::Result<Vec<String>> {
+        let keys = self.list_keys()?;
+        let start = keys.partition_point(|key| key.as_str() < prefix);
+        Ok(keys
+            .into_iter()
+            .skip(start)
+            .take_while(|key| key.starts_with(prefix))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod prefix_listing_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn returns_only_matching_keys_in_sorted_order() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        for key in ["year-2025", "year-2024-b", "other", "year-2024-a"] {
+            store.put(key, b"data").unwrap();
+        }
+        assert_eq!(
+            store.list_keys_with_prefix("year-2024").unwrap(),
+            ["year-2024-a", "year-2024-b"]
+        );
+        assert_eq!(store.list_keys_with_prefix("missing").unwrap(), Vec::<String>::new());
+        assert_eq!(store.list_keys_with_prefix("").unwrap().len(), 4);
+    }
+}
