@@ -61,6 +61,7 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
     };
     if value.is_null() { return Ok(()); }
+    let is_min = matches!(state, State::Min(_));
     match state {
         State::Count(count) => {
             *count = count.checked_add(1)
@@ -68,7 +69,7 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         }
         State::Sum(total) => {
             let next = match (total.as_ref(), &value) {
-                (None, Value::Integer(_) | Value::Float(_)) => value,
+                (None, Value::Integer(_) | Value::Float(_)) => value.clone(),
                 (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(
                     a.checked_add(*b).ok_or_else(|| Error::Execution("SUM overflow".into()))?),
                 (Some(Value::Float(a)), Value::Float(b)) => Value::Float(*a + *b),
@@ -82,7 +83,6 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
             *total = Some(next);
         }
         State::Min(current) | State::Max(current) => {
-            let is_min = matches!(state, State::Min(_));
             if let Some(existing) = current {
                 let order = value.sql_compare(existing)?
                     .ok_or_else(|| Error::Type("non-comparable MIN/MAX input".into()))?;
