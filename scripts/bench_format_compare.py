@@ -71,6 +71,7 @@ def benchmark(binary, rows=100000, repeat=3, warmup=1, timeout=120):
         csv, parquet = root / "input.csv", root / "input.parquet"
         write_csv(csv, rows)
         convert_to_parquet(csv, parquet)
+        csv_bytes, parquet_bytes = csv.stat().st_size, parquet.stat().st_size
         expected = expected_results(rows)
         output = []
         for name, sql in WORKLOADS.items():
@@ -81,7 +82,8 @@ def benchmark(binary, rows=100000, repeat=3, warmup=1, timeout=120):
                 "parquet": measure(binary, "parquet", parquet, sql, digest, repeat, warmup, timeout),
             })
         return {"metric": "cold process + file registration + SQL + JSON output",
-                "rows": rows, "repeat": repeat, "warmup": warmup, "workloads": output}
+                "rows": rows, "csv_bytes": csv_bytes, "parquet_bytes": parquet_bytes,
+                "repeat": repeat, "warmup": warmup, "workloads": output}
 
 
 def main(argv=None):
