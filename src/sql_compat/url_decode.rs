@@ -18,6 +18,9 @@ fn hex_digit(value: u8) -> Option<u8> {
 
 fn percent_decode(input: &str) -> datafusion::error::Result<String> {
     let bytes = input.as_bytes();
+    if !bytes.contains(&b'%') {
+        return Ok(input.to_owned());
+    }
     let mut result = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -70,4 +73,19 @@ pub(crate) fn udf() -> ScalarUDF {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn plain_and_encoded_urls_preserve_semantics() {
+        assert_eq!(percent_decode("plain/café").unwrap(), "plain/café");
+        assert_eq!(percent_decode("a%20b").unwrap(), "a b");
+        assert_eq!(percent_decode("%C3%A9").unwrap(), "é");
+        assert!(percent_decode("%").is_err());
+        assert!(percent_decode("%GG").is_err());
+        assert!(percent_decode("%FF").is_err());
+    }
 }
