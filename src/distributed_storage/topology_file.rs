@@ -80,7 +80,7 @@ impl ReplicaStore {
                 .root
                 .to_str()
                 .ok_or_else(|| invalid("Storage root path must be UTF-8"))?;
-            if root.trim() != root || root.contains(['=', '\n', '\r']) {
+            if root.trim() != root || root.contains('=') || root.contains('\n') || root.contains('\r') {
                 return Err(invalid("Storage root contains unsafe topology delimiters"));
             }
             body.push_str(&node.id);
@@ -102,6 +102,7 @@ impl ReplicaStore {
 #[cfg(test)]
 mod topology_export_feature_tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn round_trips_sorted_nodes_without_overwriting_a_file() {
