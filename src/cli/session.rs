@@ -55,6 +55,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(bytes) = args.sort_spill_reserve_bytes {
         config.options_mut().execution.sort_spill_reservation_bytes = bytes;
     }
+    if let Some(bytes) = args.sort_in_place_threshold_bytes {
+        config.options_mut().execution.sort_in_place_threshold_bytes = bytes;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -219,6 +222,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
             "--sort-spill-reserve-mb", "64"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().execution.sort_spill_reservation_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_sort_in_place_threshold_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-in-place-max-mb", "16"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_in_place_threshold_bytes, 16 * 1024 * 1024);
     }
 
     #[test]
