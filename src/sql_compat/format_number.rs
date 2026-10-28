@@ -67,10 +67,8 @@ pub(crate) fn udf() -> ScalarUDF {
                     .ok_or_else(|| {
                         DataFusionError::Internal("format_number expects Float64".into())
                     })?;
-                let mut result = StringBuilder::with_capacity(
-                    number.len(),
-                    number.len().saturating_mul(16),
-                );
+                let mut result =
+                    StringBuilder::with_capacity(number.len(), number.len().saturating_mul(16));
                 for number in number.iter() {
                     match number
                         .zip(*digits)
@@ -145,6 +143,7 @@ mod tests {
         assert_eq!(values.value(0), "12,345.67");
         Ok(())
     }
+
     #[tokio::test]
     async fn formats_nullable_column_with_constant_digits() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
@@ -167,5 +166,4 @@ mod tests {
         assert_eq!(values.value(2), "-1.20");
         Ok(())
     }
-
 }
