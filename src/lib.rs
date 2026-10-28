@@ -335,6 +335,8 @@ mod sql_compat_trunc;
 mod sql_compat_try_parse_url;
 #[path = "sql_compat/time_to_millis.rs"]
 mod sql_compat_time_to_millis;
+#[path = "sql_compat/months_between.rs"]
+mod sql_compat_months_between;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -559,6 +561,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_trunc::udf());
         context.register_udf(sql_compat_try_parse_url::udf());
         context.register_udf(sql_compat_time_to_millis::udf());
+        context.register_udf(sql_compat_months_between::udf());
         Self { context }
     }
 
