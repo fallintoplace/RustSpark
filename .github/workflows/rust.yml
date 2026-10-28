@@ -72,6 +72,10 @@ jobs:
             build_jobs: 2
     env:
       CARGO_BUILD_JOBS: ${{ matrix.build_jobs }}
+      # Hundreds of integration test executables can exhaust macOS runner disk.
+      # Keep all tests enabled but avoid incremental artifacts and strip symbols.
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_STRIP: symbols
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
