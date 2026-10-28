@@ -191,6 +191,8 @@ mod sql_compat_format_number;
 mod sql_compat_soundex;
 #[path = "sql_compat/locate.rs"]
 mod sql_compat_locate;
+#[path = "sql_compat/find_in_set.rs"]
+mod sql_compat_find_in_set;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/startswith.rs"]
@@ -386,6 +388,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_locate::udf());
+        context.register_udf(sql_compat_find_in_set::udf());
         context.register_udf(sql_compat_luhn_check::udf());
         context.register_udf(sql_compat_mask::udf());
         context.register_udf(sql_compat_factorial::udf());
