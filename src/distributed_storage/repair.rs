@@ -15,6 +15,15 @@ impl ReplicaStore {
         if missing == 0 {
             return Ok(0);
         }
+        // Missing replicas are safe to rebuild only when the surviving copies
+        // agree. Never select the first surviving replica as an authority when
+        // other surviving replicas contain different bytes.
+        if self.verify(key)?.divergent > 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Cannot repair missing replicas while surviving copies disagree",
+            ));
+        }
         let source_node = nodes
             .iter()
             .zip(&statuses)
@@ -76,6 +85,26 @@ mod tests {
         assert_eq!(store.repair_missing("part.parquet").unwrap(), 1);
         assert_eq!(store.repair_missing("part.parquet").unwrap(), 0);
         assert_eq!(store.verify("part.parquet").unwrap().healthy, 2);
+    }
+
+    #[test]
+    fn refuses_to_propagate_ambiguous_corrupt_replicas() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b", "c"].map(|id| {
+            let path = root.path().join(id);
+            fs::create_dir(&path).unwrap();
+            StorageNode::new(id, path).unwrap()
+        });
+        let store = ReplicaStore::new(nodes.to_vec(), 3).unwrap();
+        store.put("events.parquet", b"healthy").unwrap();
+        let placement = store.placements("events.parquet").unwrap();
+        let missing = placement[0].root.join("objects/events.parquet");
+        fs::remove_file(&missing).unwrap();
+        fs::write(placement[1].root.join("objects/events.parquet"), b"corrupt").unwrap();
+
+        let error = store.repair_missing("events.parquet").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(!missing.exists());
     }
 
     #[test]
