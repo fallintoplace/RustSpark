@@ -101,7 +101,10 @@ impl ReplicaStore {
     /// every byte, including bytes from an earlier failed replica.
     pub fn read_range_into(&self, key: &str, offset: u64, output: &mut [u8]) -> io::Result<()> {
         if output.len() > MAX_RANGE_BYTES {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "Range exceeds the 64 MiB read limit"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Range exceeds the 64 MiB read limit",
+            ));
         }
         let end = offset
             .checked_add(output.len() as u64)
