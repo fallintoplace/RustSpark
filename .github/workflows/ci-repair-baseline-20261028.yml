@@ -1,0 +1,31 @@
+name: One-time Rust formatting repair
+
+on:
+  push:
+    branches: [ci/repair-baseline-20261028]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ci/repair-baseline-20261028
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format and commit repaired sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git rm .github/workflows/ci-repair-baseline-20261028.yml
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'style: apply Rust formatting after baseline repair'
+          git push origin HEAD:refs/heads/ci/repair-baseline-20261028
