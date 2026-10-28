@@ -433,6 +433,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Enforce the target RecordBatch size at join outputs.
+    #[arg(long = "enforce-join-batch-size")]
+    enforce_join_batch_size: bool,
+
     /// Skip listing-time table statistics for cold-start latency.
     #[arg(long = "skip-table-statistics")]
     skip_table_statistics: bool,
