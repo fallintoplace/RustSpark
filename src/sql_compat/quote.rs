@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -10,6 +10,7 @@ use datafusion::{
 };
 
 /// Spark QUOTE wraps SQL text in single quotes and escapes embedded quotes.
+#[cfg(test)]
 fn evaluate(value: &str) -> Option<String> {
     Some(format!("'{}'", value.replace('\'', "\\'")))
 }
@@ -30,13 +31,21 @@ pub(crate) fn udf() -> ScalarUDF {
             let mut result =
                 StringBuilder::with_capacity(input0.len(), input0.len().saturating_mul(16));
             for row in 0..input0.len() {
-                let value = if input0.is_null(row) {
-                    None
-                } else {
-                    evaluate(input0.value(row))
-                };
+                let value = (!input0.is_null(row)).then_some(());
                 match value {
-                    Some(value) => result.append_value(value),
+                    Some(()) => {
+                        result.write_char('\'').expect("Arrow string writes cannot fail");
+                        for character in input0.value(row).chars() {
+                            if character == '\'' {
+                                result.write_char('\\').expect("Arrow string writes cannot fail");
+                            }
+                            result
+                                .write_char(character)
+                                .expect("Arrow string writes cannot fail");
+                        }
+                        result.write_char('\'').expect("Arrow string writes cannot fail");
+                        result.append_value("");
+                    }
                     None => result.append_null(),
                 }
             }
