@@ -29,8 +29,22 @@ def complete_query_results(records):
     if any(not isinstance(entry, dict) or type(entry.get("id")) is not int
            for entry in records):
         return False
+    def valid_measurement(entry):
+        median, p95 = entry.get("median_ms"), entry.get("p95_ms")
+        rows = entry.get("result_rows")
+        hashes = (entry.get("sql_sha256"), entry.get("result_sha256"))
+        return (
+            type(median) in (int, float) and math.isfinite(median) and median > 0
+            and type(p95) in (int, float) and math.isfinite(p95) and p95 >= median
+            and type(rows) is int and rows >= 0
+            and all(type(value) is str and len(value) == 64
+                    and all(char in "0123456789abcdef" for char in value)
+                    for value in hashes)
+        )
+
     return ({entry["id"] for entry in records} == set(range(1, 23))
-            and all(entry.get("status") == "ok" for entry in records))
+            and all(entry.get("status") == "ok" and valid_measurement(entry)
+                    for entry in records))
 
 
 def smoke_report_succeeded(report, exit_code):
