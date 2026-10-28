@@ -60,6 +60,21 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // Do not broadcast three SQL literals into Arrow arrays for each batch.
+            if let [
+                ColumnarValue::Array(values),
+                ColumnarValue::Scalar(ScalarValue::Float64(Some(lower))),
+                ColumnarValue::Scalar(ScalarValue::Float64(Some(upper))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(count))),
+            ] = args {
+                let values = values.as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("WIDTH_BUCKET expects Float64".into()))?;
+                let mut result = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    result.push(value.map(|value| bucket(value, *lower, *upper, *count)).transpose()?);
+                }
+                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+            }
             let scalar = args
                 .iter()
                 .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
@@ -96,4 +111,26 @@ pub(crate) fn udf() -> ScalarUDF {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod constant_bounds_regression {
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::Int64Array;
+
+    #[tokio::test]
+    async fn evaluates_constant_bounds_with_nullable_columns() -> datafusion::error::Result<()> {
+        let rows = RustSparkSession::new()
+            .sql(
+                "SELECT WIDTH_BUCKET(v, CAST(0 AS DOUBLE), CAST(10 AS DOUBLE), CAST(5 AS BIGINT))                  FROM (VALUES (0, CAST(-1 AS DOUBLE)), (1, CAST(0 AS DOUBLE)),                               (2, CAST(2.5 AS DOUBLE)), (3, CAST(10 AS DOUBLE)),                               (4, CAST(NULL AS DOUBLE))) AS t(idx, v) ORDER BY idx"
+            )
+            .await?.collect().await?;
+        let mut actual = Vec::new();
+        for batch in rows {
+            let values = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            actual.extend(values.iter());
+        }
+        assert_eq!(actual, vec![Some(0), Some(1), Some(2), Some(6), None]);
+        Ok(())
+    }
 }

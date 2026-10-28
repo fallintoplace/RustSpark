@@ -39,7 +39,13 @@ impl TableManifest {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut text = format!("{HEADER}\n{}\n", self.table);
+        let capacity = HEADER.len() + 1 + self.table.len() + 1
+            + self.objects.iter().map(|key| key.len() + 1).sum::<usize>();
+        let mut text = String::with_capacity(capacity);
+        text.push_str(HEADER);
+        text.push('\n');
+        text.push_str(&self.table);
+        text.push('\n');
         for key in &self.objects {
             text.push_str(key);
             text.push('\n');
@@ -74,5 +80,18 @@ mod tests {
         assert!(TableManifest::new("sales", vec!["x".into(), "x".into()]).is_err());
         assert!(TableManifest::decode(b"wrong\nsales\nx\n").is_err());
         assert!(TableManifest::decode(b"rustspark-table-manifest-v1\nsales\n../bad\n").is_err());
+    }
+
+    #[test]
+    fn encodes_large_manifests_with_exact_serialized_length() {
+        let objects = (0..2048)
+            .map(|index| format!("part-{index:06}.parquet"))
+            .collect::<Vec<_>>();
+        let manifest = TableManifest::new("events", objects).unwrap();
+        let encoded = manifest.encode();
+        let expected_bytes = HEADER.len() + 1 + "events".len() + 1
+            + manifest.objects().iter().map(|key| key.len() + 1).sum::<usize>();
+        assert_eq!(encoded.len(), expected_bytes);
+        assert_eq!(TableManifest::decode(&encoded).unwrap(), manifest);
     }
 }
