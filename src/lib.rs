@@ -223,6 +223,8 @@ mod sql_compat_url_encode;
 mod sql_compat_width_bucket;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "sql_compat/weekday.rs"]
+mod sql_compat_weekday;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -320,6 +322,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_endswith::udf());
         context.register_udf(sql_compat_lcase::udf());
         context.register_udf(sql_compat_sin::udf());
+        context.register_udf(sql_compat_weekday::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_asin::udf());
