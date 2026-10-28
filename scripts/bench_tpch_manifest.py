@@ -70,6 +70,8 @@ def require_table_mapping(manifest, key, message):
 def check(root):
     root = Path(root)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("TPC-H fixture manifest must be a JSON object")
     scale = manifest.get("scale_factor")
     if isinstance(scale, bool) or not isinstance(scale, (float, int)) or not math.isfinite(scale) or scale <= 0:
         raise ValueError("Invalid TPC-H scale factor")
