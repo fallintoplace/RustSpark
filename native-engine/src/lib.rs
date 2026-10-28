@@ -19,3 +19,5 @@ pub mod catalog;
 pub mod expr;
 
 pub mod filter;
+
+pub mod project;
