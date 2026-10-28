@@ -11,3 +11,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--parquet-metadata-hint-bytes 1048576`: Read this many bytes optimistically at the end of each Parquet file; tune for footer sizes, do not assume a larger hint is faster.
 - `--parquet-force-row-selection`: Force RowSelection for Parquet filter results with pushdown enabled. May regress dense filters.
 - `--parquet-write-bloom-filters`: Write Parquet bloom filters when the DataFusion writer uses session settings. More storage and write CPU; benefit depends on filter selectivity.
+- `--parquet-row-group-rows 131072`: Set rows per written Parquet row group. Smaller groups may prune better but increase footer size and overhead.

@@ -48,6 +48,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.parquet_write_bloom_filters {
         config.options_mut().execution.parquet.bloom_filter_on_write = true;
     }
+    if let Some(value) = args.parquet_row_group_rows {
+        config.options_mut().execution.parquet.max_row_group_size = value;
+    }
     config
 }
 
@@ -145,6 +148,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-write-bloom-filters"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.bloom_filter_on_write, true);
+    }
+
+    #[test]
+    fn sets_parquet_row_group_rows_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-row-group-rows", "131072"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.max_row_group_size, 131072);
     }
 
     #[test]
