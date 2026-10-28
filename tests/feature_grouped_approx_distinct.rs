@@ -15,7 +15,10 @@ async fn grouped_approx_distinct_returns_grouped_results() -> TestResult {
     let result = session.approx_distinct_per_group("events", "segment", "metric").await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE estimated_distinct >= 1").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE estimated_distinct >= 1")
+            .await?
+            .to_string(),
         "2"
     );
     assert!(session.approx_distinct_per_group("events", "segment", "missing").await.is_err());
