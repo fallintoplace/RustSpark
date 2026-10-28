@@ -543,6 +543,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Compress spilled intermediate data when disk bandwidth is limited.
+    #[arg(long = "spill-compression", value_name = "CODEC", value_parser = ["uncompressed", "lz4_frame", "zstd"])]
+    spill_compression: Option<String>,
+
     /// Maximum queued RecordBatches per output file, at least two.
     #[arg(long = "max-buffered-output-batches", value_name = "COUNT", value_parser = parse_output_buffer_batches)]
     max_buffered_output_batches: Option<usize>,
