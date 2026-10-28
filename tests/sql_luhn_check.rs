@@ -35,6 +35,6 @@ async fn luhn_check_handles_rows_and_nulls() -> Result<(), Box<dyn std::error::E
         .as_any()
         .downcast_ref::<BooleanArray>()
         .unwrap();
-    assert_eq!(values.value(0), true);
+    assert!(values.value(0));
     Ok(())
 }

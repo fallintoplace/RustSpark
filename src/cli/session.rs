@@ -456,10 +456,7 @@ mod tests {
         ])
         .unwrap();
         let config = super::build_session_config(&args);
-        assert_eq!(
-            config.options().execution.parquet.force_filter_selections,
-            true
-        );
+        assert!(config.options().execution.parquet.force_filter_selections);
     }
 
     #[test]
@@ -472,10 +469,7 @@ mod tests {
         ])
         .unwrap();
         let config = super::build_session_config(&args);
-        assert_eq!(
-            config.options().execution.parquet.bloom_filter_on_write,
-            true
-        );
+        assert!(config.options().execution.parquet.bloom_filter_on_write);
     }
 
     #[test]
@@ -684,7 +678,7 @@ mod tests {
         let args =
             Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--window-topn"]).unwrap();
         let config = super::build_session_config(&args);
-        assert_eq!(config.options().optimizer.enable_window_topn, true);
+        assert!(config.options().optimizer.enable_window_topn);
     }
 
     #[test]
@@ -762,7 +756,7 @@ mod tests {
             baseline.options().execution.coalesce_batches,
             defaults.options().execution.coalesce_batches
         );
-        assert_eq!(configured.options().execution.coalesce_batches, false);
+        assert!(!configured.options().execution.coalesce_batches);
     }
 
     #[test]
@@ -806,7 +800,7 @@ mod tests {
             baseline.options().optimizer.prefer_hash_join,
             datafusion_default.options().optimizer.prefer_hash_join
         );
-        assert_eq!(configured.options().optimizer.prefer_hash_join, false);
+        assert!(!configured.options().optimizer.prefer_hash_join);
     }
 
     #[test]
@@ -1135,13 +1129,12 @@ mod tests {
                 .parquet
                 .allow_single_file_parallelism
         );
-        assert_eq!(
-            configured
+        assert!(
+            !configured
                 .options()
                 .execution
                 .parquet
-                .allow_single_file_parallelism,
-            false
+                .allow_single_file_parallelism
         );
     }
 
@@ -1204,12 +1197,11 @@ mod tests {
                 .execution
                 .enable_file_stream_work_stealing
         );
-        assert_eq!(
-            configured
+        assert!(
+            !configured
                 .options()
                 .execution
-                .enable_file_stream_work_stealing,
-            false
+                .enable_file_stream_work_stealing
         );
     }
 
@@ -1233,10 +1225,7 @@ mod tests {
                 .execution
                 .enforce_batch_size_in_joins
         );
-        assert_eq!(
-            configured.options().execution.enforce_batch_size_in_joins,
-            true
-        );
+        assert!(configured.options().execution.enforce_batch_size_in_joins);
     }
 
     #[test]
@@ -1252,7 +1241,7 @@ mod tests {
             baseline.options().execution.collect_statistics,
             datafusion_default.options().execution.collect_statistics
         );
-        assert_eq!(configured.options().execution.collect_statistics, false);
+        assert!(!configured.options().execution.collect_statistics);
     }
 
     #[test]
@@ -1292,7 +1281,7 @@ mod tests {
             baseline.options().optimizer.prefer_existing_union,
             defaults.options().optimizer.prefer_existing_union
         );
-        assert_eq!(configured.options().optimizer.prefer_existing_union, true);
+        assert!(configured.options().optimizer.prefer_existing_union);
     }
 
     #[test]
@@ -1979,12 +1968,11 @@ mod perf_statistics_registry {
             "--use-statistics-registry",
         ])
         .unwrap();
-        assert_eq!(
+        assert!(
             build_session_config(&args)
                 .options()
                 .optimizer
-                .use_statistics_registry,
-            true
+                .use_statistics_registry
         );
     }
 }
