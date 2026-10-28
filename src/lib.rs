@@ -331,6 +331,8 @@ mod sql_compat_spark_dates;
 mod sql_compat_weekday;
 #[path = "sql_compat/trunc.rs"]
 mod sql_compat_trunc;
+#[path = "sql_compat/try_parse_url.rs"]
+mod sql_compat_try_parse_url;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -553,6 +555,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_hex::udf());
         context.register_udf(sql_compat_unix_micros::udf());
         context.register_udf(sql_compat_trunc::udf());
+        context.register_udf(sql_compat_try_parse_url::udf());
         Self { context }
     }
 
