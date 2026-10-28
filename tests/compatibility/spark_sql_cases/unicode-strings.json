@@ -1,0 +1,10 @@
+[
+  {
+    "id": "unicode_character_length",
+    "sql": "SELECT CHAR_LENGTH('café🚀') AS characters, OCTET_LENGTH('café🚀') AS bytes"
+  },
+  {
+    "id": "unicode_substring_start",
+    "sql": "SELECT SUBSTRING('naïve', 3, 2) AS selected, SUBSTRING('abcdef', -2, 2) AS trailing"
+  }
+]
