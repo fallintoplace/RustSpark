@@ -685,24 +685,39 @@ impl RustSparkSession {
         } else {
             "="
         };
+        // Deduplicate the right-side keys before joining so every left row
+        // appears exactly once, including when the lookup has duplicate keys.
+        // A direct EXISTS projection is not executable by DataFusion's
+        // physical planner, so use a LEFT JOIN against these distinct keys.
+        let mut selected_keys = String::new();
         let mut predicates = String::new();
-        for (left_key, right_key) in keys {
-            if !predicates.is_empty() {
+        for (index, (left_key, right_key)) in keys.iter().enumerate() {
+            if index != 0 {
+                selected_keys.push_str(", ");
                 predicates.push_str(" AND ");
             }
+            let key_alias = quote_join_identifier(&format!("__rustspark_key_{index}"));
+            write!(
+                &mut selected_keys,
+                "{} AS {key_alias}",
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
             write!(
                 &mut predicates,
-                "{left_alias}.{} {comparison} {right_alias}.{}",
+                "{left_alias}.{} {comparison} {right_alias}.{key_alias}",
                 quote_join_identifier(left_key),
-                quote_join_identifier(right_key),
             )
             .expect("writing to a String cannot fail");
         }
         let query = format!(
-            "SELECT {left_alias}.*, EXISTS (SELECT 1 FROM {} AS {right_alias} WHERE {predicates}) AS {} FROM {} AS {left_alias}",
-            quote_join_table(right)?,
+            "SELECT {left_alias}.*, COALESCE({right_alias}.\"__rustspark_matched\", FALSE) AS {} \
+             FROM {} AS {left_alias} \
+             LEFT JOIN (SELECT DISTINCT {selected_keys}, TRUE AS \"__rustspark_matched\" FROM {}) AS {right_alias} \
+             ON {predicates}",
             quote_join_identifier(flag_name),
             quote_join_table(left)?,
+            quote_join_table(right)?,
         );
         self.sql(&query).await
     }
