@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use super::{valid_identifier, validate_table_files};
@@ -60,11 +61,21 @@ fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>
         copy_backup_chunk(copies)?;
     } else {
         std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
-            let chunk_size = copies.len().div_ceil(workers);
-            let jobs = copies
-                .chunks(chunk_size)
-                .map(|chunk| {
-                    scope.spawn(move || copy_backup_chunk(chunk))
+            // Claim individual parts dynamically. One huge file should not
+            // strand the remaining small files behind a static worker chunk.
+            let next = AtomicUsize::new(0);
+            let jobs = (0..workers)
+                .map(|_| {
+                    let next = &next;
+                    scope.spawn(move || -> std::io::Result<()> {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some((source, target)) = copies.get(index) else {
+                                return Ok(());
+                            };
+                            fs::copy(source, target)?;
+                        }
+                    })
                 })
                 .collect::<Vec<_>>();
             for job in jobs {
@@ -124,3 +135,30 @@ pub(crate) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copies_uneven_part_sizes_to_independent_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let from = directory.path().join("from");
+        let to = directory.path().join("to");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        let copies = (0..16)
+            .map(|index| {
+                let source = from.join(format!("part-{index:04}.parquet"));
+                let target = to.join(format!("part-{index:04}.parquet"));
+                let bytes = vec![index as u8; if index == 0 { 2_000_000 } else { index + 1 }];
+                fs::write(&source, bytes).unwrap();
+                (source, target)
+            })
+            .collect::<Vec<_>>();
+        copy_backup_parts(&copies).unwrap();
+        for (source, target) in &copies {
+            assert_eq!(fs::read(source).unwrap(), fs::read(target).unwrap());
+        }
+    }
+}
