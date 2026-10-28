@@ -45,3 +45,5 @@ pub mod sql;
 pub mod csv;
 
 pub mod hash_partition;
+
+pub mod partitioned_join;
