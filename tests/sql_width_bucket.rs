@@ -32,3 +32,13 @@ async fn width_bucket_handles_bounds_reverse_and_nulls() -> Result<(), Box<dyn s
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn width_bucket_accepts_extreme_finite_bounds() -> Result<(), Box<dyn std::error::Error>> {
+    let batches = RustSparkSession::new()
+        .sql("SELECT WIDTH_BUCKET(0.0, -1e308, 1e308, 4) AS bucket")
+        .await?.collect().await?;
+    let values = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(values.value(0), 3);
+    Ok(())
+}
