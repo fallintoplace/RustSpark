@@ -6,6 +6,7 @@ Use --check-files to independently hash the actual Parquet fixture.
 """
 
 import argparse
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -85,6 +86,14 @@ def check_fixture(manifest, fixture_dir=None):
 
 
 def qualify(manifest, benchmark, verification, fixture_dir=None):
+    raw_tolerance = verification.get("numeric_tolerance")
+    try:
+        tolerance = Decimal(str(raw_tolerance))
+    except InvalidOperation as error:
+        raise ValueError("Invalid reference numeric tolerance") from error
+    if (not tolerance.is_finite() or tolerance < 0
+            or tolerance > Decimal("0.000001")):
+        raise ValueError("Reference numeric tolerance exceeds 0.000001")
     query_hashes = check_fixture(manifest, fixture_dir)
     runs = checked_entries(benchmark, "Benchmark")
     checks = checked_entries(verification, "Verification")
@@ -129,6 +138,7 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         "scale_factor": manifest["scale_factor"],
         "verified_fixture_file_hashes": fixture_dir is not None,
         "independent_duckdb_result_checks": 22,
+        "numeric_tolerance": str(tolerance),
         "samples_per_query": repeat,
         "warmups_per_query": warmup,
         "binary_sha256": binary,
