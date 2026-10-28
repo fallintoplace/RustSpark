@@ -145,8 +145,11 @@ fn projection_names(
     right: &[String],
     key_names: &HashSet<String>,
 ) -> Vec<String> {
-    let mut output: Vec<String> = keys.iter().map(|name| (*name).to_owned()).collect();
-    let mut used: HashSet<String> = key_names.clone();
+    let capacity = keys.len() + previous.len() + right.len();
+    let mut output: Vec<String> = Vec::with_capacity(capacity);
+    output.extend(keys.iter().map(|name| (*name).to_owned()));
+    let mut used: HashSet<String> = HashSet::with_capacity(capacity);
+    used.extend(key_names.iter().cloned());
     for name in previous.iter().chain(right) {
         if used.insert(name.to_ascii_lowercase()) {
             output.push(name.clone());
