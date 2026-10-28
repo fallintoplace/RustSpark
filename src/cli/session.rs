@@ -102,6 +102,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(count) = args.preserve_file_partitions {
+        config = config.set_usize("datafusion.optimizer.preserve_file_partitions", count);
+    }
     config
 }
 
@@ -297,6 +300,27 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn preserves_hive_file_partitions_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--preserve-file-partitions",
+            "365",
+        ])
+        .unwrap();
+        let base_config = super::build_session_config(&original);
+        let tuned_config = super::build_session_config(&tuned);
+        let default_config = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            base_config.options().optimizer.preserve_file_partitions,
+            default_config.options().optimizer.preserve_file_partitions
+        );
+        assert_eq!(tuned_config.options().optimizer.preserve_file_partitions, 365);
     }
 
     #[test]
