@@ -33,12 +33,12 @@ pub(crate) fn udf() -> ScalarUDF {
             let mut result = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(16));
             for value in input.iter() {
                 if let Some(number) = value {
-                    if number < 0 {
-                            write!(&mut result, "{:b}", number as u64)
-                        } else {
-                            write!(&mut result, "{number:b}")
-                        }
-                        .expect("formatting into an Arrow string buffer cannot fail");
+                    let written = if number < 0 {
+                        write!(&mut result, "{:b}", number as u64)
+                    } else {
+                        write!(&mut result, "{number:b}")
+                    };
+                    written.expect("formatting into an Arrow string buffer cannot fail");
                     result.append_value("");
                 } else {
                     result.append_null();
