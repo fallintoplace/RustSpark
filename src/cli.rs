@@ -319,6 +319,10 @@ struct Args {
     #[arg(long = "perfect-hash-key-range", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     perfect_hash_key_range: Option<usize>,
 
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "hash-join-probe-buffer-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    hash_join_probe_buffer_bytes: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
