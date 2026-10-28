@@ -547,6 +547,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// False-positive probability for Parquet bloom filters written on export.
+    #[arg(long = "parquet-bloom-fpp", value_name = "PROBABILITY", value_parser = parse_parquet_bloom_fpp)]
+    parquet_bloom_fpp: Option<f64>,
+
     /// Opt-in configuration for large analytical workloads.
     #[arg(long = "disable-batch-coalescing")]
     disable_batch_coalescing: bool,
@@ -1069,6 +1073,20 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_parquet_bloom_fpp(value: &str) -> Result<f64, String> {
+    let probability = value.parse::<f64>().map_err(|_| {
+        "--parquet-bloom-fpp must be a finite probability greater than 0 and less than 1"
+            .to_owned()
+    })?;
+    if !probability.is_finite() || probability <= 0.0 || probability >= 1.0 {
+        return Err(
+            "--parquet-bloom-fpp must be a finite probability greater than 0 and less than 1"
+                .to_owned(),
+        );
+    }
+    Ok(probability)
 }
 
 fn parse_output_buffer_batches(value: &str) -> Result<usize, String> {

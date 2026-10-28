@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(probability) = args.parquet_bloom_fpp {
+        config.options_mut().execution.parquet.bloom_filter_fpp = Some(probability);
+    }
     if args.disable_batch_coalescing {
         config.options_mut().execution.coalesce_batches = false;
     }
@@ -441,6 +444,42 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn validates_and_configures_parquet_bloom_fpp() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-bloom-fpp",
+            "0.01",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.bloom_filter_fpp,
+            defaults.options().execution.parquet.bloom_filter_fpp
+        );
+        assert_eq!(
+            configured.options().execution.parquet.bloom_filter_fpp,
+            Some(0.01)
+        );
+        for invalid in ["0", "1", "NaN", "inf", "-0.1", "nope"] {
+            assert!(
+                Args::try_parse_from([
+                    "rustspark",
+                    "--sql",
+                    "SELECT 1",
+                    "--parquet-bloom-fpp",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
     }
 
     #[test]
