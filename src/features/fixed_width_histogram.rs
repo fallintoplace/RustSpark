@@ -1,5 +1,8 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
+use datafusion::{
+    error::{DataFusionError, Result},
+    prelude::DataFrame,
+};
 
 impl RustSparkSession {
     /// Bucket numeric values lazily using a caller-selected positive bucket width.
