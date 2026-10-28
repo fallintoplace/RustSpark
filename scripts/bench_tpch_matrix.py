@@ -46,7 +46,25 @@ def verify_query_fingerprints(results, fingerprints):
         fingerprints[number] = digest
 
 
-def run_configuration(binary, queries, parquet, output, n, repeat, warmup, fingerprints):
+def verify_sql_fingerprints(results, sql_fingerprints):
+    for row in results:
+        if row.get("status") != "ok":
+            continue
+        number = row["id"]
+        digest = row.get("sql_sha256")
+        if digest is None:
+            if number in sql_fingerprints:
+                raise ValueError(f"Query Q{number:02} lost its SQL fingerprint")
+            continue
+        if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(f"Query Q{number:02} has invalid SQL fingerprint")
+        if number in sql_fingerprints and sql_fingerprints[number] != digest:
+            raise ValueError(f"Query Q{number:02} changed SQL across partitions")
+        sql_fingerprints[number] = digest
+
+
+def run_configuration(binary, queries, parquet, output, n, repeat, warmup, fingerprints,
+                      sql_fingerprints=None):
     path = output / f"partitions-{n}.json"
     if path.exists():
         raise ValueError(f"Report already exists: {path}")
@@ -66,6 +84,8 @@ def run_configuration(binary, queries, parquet, output, n, repeat, warmup, finge
         raise ValueError("Invalid or duplicate TPC-H query IDs in partition report")
     ok = sum(row.get("status") == "ok" for row in results)
     verify_query_fingerprints(results, fingerprints)
+    if sql_fingerprints is not None:
+        verify_sql_fingerprints(results, sql_fingerprints)
     complete = (len(results) == 22 and ok == 22 and process.returncode == 0
                 and {row.get("id") for row in results} == set(range(1, 23)))
     total = None
@@ -86,9 +106,11 @@ def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
     output.mkdir(parents=True, exist_ok=True)
     configurations = []
     fingerprints = {}
+    sql_fingerprints = {}
     for n in partitions:
         configurations.append(
-            run_configuration(binary, queries, parquet, output, n, repeat, warmup, fingerprints)
+            run_configuration(binary, queries, parquet, output, n, repeat, warmup,
+                              fingerprints, sql_fingerprints)
         )
     complete_runs = [row for row in configurations if row["sum_median_ms"] is not None]
     best = min(complete_runs, key=lambda row: row["sum_median_ms"]) if complete_runs else None
