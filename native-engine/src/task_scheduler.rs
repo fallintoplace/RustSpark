@@ -50,7 +50,7 @@ impl TaskScheduler {
         let until = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
         for task in self.tasks.values_mut() {
-            if matches!(task.status, TaskStatus::Leased { until, .. } if until <= now) {
+            if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
                 task.status = if task.attempts >= self.max_attempts {
                     TaskStatus::Failed
                 } else {
@@ -72,8 +72,8 @@ impl TaskScheduler {
         let Some(task) = self.tasks.get_mut(&lease.task) else {
             return false;
         };
-        if !matches!(task.status, TaskStatus::Leased { worker, attempt, .. }
-            if worker == lease.worker && attempt == lease.attempt) {
+        if !matches!(&task.status, TaskStatus::Leased { worker, attempt, .. }
+            if *worker == lease.worker && *attempt == lease.attempt) {
             return false;
         }
         task.status = if success {
