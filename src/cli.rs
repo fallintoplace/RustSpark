@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Expose the memory reservation for spillable sort merges.
+    #[arg(long = "sort-spill-reserve-mb", value_name = "MIB", value_parser = parse_sort_spill_reserve_bytes)]
+    sort_spill_reserve_bytes: Option<usize>,
+
     /// Expose the estimated build-side row threshold for single-partition joins.
     #[arg(long = "hash-join-single-partition-rows", value_name = "COUNT", value_parser = parse_hash_join_single_partition_rows)]
     hash_join_single_partition_rows: Option<usize>,
@@ -753,6 +757,12 @@ fn parse_perfect_hash_small_range(value: &str) -> Result<usize, String> {
 
 fn parse_hash_join_single_partition_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--hash-join-single-partition-rows")
+}
+
+fn parse_sort_spill_reserve_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-spill-reserve-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--sort-spill-reserve-mb exceeds the supported range".into())
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
