@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Datelike;
 use datafusion::{
     arrow::{array::{Date32Array}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
