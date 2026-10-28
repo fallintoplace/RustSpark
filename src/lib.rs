@@ -193,6 +193,8 @@ mod sql_compat_soundex;
 mod sql_compat_locate;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
+#[path = "sql_compat/timestamp_millis.rs"]
+mod sql_compat_timestamp_millis;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
 #[path = "sql_compat/tan.rs"]
@@ -328,6 +330,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_rint::udf());
         context.register_udf(sql_compat_space::udf());
+        context.register_udf(sql_compat_timestamp_millis::udf());
         context.register_udf(sql_compat_acos::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
         context.register_udf(sql_compat_acosh::udf());
