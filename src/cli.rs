@@ -367,6 +367,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Disable file-scan work stealing for predictable layouts.
+    #[arg(long = "disable-file-work-stealing")]
+    disable_file_work_stealing: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
