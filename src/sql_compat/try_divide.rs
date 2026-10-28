@@ -28,7 +28,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("try_divide expects Int64".into()))?;
-            let result: Vec<Option<f64>> = lhs
+            let result: Float64Array = lhs
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| match (left, right) {
@@ -38,10 +38,10 @@ pub(crate) fn udf() -> ScalarUDF {
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Float64(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(Float64Array::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )
