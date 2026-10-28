@@ -543,6 +543,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Tune min-parallel-output-files for large Parquet datasets.
+    #[arg(long = "min-parallel-output-files", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    min_parallel_output_files: Option<usize>,
+
     /// Retain UNION execution instead of planning an Interleave.
     #[arg(long = "prefer-existing-union")]
     prefer_existing_union: bool,
