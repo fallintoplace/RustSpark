@@ -1,6 +1,7 @@
 use crate::{
     aggregate, catalog::Catalog, distinct, filter, join, limit,
     plan::Plan, project, sort, union,
+    cancel::QueryGuard,
     batch::Batch, Error, Result,
 };
 
@@ -29,7 +30,18 @@ pub fn execute_with_options(
     catalog: &Catalog,
     options: ExecutionOptions,
 ) -> Result<Batch> {
-    execute_inner(plan, catalog, &options, 0)
+    execute_with_guard(plan, catalog, options, &QueryGuard::default())
+}
+
+/// Check cancellation before and after each plan node.
+/// Blocking operators will support finer-grained interruption separately.
+pub fn execute_with_guard(
+    plan: &Plan,
+    catalog: &Catalog,
+    options: ExecutionOptions,
+    guard: &QueryGuard,
+) -> Result<Batch> {
+    execute_inner(plan, catalog, &options, 0, guard)
 }
 
 fn execute_inner(
@@ -37,11 +49,13 @@ fn execute_inner(
     catalog: &Catalog,
     options: &ExecutionOptions,
     depth: usize,
+    guard: &QueryGuard,
 ) -> Result<Batch> {
     if depth >= options.max_plan_depth {
         return Err(Error::Execution("query plan exceeds maximum depth".into()));
     }
-    let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1);
+    guard.check()?;
+    let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
@@ -67,6 +81,7 @@ fn execute_inner(
         )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
     };
+    guard.check()?;
     if batch.num_rows() > options.max_output_rows {
         return Err(Error::Execution(format!(
             "query output exceeds {} rows",
@@ -84,6 +99,37 @@ mod tests {
         scalar::Value,
         schema::{DataType, Field, Schema},
     };
+
+    #[test]
+    fn cancelled_queries_stop_before_reading_sources() {
+        use crate::cancel::Cancellation;
+        let token = Cancellation::new();
+        token.cancel();
+        let guard = QueryGuard::new(token);
+        let error = execute_with_guard(
+            &Plan::scan("unregistered"),
+            &Catalog::new(),
+            ExecutionOptions::default(),
+            &guard,
+        ).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn query_deadlines_stop_before_execution() {
+        use crate::cancel::{Cancellation, QueryGuard};
+        use std::time::Duration;
+        let guard = QueryGuard::with_timeout(
+            Cancellation::new(), Duration::ZERO,
+        ).unwrap();
+        let error = execute_with_guard(
+            &Plan::scan("unused"),
+            &Catalog::new(),
+            ExecutionOptions::default(),
+            &guard,
+        ).unwrap_err();
+        assert!(error.to_string().contains("deadline"));
+    }
 
     #[test]
     fn scan_filter_limit_runs_without_datafusion() {
