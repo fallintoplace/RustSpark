@@ -58,6 +58,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.hash_join_probe_buffer_mb {
         config.options_mut().execution.hash_join_buffering_capacity = value;
     }
+    if let Some(value) = args.sort_in_place_kb {
+        config.options_mut().execution.sort_in_place_threshold_bytes = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -544,5 +547,18 @@ mod perf_hash_join_probe_buffer {
             "rustspark", "--sql", "SELECT 1", "--hash-join-probe-buffer-mb", "0",
         ])
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_sort_in_place {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn validates_and_applies_tuning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-kb", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.sort_in_place_threshold_bytes, 8192);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-kb", "0"]).is_err());
     }
 }
