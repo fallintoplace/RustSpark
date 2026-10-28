@@ -80,7 +80,11 @@ impl ReplicaStore {
                 .root
                 .to_str()
                 .ok_or_else(|| invalid("Storage root path must be UTF-8"))?;
-            if root.trim() != root || root.contains('=') || root.contains('\n') || root.contains('\r') {
+            if root.trim() != root
+                || root.contains('=')
+                || root.contains('\n')
+                || root.contains('\r')
+            {
                 return Err(invalid("Storage root contains unsafe topology delimiters"));
             }
             body.push_str(&node.id);
