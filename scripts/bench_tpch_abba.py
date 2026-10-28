@@ -17,6 +17,14 @@ from tpch_run import command_for, input_arguments, query_paths, result_signature
 ORDER = ("baseline", "candidate", "candidate", "baseline")
 
 
+def binary_sha256(binary):
+    digest = hashlib.sha256()
+    with Path(binary).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def timed_command(command, timeout, ordered):
     started = time.perf_counter()
     proc = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False)
@@ -72,6 +80,8 @@ def benchmark(baseline, candidate, parquet, queries, repeat=3, warmup=1,
               timeout=180, partitions=2):
     if timeout < 1 or partitions < 1:
         raise ValueError("Timeout and partitions must be positive")
+    hashes = {"baseline_sha256": binary_sha256(baseline),
+              "candidate_sha256": binary_sha256(candidate)}
     inputs = input_arguments(parquet)
     results = []
     for number, sql_file in queries:
@@ -88,7 +98,7 @@ def benchmark(baseline, candidate, parquet, queries, repeat=3, warmup=1,
     return {"metric": "ABBA interleaved cold-process end-to-end latency",
             "warning": "Not a TPC-certified performance score",
             "platform": platform.platform(), "repeat": repeat, "warmup": warmup,
-            "target_partitions": partitions, "results": results}
+            "target_partitions": partitions, **hashes, "results": results}
 
 
 def main(argv=None):
