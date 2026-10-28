@@ -8,8 +8,16 @@ use datafusion::{
 
 /// bit position in the 64-bit integer.
 pub(crate) fn udf() -> ScalarUDF {
+    udf_named("bit_get")
+}
+
+pub(crate) fn getbit_udf() -> ScalarUDF {
+    udf_named("getbit")
+}
+
+fn udf_named(name: &str) -> ScalarUDF {
     create_udf(
-        "bit_get",
+        name,
         vec![DataType::Int64, DataType::Int64],
         DataType::Int64,
         Volatility::Immutable,
