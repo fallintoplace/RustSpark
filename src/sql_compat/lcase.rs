@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark SQL LCASE escapes single lcases with a backslash.
+/// Spark LCASE converts a UTF-8 SQL string to lowercase.
 fn evaluate(value: &str) -> Option<String> {
     Some(value.to_lowercase())
 }
@@ -56,6 +56,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
 
     #[test]
     fn reference_vectors() {
@@ -66,11 +67,16 @@ mod tests {
     #[tokio::test]
     async fn sql_function_is_registered() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
-            .sql("SELECT LCASE('Spark SQL')")
+            .sql("SELECT LCASE('RuSt')")
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "rust");
         Ok(())
     }
 }
