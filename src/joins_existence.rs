@@ -27,17 +27,30 @@ pub struct ExistenceFilter<'a> {
     pub keys: &'a [(&'a str, &'a str)],
 }
 
+fn validate_existence_keys(keys: &[(&str, &str)]) -> Result<()> {
+    if keys.is_empty() {
+        return Err(DataFusionError::Plan(
+            "Every existence filter requires non-empty join keys".into(),
+        ));
+    }
+    if keys
+        .iter()
+        .any(|(source_key, match_key)| source_key.trim().is_empty() || match_key.trim().is_empty())
+    {
+        return Err(DataFusionError::Plan(
+            "Existence filter key names cannot be blank".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn append_existence_predicate(
     query: &mut String,
     source_alias: &str,
     index: usize,
     filter: &ExistenceFilter<'_>,
 ) -> Result<()> {
-    if filter.keys.is_empty() {
-        return Err(DataFusionError::Plan(
-            "Every existence filter requires non-empty join keys".into(),
-        ));
-    }
+    validate_existence_keys(filter.keys)?;
     if index != 0 {
         query.push_str(" AND ");
     }
@@ -45,20 +58,13 @@ fn append_existence_predicate(
         ExistenceMode::Exists => "EXISTS",
         ExistenceMode::NotExists => "NOT EXISTS",
     };
-    let match_alias = quote_join_identifier(&format!("__rustspark_match_{index}"));
+    let match_alias = format!("\"__rustspark_match_{index}\"");
     let lookup = quote_catalog_table(filter.table, "Invalid existence filter table name")?;
     write!(
-        query,
-        "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
-    )
-    .expect("writing to a String cannot fail");
+        query, "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
+    ).expect("writing to a String cannot fail");
 
     for (key_index, (source_key, match_key)) in filter.keys.iter().enumerate() {
-        if source_key.trim().is_empty() || match_key.trim().is_empty() {
-            return Err(DataFusionError::Plan(
-                "Existence filter key names cannot be blank".into(),
-            ));
-        }
         if key_index != 0 {
             query.push_str(" AND ");
         }
@@ -67,8 +73,7 @@ fn append_existence_predicate(
             "{source_alias}.{} = {match_alias}.{}",
             quote_join_identifier(source_key),
             quote_join_identifier(match_key)
-        )
-        .expect("writing to a String cannot fail");
+        ).expect("writing to a String cannot fail");
     }
     query.push(')');
     Ok(())
@@ -100,5 +105,18 @@ impl RustSparkSession {
             append_existence_predicate(&mut query, source_alias, index, filter)?;
         }
         self.sql(&query).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_existence_keys;
+
+    #[test]
+    fn rejects_missing_or_blank_existence_keys() {
+        assert!(validate_existence_keys(&[]).is_err());
+        assert!(validate_existence_keys(&[("", "id")]).is_err());
+        assert!(validate_existence_keys(&[("id", " ")]).is_err());
+        assert!(validate_existence_keys(&[("id", "item_id")]).is_ok());
     }
 }

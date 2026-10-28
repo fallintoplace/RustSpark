@@ -12,57 +12,17 @@ async fn summary_counts_nulls_and_computes_numeric_means() -> TestResult {
              SELECT 3 UNION ALL SELECT CAST(NULL AS BIGINT)",
         )
         .await?;
-    let summary = session
-        .numeric_column_summary("metrics", "score total")
-        .await?;
+    let summary = session.numeric_column_summary("metrics", "score total").await?;
     session.register_dataframe("stats", summary)?;
+    assert_eq!(session.sql_scalar("SELECT row_count FROM stats").await?.to_string(), "3");
+    assert_eq!(session.sql_scalar("SELECT non_null_count FROM stats").await?.to_string(), "2");
+    assert_eq!(session.sql_scalar("SELECT null_count FROM stats").await?.to_string(), "1");
+    assert_eq!(session.sql_scalar("SELECT min_value FROM stats").await?.to_string(), "1");
+    assert_eq!(session.sql_scalar("SELECT max_value FROM stats").await?.to_string(), "3");
     assert_eq!(
-        session
-            .sql_scalar("SELECT row_count FROM stats")
-            .await?
-            .to_string(),
-        "3"
-    );
-    assert_eq!(
-        session
-            .sql_scalar("SELECT non_null_count FROM stats")
-            .await?
-            .to_string(),
+        session.sql_scalar("SELECT CAST(mean_value AS BIGINT) FROM stats").await?.to_string(),
         "2"
     );
-    assert_eq!(
-        session
-            .sql_scalar("SELECT null_count FROM stats")
-            .await?
-            .to_string(),
-        "1"
-    );
-    assert_eq!(
-        session
-            .sql_scalar("SELECT min_value FROM stats")
-            .await?
-            .to_string(),
-        "1"
-    );
-    assert_eq!(
-        session
-            .sql_scalar("SELECT max_value FROM stats")
-            .await?
-            .to_string(),
-        "3"
-    );
-    assert_eq!(
-        session
-            .sql_scalar("SELECT CAST(mean_value AS BIGINT) FROM stats")
-            .await?
-            .to_string(),
-        "2"
-    );
-    assert!(
-        session
-            .numeric_column_summary("metrics", "missing")
-            .await
-            .is_err()
-    );
+    assert!(session.numeric_column_summary("metrics", "missing").await.is_err());
     Ok(())
 }

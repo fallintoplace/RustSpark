@@ -22,11 +22,7 @@ async fn shiftleft_supports_columns_nulls_and_literals() -> Result<(), Box<dyn s
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(8), Some(1), None, Some(-2)]);
-    let scalar = session
-        .sql("SELECT SHIFTLEFT(3, 2)")
-        .await?
-        .collect()
-        .await?;
+    let scalar = session.sql("SELECT SHIFTLEFT(3, 2)").await?.collect().await?;
     let values = scalar[0]
         .column(0)
         .as_any()

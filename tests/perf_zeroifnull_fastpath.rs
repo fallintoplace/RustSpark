@@ -9,14 +9,7 @@ async fn zeroifnull_keeps_dense_and_nullable_values() -> Result<(), Box<dyn std:
     ).await?.collect().await?;
     let mut values = Vec::new();
     for batch in &batches {
-        values.extend(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .iter(),
-        );
+        values.extend(batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap().iter());
     }
     assert_eq!(values, vec![Some(5), Some(0), Some(-1)]);
     let null_batches = session.sql(
@@ -24,26 +17,11 @@ async fn zeroifnull_keeps_dense_and_nullable_values() -> Result<(), Box<dyn std:
     ).await?.collect().await?;
     let mut null_values = Vec::new();
     for batch in &null_batches {
-        null_values.extend(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .iter(),
-        );
+        null_values.extend(batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap().iter());
     }
     assert_eq!(null_values, vec![Some(0), Some(3)]);
-    let scalar = session
-        .sql("SELECT ZEROIFNULL(CAST(NULL AS BIGINT))")
-        .await?
-        .collect()
-        .await?;
-    let value = scalar[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
+    let scalar = session.sql("SELECT ZEROIFNULL(CAST(NULL AS BIGINT))").await?.collect().await?;
+    let value = scalar[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(value.value(0), 0);
     Ok(())
 }

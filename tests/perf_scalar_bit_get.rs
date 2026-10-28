@@ -9,14 +9,7 @@ async fn bit_get_with_scalar_rhs_preserves_rows() -> Result<(), Box<dyn std::err
     ).await?.collect().await?;
     let mut values = Vec::new();
     for batch in &batches {
-        values.extend(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .iter(),
-        );
+        values.extend(batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap().iter());
     }
     assert_eq!(values, vec![Some(1), Some(1), None]);
     Ok(())

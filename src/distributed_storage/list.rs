@@ -6,30 +6,33 @@ use std::{
 
 use super::{ReplicaStore, validate_key};
 
+fn inventory_key(entry: &fs::DirEntry) -> io::Result<Option<String>> {
+    let name = entry.file_name();
+    let Some(key) = name.to_str() else {
+        return Ok(None);
+    };
+    // Ignore staged writes and invalid object names before checking file type.
+    if key.starts_with(".tmp") || validate_key(key).is_err() {
+        return Ok(None);
+    }
+    if !entry.file_type()?.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Object inventory contains a non-file entry",
+        ));
+    }
+    Ok(Some(key.to_owned()))
+}
+
 impl ReplicaStore {
     pub fn list_keys(&self) -> io::Result<Vec<String>> {
         let mut keys = HashSet::new();
         for node in self.nodes() {
             for entry in fs::read_dir(node.root.join("objects"))? {
                 let entry = entry?;
-                let name = entry.file_name();
-                let Some(key) = name.to_str() else {
-                    continue;
-                };
-                // NamedTempFile creates .tmp entries during unpublished writes.
-                if key.starts_with(".tmp") {
-                    continue;
+                if let Some(key) = inventory_key(&entry)? {
+                    keys.insert(key);
                 }
-                if validate_key(key).is_err() {
-                    continue;
-                }
-                if !entry.file_type()?.is_file() {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidData,
-                        "Object inventory contains a non-file entry",
-                    ));
-                }
-                keys.insert(key.to_owned());
             }
         }
         // Hash membership is cheaper than maintaining tree order for every file.
@@ -44,6 +47,23 @@ impl ReplicaStore {
 mod tests {
     use super::*;
     use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn inventory_skips_invalid_names_but_rejects_named_directories() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("bad?name"), b"ignored").unwrap();
+        fs::write(root.path().join(".tmpunfinished"), b"ignored").unwrap();
+        let mut entries = fs::read_dir(root.path()).unwrap();
+        for entry in entries.by_ref() {
+            assert_eq!(inventory_key(&entry.unwrap()).unwrap(), None);
+        }
+        fs::create_dir(root.path().join("valid.parquet")).unwrap();
+        let entry = fs::read_dir(root.path()).unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.file_name() == "valid.parquet")
+            .unwrap();
+        assert_eq!(inventory_key(&entry).unwrap_err().kind(), ErrorKind::InvalidData);
+    }
 
     #[test]
     fn lists_replicated_keys_once_in_sorted_order() {
@@ -70,9 +90,7 @@ mod tests {
         });
         let store = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
         for index in (0..256).rev() {
-            store
-                .put(&format!("part-{index:04}.parquet"), b"test")
-                .unwrap();
+            store.put(&format!("part-{index:04}.parquet"), b"test").unwrap();
         }
         let keys = store.list_keys().unwrap();
         assert_eq!(keys.len(), 256);

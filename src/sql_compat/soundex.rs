@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{
-        array::{Array, StringArray, StringBuilder},
-        datatypes::DataType,
-    },
+    arrow::{array::{Array, StringArray, StringBuilder}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -56,23 +53,19 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Utf8(value))] = args {
+                let encoded = value.as_deref().map(|name| {
+                    soundex_bytes(name)
+                        .map(|digits| std::str::from_utf8(&digits).unwrap().to_owned())
+                        .unwrap_or_default()
+                });
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(encoded)));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("soundex expects Utf8".into()))?;
-            if scalar {
-                let value = input.iter().next().flatten().map(|name| {
-                    soundex_bytes(name)
-                        .map(|digits| std::str::from_utf8(&digits).unwrap().to_owned())
-                        .unwrap_or_default()
-                });
-                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(value)));
-            }
-            // Produce four ASCII bytes directly in Arrow's contiguous output buffer.
             let mut result =
                 StringBuilder::with_capacity(input.len(), input.len().saturating_mul(4));
             for value in input.iter() {

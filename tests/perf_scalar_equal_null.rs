@@ -9,14 +9,7 @@ async fn equal_null_with_scalar_rhs_preserves_rows() -> Result<(), Box<dyn std::
     ).await?.collect().await?;
     let mut values = Vec::new();
     for batch in &batches {
-        values.extend(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .unwrap()
-                .iter(),
-        );
+        values.extend(batch.column(0).as_any().downcast_ref::<BooleanArray>().unwrap().iter());
     }
     assert_eq!(values, vec![Some(true), Some(false), Some(false)]);
     Ok(())

@@ -1,8 +1,5 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{
-    error::{DataFusionError, Result},
-    prelude::DataFrame,
-};
+use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
 
 impl RustSparkSession {
     /// Estimate a numeric percentile between 0.0 (minimum) and 1.0 (maximum).

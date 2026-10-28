@@ -1,30 +1,10 @@
 use std::{
     fs::{self, File},
-    io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    io::{self, ErrorKind, Seek, SeekFrom},
+    path::PathBuf,
 };
 
-use super::ReplicaStore;
-
-fn matching_files(left: &Path, right: &Path) -> io::Result<bool> {
-    let mut left = BufReader::new(File::open(left)?);
-    let mut right = BufReader::new(File::open(right)?);
-    if left.get_ref().metadata()?.len() != right.get_ref().metadata()?.len() {
-        return Ok(false);
-    }
-    let mut a = [0_u8; 64 * 1024];
-    let mut b = [0_u8; 64 * 1024];
-    loop {
-        let n = left.read(&mut a)?;
-        if n == 0 {
-            return Ok(true);
-        }
-        right.read_exact(&mut b[..n])?;
-        if a[..n] != b[..n] {
-            return Ok(false);
-        }
-    }
-}
+use super::{ReplicaStore, verify::same_bytes};
 
 impl ReplicaStore {
     fn surviving_path(&self, key: &str) -> io::Result<PathBuf> {
@@ -34,10 +14,7 @@ impl ReplicaStore {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_file() => return Ok(path),
                 Ok(_) => {
-                    last_error = Some(io::Error::new(
-                        ErrorKind::InvalidData,
-                        "Unsafe source replica",
-                    ));
+                    last_error = Some(io::Error::new(ErrorKind::InvalidData, "Unsafe source replica"));
                 }
                 Err(error) => last_error = Some(error),
             }
@@ -57,20 +34,12 @@ impl ReplicaStore {
                 let target = directory.join(&key);
                 match fs::symlink_metadata(&target) {
                     Ok(metadata) if metadata.file_type().is_file() => {
-                        if matching_files(&source_path, &target)? {
+                        if same_bytes(&source_path, &target)? {
                             continue;
                         }
-                        return Err(io::Error::new(
-                            ErrorKind::AlreadyExists,
-                            "Divergent destination replica",
-                        ));
+                        return Err(io::Error::new(ErrorKind::AlreadyExists, "Divergent destination replica"));
                     }
-                    Ok(_) => {
-                        return Err(io::Error::new(
-                            ErrorKind::InvalidData,
-                            "Unsafe destination replica",
-                        ));
-                    }
+                    Ok(_) => return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe destination replica")),
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
@@ -84,12 +53,9 @@ impl ReplicaStore {
                     Ok(_) => {}
                     Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
                         if !fs::symlink_metadata(&target)?.file_type().is_file()
-                            || !matching_files(&source_path, &target)?
+                            || !same_bytes(&source_path, &target)?
                         {
-                            return Err(io::Error::new(
-                                ErrorKind::AlreadyExists,
-                                "Divergent destination replica",
-                            ));
+                            return Err(io::Error::new(ErrorKind::AlreadyExists, "Divergent destination replica"));
                         }
                     }
                     Err(error) => return Err(error.error),

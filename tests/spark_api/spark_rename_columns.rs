@@ -67,9 +67,7 @@ async fn sparse_rename_on_wide_table_preserves_other_names() -> TestResult {
     session
         .register_sql_view("wide", &format!("SELECT {projection}"))
         .await?;
-    let updated = session
-        .rename_columns("wide", &[("c63", "renamed")])
-        .await?;
+    let updated = session.rename_columns("wide", &[("c63", "renamed")]).await?;
     let names = updated
         .schema()
         .fields()
@@ -79,11 +77,6 @@ async fn sparse_rename_on_wide_table_preserves_other_names() -> TestResult {
     assert_eq!(names.len(), 64);
     assert_eq!(names[0], "c0");
     assert_eq!(names[63], "renamed");
-    assert!(
-        session
-            .rename_columns("wide", &[("missing", "renamed")])
-            .await
-            .is_err()
-    );
+    assert!(session.rename_columns("wide", &[("missing", "renamed")]).await.is_err());
     Ok(())
 }

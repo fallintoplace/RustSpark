@@ -106,21 +106,10 @@ async fn wide_null_counts_return_all_fields() -> TestResult {
     session
         .register_sql_view("wide_nulls", &format!("SELECT {projection}"))
         .await?;
-    let batches = session
-        .null_counts("wide_nulls", &[])
-        .await?
-        .collect()
-        .await?;
+    let batches = session.null_counts("wide_nulls", &[]).await?.collect().await?;
     assert_eq!(batches[0].num_columns(), 32);
     for column in batches[0].columns() {
-        assert_eq!(
-            column
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .value(0),
-            1
-        );
+        assert_eq!(column.as_any().downcast_ref::<Int64Array>().unwrap().value(0), 1);
     }
     Ok(())
 }

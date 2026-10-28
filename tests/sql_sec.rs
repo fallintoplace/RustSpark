@@ -22,11 +22,7 @@ async fn sec_handles_rows_and_nulls() -> Result<(), Box<dyn std::error::Error>> 
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(1.0), None]);
-    let scalar = session
-        .sql("SELECT SEC(CAST(0 AS DOUBLE))")
-        .await?
-        .collect()
-        .await?;
+    let scalar = session.sql("SELECT SEC(CAST(0 AS DOUBLE))").await?.collect().await?;
     let values = scalar[0]
         .column(0)
         .as_any()

@@ -1,6 +1,6 @@
 //! Lazy multi-way equality joins for registered tables.
 
-use std::{collections::HashSet, fmt::Write as _};
+use std::{borrow::Cow, collections::HashSet, fmt::Write as _};
 
 use datafusion::{
     error::{DataFusionError, Result},
@@ -43,7 +43,12 @@ fn append_join_step_predicates(
     keys: &[(&str, &str, &str)],
 ) -> Result<()> {
     for (index, (left_alias, left_key, right_key)) in keys.iter().enumerate() {
-        if !known_aliases.contains(&left_alias.to_ascii_lowercase()) {
+        let alias: Cow<'_, str> = if left_alias.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            Cow::Owned(left_alias.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(left_alias)
+        };
+        if !known_aliases.contains(alias.as_ref()) {
             return Err(DataFusionError::Plan(format!(
                 "Join references unknown or future alias: {left_alias}"
             )));
@@ -87,17 +92,16 @@ impl RustSparkSession {
             ));
         }
         if base_alias.trim().is_empty() {
-            return Err(DataFusionError::Plan(
-                "Base join alias cannot be blank".into(),
-            ));
+            return Err(DataFusionError::Plan("Base join alias cannot be blank".into()));
         }
-        let mut aliases = HashSet::new();
+        let mut aliases = HashSet::with_capacity(steps.len() + 1);
         aliases.insert(base_alias.to_ascii_lowercase());
         let mut query = format!(
             "SELECT * FROM {} AS {}",
             quote_catalog_table(base_table, "Invalid base join table name")?,
             quote_join_identifier(base_alias)
         );
+        query.reserve(steps.len().saturating_mul(128));
 
         for step in steps {
             if step.alias.trim().is_empty() {
@@ -106,8 +110,7 @@ impl RustSparkSession {
             let alias_key = step.alias.to_ascii_lowercase();
             if aliases.contains(&alias_key) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate join alias: {}",
-                    step.alias
+                    "Duplicate join alias: {}", step.alias
                 )));
             }
             if step.keys.is_empty() {

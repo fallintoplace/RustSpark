@@ -6,16 +6,38 @@ use std::{
 
 use datafusion::error::{DataFusionError, Result};
 
-fn parse_manifest_reader(reader: impl BufRead, directory: &Path) -> Result<Vec<(usize, PathBuf)>> {
+fn resolve_manifest_path(directory: &Path, name: &str) -> PathBuf {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        directory.join(candidate)
+    }
+}
+
+fn parse_manifest_reader(
+    mut reader: impl BufRead,
+    directory: &Path,
+) -> Result<Vec<(usize, PathBuf)>> {
     let mut paths = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|error| DataFusionError::External(Box::new(error)))?;
-        let line = if index == 0 {
+    let mut line = String::new();
+    let mut line_number = 0;
+    loop {
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
+            == 0
+        {
+            break;
+        }
+        line_number += 1;
+        let content = if line_number == 1 {
             line.strip_prefix('\u{feff}').unwrap_or(&line)
         } else {
             &line
         };
-        let name = line.trim();
+        let name = content.trim();
         if name.is_empty() || name.starts_with('#') {
             continue;
         }
@@ -25,7 +47,7 @@ fn parse_manifest_reader(reader: impl BufRead, directory: &Path) -> Result<Vec<(
         } else {
             directory.join(candidate)
         };
-        paths.push((index + 1, path));
+        paths.push((line_number, path));
     }
     Ok(paths)
 }
@@ -58,7 +80,8 @@ fn first_invalid_parallel(paths: &[(usize, PathBuf)], workers: usize) -> Result<
             .enumerate()
             .map(|(chunk_index, chunk)| {
                 scope.spawn(move || {
-                    first_missing_file_position(chunk).map(|index| chunk_index * chunk_size + index)
+                    first_missing_file_position(chunk)
+                        .map(|index| chunk_index * chunk_size + index)
                 })
             })
             .collect::<Vec<_>>();
@@ -107,16 +130,32 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader};
+    use super::{
+        earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader,
+        resolve_manifest_path,
+    };
     use std::{fs, io::Cursor, path::Path};
+
+    #[test]
+    fn manifest_paths_resolve_absolute_and_relative_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let absolute = directory.path().join("part.parquet");
+        assert_eq!(
+            resolve_manifest_path(Path::new("data"), "part.parquet"),
+            Path::new("data").join("part.parquet")
+        );
+        assert_eq!(
+            resolve_manifest_path(Path::new("data"), absolute.to_str().unwrap()),
+            absolute
+        );
+    }
 
     #[test]
     fn parser_keeps_source_lines_and_relative_paths() {
         let paths = parse_manifest_reader(
             Cursor::new("\u{feff}# header\r\n\r\n part-1.parquet \r\n# skip\npart-2.parquet\n"),
             Path::new("data"),
-        )
-        .unwrap();
+        ).unwrap();
         assert_eq!(
             paths,
             vec![
@@ -188,11 +227,10 @@ mod tests {
             });
             let error = earliest_invalid_worker_result([worker]).unwrap_err();
             assert!(
-                error
-                    .to_string()
-                    .contains("Parquet manifest validation worker panicked"),
+                error.to_string().contains("Parquet manifest validation worker panicked"),
                 "{error}"
             );
         });
     }
+
 }

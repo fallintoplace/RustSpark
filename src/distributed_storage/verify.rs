@@ -14,12 +14,14 @@ pub struct ReplicaVerification {
 }
 
 /// Compare two replica files without allocating buffers proportional to object size.
-fn same_bytes(left: &Path, right: &Path) -> io::Result<bool> {
-    let mut left = BufReader::with_capacity(64 * 1024, File::open(left)?);
-    let mut right = BufReader::with_capacity(64 * 1024, File::open(right)?);
-    if left.get_ref().metadata()?.len() != right.get_ref().metadata()?.len() {
+pub(super) fn same_bytes(left: &Path, right: &Path) -> io::Result<bool> {
+    let left_file = File::open(left)?;
+    let right_file = File::open(right)?;
+    if left_file.metadata()?.len() != right_file.metadata()?.len() {
         return Ok(false);
     }
+    let mut left = BufReader::with_capacity(64 * 1024, left_file);
+    let mut right = BufReader::with_capacity(64 * 1024, right_file);
     loop {
         let a = left.fill_buf()?;
         let b = right.fill_buf()?;
@@ -53,8 +55,8 @@ impl ReplicaStore {
                 Err(error) => return Err(error),
             }
         }
-        let reference =
-            reference.ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found"))?;
+        let reference = reference
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found"))?;
         let mut result = ReplicaVerification {
             healthy: 0,
             missing: 0,
@@ -88,6 +90,20 @@ impl ReplicaStore {
 mod tests {
     use super::*;
     use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn byte_comparison_checks_lengths_and_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        fs::write(&left, b"same").unwrap();
+        fs::write(&right, b"same").unwrap();
+        assert!(same_bytes(&left, &right).unwrap());
+        fs::write(&right, b"diff").unwrap();
+        assert!(!same_bytes(&left, &right).unwrap());
+        fs::write(&right, b"short").unwrap();
+        assert!(!same_bytes(&left, &right).unwrap());
+    }
 
     #[test]
     fn identifies_missing_and_different_copies() {

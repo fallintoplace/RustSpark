@@ -9,6 +9,12 @@ import subprocess
 from tpch_run import TABLES, reject_nonfinite, unique_keys
 
 
+def checked_count(value, message):
+    if type(value) is not int or value < 0:
+        raise ValueError(message)
+    return value
+
+
 def parse_count(stdout):
     rows = [
         json.loads(line, parse_constant=reject_nonfinite, object_pairs_hook=unique_keys)
@@ -16,10 +22,7 @@ def parse_count(stdout):
     ]
     if len(rows) != 1 or not isinstance(rows[0], dict) or set(rows[0]) != {"n"}:
         raise ValueError("Expected one JSON object with only a count column n")
-    value = rows[0]["n"]
-    if type(value) is not int or value < 0:
-        raise ValueError("Expected a nonnegative integer count")
-    return value
+    return checked_count(rows[0]["n"], "Expected a nonnegative integer count")
 
 
 def count_command(binary, fixture, table):
@@ -43,9 +46,7 @@ def execute_count(binary, fixture, table, timeout):
 
 
 def compare_table_count(binary, fixture, timeout, table, expected_count):
-    count = expected_count
-    if type(count) is not int or count < 0:
-        raise ValueError(f"Invalid expected row count for {table}")
+    count = checked_count(expected_count, f"Invalid expected row count for {table}")
     actual = execute_count(binary, fixture, table, timeout)
     return {"table": table, "expected": count, "actual": actual,
                     "status": "ok" if count == actual else "mismatch"}

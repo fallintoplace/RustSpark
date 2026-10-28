@@ -16,49 +16,34 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
-            // A constant left argument does not need an Arrow broadcast array.
+            // Constant expressions do not need to become one-row Arrow arrays.
             if let [
                 ColumnarValue::Scalar(ScalarValue::Int64(lhs)),
-                ColumnarValue::Array(right),
+                ColumnarValue::Scalar(ScalarValue::Int64(rhs)),
             ] = args
             {
-                let right = right
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
+                return Ok(ColumnarValue::Scalar(ScalarValue::Float64(
+                    (*lhs).zip(*rhs).and_then(|(left, right)| (right != 0).then(|| left as f64 / right as f64)),
+                )));
+            }
+            // A constant left argument does not need an Arrow broadcast array.
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
+                let right = right.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("try_divide expects Int64".into()))?;
-                let result: Float64Array = right
-                    .iter()
-                    .map(|right| {
-                        (*lhs)
-                            .zip(right)
-                            .and_then(|(a, b)| (b != 0).then(|| a as f64 / b as f64))
-                    })
+                let result: Float64Array = right.iter()
+                    .map(|right| (*lhs).zip(right).and_then(|(a, b)| (b != 0).then(|| a as f64 / b as f64)))
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             // A SQL literal remains a scalar. Avoid expanding it into a full input array.
-            if let [
-                ColumnarValue::Array(left),
-                ColumnarValue::Scalar(ScalarValue::Int64(rhs)),
-            ] = args
-            {
-                let left = left
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
+            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(rhs))] = args {
+                let left = left.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("try_divide expects Int64".into()))?;
-                let result: Vec<Option<f64>> = left
-                    .iter()
-                    .map(|left| {
-                        left.zip(*rhs).and_then(|(left, right)| {
-                            (right != 0).then(|| left as f64 / right as f64)
-                        })
-                    })
+                let result: Float64Array = left.iter()
+                    .map(|left| left.zip(*rhs).and_then(|(left, right)| (right != 0).then(|| left as f64 / right as f64)))
                     .collect();
-                return Ok(ColumnarValue::Array(Arc::new(Float64Array::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(result)));
             }
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let lhs = arrays[0]
                 .as_any()
@@ -76,13 +61,7 @@ pub(crate) fn udf() -> ScalarUDF {
                     (Some(left), Some(right)) => Some(left as f64 / right as f64),
                 })
                 .collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Float64(
-                    result.iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }
@@ -99,11 +78,7 @@ mod constant_left_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
+            let column = batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(5.0), Some(-2.5), None, None]);

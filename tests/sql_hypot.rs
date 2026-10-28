@@ -22,11 +22,7 @@ async fn hypot_handles_rows_and_nulls() -> Result<(), Box<dyn std::error::Error>
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(5.0), Some(13.0), None]);
-    let scalar = session
-        .sql("SELECT HYPOT(CAST(8 AS DOUBLE), CAST(15 AS DOUBLE))")
-        .await?
-        .collect()
-        .await?;
+    let scalar = session.sql("SELECT HYPOT(CAST(8 AS DOUBLE), CAST(15 AS DOUBLE))").await?.collect().await?;
     let values = scalar[0]
         .column(0)
         .as_any()

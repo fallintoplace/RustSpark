@@ -12,9 +12,7 @@ async fn cardinality_estimate_excludes_nulls() -> TestResult {
              SELECT 2 UNION ALL SELECT CAST(NULL AS BIGINT)",
         )
         .await?;
-    let estimate = session
-        .approx_distinct_column_count("items", "value")
-        .await?;
+    let estimate = session.approx_distinct_column_count("items", "value").await?;
     session.register_dataframe("estimate", estimate)?;
     assert_eq!(
         session
@@ -23,11 +21,6 @@ async fn cardinality_estimate_excludes_nulls() -> TestResult {
             .to_string(),
         "true"
     );
-    assert!(
-        session
-            .approx_distinct_column_count("items", "missing")
-            .await
-            .is_err()
-    );
+    assert!(session.approx_distinct_column_count("items", "missing").await.is_err());
     Ok(())
 }

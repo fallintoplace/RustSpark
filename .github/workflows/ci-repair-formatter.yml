@@ -1,0 +1,32 @@
+name: Temporary CI repair formatter
+
+on:
+  push:
+    branches:
+      - ci/repair-baseline-20261028
+
+permissions:
+  contents: write
+
+jobs:
+  format-repair:
+    if: github.ref == 'refs/heads/ci/repair-baseline-20261028'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format current Rust sources
+        run: cargo fmt --all
+      - name: Commit formatting on this repair branch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -u
+          if ! git diff --cached --quiet; then
+            git commit -m 'style: format Rust sources after recent merges'
+            git push origin HEAD:ci/repair-baseline-20261028
+          fi

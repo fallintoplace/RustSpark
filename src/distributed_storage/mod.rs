@@ -129,9 +129,7 @@ impl ReplicaStore {
         validate_key(key)?;
         // Compute each rendezvous score once and select only the required
         // replicas, rather than hashing each node during a full O(n log n) sort.
-        let mut ranked: Vec<_> = self
-            .nodes
-            .iter()
+        let mut ranked: Vec<_> = self.nodes.iter()
             .map(|node| (placement_score(key, &node.id), node))
             .collect();
         let compare = |a: &(u64, &StorageNode), b: &(u64, &StorageNode)| {

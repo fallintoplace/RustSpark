@@ -60,10 +60,10 @@ fn copy_backup_parts(copies: &[(PathBuf, PathBuf)]) -> Result<(), Box<dyn Error>
     if copies.len() < 8 || workers == 1 {
         copy_backup_chunk(copies)?;
     } else {
-        // Claim individual parts dynamically. One huge file should not
-        // strand the remaining small files behind a static worker chunk.
-        let next = AtomicUsize::new(0);
         std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+            // Claim individual parts dynamically. One huge file should not
+            // strand the remaining small files behind a static worker chunk.
+            let next = AtomicUsize::new(0);
             let jobs = (0..workers)
                 .map(|_| {
                     let next = &next;
@@ -134,6 +134,7 @@ pub(crate) fn backup_database(root: &Path, destination: &Path) -> Result<(), Box
     fs::rename(&snapshot, &normalized)?;
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {

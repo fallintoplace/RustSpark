@@ -1,30 +1,36 @@
 use std::{
     fs,
     io::{self, ErrorKind},
+    path::PathBuf,
 };
 
 use super::ReplicaStore;
+
+// Collect every safe existing replica before any deletion starts.
+fn existing_replica_paths(store: &ReplicaStore, key: &str) -> io::Result<Vec<PathBuf>> {
+    let mut existing = Vec::new();
+    for node in store.placements(key)? {
+        let path = node.root.join("objects").join(key);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_file() => existing.push(path),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Replica is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(existing)
+}
 
 impl ReplicaStore {
     /// Delete the current assigned copies. There are no tombstones, so this
     /// must not race a writer or a migration from an older cluster topology.
     pub fn delete(&self, key: &str) -> io::Result<usize> {
-        // Fail before deleting any copy if one of the placements is unsafe.
-        let mut existing = Vec::new();
-        for node in self.placements(key)? {
-            let path = node.root.join("objects").join(key);
-            match fs::symlink_metadata(&path) {
-                Ok(meta) if meta.file_type().is_file() => existing.push(path),
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidData,
-                        "Replica is not a regular file",
-                    ));
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
+        let existing = existing_replica_paths(self, key)?;
         for path in &existing {
             fs::remove_file(path)?;
         }
@@ -40,8 +46,11 @@ mod tests {
     #[test]
     fn delete_is_repeatable_and_removes_data() {
         let root = tempfile::tempdir().unwrap();
-        let store =
-            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
         store.put("part.parquet", b"data").unwrap();
         assert_eq!(store.delete("part.parquet").unwrap(), 1);
         assert_eq!(store.delete("part.parquet").unwrap(), 0);
@@ -63,10 +72,7 @@ mod tests {
         let second = placements[1].root.join("objects/part.parquet");
         fs::remove_file(&second).unwrap();
         fs::create_dir(&second).unwrap();
-        assert_eq!(
-            store.delete("part.parquet").unwrap_err().kind(),
-            ErrorKind::InvalidData
-        );
+        assert_eq!(store.delete("part.parquet").unwrap_err().kind(), ErrorKind::InvalidData);
         assert_eq!(fs::read(first).unwrap(), b"keep");
     }
 }

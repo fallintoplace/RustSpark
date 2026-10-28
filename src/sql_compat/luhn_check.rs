@@ -27,7 +27,7 @@ fn valid_luhn(input: &str) -> bool {
         }
         sum += digit;
     }
-    has_digits && sum.is_multiple_of(10)
+    has_digits && sum % 10 == 0
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -37,23 +37,18 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Boolean,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Utf8(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
+                    value.as_deref().map(valid_luhn),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("luhn_check expects Utf8".into()))?;
-            let result: Vec<Option<bool>> =
-                input.iter().map(|value| value.map(valid_luhn)).collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(result))))
-            }
+            let result: BooleanArray = input.iter().map(|value| value.map(valid_luhn)).collect();
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }

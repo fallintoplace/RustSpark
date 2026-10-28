@@ -24,7 +24,10 @@ async fn interval_anti_join_preserves_unmatched_groups_and_empty_intervals() -> 
         .await?;
     let left_bounds = ("start_at", "end_at");
     let right_bounds = ("begin_at", "finish_at");
-    for (keys, expected) in [(&[("region", "area")][..], 3), (&[][..], 2)] {
+    for (keys, expected) in [
+        (&[("region", "area")][..], 3),
+        (&[][..], 2),
+    ] {
         let count = session
             .exclude_overlapping_intervals("blocks", "reserved", left_bounds, right_bounds, keys)
             .await?

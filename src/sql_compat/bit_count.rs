@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{
-        array::{Array, Int64Array},
-        datatypes::DataType,
-    },
+    arrow::{array::{Array, Int64Array}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -17,21 +14,20 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    value.map(|value| i64::from(value.count_ones())),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("bit_count expects Int64".into()))?;
-            // A non-nullable primitive array can skip per-row validity checks.
+            // Retain the null-free integer kernel for large input batches.
             let result: Int64Array = if input.null_count() == 0 {
                 Int64Array::from_iter_values(
-                    input
-                        .values()
-                        .iter()
-                        .map(|value| i64::from(value.count_ones())),
+                    input.values().iter().map(|value| i64::from(value.count_ones())),
                 )
             } else {
                 input
@@ -39,13 +35,7 @@ pub(crate) fn udf() -> ScalarUDF {
                     .map(|value| value.map(|value| i64::from(value.count_ones())))
                     .collect()
             };
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }
@@ -62,11 +52,7 @@ mod no_nulls_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
+            let column = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(1), Some(64), Some(0)]);

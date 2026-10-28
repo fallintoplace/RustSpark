@@ -47,7 +47,7 @@ async fn read_normalized_csv(
         .iter()
         .map(|field| null_normalizing_projection(field, marker))
         .collect::<Vec<_>>();
-    raw.select(expressions)
+    Ok(raw.select(expressions)?)
 }
 
 pub(super) async fn register_csv_with_null_value(

@@ -31,10 +31,7 @@ impl ReplicaStore {
                 }
                 let mut file = File::open(path)?;
                 if end > file.metadata()?.len() {
-                    return Err(io::Error::new(
-                        ErrorKind::UnexpectedEof,
-                        "Range exceeds object",
-                    ));
+                    return Err(io::Error::new(ErrorKind::UnexpectedEof, "Range exceeds object"));
                 }
                 if length > 0 {
                     file.seek(SeekFrom::Start(offset))?;
@@ -60,8 +57,11 @@ mod tests {
     #[test]
     fn returns_exact_ranges_and_rejects_out_of_bounds() {
         let root = tempfile::tempdir().unwrap();
-        let store =
-            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
         store.put("part.parquet", b"abcdefgh").unwrap();
         assert_eq!(store.read_range("part.parquet", 2, 3).unwrap(), b"cde");
         assert_eq!(store.read_range("part.parquet", 8, 0).unwrap(), b"");
@@ -82,15 +82,7 @@ mod tests {
         store.put("large.parquet", &data).unwrap();
         let first = store.placements("large.parquet").unwrap()[0];
         fs::write(first.root.join("objects/large.parquet"), b"too short").unwrap();
-        assert_eq!(
-            store.read_range("large.parquet", 9000, 4096).unwrap(),
-            vec![73; 4096]
-        );
-        assert_eq!(
-            store
-                .read_range("large.parquet", data.len() as u64, 0)
-                .unwrap(),
-            b""
-        );
+        assert_eq!(store.read_range("large.parquet", 9000, 4096).unwrap(), vec![73; 4096]);
+        assert_eq!(store.read_range("large.parquet", data.len() as u64, 0).unwrap(), b"");
     }
 }

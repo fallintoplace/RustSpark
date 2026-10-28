@@ -143,16 +143,35 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
 }
 
 fn parse_preview_selection(arguments: &str) -> Option<(&str, usize)> {
-    let parts: Vec<_> = arguments.split_whitespace().collect();
-    match parts.as_slice() {
-        [table] => Some((*table, 10)),
-        [table, count] => count
+    let mut parts = arguments.split_whitespace();
+    let table = parts.next()?;
+    match (parts.next(), parts.next()) {
+        (None, None) => Some((table, 10)),
+        (Some(count), None) => count
             .parse::<usize>()
             .ok()
             .filter(|rows| (1..=1000).contains(rows))
-            .map(|rows| (*table, rows)),
+            .map(|rows| (table, rows)),
         _ => None,
     }
+}
+
+fn quote_shell_table(table: &str) -> String {
+    let mut quoted = String::with_capacity(table.len() + 2);
+    for (index, part) in table.split('.').enumerate() {
+        if index != 0 {
+            quoted.push('.');
+        }
+        quoted.push('"');
+        for character in part.chars() {
+            if character == '"' {
+                quoted.push('"');
+            }
+            quoted.push(character);
+        }
+        quoted.push('"');
+    }
+    quoted
 }
 
 // Use quoted identifiers so a shell table name cannot change the SQL plan.
@@ -172,11 +191,7 @@ async fn handle_preview_command(session: &RustSparkSession, args: &Args, command
         eprintln!("Shell error: .preview requires a valid table name");
         return true;
     }
-    let source = table
-        .split('.')
-        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(".");
+    let source = quote_shell_table(table);
     let query = format!("SELECT * FROM {source} LIMIT {rows}");
     if let Err(error) = execute_interactive_statement(session, args, &query).await {
         eprintln!("Shell error: {error}");
@@ -324,7 +339,8 @@ pub(super) async fn run_interactive(
 #[cfg(test)]
 mod tests {
     use super::{
-        SqlTerminatorScanner, is_single_table_argument, parse_preview_selection, shell_arguments,
+        SqlTerminatorScanner, is_single_table_argument, parse_preview_selection, quote_shell_table,
+        shell_arguments,
     };
 
     #[test]
@@ -352,12 +368,15 @@ mod tests {
     }
 
     #[test]
+    fn preview_table_quoting_preserves_components_and_embedded_quotes() {
+        assert_eq!(quote_shell_table("db.events"), "\"db\".\"events\"");
+        assert_eq!(quote_shell_table("d\"b.events"), "\"d\"\"b\".\"events\"");
+    }
+
+    #[test]
     fn preview_selection_defaults_and_rejects_invalid_limits() {
         assert_eq!(parse_preview_selection("data"), Some(("data", 10)));
-        assert_eq!(
-            parse_preview_selection("db.table 1000"),
-            Some(("db.table", 1000))
-        );
+        assert_eq!(parse_preview_selection("db.table 1000"), Some(("db.table", 1000)));
         assert_eq!(parse_preview_selection("data 0"), None);
         assert_eq!(parse_preview_selection("data 1001"), None);
         assert_eq!(parse_preview_selection("data NaN"), None);

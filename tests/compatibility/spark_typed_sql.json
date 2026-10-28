@@ -137,7 +137,7 @@
   {
     "id": "table_window_rank",
     "ordered": true,
-    "sql": "SELECT id, CAST(RANK() OVER (ORDER BY amount DESC) AS INT) AS rank FROM events_left ORDER BY id"
+    "sql": "SELECT id, RANK() OVER (ORDER BY amount DESC) AS rank FROM events_left ORDER BY id"
   },
   {
     "id": "table_window_lag",

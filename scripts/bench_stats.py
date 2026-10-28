@@ -4,8 +4,8 @@ import math
 import statistics
 
 
-def summarize_samples(samples):
-    """Return rounded samples, median and nearest-rank p95 in milliseconds."""
+def _validated_samples(samples):
+    """Validate durations once before computing timing statistics."""
     if not samples:
         raise ValueError("Benchmark must have at least one timing sample")
     measured = []
@@ -14,6 +14,12 @@ def summarize_samples(samples):
                 or not math.isfinite(duration) or duration < 0):
             raise ValueError(f"Invalid benchmark duration: {duration}")
         measured.append(float(duration))
+    return measured
+
+
+def summarize_samples(samples):
+    """Return rounded samples, median and nearest-rank p95 in milliseconds."""
+    measured = _validated_samples(samples)
     ordered = sorted(measured)
     return {
         "samples_ms": [round(value, 3) for value in measured],

@@ -2,8 +2,7 @@ use datafusion::arrow::array::Int64Array;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn shiftright_supports_columns_nulls_and_literals() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn shiftright_supports_columns_nulls_and_literals() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
     let batches = session
         .sql(
@@ -23,11 +22,7 @@ async fn shiftright_supports_columns_nulls_and_literals() -> Result<(), Box<dyn 
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(2), Some(-2), None, Some(8)]);
-    let scalar = session
-        .sql("SELECT SHIFTRIGHT(16, 2)")
-        .await?
-        .collect()
-        .await?;
+    let scalar = session.sql("SELECT SHIFTRIGHT(16, 2)").await?.collect().await?;
     let values = scalar[0]
         .column(0)
         .as_any()

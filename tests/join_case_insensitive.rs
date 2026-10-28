@@ -32,18 +32,18 @@ async fn case_insensitive_join_preserves_outer_and_null_semantics() -> TestResul
         (JoinType::Full, 6),
     ] {
         let joined = session
-            .join_tables_case_insensitive("order", "lookup", join_type, &[("person", "username")])
+            .join_tables_case_insensitive(
+                "order",
+                "lookup",
+                join_type,
+                &[("person", "username")],
+            )
             .await?;
         assert_eq!(joined.count().await?, expected, "{join_type:?}");
     }
     assert_eq!(
         session
-            .join_tables(
-                "order",
-                "lookup",
-                JoinType::Inner,
-                &[("person", "username")]
-            )
+            .join_tables("order", "lookup", JoinType::Inner, &[("person", "username")])
             .await?
             .count()
             .await?,

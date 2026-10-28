@@ -13,8 +13,7 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         let dataframe = self.table(table).await?;
         Self::validate_selected_columns(&dataframe, &[column])?;
-        let source =
-            quote_catalog_table(table, "approx_distinct_column_count requires a table path")?;
+        let source = quote_catalog_table(table, "approx_distinct_column_count requires a table path")?;
         let key = quote_join_identifier(column);
         self.sql_read_only(&format!(
             "SELECT APPROX_DISTINCT({key}) AS approximate_distinct FROM {source}"

@@ -14,18 +14,11 @@ fn run(extra: &[&str]) -> std::process::Output {
     ]);
     command.args(extra);
     let result = command.output().expect("run RustSpark CLI");
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     result
 }
 
 #[test]
 fn split_file_groups_by_statistics_keeps_query_results() {
-    assert_eq!(
-        run(&[]).stdout,
-        run(&["--split-file-groups-by-statistics"]).stdout
-    );
+    assert_eq!(run(&[]).stdout, run(&["--split-file-groups-by-statistics"]).stdout);
 }

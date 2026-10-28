@@ -22,11 +22,7 @@ async fn csc_handles_rows_and_nulls() -> Result<(), Box<dyn std::error::Error>> 
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(f64::INFINITY), None]);
-    let scalar = session
-        .sql("SELECT CSC(CAST(0 AS DOUBLE))")
-        .await?
-        .collect()
-        .await?;
+    let scalar = session.sql("SELECT CSC(CAST(0 AS DOUBLE))").await?.collect().await?;
     let values = scalar[0]
         .column(0)
         .as_any()

@@ -14,16 +14,10 @@ async fn fixture() -> TestResultSession {
         )
         .await?;
     session
-        .register_sql_view(
-            "users",
-            "SELECT 1 AS id, 'Ada' AS label UNION ALL SELECT 3, 'Cam'",
-        )
+        .register_sql_view("users", "SELECT 1 AS id, 'Ada' AS label UNION ALL SELECT 3, 'Cam'")
         .await?;
     session
-        .register_sql_view(
-            "products",
-            "SELECT 10 AS id, 'A' AS sku UNION ALL SELECT 20, 'B'",
-        )
+        .register_sql_view("products", "SELECT 10 AS id, 'A' AS sku UNION ALL SELECT 20, 'B'")
         .await?;
     Ok(session)
 }
@@ -90,36 +84,22 @@ async fn rejects_ambiguous_aliases_and_empty_or_future_keys() -> TestResult {
     assert!(session.join_many_tables("orders", "o", &[]).await.is_err());
     for steps in [
         vec![MultiJoinStep {
-            table: "users",
-            alias: "O",
-            join_type: JoinType::Inner,
+            table: "users", alias: "O", join_type: JoinType::Inner,
             keys: &[("o", "buyer_id", "id")],
         }],
         vec![MultiJoinStep {
-            table: "users",
-            alias: "u",
-            join_type: JoinType::Inner,
+            table: "users", alias: "u", join_type: JoinType::Inner,
             keys: &[("future", "buyer_id", "id")],
         }],
         vec![MultiJoinStep {
-            table: "users",
-            alias: "u",
-            join_type: JoinType::Inner,
-            keys: &[],
+            table: "users", alias: "u", join_type: JoinType::Inner, keys: &[],
         }],
         vec![MultiJoinStep {
-            table: "users",
-            alias: "u",
-            join_type: JoinType::LeftSemi,
+            table: "users", alias: "u", join_type: JoinType::LeftSemi,
             keys: &[("o", "buyer_id", "id")],
         }],
     ] {
-        assert!(
-            session
-                .join_many_tables("orders", "o", &steps)
-                .await
-                .is_err()
-        );
+        assert!(session.join_many_tables("orders", "o", &steps).await.is_err());
     }
     Ok(())
 }

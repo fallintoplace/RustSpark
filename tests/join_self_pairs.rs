@@ -39,12 +39,7 @@ async fn self_pairs_validate_keys_before_planning() -> TestResult {
     session
         .register_sql_view("items", "SELECT 1 AS basket, 1 AS item")
         .await?;
-    assert!(
-        session
-            .join_table_distinct_pairs("items", &[], "item")
-            .await
-            .is_err()
-    );
+    assert!(session.join_table_distinct_pairs("items", &[], "item").await.is_err());
     assert!(
         session
             .join_table_distinct_pairs("items", &["basket", "BASKET"], "item")

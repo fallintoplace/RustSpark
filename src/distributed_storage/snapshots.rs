@@ -41,20 +41,17 @@ mod tests {
     #[test]
     fn publishes_one_immutable_snapshot_generation() {
         let root = tempfile::tempdir().unwrap();
-        let store =
-            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
-        store
-            .create_snapshot("sales", 1, vec!["p1.parquet".into()])
-            .unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        store.create_snapshot("sales", 1, vec!["p1.parquet".into()]).unwrap();
         assert_eq!(
             store.read_snapshot("sales", 1).unwrap().objects(),
             ["p1.parquet"]
         );
-        assert!(
-            store
-                .create_snapshot("sales", 1, vec!["p2.parquet".into()])
-                .is_err()
-        );
+        assert!(store.create_snapshot("sales", 1, vec!["p2.parquet".into()]).is_err());
         assert!(store.read_snapshot("sales", 0).is_err());
     }
 }

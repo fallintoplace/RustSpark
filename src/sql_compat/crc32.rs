@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{
-        array::{Int64Array, StringArray},
-        datatypes::DataType,
-    },
+    arrow::{array::{Int64Array, StringArray}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -48,22 +45,18 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Utf8(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    value.as_deref().map(checksum),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("crc32 expects Utf8".into()))?;
-            let result: Vec<Option<i64>> = input.iter().map(|value| value.map(checksum)).collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
-            }
+            let result: Int64Array = input.iter().map(|value| value.map(checksum)).collect();
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
 }

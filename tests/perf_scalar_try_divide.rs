@@ -4,21 +4,13 @@ use rustspark::RustSparkSession;
 #[tokio::test]
 async fn try_divide_scalar_operand_keeps_nulls() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
-    let batches = session
-        .sql(
-            "SELECT TRY_DIVIDE(n, CAST(3 AS BIGINT)) AS value FROM 
+    let batches = session.sql(
+        "SELECT TRY_DIVIDE(n, CAST(3 AS BIGINT)) AS value FROM 
          (VALUES (0, CAST(9 AS BIGINT)), (1, CAST(NULL AS BIGINT))) AS t(idx, n) ORDER BY idx",
-        )
-        .await?
-        .collect()
-        .await?;
+    ).await?.collect().await?;
     let mut values = Vec::new();
     for batch in &batches {
-        let column = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
+        let column = batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         values.extend(column.iter());
     }
     assert_eq!(values, vec![Some(3.0), None]);

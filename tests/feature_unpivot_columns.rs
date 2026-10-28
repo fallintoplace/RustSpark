@@ -13,57 +13,20 @@ async fn unpivot_preserves_ids_and_nulls() -> TestResult {
         )
         .await?;
     let long = session
-        .unpivot_columns(
-            "wide",
-            &["id"],
-            &["score x", "team's note"],
-            "attribute",
-            "value",
-        )
+        .unpivot_columns("wide", &["id"], &["score x", "team's note"], "attribute", "value")
         .await?;
     session.register_dataframe("long_form", long)?;
+    assert_eq!(session.sql_scalar("SELECT COUNT(*) FROM long_form").await?.to_string(), "4");
     assert_eq!(
-        session
-            .sql_scalar("SELECT COUNT(*) FROM long_form")
-            .await?
-            .to_string(),
-        "4"
-    );
-    assert_eq!(
-        session
-            .sql_scalar(
-                "SELECT COUNT(*) FROM long_form WHERE attribute = 'score x' AND value IS NULL"
-            )
-            .await?
-            .to_string(),
+        session.sql_scalar("SELECT COUNT(*) FROM long_form WHERE attribute = 'score x' AND value IS NULL").await?.to_string(),
         "1"
     );
     assert_eq!(
-        session
-            .sql_scalar(
-                "SELECT COUNT(*) FROM long_form WHERE attribute = 'team''s note' AND value = 'yes'"
-            )
-            .await?
-            .to_string(),
+        session.sql_scalar("SELECT COUNT(*) FROM long_form WHERE attribute = 'team''s note' AND value = 'yes'").await?.to_string(),
         "1"
     );
-    assert!(
-        session
-            .unpivot_columns("wide", &[], &[], "key", "value")
-            .await
-            .is_err()
-    );
-    assert!(
-        session
-            .unpivot_columns("wide", &["id"], &["score x"], "id", "value")
-            .await
-            .is_err()
-    );
-    assert!(
-        session
-            .unpivot_columns("wide", &["id"], &["id"], "key", "value")
-            .await
-            .is_err()
-    );
+    assert!(session.unpivot_columns("wide", &[], &[], "key", "value").await.is_err());
+    assert!(session.unpivot_columns("wide", &["id"], &["score x"], "id", "value").await.is_err());
+    assert!(session.unpivot_columns("wide", &["id"], &["id"], "key", "value").await.is_err());
     Ok(())
 }

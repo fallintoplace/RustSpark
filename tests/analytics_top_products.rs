@@ -2,7 +2,8 @@ use std::{path::Path, process::Command};
 
 #[test]
 fn top_products_analytics() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/analytics/top_products");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/analytics/top_products");
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--csv")
         .arg(path.join("data.csv"))

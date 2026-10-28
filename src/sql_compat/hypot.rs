@@ -15,36 +15,22 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             // Keep a constant left argument as a scalar for the entire batch.
-            if let [
-                ColumnarValue::Scalar(ScalarValue::Float64(lhs)),
-                ColumnarValue::Array(right),
-            ] = args
-            {
-                let right = right
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
+            if let [ColumnarValue::Scalar(ScalarValue::Float64(lhs)), ColumnarValue::Array(right)] = args {
+                let right = right.as_any().downcast_ref::<Float64Array>()
                     .ok_or_else(|| DataFusionError::Internal("hypot expects Float64".into()))?;
-                let result: Float64Array = right
-                    .iter()
+                let result: Float64Array = right.iter()
                     .map(|value| (*lhs).zip(value).map(|(a, b)| a.hypot(b)))
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             // Keep a literal right operand scalar across an entire input batch.
-            if let [
-                ColumnarValue::Array(left),
-                ColumnarValue::Scalar(ScalarValue::Float64(right)),
-            ] = args
-            {
-                let left = left
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
+            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Float64(right))] = args {
+                let left = left.as_any().downcast_ref::<Float64Array>()
                     .ok_or_else(|| DataFusionError::Internal("hypot expects Float64".into()))?;
-                let result: Vec<Option<f64>> = left
-                    .iter()
+                let result: Float64Array = left.iter()
                     .map(|left| left.zip(*right).map(|(left, right)| left.hypot(right)))
                     .collect();
-                return Ok(ColumnarValue::Array(Arc::new(Float64Array::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             let scalar = args
                 .iter()
@@ -61,7 +47,9 @@ pub(crate) fn udf() -> ScalarUDF {
             let result: Float64Array = lhs
                 .iter()
                 .zip(rhs.iter())
-                .map(|(left, right)| left.zip(right).map(|(left, right)| left.hypot(right)))
+                .map(|(left, right)| {
+                    left.zip(right).map(|(left, right)| left.hypot(right))
+                })
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Float64(
@@ -87,11 +75,7 @@ mod constant_left_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
+            let column = batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(5.0), Some(3.0), None, Some(5.0)]);

@@ -1,5 +1,4 @@
-# DataFusion's SQL planning and expression evaluation can require more
-# than Windows' default 1 MiB main-thread stack on nested queries.
-# Apply this to the shipped CLI and test binaries, not only CI.
+# Increase the Windows main-thread stack for nested DataFusion SQL plans.
+# Apply to the shipped CLI and test executables, not just GitHub Actions.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=/STACK:8388608"]

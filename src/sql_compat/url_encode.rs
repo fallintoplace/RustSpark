@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{
-        array::{Array, StringArray, StringBuilder},
-        datatypes::DataType,
-    },
+    arrow::{array::{Array, StringArray, StringBuilder}, datatypes::DataType},
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -12,8 +9,9 @@ use datafusion::{
 /// Spark URL_ENCODE form encoding of UTF-8 strings.
 fn write_encoded(output: &mut impl std::fmt::Write, input: &str) -> std::fmt::Result {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let unreserved =
-        |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'*');
+    let unreserved = |byte: u8| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'*')
+    };
     let Some(first_escape) = input.bytes().position(|byte| !unreserved(byte)) else {
         return output.write_str(input);
     };
@@ -47,20 +45,19 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             match args {
-                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => Ok(ColumnarValue::Scalar(
-                    ScalarValue::Utf8(value.as_deref().map(percent_encode)),
-                )),
+                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
+                    Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
+                        value.as_deref().map(percent_encode),
+                    )))
+                }
                 [ColumnarValue::Array(array)] => {
-                    let input = array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            DataFusionError::Internal("url_encode expects Utf8".into())
-                        })?;
+                    let input = array.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| DataFusionError::Internal("url_encode expects Utf8".into()))?;
                     // Write bytes directly to Arrow's contiguous output buffer.
                     // append_value("") finalizes each string without an intermediate allocation.
-                    let mut result =
-                        StringBuilder::with_capacity(input.len(), input.value_data().len());
+                    let mut result = StringBuilder::with_capacity(
+                        input.len(), input.value_data().len(),
+                    );
                     for value in input.iter() {
                         if let Some(value) = value {
                             write_encoded(&mut result, value)
@@ -108,22 +105,13 @@ mod array_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let values = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
+            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
             actual.extend(values.iter().map(|value| value.map(str::to_owned)));
         }
-        assert_eq!(
-            actual,
-            vec![
-                Some("spark+sql".into()),
-                Some("caf%C3%A9".into()),
-                Some("a%2Fb".into()),
-                None,
-            ]
-        );
+        assert_eq!(actual, vec![
+            Some("spark+sql".into()), Some("caf%C3%A9".into()),
+            Some("a%2Fb".into()), None,
+        ]);
         Ok(())
     }
 }

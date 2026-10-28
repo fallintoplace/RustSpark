@@ -152,8 +152,12 @@ async fn register_unnamed_input(
 type NamedInput = (NamedInputKind, String, String);
 
 fn parsed_named_inputs(args: &Args) -> Result<Vec<NamedInput>, Box<dyn std::error::Error>> {
-    let mut names = HashSet::new();
-    let mut inputs = Vec::new();
+    let count: usize = INPUT_KINDS
+        .iter()
+        .map(|kind| kind.named_tables(args).len())
+        .sum();
+    let mut names = HashSet::with_capacity(count);
+    let mut inputs = Vec::with_capacity(count);
     for kind in INPUT_KINDS {
         for mapping in kind.named_tables(args) {
             let (name, path) = parse_unique_named_table(mapping, &mut names)?;

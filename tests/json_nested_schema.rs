@@ -23,37 +23,23 @@ fn reads_typed_nested_json_columns() -> Result<(), Box<dyn std::error::Error>> {
             "json",
         ])
         .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout)?;
     assert_eq!(stdout.lines().count(), 2);
     assert!(stdout.contains("one") && stdout.contains("two"), "{stdout}");
-    assert!(
-        stdout.contains("Berlin") && stdout.contains("Prague"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("Berlin") && stdout.contains("Prague"), "{stdout}");
     assert!(stdout.contains("attrs"), "{stdout}");
     Ok(())
 }
 
 #[test]
 fn rejects_malformed_nested_schema_in_cli() {
-    for schema in [
-        "tags:array<>",
-        "data:map<utf8>",
-        "meta:struct<x:int64,X:int64>",
-    ] {
+    for schema in ["tags:array<>", "data:map<utf8>", "meta:struct<x:int64,X:int64>"] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
             .args([
-                "--json",
-                "tests/fixtures/sales.json",
-                "--json-schema",
-                schema,
-                "--sql",
-                "SELECT 1",
+                "--json", "tests/fixtures/sales.json",
+                "--json-schema", schema,
+                "--sql", "SELECT 1",
             ])
             .output()
             .unwrap();
