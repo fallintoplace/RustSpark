@@ -157,6 +157,8 @@ mod sql_compat_luhn_check;
 mod sql_compat_mask;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
+#[path = "sql_compat/unix_micros.rs"]
+mod sql_compat_unix_micros;
 #[path = "sql_compat/oct.rs"]
 mod sql_compat_oct;
 #[path = "sql_compat/conv.rs"]
@@ -358,6 +360,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_tanh::udf());
         context.register_udf(sql_compat_bit_count::udf());
         context.register_udf(sql_compat_bitwise_and::udf());
+        context.register_udf(sql_compat_unix_micros::udf());
         context.register_udf(sql_compat_tan::udf());
         context.register_udf(sql_compat_shiftleft::udf());
         context.register_udf(sql_compat_chr::udf());
