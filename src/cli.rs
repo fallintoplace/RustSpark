@@ -433,6 +433,10 @@ struct Args {
     #[arg(long = "split-file-groups-by-statistics")]
     split_file_groups_by_statistics: bool,
 
+    /// Stop preferring hash joins for eligible large joins.
+    #[arg(long = "prefer-sort-merge-join")]
+    prefer_sort_merge_join: bool,
+
     /// Disable file-scan work stealing for predictable layouts.
     #[arg(long = "disable-file-work-stealing")]
     disable_file_work_stealing: bool,

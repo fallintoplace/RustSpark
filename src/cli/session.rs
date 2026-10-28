@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.prefer_sort_merge_join {
+        config.options_mut().optimizer.prefer_hash_join = false;
+    }
     if let Some(codec) = args.spill_compression.as_deref() {
         config = config.set_str("datafusion.execution.spill_compression", codec);
     }
@@ -432,6 +435,26 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_prefer_sort_merge_join_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--prefer-sort-merge-join",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().optimizer.prefer_hash_join,
+            datafusion_default.options().optimizer.prefer_hash_join
+        );
+        assert_eq!(configured.options().optimizer.prefer_hash_join, false);
     }
 
     #[test]
