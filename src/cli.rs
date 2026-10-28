@@ -359,6 +359,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Tune max-spill-file-bytes for large Parquet datasets.
+    #[arg(long = "max-spill-file-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    max_spill_file_bytes: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
