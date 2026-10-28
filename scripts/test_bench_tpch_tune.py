@@ -45,6 +45,27 @@ class TuneTests(unittest.TestCase):
             self.assertIsNone(report["best_complete_variant"])
             self.assertEqual(report["configurations"][1]["total_median_ms"], 2.0)
 
+    def test_rejects_invalid_fingerprints_and_nan_medians(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for table in __import__("tpch_run").TABLES:
+                (folder / f"{table}.parquet").touch()
+            sql = folder / "01.sql"
+            sql.write_text("SELECT 42")
+            variants = tune.parse_variants([
+                {"name": "base", "partitions": 1},
+                {"name": "candidate", "partitions": 2},
+            ])
+            for invalid in (
+                {"status": "ok", "result_sha256": "not-a-hash", "median_ms": 1.0},
+                {"status": "ok", "result_sha256": "a" * 64,
+                 "median_ms": float("nan")},
+            ):
+                with self.subTest(invalid=invalid):
+                    with mock.patch.object(tune, "measure", return_value=invalid):
+                        with self.assertRaisesRegex(ValueError, "invalid .*"):
+                            tune.run("rs", folder, [(1, sql)], variants)
+
     def test_mismatched_results_abort_tuning(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
@@ -57,8 +78,8 @@ class TuneTests(unittest.TestCase):
                 {"name": "changed", "partitions": 2},
             ])
             with mock.patch.object(tune, "measure", side_effect=[
-                {"status": "ok", "result_sha256": "a", "median_ms": 2.0},
-                {"status": "ok", "result_sha256": "b", "median_ms": 1.0},
+                {"status": "ok", "result_sha256": "a" * 64, "median_ms": 2.0},
+                {"status": "ok", "result_sha256": "b" * 64, "median_ms": 1.0},
             ]):
                 with self.assertRaisesRegex(ValueError, "result changed"):
                     tune.run("rs", folder, [(1, sql)], variants)

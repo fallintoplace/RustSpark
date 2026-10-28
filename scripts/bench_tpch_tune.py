@@ -71,7 +71,13 @@ def run(binary, parquet, queries, variants, repeat=3, warmup=1, timeout=180):
                             ordered=has_top_level_order_by(sql))
             if entry["status"] != "ok":
                 raise ValueError(f"Q{number:02} failed for {variant['name']}")
-            digest = entry["result_sha256"]
+            digest = entry.get("result_sha256")
+            median = entry.get("median_ms")
+            if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"Q{number:02} invalid result fingerprint")
+            if (type(median) not in (int, float) or not math.isfinite(median)
+                    or median <= 0):
+                raise ValueError(f"Q{number:02} invalid median timing")
             if number in expected and expected[number] != digest:
                 raise ValueError(f"Q{number:02} result changed for {variant['name']}")
             expected[number] = digest
