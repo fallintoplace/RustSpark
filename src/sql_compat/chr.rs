@@ -15,8 +15,16 @@ fn evaluate(value: i64) -> Option<String> {
 }
 
 pub(crate) fn udf() -> ScalarUDF {
+    udf_named("chr")
+}
+
+pub(crate) fn char_udf() -> ScalarUDF {
+    udf_named("char")
+}
+
+fn udf_named(name: &str) -> ScalarUDF {
     create_udf(
-        "chr",
+        name,
         vec![DataType::Int64],
         DataType::Utf8,
         Volatility::Immutable,
