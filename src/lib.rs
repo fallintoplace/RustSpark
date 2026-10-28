@@ -70,6 +70,8 @@ mod sql_compat_pmod;
 mod sql_compat_degrees;
 #[path = "features/substring_filter.rs"]
 mod feature_substring_filter;
+#[path = "features/grouped_completeness.rs"]
+mod feature_grouped_completeness;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/acos.rs"]
