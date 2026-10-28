@@ -20,9 +20,7 @@ fn parse_json_path(path: &str) -> Option<Vec<PathSegment<'_>>> {
     let mut segments = Vec::new();
     while !rest.is_empty() {
         if let Some(after_dot) = rest.strip_prefix('.') {
-            let end = after_dot
-                .find(['.', '['])
-                .unwrap_or(after_dot.len());
+            let end = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
             let name = &after_dot[..end];
             if name.is_empty() || name == "*" {
                 return None;
@@ -179,10 +177,8 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
-                let result: BooleanArray = input
-                    .iter()
-                    .map(|text| text.map(is_valid_json))
-                    .collect();
+                let result: BooleanArray =
+                    input.iter().map(|text| text.map(is_valid_json)).collect();
                 Ok(ColumnarValue::Array(Arc::new(result)))
             }
             _ => Err(DataFusionError::Internal("json_valid expects UTF-8".into())),
