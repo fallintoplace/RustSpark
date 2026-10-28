@@ -94,3 +94,67 @@ mod tests {
         );
     }
 }
+
+impl ReplicaStore {
+    /// Fill a caller-owned buffer with an exact object range. The buffer
+    /// contents are unspecified on error; a successful fallback overwrites
+    /// every byte, including bytes from an earlier failed replica.
+    pub fn read_range_into(&self, key: &str, offset: u64, output: &mut [u8]) -> io::Result<()> {
+        if output.len() > MAX_RANGE_BYTES {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Range exceeds the 64 MiB read limit",
+            ));
+        }
+        let end = offset
+            .checked_add(output.len() as u64)
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "Range overflow"))?;
+        let mut last_error = None;
+        for node in self.placements(key)? {
+            let path = node.root.join("objects").join(key);
+            let attempt = (|| {
+                if !fs::symlink_metadata(&path)?.file_type().is_file() {
+                    return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe replica"));
+                }
+                let mut file = File::open(path)?;
+                if end > file.metadata()?.len() {
+                    return Err(io::Error::new(ErrorKind::UnexpectedEof, "Range exceeds object"));
+                }
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(output)
+            })();
+            match attempt {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found")))
+    }
+}
+
+#[cfg(test)]
+mod read_range_into_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn fills_reusable_buffer_after_primary_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = ["a", "b"]
+            .into_iter()
+            .map(|id| {
+                let directory = root.path().join(id);
+                fs::create_dir(&directory).unwrap();
+                StorageNode::new(id, directory).unwrap()
+            })
+            .collect();
+        let store = ReplicaStore::new(nodes, 2).unwrap();
+        store.put("part", b"abcdefgh").unwrap();
+        let primary = store.placements("part").unwrap()[0];
+        fs::write(primary.root.join("objects/part"), b"x").unwrap();
+        let mut bytes = [0; 4];
+        store.read_range_into("part", 2, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"cdef");
+        assert!(store.read_range_into("part", u64::MAX, &mut bytes).is_err());
+    }
+}
