@@ -189,6 +189,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.optimizer_passes {
+        config = config.set_usize("datafusion.optimizer.max_passes", value);
+    }
     if args.parquet_serial_file_write {
         config.options_mut().execution.parquet.allow_single_file_parallelism = false;
     }
@@ -405,6 +408,30 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn configures_optimizer_passes_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--optimizer-passes",
+            "5",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().optimizer.max_passes,
+            defaults.options().optimizer.max_passes
+        );
+        assert_eq!(
+            configured.options().optimizer.max_passes,
+            5
+        );
     }
 
     #[test]

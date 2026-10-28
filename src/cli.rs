@@ -543,6 +543,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Optional performance tuning for Parquet-backed analytics.
+    #[arg(long = "optimizer-passes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    optimizer_passes: Option<usize>,
+
     /// Opt-in configuration for large analytical workloads.
     #[arg(long = "parquet-serial-file-write")]
     parquet_serial_file_write: bool,

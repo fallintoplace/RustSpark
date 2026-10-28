@@ -6,6 +6,7 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 
 ## Available tuning knobs
 
+- `--optimizer-passes 5`: Set the maximum logical optimization passes. More passes can improve some plans but add planning latency.
 - `--parquet-serial-file-write`: Disable parallel encoding within a single Parquet file. Required for byte-based row-group limits, but can reduce write throughput.
 - `--min-parallel-output-files 8`: Set a lower bound on concurrent export files. Higher counts increase memory and file management overhead.
 - `--disable-file-work-stealing`: Disable file-scan work stealing for prebalanced file groups. Leave enabled for skewed inputs.
