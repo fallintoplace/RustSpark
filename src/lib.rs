@@ -78,6 +78,8 @@ mod feature_grouped_completeness;
 mod sql_compat_space;
 #[path = "sql_compat/acos.rs"]
 mod sql_compat_acos;
+#[path = "features/top_groups_by_sum.rs"]
+mod feature_top_groups_by_sum;
 #[path = "features/group_ranks.rs"]
 mod feature_group_ranks;
 #[path = "features/grouped_min_max.rs"]
