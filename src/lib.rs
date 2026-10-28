@@ -111,6 +111,8 @@ mod sql_compat_bitwise_or;
 mod sql_compat_cos;
 #[path = "sql_compat/bitwise_xor.rs"]
 mod sql_compat_bitwise_xor;
+#[path = "sql_compat/dayofyear.rs"]
+mod sql_compat_dayofyear;
 #[path = "sql_compat/cosh.rs"]
 mod sql_compat_cosh;
 #[path = "sql_compat/bitwise_not.rs"]
@@ -342,6 +344,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_cos::udf());
         context.register_udf(sql_compat_bitwise_xor::udf());
+        context.register_udf(sql_compat_dayofyear::udf());
         context.register_udf(sql_compat_try_divide::udf());
         context.register_udf(sql_compat_atan::udf());
         context.register_udf(sql_compat_try_add::udf());
