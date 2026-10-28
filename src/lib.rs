@@ -11,6 +11,8 @@ mod export;
 pub mod distributed_storage;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
+#[path = "features/group_size_skew.rs"]
+mod feature_group_size_skew;
 mod joins;
 mod joins_existence;
 pub use joins_existence::{ExistenceFilter, ExistenceMode};
