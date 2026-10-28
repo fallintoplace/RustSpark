@@ -15,6 +15,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
+        if args.parquet_bloom_filters {
+            parquet.bloom_filter_on_read = true;
+        }
     }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
@@ -86,6 +89,15 @@ mod tests {
     use super::{Args, custom_runtime, validate_spill_directory};
     use clap::Parser;
     use std::fs;
+
+    #[test]
+    fn can_enable_parquet_bloom_filter_pruning() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--parquet-bloom-filters",
+        ]).unwrap();
+        let config = super::build_session_config(&args);
+        assert!(config.options().execution.parquet.bloom_filter_on_read);
+    }
 
     #[test]
     fn leaves_the_default_session_without_custom_runtime() {
