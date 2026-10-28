@@ -1,0 +1,74 @@
+//! Bounded Parquet scans using Apache Parquet and Arrow, never DataFusion.
+use std::{fs::File, path::Path};
+
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+
+use crate::{arrow_bridge, batch::Batch, Error, Result};
+
+pub struct ParquetScan {
+    inner: ParquetRecordBatchReader,
+}
+
+pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    let file = File::open(path)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?
+        .with_batch_size(batch_size)
+        .build()
+        .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner: reader })
+}
+
+impl Iterator for ParquetScan {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|result| {
+            let record = result
+                .map_err(|e| Error::Execution(format!("Parquet decode: {e}")))?;
+            arrow_bridge::from_arrow(&record)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn scan_parquet_in_bounded_native_batches() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-native-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let native = Batch::from_rows(
+            Schema::new(vec![
+                Field::new("id", DataType::Integer, false),
+                Field::new("city", DataType::Text, true),
+            ]).unwrap(),
+            vec![
+                vec![Value::Integer(1), Value::Text("Berlin".into())],
+                vec![Value::Integer(2), Value::Null],
+                vec![Value::Integer(3), Value::Text("Paris".into())],
+            ],
+        ).unwrap();
+        let arrow = arrow_bridge::to_arrow(&native).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+
+        let parts = scan(&path, 2).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![2, 1]);
+        let rows: Vec<_> = parts.into_iter().flat_map(|batch| batch.rows().unwrap()).collect();
+        assert_eq!(rows, native.rows().unwrap());
+        assert!(scan(&path, 0).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}

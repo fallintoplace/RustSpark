@@ -89,3 +89,11 @@ pub mod stages;
 pub mod cancellation;
 
 pub mod batch_chunks;
+
+pub mod arrow_bridge;
+
+pub mod spill_ipc;
+
+pub mod external_sort;
+
+pub mod parquet_scan;
