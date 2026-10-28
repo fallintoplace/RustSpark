@@ -15,6 +15,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
+        if args.parquet_force_filter_selections {
+            parquet.force_filter_selections = true;
+        }
         if let Some(bytes) = args.parquet_predicate_cache_bytes {
             parquet.max_predicate_cache_size = Some(bytes);
         }
@@ -129,6 +132,13 @@ mod tests {
             "--parquet-pushdown-filters", "--parquet-predicate-cache-mb", "32"]).unwrap();
         assert_eq!(super::build_session_config(&args).options().execution.parquet.max_predicate_cache_size,
             Some(32 * 1024 * 1024));
+    }
+
+    #[test]
+    fn configures_parquet_filter_selections() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-pushdown-filters", "--parquet-force-filter-selections"]).unwrap();
+        assert!(super::build_session_config(&args).options().execution.parquet.force_filter_selections);
     }
 
     #[test]
