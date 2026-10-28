@@ -55,9 +55,9 @@ impl Reservation {
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
-            let new_reservation = self.budget.reserve(extra)?;
-            // Transfer the new bytes to this guard without releasing them.
-            std::mem::forget(new_reservation);
+            let mut additional = self.budget.reserve(extra)?;
+            // Transfer the reservation, then release only the guard object.
+            additional.bytes = 0;
         } else if new_bytes < self.bytes {
             self.budget.used.fetch_sub(self.bytes - new_bytes, Ordering::AcqRel);
         }
