@@ -16,9 +16,6 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
     }
-    if args.window_topn {
-        config.options_mut().optimizer.enable_window_topn = true;
-    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -27,9 +24,6 @@ fn build_session_config(args: &Args) -> SessionConfig {
     }
     if let Some(partitions) = args.target_partitions {
         config = config.with_target_partitions(partitions);
-    }
-    if args.split_file_groups_by_statistics {
-        config.options_mut().execution.split_file_groups_by_statistics = true;
     }
     if let Some(min_bytes) = args.scan_split_min_bytes {
         config = config
