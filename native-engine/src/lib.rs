@@ -81,3 +81,5 @@ pub mod vector_filter;
 pub mod topk;
 
 pub mod parallel_map;
+
+pub mod bloom;
