@@ -1,6 +1,8 @@
 name: TPC-H full 22-query smoke
 
 on:
+  schedule:
+    - cron: '17 4 * * 4'
   workflow_dispatch:
     inputs:
       scale_factor:
@@ -29,7 +31,7 @@ jobs:
       - run: cargo build --release --locked
       - name: Generate TPC-H data and SQL
         env:
-          SCALE_FACTOR: ${{ inputs.scale_factor }}
+          SCALE_FACTOR: ${{ inputs.scale_factor || '0.01' }}
         run: python3 scripts/tpch_prepare.py --scale-factor "$SCALE_FACTOR" --output "$RUNNER_TEMP/tpch"
       - name: Run all TPC-H queries
         run: |
