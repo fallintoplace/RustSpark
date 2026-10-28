@@ -36,6 +36,17 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaisesRegex(RustSparkError, "invalid JSON"):
             RustSpark().query("SELECT 1")
 
+    @patch("rustspark_local.subprocess.run")
+    def test_rejects_duplicate_keys_and_nonfinite_json(self, run):
+        for output in ('[{"v":1,"v":2}]', '[{"v":NaN}]',
+                       '[{"v":Infinity}]', '[{"v":1e999}]'):
+            with self.subTest(output=output):
+                run.return_value = subprocess.CompletedProcess([], 0, output, "")
+                with self.assertRaisesRegex(RustSparkError, "invalid JSON"):
+                    RustSpark().query("SELECT 1")
+        run.return_value = subprocess.CompletedProcess([], 0, '[{"v":1.25}]', "")
+        self.assertEqual(RustSpark().query("SELECT 1"), [{"v": 1.25}])
+
     def test_rejects_unsafe_or_conflicting_options_early(self):
         client = RustSpark()
         with self.assertRaises(ValueError):
