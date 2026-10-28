@@ -59,3 +59,15 @@ pub mod csv_stream;
 pub mod statistics;
 
 pub mod pruning;
+
+pub mod partial_aggregate;
+
+pub mod stage_graph;
+
+pub mod transport;
+
+pub mod task_scheduler;
+
+pub mod metrics;
+
+pub mod optimizer;

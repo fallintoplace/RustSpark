@@ -5,6 +5,7 @@ use crate::{
     filter, limit,
     project::{self, Selection},
     Result,
+    metrics::QueryMetrics,
 };
 
 pub struct Pipeline<I> {
@@ -14,6 +15,7 @@ pub struct Pipeline<I> {
     skip: usize,
     remaining: Option<usize>,
     guard: QueryGuard,
+    metrics: Option<QueryMetrics>,
 }
 
 impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
@@ -25,6 +27,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
             skip: 0,
             remaining: None,
             guard: QueryGuard::default(),
+            metrics: None,
         }
     }
 
@@ -41,6 +44,11 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     pub fn with_limit(mut self, offset: usize, count: Option<usize>) -> Self {
         self.skip = offset;
         self.remaining = count;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: QueryMetrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -65,6 +73,9 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
             let input = self.source.next()?;
             let result: Result<Batch> = (|| {
                 let mut batch = input?;
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_input(batch.num_rows() as u64)?;
+                }
                 if let Some(predicate) = &self.predicate {
                     batch = filter::filter(&batch, predicate)?;
                 }
@@ -80,6 +91,9 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                     let taking = remaining.min(batch.num_rows());
                     batch = limit::limit(&batch, 0, Some(taking))?;
                     self.remaining = Some(remaining - taking);
+                }
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_output(batch.num_rows() as u64)?;
                 }
                 Ok(batch)
             })();
