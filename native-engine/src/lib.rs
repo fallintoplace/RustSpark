@@ -9,3 +9,5 @@ pub mod error;
 pub use error::{Error, Result};
 
 pub mod scalar;
+
+pub mod schema;
