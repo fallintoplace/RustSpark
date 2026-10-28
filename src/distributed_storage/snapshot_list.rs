@@ -82,3 +82,35 @@ mod tests {
         assert!(store.list_snapshots("empty").unwrap().is_empty());
     }
 }
+
+impl ReplicaStore {
+    /// Return the newest committed generation for one table, if any.
+    pub fn latest_snapshot_generation(&self, table: &str) -> io::Result<Option<u64>> {
+        Ok(self.list_snapshots(table)?.into_iter().last())
+    }
+}
+
+#[cfg(test)]
+mod latest_snapshot_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn finds_highest_generation_and_handles_missing_table() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        assert_eq!(store.latest_snapshot_generation("sales").unwrap(), None);
+        for generation in [9, 3, 20] {
+            store
+                .create_snapshot("sales", generation, vec!["part.parquet".into()])
+                .unwrap();
+        }
+        assert_eq!(store.latest_snapshot_generation("sales").unwrap(), Some(20));
+        assert_eq!(store.latest_snapshot_generation("other").unwrap(), None);
+        assert!(store.latest_snapshot_generation("../bad").is_err());
+    }
+}
