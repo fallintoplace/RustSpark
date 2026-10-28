@@ -38,12 +38,17 @@ def index_queries(report: dict, label: str) -> dict[int, dict]:
     attempted = report.get("queries_attempted")
     if type(attempted) is not int or attempted != len(results):
         raise ValueError(f"{label}: queries_attempted does not match results")
+    total = report.get("queries_total")
+    if total is not None and (type(total) is not int or total < attempted):
+        raise ValueError(f"{label}: invalid queries_total")
     indexed = {}
     for row in results:
         if not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] < 1:
             raise ValueError(f"{label}: invalid query result or ID")
         if row["id"] in indexed:
             raise ValueError(f"{label}: duplicate query ID {row['id']}")
+        if total is not None and row["id"] > total:
+            raise ValueError(f"{label}: query ID exceeds queries_total")
         indexed[row["id"]] = row
     return indexed
 
@@ -70,6 +75,10 @@ def verify_reports(actual: dict, reference: dict) -> list[str]:
         raise ValueError("SQL workload hash differs between reports")
     rows = index_queries(actual, "Actual")
     expected = index_queries(reference, "Reference")
+    if (actual.get("queries_total") is not None
+            and reference.get("queries_total") is not None
+            and actual["queries_total"] != reference["queries_total"]):
+        raise ValueError("SQL report query totals differ")
     issues = []
     for number in sorted(expected.keys() - rows.keys()):
         issues.append(f"Query {number}: missing actual result")
