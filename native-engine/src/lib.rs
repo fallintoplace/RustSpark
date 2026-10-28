@@ -15,3 +15,5 @@ pub mod schema;
 pub mod batch;
 
 pub mod catalog;
+
+pub mod expr;
