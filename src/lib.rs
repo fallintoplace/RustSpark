@@ -100,6 +100,8 @@ mod sql_compat_try_mod;
 mod sql_compat_atan2;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
+#[path = "features/grouped_variance.rs"]
+mod feature_grouped_variance;
 #[path = "sql_compat/acosh.rs"]
 mod sql_compat_acosh;
 #[path = "sql_compat/try_add.rs"]
