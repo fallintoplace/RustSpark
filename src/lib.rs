@@ -57,6 +57,8 @@ mod sql_compat_startswith;
 mod sql_compat_try_divide;
 #[path = "sql_compat/try_mod.rs"]
 mod sql_compat_try_mod;
+#[path = "sql_compat/atan2.rs"]
+mod sql_compat_atan2;
 #[path = "sql_compat/zeroifnull.rs"]
 mod sql_compat_zeroifnull;
 #[path = "sql_compat/try_add.rs"]
@@ -202,6 +204,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_nullifzero::udf());
         context.register_udf(sql_compat_pmod::udf());
         context.register_udf(sql_compat_try_mod::udf());
+        context.register_udf(sql_compat_atan2::udf());
         context.register_udf(sql_compat_bin::udf());
         context.register_udf(sql_compat_try_divide::udf());
         context.register_udf(sql_compat_try_add::udf());
