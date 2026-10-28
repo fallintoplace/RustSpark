@@ -68,6 +68,13 @@ class SparkCompatibilityTests(unittest.TestCase):
             mod.compare(mod.QueryResult(["a"], [[]]), mod.QueryResult(["b"], [[]]))
         )
 
+    def test_signed_zero_values_match_without_losing_numeric_types(self):
+        left = mod.QueryResult(["n"], [[-0.0]])
+        right = mod.QueryResult(["n"], [[0.0]])
+        self.assertIsNone(mod.compare(left, right))
+        self.assertIsNotNone(mod.compare(left, mod.QueryResult(["n"], [[0]])))
+        self.assertEqual(mod.normalize(-0.0), 0.0)
+
     def test_binary_buffers_match_between_engines(self):
         left = mod.QueryResult(["payload"], [[bytearray(b"\\x00\\xff")]])
         right = mod.QueryResult(["payload"], [[memoryview(b"\\x00\\xff")]])
