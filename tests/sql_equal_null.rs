@@ -35,6 +35,6 @@ async fn equal_null_supports_rows_and_nulls() -> Result<(), Box<dyn std::error::
         .as_any()
         .downcast_ref::<BooleanArray>()
         .unwrap();
-    assert_eq!(values.value(0), true);
+    assert!(values.value(0));
     Ok(())
 }
