@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Expose the hash-join probe-side byte buffer size.
+    #[arg(long = "hash-join-probe-buffer-mb", value_name = "MIB", value_parser = parse_hash_join_probe_buffer_bytes)]
+    hash_join_probe_buffer_bytes: Option<usize>,
+
     /// Read Parquet strings and binary data as Arrow view types.
     #[arg(long = "parquet-view-arrays")]
     parquet_view_arrays: bool,
@@ -699,6 +703,12 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_hash_join_probe_buffer_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--hash-join-probe-buffer-mb")?
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "--hash-join-probe-buffer-mb exceeds the supported range".into())
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
