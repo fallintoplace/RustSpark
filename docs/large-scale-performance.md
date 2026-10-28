@@ -6,6 +6,7 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 
 ## Available tuning knobs
 
+- `--parquet-bloom-ndv 10000`: Set estimated distinct values for written Parquet bloom filters. Pair with `--parquet-write-bloom-filters`; incorrect estimates can inflate filters or false positives.
 - `--parquet-dictionary-page-bytes 2097152`: Tune Parquet dictionary pages when writing compressed analytics tables. Larger dictionaries consume memory and may hurt high-cardinality data.
 - `--parquet-row-group-bytes 134217728`: Limit Parquet output row-group size by bytes. Requires `--parquet-serial-file-write`; otherwise the parallel writer may ignore this limit.
 - `--optimizer-passes 5`: Set the maximum logical optimization passes. More passes can improve some plans but add planning latency.
