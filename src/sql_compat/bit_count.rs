@@ -26,7 +26,7 @@ pub(crate) fn udf() -> ScalarUDF {
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
-                .downcast_ref::<Int32Array>()
+                .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("bit_count expects Int64".into()))?;
             // Retain the null-free integer kernel for large input batches.
             let result: Int32Array = if input.null_count() == 0 {
@@ -62,7 +62,7 @@ mod no_nulls_regression {
             let column = batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<Int32Array>()
                 .unwrap();
             actual.extend(column.iter());
         }
