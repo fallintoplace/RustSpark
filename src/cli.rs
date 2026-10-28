@@ -379,6 +379,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Tune Parquet writer statistics for selective queries.
+    #[arg(long = "parquet-column-index-truncate", value_name = "LENGTH", value_parser = parse_positive_tuning_usize)]
+    parquet_column_index_truncate: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
