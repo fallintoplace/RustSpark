@@ -261,6 +261,8 @@ mod sql_compat_bround;
 mod sql_compat_sinh;
 #[path = "sql_compat/format_number.rs"]
 mod sql_compat_format_number;
+#[path = "sql_compat/initcap.rs"]
+mod sql_compat_initcap;
 #[path = "sql_compat/date_add.rs"]
 mod sql_compat_date_add;
 #[path = "sql_compat/date_from_unix_date.rs"]
@@ -478,6 +480,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_try_negate::udf());
         context.register_udf(sql_compat_sinh::udf());
         context.register_udf(sql_compat_format_number::udf());
+        context.register_udf(sql_compat_initcap::udf());
         context.register_udf(sql_compat_date_from_unix_date::udf());
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_tanh::udf());
