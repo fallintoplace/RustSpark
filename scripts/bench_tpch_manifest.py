@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 
 from tpch_prepare import sha256_file
+from tpch_run import unique_keys
 
 TABLES = frozenset(("customer", "lineitem", "nation", "orders",
                     "part", "partsupp", "region", "supplier"))
@@ -69,7 +70,8 @@ def require_table_mapping(manifest, key, message):
 
 def check(root):
     root = Path(root)
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"),
+                          object_pairs_hook=unique_keys)
     if not isinstance(manifest, dict):
         raise ValueError("TPC-H fixture manifest must be a JSON object")
     scale = manifest.get("scale_factor")

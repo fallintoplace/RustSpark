@@ -9,6 +9,13 @@ import bench_tpch_manifest as manifest
 
 
 class ManifestShapeTests(unittest.TestCase):
+    def test_duplicate_manifest_keys_fail_before_audit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "manifest.json"
+            path.write_text('{"rows": {}, "rows": {}}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Duplicate"):
+                manifest.check(folder)
+
     def test_non_object_top_level_manifest(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "manifest.json"
