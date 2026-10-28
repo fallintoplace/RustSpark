@@ -829,6 +829,60 @@ impl RustSparkSession {
         self.sql(&query).await
     }
 
+    /// Join pairs of intervals that overlap.
+    ///
+    /// Without touching endpoints, intervals are interpreted as half-open
+    /// [start, end). With touching endpoints, they are closed [start, end].
+    /// Zero-width half-open ranges are empty, while closed ones are points.
+    /// Reversed ranges and NULL endpoints never match.
+    pub async fn join_tables_on_interval_overlap(
+        &self,
+        left: &str,
+        right: &str,
+        join_type: datafusion::logical_expr::JoinType,
+        left_bounds: (&str, &str),
+        right_bounds: (&str, &str),
+        include_touching: bool,
+    ) -> Result<DataFrame> {
+        use datafusion::logical_expr::JoinType;
+
+        if [
+            left_bounds.0,
+            left_bounds.1,
+            right_bounds.0,
+            right_bounds.1,
+        ]
+        .iter()
+        .any(|column| column.trim().is_empty())
+        {
+            return Err(DataFusionError::Plan(
+                "Interval overlap joins require non-empty boundary columns".into(),
+            ));
+        }
+        let operator = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "Interval overlap joins support inner and left joins only".into(),
+                ));
+            }
+        };
+        let cmp = if include_touching { "<=" } else { "<" };
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let ls = format!("{left_alias}.{}", quote_join_identifier(left_bounds.0));
+        let le = format!("{left_alias}.{}", quote_join_identifier(left_bounds.1));
+        let rs = format!("{right_alias}.{}", quote_join_identifier(right_bounds.0));
+        let re = format!("{right_alias}.{}", quote_join_identifier(right_bounds.1));
+        let query = format!(
+            "SELECT * FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {ls} {cmp} {le} AND {rs} {cmp} {re} AND {ls} {cmp} {re} AND {rs} {cmp} {le}",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join values to intervals containing them, with configurable boundaries.
     ///
     /// Values are taken from the left table; interval start/end columns come
