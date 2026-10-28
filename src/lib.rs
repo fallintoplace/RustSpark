@@ -11,8 +11,6 @@ mod export;
 pub mod distributed_storage;
 #[path = "features/group_row_numbers.rs"]
 mod feature_group_row_numbers;
-#[path = "features/grouped_row_counts.rs"]
-mod feature_grouped_row_counts;
 mod joins;
 mod joins_existence;
 pub use joins_existence::{ExistenceFilter, ExistenceMode};
@@ -145,6 +143,8 @@ mod sql_compat_luhn_check;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
 mod sql_results;
+#[path = "features/grouped_row_counts.rs"]
+mod feature_grouped_row_counts;
 mod joins_multi_range;
 pub use joins_multi_range::RangeTableJoin;
 
