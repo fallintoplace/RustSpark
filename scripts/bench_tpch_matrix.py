@@ -55,7 +55,15 @@ def run_configuration(binary, queries, parquet, output, n, repeat, warmup, finge
     if not path.is_file():
         raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")
     report = json.loads(path.read_text(encoding="utf-8"))
-    results = report.get("results", [])
+    if not isinstance(report, dict):
+        raise ValueError("Partition matrix report must be a JSON object")
+    results = report.get("results")
+    if not isinstance(results, list) or any(not isinstance(row, dict) for row in results):
+        raise ValueError("Partition matrix results must be JSON objects")
+    ids = [row.get("id") for row in results]
+    if (any(type(number) is not int or number not in range(1, 23) for number in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("Invalid or duplicate TPC-H query IDs in partition report")
     ok = sum(row.get("status") == "ok" for row in results)
     verify_query_fingerprints(results, fingerprints)
     complete = (len(results) == 22 and ok == 22 and process.returncode == 0
