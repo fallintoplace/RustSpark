@@ -14,7 +14,10 @@ async fn approx_quantile_summary_stays_in_engine_and_checks_inputs() -> TestResu
     let result = session.approximate_quantile_summary("events", "metric").await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE q25 IS NOT NULL AND q50 IS NOT NULL AND q75 IS NOT NULL").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE q25 IS NOT NULL AND q50 IS NOT NULL AND q75 IS NOT NULL")
+            .await?
+            .to_string(),
         "1"
     );
     assert!(session.approximate_quantile_summary("events", "missing").await.is_err());
