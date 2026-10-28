@@ -23,6 +23,8 @@ mod remove;
 
 mod range;
 
+mod list;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
