@@ -102,3 +102,33 @@ manifest rows by elapsed time and label it scanned rows if pruning applies.
 A query completes in "seconds" only if that particular result and its full
 conditions have been measured. The opt-in settings in this series are
 experiment controls, not individually proven speedups.
+
+## Qualify a complete TPC-H evidence bundle
+
+For a separate **all-22-query** qualification (not the three-query billion
+`lineitem` tuning run above), use the same generated `sf167` fixture:
+
+~~~sh
+python3 scripts/tpch_run.py \
+  --binary ./target/release/rustspark \
+  --queries-dir /data/tpch-sf167/queries \
+  --parquet-dir /data/tpch-sf167/data \
+  --require-all --warmup 1 --repeat 5 --timeout 900 \
+  --json-out /data/tpch-full-results.json
+python3 scripts/bench_tpch_verify.py \
+  --binary ./target/release/rustspark \
+  --queries-dir /data/tpch-sf167/queries \
+  --parquet-dir /data/tpch-sf167/data \
+  --timeout 900 --json-out /data/tpch-full-verified.json
+python3 scripts/bench_tpch_evidence.py \
+  /data/tpch-sf167/manifest.json \
+  /data/tpch-full-results.json \
+  /data/tpch-full-verified.json --check-files \
+  --json-out /data/tpch-qualified.json
+~~~
+
+The last command checks row counts, all SQL and result hashes, independent
+DuckDB matches, and the reported timing samples. With `--check-files`, it
+also rehashes all eight Parquet files in bounded chunks. This may take
+substantial additional disk I/O. Without that flag, only manifest metadata
+is validated. Neither result proves a cross-engine speedup.
