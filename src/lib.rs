@@ -283,6 +283,8 @@ mod sql_compat_timestamp_micros;
 mod sql_compat_tan;
 #[path = "sql_compat/tanh.rs"]
 mod sql_compat_tanh;
+#[path = "sql_compat/translate.rs"]
+mod sql_compat_translate;
 #[path = "sql_compat/try_abs.rs"]
 mod sql_compat_try_abs;
 #[path = "sql_compat/try_add.rs"]
@@ -484,6 +486,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_date_from_unix_date::udf());
         context.register_udf(sql_compat_try_abs::udf());
         context.register_udf(sql_compat_tanh::udf());
+        context.register_udf(sql_compat_translate::udf());
         context.register_udf(sql_compat_bit_count::udf());
         context.register_udf(sql_compat_validate_utf8::udf());
         context.register_udf(sql_compat_bitwise_and::udf());
