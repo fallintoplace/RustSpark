@@ -181,6 +181,8 @@ mod sql_compat_sin;
 mod sql_compat_sinh;
 #[path = "sql_compat/soundex.rs"]
 mod sql_compat_soundex;
+#[path = "sql_compat/locate.rs"]
+mod sql_compat_locate;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/startswith.rs"]
@@ -368,6 +370,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_json::json_array_length_udf());
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
+        context.register_udf(sql_compat_locate::udf());
         context.register_udf(sql_compat_luhn_check::udf());
         context.register_udf(sql_compat_mask::udf());
         context.register_udf(sql_compat_factorial::udf());
