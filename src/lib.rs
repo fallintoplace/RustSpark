@@ -56,6 +56,8 @@ mod feature_grouped_numeric_summary;
 mod sql_compat_nullifzero;
 #[path = "sql_compat/exp.rs"]
 mod sql_compat_exp;
+#[path = "features/grouped_correlation.rs"]
+mod feature_grouped_correlation;
 #[path = "features/approx_distinct_count.rs"]
 mod feature_approx_distinct_count;
 #[path = "features/grouped_approx_distinct.rs"]
