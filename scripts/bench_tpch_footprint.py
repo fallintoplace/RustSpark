@@ -54,10 +54,17 @@ def compare(a, b):
             changes.append(table)
     changed_sql = [number for number in range(1, 23)
                    if a["query_sha256"][number] != b["query_sha256"][number]]
+    before_bytes = a["total_physical_bytes"]
+    after_bytes = b["total_physical_bytes"]
     return {"identical_parquet_inputs": not changes,
             "changed_tables": changes,
             "identical_sql": not changed_sql,
-            "changed_queries": changed_sql}
+            "changed_queries": changed_sql,
+            "physical_bytes_delta": after_bytes - before_bytes,
+            "physical_bytes_change_percent": (
+                round(100 * (after_bytes - before_bytes) / before_bytes, 3)
+                if before_bytes else None),
+            }
 
 
 def main(argv=None):
