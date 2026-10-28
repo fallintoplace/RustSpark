@@ -58,7 +58,7 @@ def diagnose(binary: str, csv: str | None = None) -> dict:
         else:
             # A user-supplied CSV path is never copied into the report.
             check("csv_input", [
-                "--csv", os.fspath(source), "--sql", "SELECT 42 AS probe FROM data LIMIT 1",
+                "--csv", os.fspath(source), "--sql", "SELECT 42 AS probe FROM (SELECT COUNT(*) AS row_count FROM data) AS input_count",
                 "--stdout-format", "json-array", "--max-rows", "1",
             ], expected="probe")
     report["ok"] = all(item["ok"] for item in report["checks"])
