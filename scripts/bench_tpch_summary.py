@@ -19,7 +19,8 @@ def checked_medians(entries):
     return medians
 
 
-def summarize(report):
+def complete_query_rows(report):
+    """Require one valid result for every TPC-H query ID."""
     entries = report.get("results")
     if not isinstance(entries, list) or len(entries) != 22:
         raise ValueError("A summary requires exactly 22 TPC-H queries")
@@ -27,6 +28,11 @@ def summarize(report):
             for row in entries)
             or {row["id"] for row in entries} != set(range(1, 23))):
         raise ValueError("Missing or duplicate TPC-H query ID")
+    return entries
+
+
+def summarize(report):
+    entries = complete_query_rows(report)
     medians = checked_medians(entries)
     return {
         "queries_executed": 22,
