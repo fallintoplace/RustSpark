@@ -1,0 +1,10 @@
+[
+  {
+    "id": "null_safe_equals_null",
+    "sql": "SELECT CAST(NULL AS BIGINT) IS NOT DISTINCT FROM CAST(NULL AS BIGINT) AS same_null, 1 IS NOT DISTINCT FROM CAST(NULL AS BIGINT) AS different"
+  },
+  {
+    "id": "null_safe_distinctness",
+    "sql": "SELECT CAST(NULL AS BIGINT) IS DISTINCT FROM 3 AS different, 3 IS DISTINCT FROM 3 AS same"
+  }
+]
