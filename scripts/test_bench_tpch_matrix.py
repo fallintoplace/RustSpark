@@ -53,6 +53,20 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(args[args.index("--repeat") + 1], "2")
         self.assertIn("--json-out", args)
 
+    def test_rejects_non_hex_result_fingerprints(self):
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            def execute(command, **kwargs):
+                report = Path(command[command.index("--json-out") + 1])
+                report.write_text(json.dumps({"results": [
+                    {"id": 1, "status": "ok", "result_sha256": "x" * 64}
+                ]}))
+                return mock.Mock(returncode=0)
+            with mock.patch.object(matrix.subprocess, "run", side_effect=execute):
+                with self.assertRaisesRegex(ValueError, "fingerprint"):
+                    matrix.run_configuration("rs", "queries", "parquet", output,
+                                             1, 1, 0, {})
+
 
 if __name__ == "__main__":
     unittest.main()
