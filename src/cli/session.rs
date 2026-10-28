@@ -42,6 +42,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_metadata_hint_bytes {
         config.options_mut().execution.parquet.metadata_size_hint = Some(value);
     }
+    if args.parquet_force_row_selection {
+        config.options_mut().execution.parquet.force_filter_selections = true;
+    }
     config
 }
 
@@ -125,6 +128,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-metadata-hint-bytes", "1048576"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.metadata_size_hint, Some(1048576));
+    }
+
+    #[test]
+    fn sets_parquet_force_row_selection_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-pushdown-filters", "--parquet-force-row-selection"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.force_filter_selections, true);
     }
 
     #[test]
