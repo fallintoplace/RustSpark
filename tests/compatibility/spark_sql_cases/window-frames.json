@@ -1,0 +1,12 @@
+[
+  {
+    "id": "window_rows_one_preceding",
+    "ordered": true,
+    "sql": "SELECT id, SUM(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling FROM (VALUES (1, 10), (2, 20), (3, 30)) AS t(id, v) ORDER BY id"
+  },
+  {
+    "id": "window_range_one_preceding",
+    "ordered": true,
+    "sql": "SELECT id, SUM(v) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling FROM (VALUES (1, 10), (2, 20), (3, 30)) AS t(id, v) ORDER BY id"
+  }
+]
