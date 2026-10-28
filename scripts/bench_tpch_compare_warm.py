@@ -53,8 +53,13 @@ def compare(rustspark, duckdb, verified):
     rs, dd = checked_medians(rustspark), checked_medians(duckdb)
     if rs.keys() != dd.keys():
         raise ValueError("TPC-H query coverage differs")
-    if checked_sql_hashes(rustspark) != checked_sql_hashes(duckdb):
+    verified_hashes = checked_sql_hashes(rustspark)
+    if verified_hashes != checked_sql_hashes(duckdb):
         raise ValueError("Warm TPC-H reports use different SQL query files")
+    reference_hashes = {row["id"]: row.get("sql_sha256")
+                        for row in verified["results"]}
+    if verified_hashes != reference_hashes:
+        raise ValueError("Reference verification uses different SQL query files")
     rows = []
     for number in sorted(rs):
         ratio = dd[number] / rs[number]
