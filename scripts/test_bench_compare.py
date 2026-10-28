@@ -50,6 +50,17 @@ class ComparisonTests(unittest.TestCase):
                          [25.0, 25.0])
         self.assertEqual(report["competitor_median_over_rustspark_median"], {})
 
+    def test_three_way_rotation_balances_execution_positions(self):
+        engines = ["rustspark", "duckdb", "spark"]
+        orders = [bench_compare.rotated_engine_order(engines, index) for index in range(3)]
+        self.assertEqual(orders, [
+            ["rustspark", "duckdb", "spark"],
+            ["duckdb", "spark", "rustspark"],
+            ["spark", "rustspark", "duckdb"],
+        ])
+        for position in range(3):
+            self.assertEqual({order[position] for order in orders}, set(engines))
+
     def test_balanced_order_interleaves_engines_and_keeps_checked_samples(self):
         from bench_rustspark import expected_results, output_signature
         engine_calls = []

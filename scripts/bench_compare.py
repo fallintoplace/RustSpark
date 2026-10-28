@@ -130,6 +130,12 @@ def _benchmark_engine(binary, engine, csv, expected, repeat, warmup, timeout):
     return results
 
 
+def rotated_engine_order(engines, iteration):
+    """Give each engine every position across a full rotation."""
+    start = iteration % len(engines)
+    return engines[start:] + engines[:start]
+
+
 def benchmark_interleaved(binary, engines, csv, expected, repeat, warmup, timeout):
     """Alternate engine order each round to reduce time-of-run bias."""
     results = {engine: {} for engine in engines}
@@ -140,7 +146,7 @@ def benchmark_interleaved(binary, engines, csv, expected, repeat, warmup, timeou
         }
         samples = {engine: [] for engine in engines}
         for iteration in range(warmup + repeat):
-            order = engines if iteration % 2 == 0 else list(reversed(engines))
+            order = rotated_engine_order(engines, iteration)
             for engine in order:
                 elapsed, digest, actual = execute(commands[engine], timeout)
                 if (isinstance(elapsed, bool) or not isinstance(elapsed, (float, int))
