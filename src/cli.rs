@@ -253,6 +253,14 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
+    /// tune sort-pushdown scan read-ahead, measured in MiB.
+    #[arg(
+        long = "sort-read-ahead-mb",
+        value_name = "SIZE",
+        value_parser = parse_sort_read_ahead_bytes
+    )]
+    sort_read_ahead_bytes: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -614,6 +622,12 @@ fn parse_csv_schema(value: &str) -> Result<Schema, String> {
 
 fn parse_json_schema(value: &str) -> Result<Schema, String> {
     parse_column_schema(value, "JSON")
+}
+
+fn parse_sort_read_ahead_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--sort-read-ahead-mb")?
+        .checked_mul(1048576)
+        .ok_or_else(|| "--sort-read-ahead-mb is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
