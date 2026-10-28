@@ -46,26 +46,30 @@ fn earliest_invalid_worker_result<'scope>(
     Ok(first)
 }
 
+fn first_invalid_parallel(paths: &[(usize, PathBuf)], workers: usize) -> Result<Option<usize>> {
+    let chunk_size = paths.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let checks = paths
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                scope.spawn(move || {
+                    first_missing_file_position(chunk)
+                        .map(|index| chunk_index * chunk_size + index)
+                })
+            })
+            .collect::<Vec<_>>();
+        earliest_invalid_worker_result(checks)
+    })
+}
+
 fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Result<Option<usize>> {
     // Check large manifests in parallel while preserving the earliest error.
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
         .min(8);
     if workers > 1 && paths.len() >= 128 {
-        let chunk_size = paths.len().div_ceil(workers);
-        std::thread::scope(|scope| {
-            let checks = paths
-                .chunks(chunk_size)
-                .enumerate()
-                .map(|(chunk_index, chunk)| {
-                    scope.spawn(move || {
-                        first_missing_file_position(chunk)
-                            .map(|index| chunk_index * chunk_size + index)
-                    })
-                })
-                .collect::<Vec<_>>();
-            earliest_invalid_worker_result(checks)
-        })
+        first_invalid_parallel(paths, workers)
     } else {
         Ok(first_missing_file_position(paths))
     }
