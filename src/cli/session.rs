@@ -75,6 +75,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.join_inlist_pushdown_bytes {
         config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = value;
     }
+    if let Some(value) = args.join_inlist_pushdown_values {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = value;
+    }
     config
 }
 
@@ -235,6 +238,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--join-inlist-pushdown-bytes", "262144"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_size, 262144);
+    }
+
+    #[test]
+    fn sets_join_inlist_pushdown_values_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--join-inlist-pushdown-values", "256"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_distinct_values, 256);
     }
 
     #[test]
