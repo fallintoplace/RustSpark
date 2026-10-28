@@ -114,6 +114,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(codec) = args.spill_compression.as_deref() {
+        config = config.set_str("datafusion.execution.spill_compression", codec);
+    }
     config
 }
 
@@ -309,6 +312,38 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn supports_opt_in_spill_compression_codecs() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--spill-compression",
+            "lz4_frame",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.spill_compression.to_string(),
+            defaults.options().execution.spill_compression.to_string()
+        );
+        assert_eq!(
+            configured.options().execution.spill_compression.to_string(),
+            "lz4_frame"
+        );
+        assert!(Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--spill-compression",
+            "not-a-codec",
+        ])
+        .is_err());
     }
 
     #[test]
