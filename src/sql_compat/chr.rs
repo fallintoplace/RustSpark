@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(evaluate(321), Some("A".into()));
         assert_eq!(evaluate(-1), Some("".into()));
         assert_eq!(evaluate(-256), Some("".into()));
-        assert_eq!(evaluate(256), Some("\\0".into()));
+        assert_eq!(evaluate(256), Some("\0".into()));
     }
 
     #[tokio::test]
