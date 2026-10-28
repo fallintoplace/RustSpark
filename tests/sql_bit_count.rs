@@ -1,4 +1,4 @@
-use datafusion::arrow::array::Int64Array;
+use datafusion::arrow::array::Int32Array;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
@@ -17,7 +17,7 @@ async fn bit_count_supports_columns_nulls_and_literals() -> Result<(), Box<dyn s
         let column = batch
             .column(0)
             .as_any()
-            .downcast_ref::<Int64Array>()
+            .downcast_ref::<Int32Array>()
             .unwrap();
         actual.extend(column.iter());
     }
@@ -30,8 +30,12 @@ async fn bit_count_supports_columns_nulls_and_literals() -> Result<(), Box<dyn s
     let values = scalar[0]
         .column(0)
         .as_any()
-        .downcast_ref::<Int64Array>()
+        .downcast_ref::<Int32Array>()
         .unwrap();
     assert_eq!(values.value(0), 8);
+    assert_eq!(
+        scalar[0].schema().field(0).data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+    );
     Ok(())
 }
