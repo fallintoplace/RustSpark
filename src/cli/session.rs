@@ -31,6 +31,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.hash_join_single_partition_rows {
         config.options_mut().optimizer.hash_join_single_partition_threshold_rows = value;
     }
+    if let Some(value) = args.perfect_hash_small_build_rows {
+        config.options_mut().execution.perfect_hash_join_small_build_threshold = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -396,5 +399,18 @@ mod perf_hash_join_single_partition_rows {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-rows", "8"]).unwrap();
         assert_eq!(build_session_config(&args).options().optimizer.hash_join_single_partition_threshold_rows, 8);
         assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-rows", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_perfect_hash_small_build {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn reads_nonzero_tuning_value() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--perfect-hash-small-build-rows", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.perfect_hash_join_small_build_threshold, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--perfect-hash-small-build-rows", "0"]).is_err());
     }
 }
