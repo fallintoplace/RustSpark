@@ -55,7 +55,8 @@ def compare_table_count(binary, fixture, timeout, table, expected_count):
 def check(binary, fixture, timeout=120):
     if timeout < 1:
         raise ValueError("Timeout must be positive")
-    manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"),
+                          object_pairs_hook=unique_keys)
     if not isinstance(manifest, dict):
         raise ValueError("TPC-H row-count manifest must be a JSON object")
     expected = manifest.get("rows")
