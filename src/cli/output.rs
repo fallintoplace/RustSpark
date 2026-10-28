@@ -417,7 +417,11 @@ pub(super) async fn write_arrow_ipc(
     });
     let options = IpcWriteOptions::default().try_with_compression(codec)?;
     let mut writer =
-        FileWriter::try_new_with_options(BufWriter::new(temporary.reopen()?), &schema, options)?;
+        FileWriter::try_new_with_options(
+            BufWriter::with_capacity(128 * 1024, temporary.reopen()?),
+            &schema,
+            options,
+        )?;
     while let Some(batch) = stream.next().await {
         writer.write(&batch?)?;
     }
