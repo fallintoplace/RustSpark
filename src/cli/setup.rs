@@ -134,11 +134,14 @@ pub(super) async fn read_query(
         return Ok(std::borrow::Cow::Borrowed(sql));
     }
     if let Some(path) = args.sql_file.as_ref() {
-        let sql = if path.as_os_str() == "-" {
+        let mut sql = if path.as_os_str() == "-" {
             read_sql_stdin().await?
         } else {
             std::fs::read_to_string(path)?
         };
+        if sql.starts_with('\u{feff}') {
+            sql.replace_range(..'\u{feff}'.len_utf8(), "");
+        }
         return Ok(std::borrow::Cow::Owned(sql));
     }
     unreachable!("clap requires either --sql or --sql-file")
@@ -203,6 +206,20 @@ mod view_validation_tests {
         let parsed = parsed_union_definitions(&args).unwrap();
         assert_eq!(parsed[0], ("first", vec!["one", "two"], false));
         assert_eq!(parsed[1], ("second", vec!["three", "four"], true));
+    }
+
+    #[tokio::test]
+    async fn sql_files_accept_utf8_bom_without_changing_query_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("query.sql");
+        std::fs::write(&file, "\u{feff}SELECT 'é' AS value").unwrap();
+        let args = Args::try_parse_from([
+            "rustspark",
+            "--sql-file",
+            file.to_str().unwrap(),
+        ]).unwrap();
+        let sql = super::read_query(&args).await.unwrap();
+        assert_eq!(sql.as_ref(), "SELECT 'é' AS value");
     }
 
     #[test]
