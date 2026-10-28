@@ -90,7 +90,9 @@ pub(crate) fn get_json_object_udf() -> ScalarUDF {
                 let input = column
                     .as_any()
                     .downcast_ref::<StringArray>()
-                    .ok_or_else(|| DataFusionError::Internal("get_json_object expects UTF-8 JSON".into()))?;
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("get_json_object expects UTF-8 JSON".into())
+                    })?;
                 let parsed_path = path.as_deref().and_then(parse_json_path);
                 let mut result = StringBuilder::new();
                 for value in input.iter() {
@@ -209,9 +211,10 @@ mod tests {
         let batches = RustSparkSession::new()
             .sql(
                 r#"SELECT GET_JSON_OBJECT(payload, '$.n')
-                   FROM (VALUES ('{"n":"first"}'), ('{"n":"second"}'),
-                                ('{"other":1}'), (CAST(NULL AS VARCHAR)), ('bad json'))
-                        AS t(payload)"#,
+                   FROM (VALUES (0, '{"n":"first"}'), (1, '{"n":"second"}'),
+                                (2, '{"other":1}'), (3, CAST(NULL AS VARCHAR)),
+                                (4, 'bad json'))
+                        AS t(idx, payload) ORDER BY idx"#,
             )
             .await?
             .collect()
