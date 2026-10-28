@@ -114,9 +114,16 @@ impl ReplicaStore {
     /// Export distinct object keys into an existing regular directory.
     /// Each file is published atomically without overwrite, but the whole
     /// batch is not transactional if a later object fails.
-    pub fn export_many(&self, keys: &[&str], directory: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+    pub fn export_many(
+        &self,
+        keys: &[&str],
+        directory: &Path,
+    ) -> io::Result<Vec<std::path::PathBuf>> {
         if !fs::symlink_metadata(directory)?.file_type().is_dir() {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "Export destination must be a directory"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Export destination must be a directory",
+            ));
         }
         let mut seen = std::collections::HashSet::new();
         for key in keys {
