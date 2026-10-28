@@ -233,7 +233,7 @@ impl Parser {
         Ok(SelectItem::Scalar(Selection::new(expr, alias)))
     }
 
-    fn select(&mut self) -> Result<Plan> {
+    fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
         let mut select = Vec::new();
@@ -289,6 +289,7 @@ impl Parser {
             }
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let grouped = has_aggregates || !group_columns.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
         if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
@@ -334,10 +335,20 @@ impl Parser {
                 .collect();
             plan = plan.project(selections);
         }
+        if self.take_word("HAVING") {
+            if !grouped {
+                return Err(Error::Unsupported("HAVING requires aggregation or GROUP BY".into()));
+            }
+            plan = plan.filter(self.expression(0)?);
+        }
         if is_distinct {
             plan = Plan::Distinct { input: Box::new(plan) };
         }
 
+        Ok(plan)
+    }
+
+    fn finish_query(&mut self, mut plan: Plan) -> Result<Plan> {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
@@ -391,7 +402,13 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let plan = parser.select()?;
+    let mut plan = parser.select_body()?;
+    while parser.take_word("UNION") {
+        parser.expect_word("ALL")?;
+        let right = parser.select_body()?;
+        plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+    }
+    let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');
     if parser.peek().is_some() {
         return Err(Error::Unsupported(format!(
