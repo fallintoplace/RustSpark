@@ -1158,7 +1158,13 @@ mod tests {
                 .parquet
                 .allow_single_file_parallelism
         );
-        assert!(!configured.options().execution.parquet.allow_single_file_parallelism);
+        assert!(
+            !configured
+                .options()
+                .execution
+                .parquet
+                .allow_single_file_parallelism
+        );
     }
 
     #[test]
@@ -1220,7 +1226,12 @@ mod tests {
                 .execution
                 .enable_file_stream_work_stealing
         );
-        assert!(!configured.options().execution.enable_file_stream_work_stealing);
+        assert!(
+            !configured
+                .options()
+                .execution
+                .enable_file_stream_work_stealing
+        );
     }
 
     #[test]
@@ -1986,7 +1997,12 @@ mod perf_statistics_registry {
             "--use-statistics-registry",
         ])
         .unwrap();
-        assert!(build_session_config(&args).options().optimizer.use_statistics_registry);
+        assert!(
+            build_session_config(&args)
+                .options()
+                .optimizer
+                .use_statistics_registry
+        );
     }
 }
 
