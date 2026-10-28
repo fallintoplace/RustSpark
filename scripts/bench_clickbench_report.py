@@ -39,6 +39,19 @@ def render(report):
     if any(type(i) is not int or i not in range(1, 44) for i in ids) or len(set(ids)) != len(ids):
         raise ValueError("Invalid or duplicated query ID")
     executed = sum(row.get("status") == "executed" for row in entries)
+    attempted = report.get("queries_attempted")
+    if attempted is not None and (type(attempted) is not int or attempted != len(entries)):
+        raise ValueError("Inconsistent queries_attempted metadata")
+    claimed_executed = report.get("queries_executed")
+    if claimed_executed is not None and (
+        type(claimed_executed) is not int or claimed_executed != executed
+    ):
+        raise ValueError("Inconsistent queries_executed metadata")
+    total = report.get("queries_total")
+    if total is not None and (
+        type(total) is not int or not 1 <= total <= 43 or max(ids) > total
+    ):
+        raise ValueError("Inconsistent queries_total metadata")
     lines = [
         "# ClickBench local run", "",
         f"**Queries executed:** {executed}/{len(entries)}",
