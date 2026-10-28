@@ -87,3 +87,5 @@ pub mod bloom;
 pub mod stages;
 
 pub mod cancellation;
+
+pub mod batch_chunks;
