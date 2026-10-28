@@ -45,6 +45,15 @@ fn validate_using_source_columns(
     Ok(seen)
 }
 
+fn source_column_names(dataframe: &DataFrame) -> Vec<String> {
+    dataframe
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().to_string())
+        .collect()
+}
+
 impl RustSparkSession {
     /// Join at least two registered tables on shared, identically named keys.
     ///
@@ -78,14 +87,7 @@ impl RustSparkSession {
             }
         }
         let first = tables[0];
-        let mut names: Vec<String> = self
-            .table(first)
-            .await?
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().to_string())
-            .collect();
+        let mut names = source_column_names(&self.table(first).await?);
         let mut seen = validate_using_source_columns(&names, columns, first)?;
         let mut query = format!(
             "SELECT * FROM {}",
@@ -94,14 +96,7 @@ impl RustSparkSession {
         let left = "\"__rustspark_using_left\"";
         let right = "\"__rustspark_using_right\"";
         for table in &tables[1..] {
-            let right_names: Vec<String> = self
-                .table(table)
-                .await?
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| field.name().to_string())
-                .collect();
+            let right_names = source_column_names(&self.table(table).await?);
             validate_using_source_columns(&right_names, columns, table)?;
             let mut new_names = Vec::new();
             for name in &right_names {

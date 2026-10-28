@@ -29,6 +29,14 @@ def run_explain(binary, tables, sql_file, partitions, timeout):
     return process.stdout
 
 
+def save_explain_plan(destination, plan):
+    """Persist one plan and return its integrity metadata."""
+    destination.write_text(plan, encoding="utf-8")
+    plan_bytes = plan.encode("utf-8")
+    return {"plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+            "plan_bytes": len(plan_bytes)}
+
+
 def capture(binary, parquet, queries, output, timeout=120, partitions=2):
     if timeout < 1 or output.exists():
         raise ValueError("Timeout must be positive; output directory must not exist")
@@ -40,10 +48,7 @@ def capture(binary, parquet, queries, output, timeout=120, partitions=2):
         entry = {"id": number, "plan_file": destination.name}
         try:
             plan = run_explain(binary, tables, file, partitions, timeout)
-            destination.write_text(plan, encoding="utf-8")
-            plan_bytes = plan.encode("utf-8")
-            entry["plan_sha256"] = hashlib.sha256(plan_bytes).hexdigest()
-            entry["plan_bytes"] = len(plan_bytes)
+            entry.update(save_explain_plan(destination, plan))
             entry["status"] = "ok"
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             entry.update({"status": "error", "error": str(error)[-500:]})

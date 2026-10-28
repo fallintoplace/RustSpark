@@ -6,6 +6,22 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
+const FACTORIALS: [i64; 21] = {
+    let mut values = [1; 21];
+    let mut index = 1;
+    while index < values.len() {
+        values[index] = values[index - 1] * index as i64;
+        index += 1;
+    }
+    values
+};
+
+fn factorial(value: i64) -> Option<i64> {
+    usize::try_from(value)
+        .ok()
+        .and_then(|index| FACTORIALS.get(index).copied())
+}
+
 /// Spark's FACTORIAL returns NULL outside the inclusive range 0..=20.
 pub(crate) fn udf() -> ScalarUDF {
     create_udf(
@@ -14,27 +30,33 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args
-                .iter()
-                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            if let [ColumnarValue::Scalar(ScalarValue::Int64(value))] = args {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    value.and_then(factorial),
+                )));
+            }
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let values = arrays[0]
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("factorial expects Int64".into()))?;
-            let result: Vec<Option<i64>> = values
-                .iter()
-                .map(|value| {
-                    value.and_then(|n| (0..=20).contains(&n).then(|| (1..=n).product::<i64>()))
-                })
-                .collect();
-            if scalar {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
-                )))
-            } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
-            }
+            let result: Int64Array = values.iter().map(|value| value.and_then(factorial)).collect();
+            Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::factorial;
+
+    #[test]
+    fn factorial_table_preserves_spark_boundaries() {
+        assert_eq!(factorial(0), Some(1));
+        assert_eq!(factorial(1), Some(1));
+        assert_eq!(factorial(5), Some(120));
+        assert_eq!(factorial(20), Some(2_432_902_008_176_640_000));
+        assert_eq!(factorial(-1), None);
+        assert_eq!(factorial(21), None);
+    }
 }

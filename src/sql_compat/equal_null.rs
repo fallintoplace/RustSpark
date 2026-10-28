@@ -27,10 +27,10 @@ pub(crate) fn udf() -> ScalarUDF {
             if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
                 let left = left.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("equal_null expects Int64".into()))?;
-                let result: Vec<Option<bool>> = left.iter()
-                    .map(|left| Some(left == *right))
+                let result: BooleanArray = left.iter()
+                    .map(|left| left == *right)
                     .collect();
-                return Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(result))));
+                return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             let scalar = args
                 .iter()

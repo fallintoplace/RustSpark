@@ -6,6 +6,15 @@ use std::{
 
 use super::{ReplicaStore, invalid};
 
+// Check both before staging and before the atomic rename.
+fn ensure_destination_absent(destination: &Path, message: &'static str) -> io::Result<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(io::Error::new(ErrorKind::AlreadyExists, message)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 impl ReplicaStore {
     /// Materialize immutable snapshot parts in a fresh directory.
     /// All executors must see the same absolute path when used with Ballista.
@@ -19,11 +28,7 @@ impl ReplicaStore {
         if manifest.objects().iter().any(|key| !key.ends_with(".parquet")) {
             return Err(invalid("Snapshot contains a non-Parquet object"));
         }
-        match fs::symlink_metadata(destination) {
-            Ok(_) => return Err(io::Error::new(ErrorKind::AlreadyExists, "Destination exists")),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        ensure_destination_absent(destination, "Destination exists")?;
         let parent = destination.parent().unwrap_or_else(|| Path::new("."));
         let stage = tempfile::Builder::new()
             .prefix(".rustspark-snapshot-")
@@ -37,11 +42,7 @@ impl ReplicaStore {
             filenames.push(filename);
         }
         // This directory rename is atomic on the destination filesystem.
-        match fs::symlink_metadata(destination) {
-            Ok(_) => return Err(io::Error::new(ErrorKind::AlreadyExists, "Destination appeared")),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        ensure_destination_absent(destination, "Destination appeared")?;
         fs::rename(private, destination)?;
         Ok(filenames
             .into_iter()
@@ -54,6 +55,17 @@ impl ReplicaStore {
 mod tests {
     use super::*;
     use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn destination_guard_preserves_collision_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("target");
+        assert!(ensure_destination_absent(&destination, "Destination exists").is_ok());
+        fs::write(&destination, b"existing").unwrap();
+        let error = ensure_destination_absent(&destination, "Destination appeared").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(error.to_string(), "Destination appeared");
+    }
 
     #[test]
     fn publishes_complete_snapshot_parts_to_a_new_directory() {

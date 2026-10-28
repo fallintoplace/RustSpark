@@ -5,16 +5,21 @@ use std::{
 
 use super::{ReplicaStore, manifest::TableManifest};
 
+fn referenced_parts(store: &ReplicaStore, keys: &[String]) -> io::Result<HashSet<String>> {
+    let mut referenced = HashSet::new();
+    for key in keys.iter().filter(|key| key.starts_with("_snapshot_")) {
+        let manifest = TableManifest::decode(&store.get(key)?)?;
+        referenced.extend(manifest.objects().iter().cloned());
+    }
+    Ok(referenced)
+}
+
 impl ReplicaStore {
     /// Return candidates only. Direct callers may still use objects that are
     /// absent from snapshots, so this method does not delete anything.
     pub fn orphan_candidates(&self) -> io::Result<Vec<String>> {
         let keys = self.list_keys()?;
-        let mut referenced = HashSet::new();
-        for key in keys.iter().filter(|key| key.starts_with("_snapshot_")) {
-            let manifest = TableManifest::decode(&self.get(key)?)?;
-            referenced.extend(manifest.objects().iter().cloned());
-        }
+        let referenced = referenced_parts(self, &keys)?;
         Ok(keys
             .into_iter()
             .filter(|key| key.ends_with(".parquet") && !referenced.contains(key))

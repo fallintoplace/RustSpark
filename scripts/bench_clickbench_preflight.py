@@ -43,6 +43,12 @@ def inspect(parquet, sql_file):
     }
 
 
+def validate_report_path(report, parquet, queries):
+    """Keep report output separate from benchmark inputs."""
+    if report is not None and report.resolve() in (parquet.resolve(), queries.resolve()):
+        raise ValueError("Report output must differ from Parquet and SQL inputs")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parquet", required=True, type=Path)
@@ -50,10 +56,7 @@ def main(argv=None):
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.json_out is not None and args.json_out.resolve() in (
-            args.parquet.resolve(), args.queries.resolve(),
-        ):
-            raise ValueError("Report output must differ from Parquet and SQL inputs")
+        validate_report_path(args.json_out, args.parquet, args.queries)
         report = inspect(args.parquet, args.queries)
         output = json.dumps(report, indent=2) + "\n"
         if args.json_out:

@@ -1,0 +1,86 @@
+name: Product integrations
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/**'
+      - 'examples/streamlit/**'
+      - 'tests/product_tools/**'
+      - 'scripts/rustspark_doctor.py'
+      - '.github/workflows/product-integrations.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/**'
+      - 'examples/streamlit/**'
+      - 'tests/product_tools/**'
+      - 'scripts/rustspark_doctor.py'
+      - '.github/workflows/product-integrations.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python adapters and integrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: integrations/python/src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run standard-library integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for folder in \
+            integrations/python/tests \
+            integrations/http_gateway \
+            integrations/pyarrow \
+            integrations/polars \
+            integrations/pandas \
+            integrations/mcp \
+            examples/streamlit \
+            tests/product_tools
+          do
+            if [[ -d "$folder" ]] && compgen -G "$folder/test_*.py" > /dev/null; then
+              python3 -m unittest discover -s "$folder" -p 'test_*.py' -v
+            fi
+          done
+  node:
+    name: Node.js SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test ESM client when present
+        run: |
+          if [ -f integrations/node/package.json ]; then
+            npm --prefix integrations/node test
+          fi
+  go:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.23'
+      - name: Test Go module when present
+        run: |
+          if [ -f integrations/go/go.mod ]; then
+            cd integrations/go
+            go test ./...
+          fi
