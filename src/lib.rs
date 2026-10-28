@@ -211,6 +211,8 @@ mod sql_compat_try_mod;
 mod sql_compat_try_multiply;
 #[path = "sql_compat/try_negate.rs"]
 mod sql_compat_try_negate;
+#[path = "sql_compat/time_to_seconds.rs"]
+mod sql_compat_time_to_seconds;
 #[path = "sql_compat/try_subtract.rs"]
 mod sql_compat_try_subtract;
 #[path = "sql_compat/url_decode.rs"]
@@ -352,6 +354,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_cosh::udf());
         context.register_udf(sql_compat_bitwise_not::udf());
         context.register_udf(sql_compat_try_negate::udf());
+        context.register_udf(sql_compat_time_to_seconds::udf());
         context.register_udf(sql_compat_sinh::udf());
         context.register_udf(sql_compat_format_number::udf());
         context.register_udf(sql_compat_try_abs::udf());
