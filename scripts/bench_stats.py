@@ -14,6 +14,8 @@ def _validated_samples(samples):
                 or not math.isfinite(duration) or duration < 0):
             raise ValueError(f"Invalid benchmark duration: {duration}")
         measured.append(float(duration))
+    if not measured:
+        raise ValueError("Benchmark must have at least one timing sample")
     return measured
 
 
