@@ -27,6 +27,10 @@ def normalize(value):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
         return format(value, "f")
+    # Spark compares +0.0 and -0.0 as equal numeric values. JSON renders
+    # their sign differently, so canonicalize signed floating-point zeros.
+    if isinstance(value, float) and value == 0.0:
+        return 0.0
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value).hex()
     if isinstance(value, dict):
