@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Tune maximum per-partition IN-list dynamic filter bytes.
+    #[arg(long = "join-dynamic-inlist-kb", value_name = "KIB", value_parser = parse_join_dynamic_inlist_bytes)]
+    join_dynamic_inlist_bytes: Option<usize>,
+
     /// Expose DataFusion's size limit for single-partition hash joins.
     #[arg(long = "hash-join-single-partition-mb", value_name = "MIB", value_parser = parse_hash_join_single_partition_bytes)]
     hash_join_single_partition_bytes: Option<usize>,
@@ -719,6 +723,12 @@ fn parse_hash_join_single_partition_bytes(value: &str) -> Result<usize, String> 
     parse_positive_usize(value, "--hash-join-single-partition-mb")?
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "--hash-join-single-partition-mb exceeds the supported range".into())
+}
+
+fn parse_join_dynamic_inlist_bytes(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--join-dynamic-inlist-kb")?
+        .checked_mul(1024)
+        .ok_or_else(|| "--join-dynamic-inlist-kb exceeds the supported range".into())
 }
 
 fn parse_output_rows_per_file(value: &str) -> Result<usize, String> {
