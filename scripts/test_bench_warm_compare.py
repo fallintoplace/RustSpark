@@ -91,6 +91,12 @@ class WarmComparisonTests(unittest.TestCase):
         self.assertIn(".timer on", run.call_args.kwargs["input"])
         self.assertIn(".quit", run.call_args.kwargs["input"])
 
+    def test_comparison_requires_rustspark_engine(self):
+        with mock.patch.object(warm, "write_csv") as writer:
+            with self.assertRaisesRegex(ValueError, "include RustSpark"):
+                warm.benchmark("bin", ["duckdb"], 100, 0, 1, 10, 2, "local[2]")
+            writer.assert_not_called()
+
     def test_benchmark_rejects_nonfinite_timeouts_before_launch(self):
         for timeout in (float("nan"), float("inf"), float("-inf"), 0):
             with self.subTest(timeout=timeout):
