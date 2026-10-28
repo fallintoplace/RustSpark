@@ -55,11 +55,12 @@ impl RustSparkSession {
         let fact_frame = self.table(fact_table).await?;
         let fact_columns: HashSet<&str> = fact_frame.schema().fields()
             .iter().map(|f| f.name().as_str()).collect();
+        let projected_columns = dimensions.iter().map(|dimension| dimension.columns.len()).sum();
         let mut output_names: HashSet<String> = fact_columns.iter()
             .map(|name| name.to_ascii_lowercase()).collect();
-        let mut seen_aliases: HashSet<String> = HashSet::from([
-            "__rustspark_fact".to_string()
-        ]);
+        output_names.reserve(projected_columns);
+        let mut seen_aliases = HashSet::with_capacity(dimensions.len() + 1);
+        seen_aliases.insert("__rustspark_fact".to_string());
 
         let mut query = format!(
             " FROM {} AS {fact}",
