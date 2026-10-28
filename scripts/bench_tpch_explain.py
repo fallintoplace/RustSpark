@@ -38,6 +38,8 @@ def save_explain_plan(destination, plan):
 
 
 def capture(binary, parquet, queries, output, timeout=120, partitions=2):
+    if not queries:
+        raise ValueError("At least one TPC-H query is required for EXPLAIN")
     if timeout < 1 or output.exists():
         raise ValueError("Timeout must be positive; output directory must not exist")
     tables = input_arguments(parquet)
