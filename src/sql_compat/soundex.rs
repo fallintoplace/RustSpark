@@ -22,13 +22,22 @@ fn soundex_bytes(input: &str) -> Option<[u8; 4]> {
             _ => b'0',
         }
     }
-    let mut letters = input.bytes().filter(u8::is_ascii_alphabetic);
-    let first = letters.next()?.to_ascii_uppercase();
+    let mut letters = input.bytes();
+    let first = letters.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    let first = first.to_ascii_uppercase();
     let mut result = [b'0'; 4];
     result[0] = first;
     let mut length = 1;
     let mut previous = digit(first);
     for letter in letters {
+        // Spark treats nonletters as phonetic separators, not invisible bytes.
+        if !letter.is_ascii_alphabetic() {
+            previous = b'0';
+            continue;
+        }
         let letter = letter.to_ascii_uppercase();
         let code = digit(letter);
         if code == b'0' {
@@ -124,6 +133,47 @@ mod spark_soundex_regression {
                 None,
             ],
         );
+        Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod internal_separator_regressions {
+    use super::soundex_bytes;
+    use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
+
+    #[test]
+    fn separators_reset_duplicate_suppression() {
+        assert_eq!(soundex_bytes("PP"), Some(*b"P000"));
+        assert_eq!(soundex_bytes("P-P"), Some(*b"P100"));
+        assert_eq!(soundex_bytes("P P"), Some(*b"P100"));
+        assert_eq!(soundex_bytes("PH P"), Some(*b"P100"));
+        assert_eq!(soundex_bytes("PWP"), Some(*b"P000"));
+    }
+
+    #[tokio::test]
+    async fn sql_handles_punctuation_between_equal_consonants()
+        -> datafusion::error::Result<()>
+    {
+        let rows = RustSparkSession::new()
+            .sql("SELECT SOUNDEX('P-P'), SOUNDEX('PP')")
+            .await?
+            .collect()
+            .await?;
+        let first = rows[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let second = rows[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(first.value(0), "P100");
+        assert_eq!(second.value(0), "P000");
         Ok(())
     }
 }
