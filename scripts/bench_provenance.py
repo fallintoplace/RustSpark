@@ -32,6 +32,20 @@ def git_revision(directory):
     return None
 
 
+def git_dirty(directory):
+    """Report uncommitted changes, or None when Git state is unavailable."""
+    try:
+        process = subprocess.run(
+            ["git", "status", "--porcelain=v1"], cwd=directory,
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if process.returncode == 0:
+            return bool(process.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def host_metadata():
     """Collect platform information independently of the benchmark executable."""
     return {
@@ -48,6 +62,7 @@ def collect_provenance(executable, repository):
         "binary_bytes": executable.stat().st_size,
         **host_metadata(),
         "git_revision": git_revision(repository),
+        "git_dirty": git_dirty(repository),
     }
 
 
