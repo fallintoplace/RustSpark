@@ -20,7 +20,7 @@ def encode_jsonl_row(index):
 def write_jsonl(path, rows):
     if rows < 1:
         raise ValueError("rows must be positive")
-    with Path(path).open("w", encoding="utf-8") as stream:
+    with Path(path).open("w", encoding="utf-8", newline="\n") as stream:
         for start in range(0, rows, 4096):
             stream.write("".join(
                 encode_jsonl_row(index)
