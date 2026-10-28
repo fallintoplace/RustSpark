@@ -37,3 +37,5 @@ pub mod union;
 pub mod plan;
 
 pub mod executor;
+
+pub mod lexer;
