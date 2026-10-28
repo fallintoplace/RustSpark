@@ -37,6 +37,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.sort_read_ahead_bytes {
         config.options_mut().execution.sort_pushdown_buffer_capacity = value;
     }
+    if let Some(value) = args.planning_concurrency_override {
+        config.options_mut().execution.planning_concurrency = value;
+    }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
     }
@@ -428,5 +431,18 @@ mod perf_sort_read_ahead {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-read-ahead-mb", "8"]).unwrap();
         assert_eq!(build_session_config(&args).options().execution.sort_pushdown_buffer_capacity, 8388608);
         assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-read-ahead-mb", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_parallel_planning {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn validates_and_applies_tuning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--planning-concurrency", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.planning_concurrency, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--planning-concurrency", "0"]).is_err());
     }
 }
