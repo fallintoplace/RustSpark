@@ -25,17 +25,17 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("try_mod expects Int64".into()))?;
-            let result: Vec<Option<i64>> = lhs
+            let result: Int64Array = lhs
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| left.zip(right).and_then(|(a, b)| a.checked_rem(b)))
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )
