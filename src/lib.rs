@@ -66,6 +66,8 @@ mod sql_compat_acos;
 mod feature_group_ranks;
 #[path = "sql_compat/startswith.rs"]
 mod sql_compat_startswith;
+#[path = "sql_compat/asin.rs"]
+mod sql_compat_asin;
 #[path = "sql_compat/try_divide.rs"]
 mod sql_compat_try_divide;
 #[path = "sql_compat/try_mod.rs"]
@@ -212,6 +214,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_endswith::udf());
         context.register_udf(sql_compat_sin::udf());
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
         context.register_udf(sql_compat_radians::udf());
         context.register_udf(sql_compat_space::udf());
