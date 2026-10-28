@@ -4,6 +4,7 @@
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -38,7 +39,7 @@ def verify_query_fingerprints(results, fingerprints):
         digest = row.get("result_sha256")
         if type(number) is not int or number not in range(1, 23):
             raise ValueError("Invalid TPC-H query ID in partition report")
-        if not isinstance(digest, str) or len(digest) != 64:
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise ValueError(f"Missing result fingerprint for Q{number:02}")
         if number in fingerprints and fingerprints[number] != digest:
             raise ValueError(f"Query Q{number:02} changed answers across partitions")
