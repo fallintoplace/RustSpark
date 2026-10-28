@@ -181,6 +181,8 @@ mod sql_compat_shiftright;
 mod sql_compat_shiftrightunsigned;
 #[path = "sql_compat/sin.rs"]
 mod sql_compat_sin;
+#[path = "sql_compat/timestamp_seconds.rs"]
+mod sql_compat_timestamp_seconds;
 #[path = "sql_compat/bround.rs"]
 mod sql_compat_bround;
 #[path = "sql_compat/sinh.rs"]
@@ -320,6 +322,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_endswith::udf());
         context.register_udf(sql_compat_lcase::udf());
         context.register_udf(sql_compat_sin::udf());
+        context.register_udf(sql_compat_timestamp_seconds::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
         context.register_udf(sql_compat_asin::udf());
