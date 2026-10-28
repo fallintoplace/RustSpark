@@ -133,6 +133,8 @@ mod sql_compat_endswith;
 mod sql_compat_lcase;
 #[path = "sql_compat/equal_null.rs"]
 mod sql_compat_equal_null;
+#[path = "sql_compat/next_day.rs"]
+mod sql_compat_next_day;
 #[path = "sql_compat/ucase.rs"]
 mod sql_compat_ucase;
 #[path = "sql_compat/exp.rs"]
@@ -335,6 +337,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_exp::udf());
         context.register_udf(sql_compat_e::udf());
         context.register_udf(sql_compat_pmod::udf());
+        context.register_udf(sql_compat_next_day::udf());
         context.register_udf(sql_compat_quote::udf());
         context.register_udf(sql_compat_degrees::udf());
         context.register_udf(sql_compat_try_mod::udf());
