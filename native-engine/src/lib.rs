@@ -71,3 +71,5 @@ pub mod task_scheduler;
 pub mod metrics;
 
 pub mod optimizer;
+
+pub mod scale;
