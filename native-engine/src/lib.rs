@@ -43,3 +43,5 @@ pub mod lexer;
 pub mod sql;
 
 pub mod csv;
+
+pub mod arrow_bridge;

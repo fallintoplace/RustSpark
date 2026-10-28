@@ -9,3 +9,7 @@ publish = false
 
 # Independent from the root RustSpark crate and its DataFusion dependency.
 [workspace]
+
+[dependencies]
+arrow-array = "60.0.0"
+arrow-schema = "60.0.0"
