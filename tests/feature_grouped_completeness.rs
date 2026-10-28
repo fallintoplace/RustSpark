@@ -15,7 +15,10 @@ async fn grouped_completeness_reports_group_aggregates() -> TestResult {
     let result = session.non_null_ratio_per_group("events", "segment", "metric").await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT COUNT(*) FROM analytics WHERE completeness > 0.5").await?.to_string(),
+        session
+            .sql_scalar("SELECT COUNT(*) FROM analytics WHERE completeness > 0.5")
+            .await?
+            .to_string(),
         "1"
     );
     assert!(session.non_null_ratio_per_group("events", "segment", "missing").await.is_err());
