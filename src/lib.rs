@@ -109,6 +109,8 @@ mod sql_compat_cos;
 mod sql_compat_cosh;
 #[path = "sql_compat/cot.rs"]
 mod sql_compat_cot;
+#[path = "sql_compat/positive.rs"]
+mod sql_compat_positive;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
 #[path = "sql_compat/csc.rs"]
@@ -311,6 +313,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_tan::udf());
         context.register_udf(sql_compat_shiftleft::udf());
         context.register_udf(sql_compat_cot::udf());
+        context.register_udf(sql_compat_positive::udf());
         context.register_udf(sql_compat_shiftright::udf());
         context.register_udf(sql_compat_cbrt::udf());
         context.register_udf(sql_compat_bit_get::udf());
