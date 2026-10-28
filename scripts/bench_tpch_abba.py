@@ -32,6 +32,9 @@ def timed_command(command, timeout, ordered):
 def compare_query(commands, ordered, repeat, warmup, timeout):
     if type(repeat) is not int or repeat < 1 or type(warmup) is not int or warmup < 0:
         raise ValueError("Repeat must be positive; warmup nonnegative")
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or timeout <= 0):
+        raise ValueError("ABBA query timeout must be positive and finite")
     samples = {"baseline": [], "candidate": []}
     paired_speedups = []
     digest = None
