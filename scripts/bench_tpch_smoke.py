@@ -24,8 +24,12 @@ def commands(binary, fixture, report, scale, partitions, timeout):
 
 
 def complete_query_results(records):
-    return (isinstance(records, list) and len(records) == 22
-            and {entry.get("id") for entry in records} == set(range(1, 23))
+    if not isinstance(records, list) or len(records) != 22:
+        return False
+    if any(not isinstance(entry, dict) or type(entry.get("id")) is not int
+           for entry in records):
+        return False
+    return ({entry["id"] for entry in records} == set(range(1, 23))
             and all(entry.get("status") == "ok" for entry in records))
 
 
