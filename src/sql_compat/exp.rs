@@ -24,7 +24,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("exp expects Float64".into()))?;
-            let result = unary(values, |x| x.exp());
+            let result: Float64Array = unary(values, |x| x.exp());
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )
