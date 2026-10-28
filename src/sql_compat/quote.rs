@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// Spark SQL QUOTE escapes single quotes with a backslash.
+/// Spark QUOTE wraps SQL text in single quotes and escapes embedded quotes.
 fn evaluate(value: &str) -> Option<String> {
     Some(format!("'{}'", value.replace('\'', "\\'")))
 }
@@ -27,7 +27,8 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("quote expects Utf8".into()))?;
-            let mut result = StringBuilder::with_capacity(input0.len(), input0.len().saturating_mul(16));
+            let mut result =
+                StringBuilder::with_capacity(input0.len(), input0.len().saturating_mul(16));
             for row in 0..input0.len() {
                 let value = if input0.is_null(row) {
                     None
@@ -55,6 +56,7 @@ pub(crate) fn udf() -> ScalarUDF {
 mod tests {
     use super::evaluate;
     use crate::RustSparkSession;
+    use datafusion::arrow::array::StringArray;
 
     #[test]
     fn reference_vectors() {
@@ -69,7 +71,12 @@ mod tests {
             .await?
             .collect()
             .await?;
-        assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "\'Spark SQL\'");
         Ok(())
     }
 }
