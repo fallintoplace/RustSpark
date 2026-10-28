@@ -4,10 +4,18 @@ use super::{ReplicaStore, validate_key};
 
 fn parse_snapshot_generation(key: &str, prefix: &str) -> Option<u64> {
     let suffix = key.strip_prefix(prefix)?;
-    if suffix.len() != 20 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+    if suffix.len() != 20 {
         return None;
     }
-    suffix.parse::<u64>().ok().filter(|generation| *generation > 0)
+    let mut generation = 0_u64;
+    for byte in suffix.bytes() {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        generation = generation.checked_mul(10)?.checked_add(u64::from(digit))?;
+    }
+    (generation > 0).then_some(generation)
 }
 
 impl ReplicaStore {
@@ -40,6 +48,8 @@ mod tests {
             "_snapshot_sales_00000000000000000000",
             "_snapshot_other_00000000000000000007",
             "_snapshot_sales_0000000000000000000a",
+            "_snapshot_sales_99999999999999999999",
+            "_snapshot_sales_+0000000000000000001",
         ] {
             assert_eq!(parse_snapshot_generation(key, prefix), None);
         }
