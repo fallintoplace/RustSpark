@@ -108,6 +108,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.parquet_column_index_truncate {
+        config = config.set_usize("datafusion.execution.parquet.column_index_truncate_length", value);
+    }
     config
 }
 
@@ -303,6 +306,27 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn configures_parquet_column_index_truncate_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-column-index-truncate",
+            "256",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.parquet.column_index_truncate_length,
+            defaults.options().execution.parquet.column_index_truncate_length
+        );
+        assert_eq!(configured.options().execution.parquet.column_index_truncate_length, Some(256));
     }
 
     #[test]
