@@ -11,11 +11,19 @@ use datafusion::{
 
 /// Spark BROUND rounds floating-point numbers to a scale using ties-to-even.
 fn evaluate(value: f64, digits: i64) -> Option<f64> {
-    if !(-15..=15).contains(&digits) {
+    if !(-18..=18).contains(&digits) {
         return None;
     }
+    if !value.is_finite() {
+        return Some(value);
+    }
     let factor = 10_f64.powi(digits as i32);
-    Some((value * factor).round_ties_even() / factor)
+    let scaled = value * factor;
+    if !scaled.is_finite() {
+        // A value this large already has fewer fractional digits than requested.
+        return Some(value);
+    }
+    Some(scaled.round_ties_even() / factor)
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -25,6 +33,17 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Float64(value)),
+                ColumnarValue::Scalar(ScalarValue::Int64(digits)),
+            ] = args
+            {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Float64(
+                    value
+                        .zip(*digits)
+                        .and_then(|(value, digits)| evaluate(value, digits)),
+                )));
+            }
             let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
@@ -83,5 +102,14 @@ mod tests {
             .unwrap();
         assert_eq!(values.value(0), 2.0);
         Ok(())
+    }
+
+    #[test]
+    fn larger_scales_and_finite_extremes() {
+        assert_eq!(evaluate(1.25, 16), Some(1.25));
+        assert_eq!(evaluate(1.25, -16), Some(0.0));
+        assert_eq!(evaluate(f64::MAX, 18), Some(f64::MAX));
+        assert!(evaluate(f64::NAN, 2).unwrap().is_nan());
+        assert_eq!(evaluate(1.0, 19), None);
     }
 }
