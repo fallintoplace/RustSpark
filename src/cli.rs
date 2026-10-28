@@ -253,6 +253,14 @@ struct Args {
     #[arg(long = "memory-limit-mb", value_name = "MIB", value_parser = parse_memory_limit_mib)]
     memory_limit_bytes: Option<usize>,
 
+    /// tune subset-aware repartition threshold.
+    #[arg(
+        long = "subset-repartition-threshold",
+        value_name = "ROWS",
+        value_parser = parse_subset_repartition_threshold
+    )]
+    subset_repartition_threshold: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -614,6 +622,10 @@ fn parse_csv_schema(value: &str) -> Result<Schema, String> {
 
 fn parse_json_schema(value: &str) -> Result<Schema, String> {
     parse_column_schema(value, "JSON")
+}
+
+fn parse_subset_repartition_threshold(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--subset-repartition-threshold")
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
