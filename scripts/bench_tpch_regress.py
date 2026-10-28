@@ -62,8 +62,19 @@ def checked_regression_threshold(value):
     return value
 
 
+def check_matching_environment(baseline, candidate):
+    # These fields must agree for a fair version-to-version comparison.
+    fields = ("metric", "platform", "target_partitions", "batch_size",
+              "memory_limit_mb", "parquet_pushdown_filters", "repeat", "warmup")
+    for field in fields:
+        left, right = baseline.get(field), candidate.get(field)
+        if left != right:
+            raise ValueError(f"TPC-H benchmark {field} differs between reports")
+
+
 def compare(baseline, candidate, max_regression=0.20):
     max_regression = checked_regression_threshold(max_regression)
+    check_matching_environment(baseline, candidate)
     old, new = medians(baseline), medians(candidate)
     if old.keys() != new.keys():
         raise ValueError("TPC-H query coverage differs between reports")
