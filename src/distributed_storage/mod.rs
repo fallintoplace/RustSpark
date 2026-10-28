@@ -19,7 +19,9 @@ impl StorageNode {
     pub fn new(id: impl Into<String>, root: impl Into<PathBuf>) -> io::Result<Self> {
         let id = id.into();
         if !valid_name(&id) || id.len() > 64 {
-            return Err(invalid("Storage node id must be 1-64 ASCII filename characters"));
+            return Err(invalid(
+                "Storage node id must be 1-64 ASCII filename characters",
+            ));
         }
         let root = root.into();
         if !fs::symlink_metadata(&root)?.file_type().is_dir() {
@@ -41,7 +43,9 @@ pub struct ReplicaStore {
 impl ReplicaStore {
     pub fn new(mut nodes: Vec<StorageNode>, factor: usize) -> io::Result<Self> {
         if nodes.is_empty() || factor == 0 || factor > nodes.len() {
-            return Err(invalid("Replication factor must be between 1 and node count"));
+            return Err(invalid(
+                "Replication factor must be between 1 and node count",
+            ));
         }
         let mut ids = HashSet::new();
         let mut roots = HashSet::new();
@@ -58,7 +62,11 @@ impl ReplicaStore {
             let objects = node.root.join("objects");
             match fs::symlink_metadata(&objects) {
                 Ok(meta) if meta.file_type().is_dir() => {}
-                Ok(_) => return Err(invalid("Storage objects directory must not be a symlink or file")),
+                Ok(_) => {
+                    return Err(invalid(
+                        "Storage objects directory must not be a symlink or file",
+                    ));
+                }
                 Err(error) if error.kind() == ErrorKind::NotFound => fs::create_dir(&objects)?,
                 Err(error) => return Err(error),
             }
@@ -87,10 +95,6 @@ impl ReplicaStore {
         ranked.truncate(self.factor);
         Ok(ranked)
     }
-
-    fn object_path(&self, node: &StorageNode, key: &str) -> PathBuf {
-        node.root.join("objects").join(key)
-    }
 }
 
 fn placement_score(key: &str, node: &str) -> u64 {
@@ -113,7 +117,9 @@ fn valid_name(name: &str) -> bool {
 
 fn validate_key(key: &str) -> io::Result<()> {
     if key.len() > 120 || !valid_name(key) || key.starts_with(".tmp") {
-        return Err(invalid("Object key must be 1-120 safe ASCII filename characters"));
+        return Err(invalid(
+            "Object key must be 1-120 safe ASCII filename characters",
+        ));
     }
     Ok(())
 }
@@ -130,12 +136,11 @@ mod tests {
     #[test]
     fn placements_are_stable_across_node_input_order() {
         let root = tempfile::tempdir().unwrap();
-        let nodes = ["a", "b", "c"]
-            .map(|id| {
-                let path = root.path().join(id);
-                fs::create_dir(&path).unwrap();
-                StorageNode::new(id, path).unwrap()
-            });
+        let nodes = ["a", "b", "c"].map(|id| {
+            let path = root.path().join(id);
+            fs::create_dir(&path).unwrap();
+            StorageNode::new(id, path).unwrap()
+        });
         let first = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
         let second = ReplicaStore::new(nodes.into_iter().rev().collect(), 2).unwrap();
         let ids = |store: &ReplicaStore| {
