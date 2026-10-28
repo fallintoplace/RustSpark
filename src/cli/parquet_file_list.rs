@@ -1,29 +1,36 @@
 use std::{
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
 use datafusion::error::{DataFusionError, Result};
 
-fn parse_manifest_paths(input: &str, directory: &Path) -> Vec<(usize, PathBuf)> {
-    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-    input
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let name = line.trim();
-            if name.is_empty() || name.starts_with('#') {
-                return None;
-            }
-            let candidate = Path::new(name);
-            let path = if candidate.is_absolute() {
-                candidate.to_path_buf()
-            } else {
-                directory.join(candidate)
-            };
-            Some((index + 1, path))
-        })
-        .collect()
+fn parse_manifest_reader(
+    reader: impl BufRead,
+    directory: &Path,
+) -> Result<Vec<(usize, PathBuf)>> {
+    let mut paths = Vec::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let line = if index == 0 {
+            line.strip_prefix('\u{feff}').unwrap_or(&line)
+        } else {
+            &line
+        };
+        let name = line.trim();
+        if name.is_empty() || name.starts_with('#') {
+            continue;
+        }
+        let candidate = Path::new(name);
+        let path = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            directory.join(candidate)
+        };
+        paths.push((index + 1, path));
+    }
+    Ok(paths)
 }
 
 fn first_missing_file_position(paths: &[(usize, PathBuf)]) -> Option<usize> {
@@ -78,9 +85,9 @@ fn first_invalid_path(paths: &[(usize, PathBuf)]) -> Result<Option<usize>> {
 /// Parse an explicit list of Parquet parts; keep the data itself lazy.
 pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
     let input =
-        fs::read_to_string(manifest).map_err(|error| DataFusionError::External(Box::new(error)))?;
+        fs::File::open(manifest).map_err(|error| DataFusionError::External(Box::new(error)))?;
     let directory = manifest.parent().unwrap_or_else(|| Path::new("."));
-    let paths = parse_manifest_paths(&input, directory);
+    let paths = parse_manifest_reader(BufReader::new(input), directory)?;
 
     if paths.is_empty() {
         return Err(DataFusionError::Plan(format!(
@@ -104,15 +111,15 @@ pub(super) fn load_parquet_file_list(manifest: &Path) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_paths};
-    use std::{fs, path::Path};
+    use super::{earliest_invalid_worker_result, load_parquet_file_list, parse_manifest_reader};
+    use std::{fs, io::Cursor, path::Path};
 
     #[test]
     fn parser_keeps_source_lines_and_relative_paths() {
-        let paths = parse_manifest_paths(
-            "\u{feff}# header\n\n part-1.parquet \n# skip\npart-2.parquet\n",
+        let paths = parse_manifest_reader(
+            Cursor::new("\u{feff}# header\r\n\r\n part-1.parquet \r\n# skip\npart-2.parquet\n"),
             Path::new("data"),
-        );
+        ).unwrap();
         assert_eq!(
             paths,
             vec![
