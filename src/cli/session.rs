@@ -99,6 +99,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if let Some(value) = args.min_parallel_output_files {
+        config = config.set_usize("datafusion.execution.minimum_parallel_output_files", value);
+    }
     config
 }
 
@@ -294,6 +297,27 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn configures_min_parallel_output_files_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--min-parallel-output-files",
+            "8",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.minimum_parallel_output_files.get(),
+            defaults.options().execution.minimum_parallel_output_files.get()
+        );
+        assert_eq!(configured.options().execution.minimum_parallel_output_files.get(), 8);
     }
 
     #[test]
