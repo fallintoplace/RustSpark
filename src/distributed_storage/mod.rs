@@ -11,6 +11,8 @@ use std::{
 
 mod write;
 
+mod read;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
