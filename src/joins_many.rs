@@ -36,6 +36,38 @@ fn join_operator(kind: JoinType) -> Result<&'static str> {
     }
 }
 
+fn append_join_step_predicates(
+    query: &mut String,
+    known_aliases: &HashSet<String>,
+    right_table_alias: &str,
+    keys: &[(&str, &str, &str)],
+) -> Result<()> {
+    for (index, (left_alias, left_key, right_key)) in keys.iter().enumerate() {
+        if !known_aliases.contains(&left_alias.to_ascii_lowercase()) {
+            return Err(DataFusionError::Plan(format!(
+                "Join references unknown or future alias: {left_alias}"
+            )));
+        }
+        if left_key.trim().is_empty() || right_key.trim().is_empty() {
+            return Err(DataFusionError::Plan(
+                "Join key column names cannot be blank".into(),
+            ));
+        }
+        if index != 0 {
+            query.push_str(" AND ");
+        }
+        write!(
+            query,
+            "{}.{} = {right_table_alias}.{}",
+            quote_join_identifier(left_alias),
+            quote_join_identifier(left_key),
+            quote_join_identifier(right_key)
+        )
+        .expect("writing to a String cannot fail");
+    }
+    Ok(())
+}
+
 impl RustSparkSession {
     /// Build a lazy equality join across two or more registered tables.
     ///
@@ -86,29 +118,7 @@ impl RustSparkSession {
             write!(&mut query, " {operator} JOIN {table} AS {right_alias} ON ")
                 .expect("writing to a String cannot fail");
 
-            for (index, (left_alias, left_key, right_key)) in step.keys.iter().enumerate() {
-                if !aliases.contains(&left_alias.to_ascii_lowercase()) {
-                    return Err(DataFusionError::Plan(format!(
-                        "Join references unknown or future alias: {left_alias}"
-                    )));
-                }
-                if left_key.trim().is_empty() || right_key.trim().is_empty() {
-                    return Err(DataFusionError::Plan(
-                        "Join key column names cannot be blank".into(),
-                    ));
-                }
-                if index != 0 {
-                    query.push_str(" AND ");
-                }
-                write!(
-                    &mut query,
-                    "{}.{} = {right_alias}.{}",
-                    quote_join_identifier(left_alias),
-                    quote_join_identifier(left_key),
-                    quote_join_identifier(right_key)
-                )
-                .expect("writing to a String cannot fail");
-            }
+            append_join_step_predicates(&mut query, &aliases, &right_alias, step.keys)?;
             aliases.insert(alias_key);
         }
         self.sql(&query).await
