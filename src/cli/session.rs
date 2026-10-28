@@ -57,6 +57,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.parquet_page_row_limit {
         config.options_mut().execution.parquet.data_page_row_count_limit = value;
     }
+    if let Some(value) = args.parquet_write_batch_rows {
+        config.options_mut().execution.parquet.write_batch_size = value;
+    }
     config
 }
 
@@ -175,6 +178,13 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-page-row-limit", "4096"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.parquet.data_page_row_count_limit, 4096);
+    }
+
+    #[test]
+    fn sets_parquet_write_batch_rows_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--parquet-write-batch-rows", "16384"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().execution.parquet.write_batch_size, 16384);
     }
 
     #[test]

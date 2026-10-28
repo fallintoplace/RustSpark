@@ -303,6 +303,10 @@ struct Args {
     #[arg(long = "parquet-page-row-limit", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
     parquet_page_row_limit: Option<usize>,
 
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-write-batch-rows", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_write_batch_rows: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
