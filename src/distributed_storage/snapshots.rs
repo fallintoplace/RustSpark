@@ -58,3 +58,67 @@ mod tests {
         assert!(store.read_snapshot("sales", 0).is_err());
     }
 }
+
+impl ReplicaStore {
+    /// Return (added, removed) object keys between two generations.
+    /// The results follow their respective manifest orders.
+    pub fn snapshot_changes(
+        &self,
+        table: &str,
+        from_generation: u64,
+        to_generation: u64,
+    ) -> io::Result<(Vec<String>, Vec<String>)> {
+        let before = self.read_snapshot(table, from_generation)?;
+        let after = self.read_snapshot(table, to_generation)?;
+        let old_keys = before
+            .objects()
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let new_keys = after
+            .objects()
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let added = after
+            .objects()
+            .iter()
+            .filter(|key| !old_keys.contains(key.as_str()))
+            .cloned()
+            .collect();
+        let removed = before
+            .objects()
+            .iter()
+            .filter(|key| !new_keys.contains(key.as_str()))
+            .cloned()
+            .collect();
+        Ok((added, removed))
+    }
+}
+
+#[cfg(test)]
+mod snapshot_diff_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn reports_added_and_removed_parts_in_manifest_order() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        store
+            .create_snapshot("sales", 1, vec!["old.parquet".into(), "keep.parquet".into()])
+            .unwrap();
+        store
+            .create_snapshot("sales", 2, vec!["keep.parquet".into(), "new.parquet".into()])
+            .unwrap();
+        let (added, removed) = store.snapshot_changes("sales", 1, 2).unwrap();
+        assert_eq!(added, ["new.parquet"]);
+        assert_eq!(removed, ["old.parquet"]);
+        assert_eq!(store.snapshot_changes("sales", 2, 2).unwrap(), (vec![], vec![]));
+        assert!(store.snapshot_changes("sales", 1, 3).is_err());
+    }
+}
