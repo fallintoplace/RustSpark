@@ -31,6 +31,7 @@ def fixtures():
         } for i in range(1, 23)],
     }
     verification = {
+        "numeric_tolerance": "0.000001",
         "results": [{
             "id": i, "status": "match", "sql_sha256": query_hashes[i],
             "expected_rows": 1, "actual_rows": 1,
@@ -65,6 +66,14 @@ class EvidenceTests(unittest.TestCase):
         verification["results"][0]["status"] = "mismatch"
         with self.assertRaisesRegex(ValueError, "failed"):
             evidence.qualify(manifest, benchmark, verification)
+
+    def test_rejects_loose_or_missing_reference_tolerance(self):
+        for value in ("0.1", "NaN", "-0.001", None):
+            with self.subTest(value=value):
+                manifest, benchmark, verification = fixtures()
+                verification["numeric_tolerance"] = value
+                with self.assertRaisesRegex(ValueError, "tolerance"):
+                    evidence.qualify(manifest, benchmark, verification)
 
     def test_rejects_missing_samples_and_bad_medians(self):
         manifest, benchmark, verification = fixtures()
