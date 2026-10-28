@@ -49,3 +49,5 @@ pub mod arrow_bridge;
 pub mod spill_ipc;
 
 pub mod external_sort;
+
+pub mod parquet_scan;
