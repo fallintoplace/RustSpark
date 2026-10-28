@@ -131,6 +131,8 @@ mod sql_compat_hypot;
 mod sql_compat_json;
 #[path = "sql_compat/luhn_check.rs"]
 mod sql_compat_luhn_check;
+#[path = "sql_compat/mask.rs"]
+mod sql_compat_mask;
 #[path = "sql_compat/nullifzero.rs"]
 mod sql_compat_nullifzero;
 #[path = "sql_compat/oct.rs"]
@@ -329,6 +331,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_width_bucket::udf());
         context.register_udf(sql_compat_soundex::udf());
         context.register_udf(sql_compat_luhn_check::udf());
+        context.register_udf(sql_compat_mask::udf());
         context.register_udf(sql_compat_factorial::udf());
         Self { context }
     }
