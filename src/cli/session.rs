@@ -99,6 +99,9 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if args.split_file_groups_by_statistics {
         config.options_mut().execution.split_file_groups_by_statistics = true;
     }
+    if args.prefer_existing_union {
+        config.options_mut().optimizer.prefer_existing_union = true;
+    }
     config
 }
 
@@ -294,6 +297,26 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
         let config = super::build_session_config(&args);
         assert!(config.options().execution.split_file_groups_by_statistics);
+    }
+
+    #[test]
+    fn toggles_prefer_existing_union_only_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--prefer-existing-union",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().optimizer.prefer_existing_union,
+            defaults.options().optimizer.prefer_existing_union
+        );
+        assert_eq!(configured.options().optimizer.prefer_existing_union, true);
     }
 
     #[test]
