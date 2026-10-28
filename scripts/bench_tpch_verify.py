@@ -9,6 +9,7 @@ import argparse
 from collections import Counter, deque
 import datetime
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -148,7 +149,9 @@ def verify(binary, parquet, queries, timeout=120, partitions=2, tolerance=Decima
         for number, path in queries:
             result = {"id": number}
             try:
-                sql = path.read_text(encoding="utf-8")
+                sql_bytes = path.read_bytes()
+                sql = sql_bytes.decode("utf-8")
+                result["sql_sha256"] = hashlib.sha256(sql_bytes).hexdigest()
                 cursor = con.execute(sql)
                 columns = [item[0] for item in cursor.description]
                 if len(set(columns)) != len(columns):

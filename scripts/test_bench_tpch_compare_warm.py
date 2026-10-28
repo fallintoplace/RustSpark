@@ -14,8 +14,8 @@ def report(ms, name):
 
 
 def verification():
-    return {"results": [{"id": number, "status": "match"}
-                        for number in range(1, 23)]}
+    return {"results": [{"id": number, "status": "match",
+                         "sql_sha256": "a" * 64} for number in range(1, 23)]}
 
 
 class CompareWarmTests(unittest.TestCase):
@@ -57,6 +57,18 @@ class CompareWarmTests(unittest.TestCase):
         cold["metric"] = "cold CLI SQL"
         with self.assertRaisesRegex(ValueError, "warm"):
             compare.compare(report(10, "rs"), cold, verification())
+
+    def test_verification_must_be_for_the_same_sql_files(self):
+        reference = verification()
+        reference["results"][0]["sql_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "Reference verification uses different SQL"):
+            compare.compare(report(10, "rs"), report(20, "duckdb"), reference)
+
+    def test_unfingerprinted_reference_report_cannot_authorize_comparison(self):
+        reference = verification()
+        del reference["results"][0]["sql_sha256"]
+        with self.assertRaisesRegex(ValueError, "Reference verification uses different SQL"):
+            compare.compare(report(10, "rs"), report(20, "duckdb"), reference)
 
 
 if __name__ == "__main__":
