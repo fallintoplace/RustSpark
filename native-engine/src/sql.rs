@@ -1,6 +1,7 @@
 use crate::{
     aggregate::{AggregateItem, AggregateOp},
     expr::{BinaryOp, Expr},
+    join::JoinKind,
     lexer::{Token, tokenize},
     plan::Plan,
     project::Selection,
@@ -244,6 +245,35 @@ impl Parser {
         }
         self.expect_word("FROM")?;
         let mut plan = Plan::scan(self.identifier()?);
+        loop {
+            let kind = if self.take_word("JOIN") {
+                Some(JoinKind::Inner)
+            } else if self.take_word("INNER") {
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Inner)
+            } else if self.take_word("LEFT") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Left)
+            } else {
+                None
+            };
+            let Some(kind) = kind else { break };
+            let right = self.identifier()?;
+            self.expect_word("ON")?;
+            let left_key = self.identifier()?;
+            if self.next() != Some(Token::Operator("=".into())) {
+                return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
+            }
+            let right_key = self.identifier()?;
+            plan = Plan::Join {
+                left: Box::new(plan),
+                right: Box::new(Plan::scan(right)),
+                left_key,
+                right_key,
+                kind,
+            };
+        }
         if self.take_word("WHERE") {
             plan = plan.filter(self.expression(0)?);
         }
@@ -437,7 +467,7 @@ mod tests {
     #[test]
     fn reject_unsupported_or_multiple_statements() {
         assert!(parse_sql("SELECT * FROM sales; DROP TABLE sales").is_err());
-        assert!(parse_sql("SELECT * FROM sales JOIN customers ON id = id").is_err());
+        assert!(parse_sql("SELECT * FROM sales JOIN customers ON id > id").is_err());
         assert!(parse_sql("SELECT city, SUM(amount) FROM sales").is_err());
     }
 }
