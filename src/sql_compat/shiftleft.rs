@@ -15,21 +15,41 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             // Reuse the scalar value while shifting every row of the right column.
-            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
-                let right = right.as_any().downcast_ref::<Int64Array>()
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Int64(lhs)),
+                ColumnarValue::Array(right),
+            ] = args
+            {
+                let right = right
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("shiftleft expects Int64".into()))?;
-                let result: Int64Array = right.iter()
-                    .map(|shift| (*lhs).zip(shift).map(|(value, shift)| value.wrapping_shl(shift as u32)))
+                let result: Int64Array = right
+                    .iter()
+                    .map(|shift| {
+                        (*lhs)
+                            .zip(shift)
+                            .map(|(value, shift)| value.wrapping_shl(shift as u32))
+                    })
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             // Keep constant SQL operands as scalars instead of broadcasting a new Arrow array.
-            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
-                let left = left.as_any().downcast_ref::<Int64Array>()
+            if let [
+                ColumnarValue::Array(left),
+                ColumnarValue::Scalar(ScalarValue::Int64(right)),
+            ] = args
+            {
+                let left = left
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("shiftleft expects Int64".into()))?;
                 let mut result = Vec::with_capacity(left.len());
                 for left in left.iter() {
-                    result.push(left.zip(*right).map(|(value, shift)| value.wrapping_shl(shift as u32)));
+                    result.push(
+                        left.zip(*right)
+                            .map(|(value, shift)| value.wrapping_shl(shift as u32)),
+                    );
                 }
                 return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
             }
@@ -49,7 +69,9 @@ pub(crate) fn udf() -> ScalarUDF {
                 .iter()
                 .zip(shifts.iter())
                 .map(|(value, shift)| {
-                    value.zip(shift).map(|(value, shift)| value.wrapping_shl(shift as u32))
+                    value
+                        .zip(shift)
+                        .map(|(value, shift)| value.wrapping_shl(shift as u32))
                 })
                 .collect();
             if scalar {
@@ -75,7 +97,11 @@ mod constant_left_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(2), Some(1), None, Some(i64::MIN)]);

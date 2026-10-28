@@ -70,7 +70,9 @@ mod tests {
         });
         let store = ReplicaStore::new(nodes.to_vec(), 2).unwrap();
         for index in (0..256).rev() {
-            store.put(&format!("part-{index:04}.parquet"), b"test").unwrap();
+            store
+                .put(&format!("part-{index:04}.parquet"), b"test")
+                .unwrap();
         }
         let keys = store.list_keys().unwrap();
         assert_eq!(keys.len(), 256);

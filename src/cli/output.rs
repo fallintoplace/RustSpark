@@ -428,12 +428,11 @@ pub(super) async fn write_arrow_ipc(
         ArrowCompression::Zstd => CompressionType::ZSTD,
     });
     let options = IpcWriteOptions::default().try_with_compression(codec)?;
-    let mut writer =
-        FileWriter::try_new_with_options(
-            BufWriter::with_capacity(128 * 1024, temporary.reopen()?),
-            &schema,
-            options,
-        )?;
+    let mut writer = FileWriter::try_new_with_options(
+        BufWriter::with_capacity(128 * 1024, temporary.reopen()?),
+        &schema,
+        options,
+    )?;
     while let Some(batch) = stream.next().await {
         writer.write(&batch?)?;
     }
@@ -486,12 +485,11 @@ mod tests {
 
     #[test]
     fn utf8_cells_borrow_arrow_storage() {
-        let column: datafusion::arrow::array::ArrayRef = std::sync::Arc::new(
-            datafusion::arrow::array::StringArray::from(vec![
+        let column: datafusion::arrow::array::ArrayRef =
+            std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec![
                 Some("éclair"),
                 Some("plain"),
-            ]),
-        );
+            ]));
         assert!(matches!(
             display_cell(&column, 0).unwrap(),
             std::borrow::Cow::Borrowed("éclair")
@@ -509,10 +507,8 @@ mod tests {
             Some("large UTF-8 value"),
             None,
         ]));
-        let view: ArrayRef = std::sync::Arc::new(StringViewArray::from(vec![
-            Some("view value"),
-            None,
-        ]));
+        let view: ArrayRef =
+            std::sync::Arc::new(StringViewArray::from(vec![Some("view value"), None]));
         assert!(matches!(
             display_cell(&large, 0).unwrap(),
             std::borrow::Cow::Borrowed("large UTF-8 value")

@@ -55,12 +55,8 @@ async fn null_safe_using_matches_null_keys_and_coalesces_the_output() -> TestRes
 #[tokio::test]
 async fn null_safe_using_checks_keys_and_join_type() -> TestResult {
     let session = RustSparkSession::new();
-    session
-        .register_sql_view("l", "SELECT 1 AS id")
-        .await?;
-    session
-        .register_sql_view("r", "SELECT 1 AS id")
-        .await?;
+    session.register_sql_view("l", "SELECT 1 AS id").await?;
+    session.register_sql_view("r", "SELECT 1 AS id").await?;
     assert!(
         session
             .join_tables_using_null_safe("l", "r", JoinType::Inner, &[])

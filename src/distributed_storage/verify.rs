@@ -53,8 +53,8 @@ impl ReplicaStore {
                 Err(error) => return Err(error),
             }
         }
-        let reference = reference
-            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found"))?;
+        let reference =
+            reference.ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Object not found"))?;
         let mut result = ReplicaVerification {
             healthy: 0,
             missing: 0,

@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Array, StringArray, StringBuilder}, datatypes::DataType},
+    arrow::{
+        array::{Array, StringArray, StringBuilder},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -70,7 +73,8 @@ pub(crate) fn udf() -> ScalarUDF {
                 return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(value)));
             }
             // Produce four ASCII bytes directly in Arrow's contiguous output buffer.
-            let mut result = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(4));
+            let mut result =
+                StringBuilder::with_capacity(input.len(), input.len().saturating_mul(4));
             for value in input.iter() {
                 match value {
                     None => result.append_null(),

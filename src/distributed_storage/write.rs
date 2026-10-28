@@ -93,11 +93,8 @@ mod tests {
     #[test]
     fn idempotent_large_write_detects_same_length_divergence() {
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        )
-        .unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         let payload = vec![7_u8; 2 * 1024 * 1024];
         store.put("large.parquet", &payload).unwrap();
         store.put("large.parquet", &payload).unwrap();

@@ -354,7 +354,10 @@ mod tests {
     #[test]
     fn preview_selection_defaults_and_rejects_invalid_limits() {
         assert_eq!(parse_preview_selection("data"), Some(("data", 10)));
-        assert_eq!(parse_preview_selection("db.table 1000"), Some(("db.table", 1000)));
+        assert_eq!(
+            parse_preview_selection("db.table 1000"),
+            Some(("db.table", 1000))
+        );
         assert_eq!(parse_preview_selection("data 0"), None);
         assert_eq!(parse_preview_selection("data 1001"), None);
         assert_eq!(parse_preview_selection("data NaN"), None);

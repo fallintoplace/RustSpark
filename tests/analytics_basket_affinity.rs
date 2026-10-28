@@ -2,8 +2,7 @@ use std::{path::Path, process::Command};
 
 #[test]
 fn basket_affinity_analytics() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/analytics/basket_affinity");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/analytics/basket_affinity");
     let output = Command::new(env!("CARGO_BIN_EXE_rustspark"))
         .arg("--csv")
         .arg(path.join("data.csv"))

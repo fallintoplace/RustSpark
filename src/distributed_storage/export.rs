@@ -22,7 +22,9 @@ impl ReplicaStore {
                 // Stream bounded chunks instead of collecting a multi-GB object.
                 io::copy(&mut source, &mut staged)?;
                 staged.as_file().sync_all()?;
-                staged.persist_noclobber(destination).map_err(|error| error.error)?;
+                staged
+                    .persist_noclobber(destination)
+                    .map_err(|error| error.error)?;
                 Ok(())
             })();
             match attempt {
@@ -45,11 +47,8 @@ mod tests {
     #[test]
     fn export_is_atomic_and_does_not_clobber_a_file() {
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        )
-        .unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         store.put("part.parquet", b"object").unwrap();
         let destination = root.path().join("export.parquet");
         store.export("part.parquet", &destination).unwrap();

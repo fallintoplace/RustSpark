@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    io,
-};
+use std::{collections::HashSet, io};
 
 use super::{ReplicaStore, manifest::TableManifest};
 
@@ -30,11 +27,8 @@ mod tests {
     #[test]
     fn protects_parts_referenced_by_any_retained_snapshot() {
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        )
-        .unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         store.put("old.parquet", b"old").unwrap();
         store.put("active.parquet", b"active").unwrap();
         store

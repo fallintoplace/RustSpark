@@ -21,8 +21,15 @@ async fn shiftrightunsigned_supports_rows_and_nulls() -> Result<(), Box<dyn std:
             .unwrap();
         actual.extend(column.iter());
     }
-    assert_eq!(actual, vec![Some(9223372036854775807), Some(2), Some(8), None]);
-    let scalar = session.sql("SELECT SHIFTRIGHTUNSIGNED(16, 2)").await?.collect().await?;
+    assert_eq!(
+        actual,
+        vec![Some(9223372036854775807), Some(2), Some(8), None]
+    );
+    let scalar = session
+        .sql("SELECT SHIFTRIGHTUNSIGNED(16, 2)")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

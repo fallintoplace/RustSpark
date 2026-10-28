@@ -87,7 +87,9 @@ impl RustSparkSession {
             ));
         }
         if base_alias.trim().is_empty() {
-            return Err(DataFusionError::Plan("Base join alias cannot be blank".into()));
+            return Err(DataFusionError::Plan(
+                "Base join alias cannot be blank".into(),
+            ));
         }
         let mut aliases = HashSet::new();
         aliases.insert(base_alias.to_ascii_lowercase());
@@ -104,7 +106,8 @@ impl RustSparkSession {
             let alias_key = step.alias.to_ascii_lowercase();
             if aliases.contains(&alias_key) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate join alias: {}", step.alias
+                    "Duplicate join alias: {}",
+                    step.alias
                 )));
             }
             if step.keys.is_empty() {

@@ -57,7 +57,8 @@ impl RustSparkSession {
         for range in ranges {
             if range.alias.trim().is_empty() || !seen.insert(range.alias.to_ascii_lowercase()) {
                 return Err(DataFusionError::Plan(format!(
-                    "Duplicate or blank interval join alias: {}", range.alias
+                    "Duplicate or blank interval join alias: {}",
+                    range.alias
                 )));
             }
             if range.value_column.trim().is_empty()
@@ -71,9 +72,11 @@ impl RustSparkSession {
             let operator = match range.join_type {
                 JoinType::Inner => "INNER",
                 JoinType::Left => "LEFT",
-                _ => return Err(DataFusionError::Plan(
-                    "join_many_range_tables supports inner and left joins only".into(),
-                )),
+                _ => {
+                    return Err(DataFusionError::Plan(
+                        "join_many_range_tables supports inner and left joins only".into(),
+                    ));
+                }
             };
             let (lower_cmp, upper_cmp) = match range.bounds {
                 RangeJoinBounds::Open => (">", "<"),
@@ -81,9 +84,8 @@ impl RustSparkSession {
                 RangeJoinBounds::LeftClosed => (">=", "<"),
                 RangeJoinBounds::RightClosed => (">", "<="),
             };
-            let interval_table = quote_catalog_table(
-                range.table, "Invalid range join interval table name"
-            )?;
+            let interval_table =
+                quote_catalog_table(range.table, "Invalid range join interval table name")?;
             let alias = quote_join_identifier(range.alias);
             write!(
                 &mut query,

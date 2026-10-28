@@ -17,15 +17,36 @@ async fn group_row_numbers_restart_for_each_partition() -> TestResult {
         .await?;
     session.register_dataframe("numbered", numbered)?;
     assert_eq!(
-        session.sql_scalar("SELECT MAX(\"rank number\") FROM numbered WHERE team = 'a'").await?.to_string(),
+        session
+            .sql_scalar("SELECT MAX(\"rank number\") FROM numbered WHERE team = 'a'")
+            .await?
+            .to_string(),
         "2"
     );
     assert_eq!(
-        session.sql_scalar("SELECT MAX(\"rank number\") FROM numbered WHERE team = 'b'").await?.to_string(),
+        session
+            .sql_scalar("SELECT MAX(\"rank number\") FROM numbered WHERE team = 'b'")
+            .await?
+            .to_string(),
         "1"
     );
-    assert!(session.with_group_row_numbers("scores", &[], &[("score", false)], "rn").await.is_err());
-    assert!(session.with_group_row_numbers("scores", &["team"], &[], "rn").await.is_err());
-    assert!(session.with_group_row_numbers("scores", &["team"], &[("score", false)], "team").await.is_err());
+    assert!(
+        session
+            .with_group_row_numbers("scores", &[], &[("score", false)], "rn")
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .with_group_row_numbers("scores", &["team"], &[], "rn")
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .with_group_row_numbers("scores", &["team"], &[("score", false)], "team")
+            .await
+            .is_err()
+    );
     Ok(())
 }

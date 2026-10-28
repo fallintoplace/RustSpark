@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{BooleanArray, Int64Array}, datatypes::DataType},
+    arrow::{
+        array::{BooleanArray, Int64Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -15,21 +18,30 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             // Keep a constant left argument as a scalar for the entire batch.
-            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
-                let right = right.as_any().downcast_ref::<Int64Array>()
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Int64(lhs)),
+                ColumnarValue::Array(right),
+            ] = args
+            {
+                let right = right
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("equal_null expects Int64".into()))?;
-                let result: BooleanArray = right.iter()
-                    .map(|value| *lhs == value)
-                    .collect();
+                let result: BooleanArray = right.iter().map(|value| *lhs == value).collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             // Keep a literal right operand scalar across an entire input batch.
-            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(right))] = args {
-                let left = left.as_any().downcast_ref::<Int64Array>()
+            if let [
+                ColumnarValue::Array(left),
+                ColumnarValue::Scalar(ScalarValue::Int64(right)),
+            ] = args
+            {
+                let left = left
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("equal_null expects Int64".into()))?;
-                let result: Vec<Option<bool>> = left.iter()
-                    .map(|left| Some(left == *right))
-                    .collect();
+                let result: Vec<Option<bool>> =
+                    left.iter().map(|left| Some(left == *right)).collect();
                 return Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(result))));
             }
             let scalar = args
@@ -73,7 +85,11 @@ mod constant_left_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch.column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(true), Some(false), Some(false)]);

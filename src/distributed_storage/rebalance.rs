@@ -34,7 +34,10 @@ impl ReplicaStore {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_file() => return Ok(path),
                 Ok(_) => {
-                    last_error = Some(io::Error::new(ErrorKind::InvalidData, "Unsafe source replica"));
+                    last_error = Some(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "Unsafe source replica",
+                    ));
                 }
                 Err(error) => last_error = Some(error),
             }
@@ -57,9 +60,17 @@ impl ReplicaStore {
                         if matching_files(&source_path, &target)? {
                             continue;
                         }
-                        return Err(io::Error::new(ErrorKind::AlreadyExists, "Divergent destination replica"));
+                        return Err(io::Error::new(
+                            ErrorKind::AlreadyExists,
+                            "Divergent destination replica",
+                        ));
                     }
-                    Ok(_) => return Err(io::Error::new(ErrorKind::InvalidData, "Unsafe destination replica")),
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsafe destination replica",
+                        ));
+                    }
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
@@ -75,7 +86,10 @@ impl ReplicaStore {
                         if !fs::symlink_metadata(&target)?.file_type().is_file()
                             || !matching_files(&source_path, &target)?
                         {
-                            return Err(io::Error::new(ErrorKind::AlreadyExists, "Divergent destination replica"));
+                            return Err(io::Error::new(
+                                ErrorKind::AlreadyExists,
+                                "Divergent destination replica",
+                            ));
                         }
                     }
                     Err(error) => return Err(error.error),

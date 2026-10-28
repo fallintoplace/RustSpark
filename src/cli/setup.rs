@@ -213,11 +213,8 @@ mod view_validation_tests {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("query.sql");
         std::fs::write(&file, "\u{feff}SELECT 'é' AS value").unwrap();
-        let args = Args::try_parse_from([
-            "rustspark",
-            "--sql-file",
-            file.to_str().unwrap(),
-        ]).unwrap();
+        let args =
+            Args::try_parse_from(["rustspark", "--sql-file", file.to_str().unwrap()]).unwrap();
         let sql = super::read_query(&args).await.unwrap();
         assert_eq!(sql.as_ref(), "SELECT 'é' AS value");
     }

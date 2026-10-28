@@ -45,10 +45,8 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| DataFusionError::Internal("luhn_check expects Utf8".into()))?;
-            let result: Vec<Option<bool>> = input
-                .iter()
-                .map(|value| value.map(valid_luhn))
-                .collect();
+            let result: Vec<Option<bool>> =
+                input.iter().map(|value| value.map(valid_luhn)).collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
                     result.into_iter().next().flatten(),

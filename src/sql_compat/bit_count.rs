@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{Array, Int64Array}, datatypes::DataType},
+    arrow::{
+        array::{Array, Int64Array},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -25,7 +28,10 @@ pub(crate) fn udf() -> ScalarUDF {
             // A non-nullable primitive array can skip per-row validity checks.
             let result: Int64Array = if input.null_count() == 0 {
                 Int64Array::from_iter_values(
-                    input.values().iter().map(|value| i64::from(value.count_ones())),
+                    input
+                        .values()
+                        .iter()
+                        .map(|value| i64::from(value.count_ones())),
                 )
             } else {
                 input
@@ -56,7 +62,11 @@ mod no_nulls_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(1), Some(64), Some(0)]);

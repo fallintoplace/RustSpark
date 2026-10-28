@@ -40,11 +40,8 @@ mod tests {
     #[test]
     fn delete_is_repeatable_and_removes_data() {
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        )
-        .unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         store.put("part.parquet", b"data").unwrap();
         assert_eq!(store.delete("part.parquet").unwrap(), 1);
         assert_eq!(store.delete("part.parquet").unwrap(), 0);
@@ -66,7 +63,10 @@ mod tests {
         let second = placements[1].root.join("objects/part.parquet");
         fs::remove_file(&second).unwrap();
         fs::create_dir(&second).unwrap();
-        assert_eq!(store.delete("part.parquet").unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            store.delete("part.parquet").unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
         assert_eq!(fs::read(first).unwrap(), b"keep");
     }
 }

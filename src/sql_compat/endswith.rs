@@ -17,20 +17,42 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             // A constant input string does not need an Arrow broadcast array.
-            if let [ColumnarValue::Scalar(ScalarValue::Utf8(left)), ColumnarValue::Array(right)] = args {
-                let right = right.as_any().downcast_ref::<StringArray>()
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Utf8(left)),
+                ColumnarValue::Array(right),
+            ] = args
+            {
+                let right = right
+                    .as_any()
+                    .downcast_ref::<StringArray>()
                     .ok_or_else(|| DataFusionError::Internal("endswith expects Utf8".into()))?;
-                let result: BooleanArray = right.iter()
-                    .map(|pattern| left.as_deref().zip(pattern).map(|(value, pattern)| value.ends_with(pattern)))
+                let result: BooleanArray = right
+                    .iter()
+                    .map(|pattern| {
+                        left.as_deref()
+                            .zip(pattern)
+                            .map(|(value, pattern)| value.ends_with(pattern))
+                    })
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             // Reuse the scalar right argument without making a repeated Arrow array.
-            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Utf8(rhs))] = args {
-                let left = left.as_any().downcast_ref::<StringArray>()
+            if let [
+                ColumnarValue::Array(left),
+                ColumnarValue::Scalar(ScalarValue::Utf8(rhs)),
+            ] = args
+            {
+                let left = left
+                    .as_any()
+                    .downcast_ref::<StringArray>()
                     .ok_or_else(|| DataFusionError::Internal("endswith expects Utf8".into()))?;
-                let result: Vec<Option<bool>> = left.iter()
-                    .map(|value| value.zip(rhs.as_deref()).map(|(value, suffix)| value.ends_with(suffix)))
+                let result: Vec<Option<bool>> = left
+                    .iter()
+                    .map(|value| {
+                        value
+                            .zip(rhs.as_deref())
+                            .map(|(value, suffix)| value.ends_with(suffix))
+                    })
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(result))));
             }
@@ -74,7 +96,11 @@ mod constant_left_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch.column(0).as_any().downcast_ref::<BooleanArray>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(true), Some(false), None, Some(true)]);

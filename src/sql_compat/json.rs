@@ -80,19 +80,28 @@ pub(crate) fn get_json_object_udf() -> ScalarUDF {
         DataType::Utf8,
         Volatility::Immutable,
         Arc::new(|args| {
-            let all_scalars = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            let all_scalars = args
+                .iter()
+                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input = arrays[0]
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| DataFusionError::Internal("get_json_object expects UTF-8 JSON".into()))?;
+                .ok_or_else(|| {
+                    DataFusionError::Internal("get_json_object expects UTF-8 JSON".into())
+                })?;
             let paths = arrays[1]
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| DataFusionError::Internal("get_json_object expects UTF-8 path".into()))?;
+                .ok_or_else(|| {
+                    DataFusionError::Internal("get_json_object expects UTF-8 path".into())
+                })?;
             let mut result = StringBuilder::new();
             for (input, path) in input.iter().zip(paths.iter()) {
-                match input.zip(path).and_then(|(input, path)| query_json(input, path)) {
+                match input
+                    .zip(path)
+                    .and_then(|(input, path)| query_json(input, path))
+                {
                     Some(value) => result.append_value(value),
                     None => result.append_null(),
                 }
@@ -115,26 +124,28 @@ pub(crate) fn json_valid_udf() -> ScalarUDF {
         vec![DataType::Utf8],
         DataType::Boolean,
         Volatility::Immutable,
-        Arc::new(|args| {
-            match args {
-                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
-                    Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
-                        value.as_deref().map(|text| serde_json::from_str::<serde_json::Value>(text).is_ok()),
-                    )))
-                }
-                [ColumnarValue::Array(array)] => {
-                    let input = array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
-                    let result: BooleanArray = input
-                        .iter()
-                        .map(|text| text.map(|text| serde_json::from_str::<serde_json::Value>(text).is_ok()))
-                        .collect();
-                    Ok(ColumnarValue::Array(Arc::new(result)))
-                }
-                _ => Err(DataFusionError::Internal("json_valid expects UTF-8".into())),
+        Arc::new(|args| match args {
+            [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
+                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(
+                    value
+                        .as_deref()
+                        .map(|text| serde_json::from_str::<serde_json::Value>(text).is_ok()),
+                )))
             }
+            [ColumnarValue::Array(array)] => {
+                let input = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| DataFusionError::Internal("json_valid expects UTF-8".into()))?;
+                let result: BooleanArray = input
+                    .iter()
+                    .map(|text| {
+                        text.map(|text| serde_json::from_str::<serde_json::Value>(text).is_ok())
+                    })
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(result)))
+            }
+            _ => Err(DataFusionError::Internal("json_valid expects UTF-8".into())),
         }),
     )
 }
@@ -152,20 +163,23 @@ pub(crate) fn json_array_length_udf() -> ScalarUDF {
                 i64::try_from(array.len()).ok()
             }
             match args {
-                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
-                    Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                        value.as_deref().and_then(length),
-                    )))
-                }
+                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => Ok(ColumnarValue::Scalar(
+                    ScalarValue::Int64(value.as_deref().and_then(length)),
+                )),
                 [ColumnarValue::Array(array)] => {
                     let input = array
                         .as_any()
                         .downcast_ref::<StringArray>()
-                        .ok_or_else(|| DataFusionError::Internal("json_array_length expects UTF-8".into()))?;
-                    let result: Int64Array = input.iter().map(|value| value.and_then(length)).collect();
+                        .ok_or_else(|| {
+                            DataFusionError::Internal("json_array_length expects UTF-8".into())
+                        })?;
+                    let result: Int64Array =
+                        input.iter().map(|value| value.and_then(length)).collect();
                     Ok(ColumnarValue::Array(Arc::new(result)))
                 }
-                _ => Err(DataFusionError::Internal("json_array_length expects UTF-8".into())),
+                _ => Err(DataFusionError::Internal(
+                    "json_array_length expects UTF-8".into(),
+                )),
             }
         }),
     )
@@ -180,7 +194,10 @@ mod tests {
         let doc = r#"{"outer":{"items":[{"x":1},{"x":"two"}]},"hyphen-key":true}"#;
         assert_eq!(query_json(doc, "$.outer.items[1].x"), Some("two".into()));
         assert_eq!(query_json(doc, "$['hyphen-key']"), Some("true".into()));
-        assert_eq!(query_json(doc, "$.outer.items[0]"), Some(r#"{"x":1}"#.into()));
+        assert_eq!(
+            query_json(doc, "$.outer.items[0]"),
+            Some(r#"{"x":1}"#.into())
+        );
         assert_eq!(query_json(doc, "$.outer.items[9]"), None);
     }
 

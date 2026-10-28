@@ -26,7 +26,8 @@ pub(crate) fn udf() -> ScalarUDF {
                 .ok_or_else(|| DataFusionError::Internal("space expects Int64".into()))?;
             // Use one contiguous Arrow buffer instead of allocating a String per row.
             const CHUNK: &str = "                                                                ";
-            let mut result = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(16));
+            let mut result =
+                StringBuilder::with_capacity(input.len(), input.len().saturating_mul(16));
             for value in input.iter() {
                 match value {
                     None => result.append_null(),
@@ -41,9 +42,12 @@ pub(crate) fn udf() -> ScalarUDF {
                             ));
                         }
                         for _ in 0..count / CHUNK.len() {
-                            result.write_str(CHUNK).expect("writing to an Arrow string buffer cannot fail");
+                            result
+                                .write_str(CHUNK)
+                                .expect("writing to an Arrow string buffer cannot fail");
                         }
-                        result.write_str(&CHUNK[..count % CHUNK.len()])
+                        result
+                            .write_str(&CHUNK[..count % CHUNK.len()])
                             .expect("writing to an Arrow string buffer cannot fail");
                         result.append_value("");
                     }

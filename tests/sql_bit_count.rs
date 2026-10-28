@@ -22,7 +22,11 @@ async fn bit_count_supports_columns_nulls_and_literals() -> Result<(), Box<dyn s
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(2), Some(64), None, Some(0)]);
-    let scalar = session.sql("SELECT BIT_COUNT(255)").await?.collect().await?;
+    let scalar = session
+        .sql("SELECT BIT_COUNT(255)")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

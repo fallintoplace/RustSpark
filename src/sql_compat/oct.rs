@@ -26,11 +26,16 @@ pub(crate) fn udf() -> ScalarUDF {
                 .ok_or_else(|| DataFusionError::Internal("oct expects Int64".into()))?;
             if scalar {
                 return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                    input.iter().next().flatten().map(|number| format!("{:o}", number as u64)),
+                    input
+                        .iter()
+                        .next()
+                        .flatten()
+                        .map(|number| format!("{:o}", number as u64)),
                 )));
             }
             // Write formatted digits directly into the Arrow string buffer.
-            let mut result = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(16));
+            let mut result =
+                StringBuilder::with_capacity(input.len(), input.len().saturating_mul(16));
             for value in input.iter() {
                 if let Some(number) = value {
                     write!(&mut result, "{:o}", number as u64)
