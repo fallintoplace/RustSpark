@@ -46,6 +46,8 @@ mod sql_compat_endswith;
 mod feature_top_groups_by_count;
 #[path = "sql_compat/sin.rs"]
 mod sql_compat_sin;
+#[path = "features/grouped_stddev.rs"]
+mod feature_grouped_stddev;
 #[path = "features/numeric_column_summary.rs"]
 mod feature_numeric_column_summary;
 #[path = "features/grouped_numeric_summary.rs"]
