@@ -38,6 +38,66 @@ fn outer_join_operator(
 }
 
 impl RustSparkSession {
+    /// Keep left rows whose half-open intervals overlap no right interval.
+    ///
+    /// Equality key pairs optionally restrict comparisons to matching groups.
+    /// Right-side duplicates never multiply left rows. NULL, empty or reversed
+    /// left intervals are retained because they overlap no valid interval.
+    pub async fn exclude_overlapping_intervals(
+        &self,
+        left: &str,
+        right: &str,
+        left_bounds: (&str, &str),
+        right_bounds: (&str, &str),
+        keys: &[(&str, &str)],
+    ) -> Result<DataFrame> {
+        use std::fmt::Write as _;
+
+        if !keys.is_empty() {
+            validate_join_key_pairs(
+                keys,
+                "exclude_overlapping_intervals requires non-empty key pairs",
+            )?;
+        }
+        if [
+            left_bounds.0,
+            left_bounds.1,
+            right_bounds.0,
+            right_bounds.1,
+        ]
+        .iter()
+        .any(|column| column.trim().is_empty())
+        {
+            return Err(DataFusionError::Plan(
+                "Interval exclusion requires non-empty boundary columns".into(),
+            ));
+        }
+        let left_alias = "\"__rustspark_left\"";
+        let right_alias = "\"__rustspark_right\"";
+        let ls = format!("{left_alias}.{}", quote_join_identifier(left_bounds.0));
+        let le = format!("{left_alias}.{}", quote_join_identifier(left_bounds.1));
+        let rs = format!("{right_alias}.{}", quote_join_identifier(right_bounds.0));
+        let re = format!("{right_alias}.{}", quote_join_identifier(right_bounds.1));
+        let mut predicates = format!(
+            "{ls} < {le} AND {rs} < {re} AND {ls} < {re} AND {rs} < {le}"
+        );
+        for (left_key, right_key) in keys {
+            write!(
+                &mut predicates,
+                " AND {left_alias}.{} = {right_alias}.{}",
+                quote_join_identifier(left_key),
+                quote_join_identifier(right_key),
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let query = format!(
+            "SELECT {left_alias}.* FROM {} AS {left_alias} WHERE NOT EXISTS (SELECT 1 FROM {} AS {right_alias} WHERE {predicates})",
+            quote_join_table(left)?,
+            quote_join_table(right)?,
+        );
+        self.sql(&query).await
+    }
+
     /// Join two registered tables by their shared column names (SQL USING).
     ///
     /// Each join key appears once in the output, unlike an ON join. FULL OUTER
