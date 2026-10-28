@@ -23,8 +23,9 @@ def scales(raw):
 
 
 def commands(scale, binary, output):
-    fixture = output / f"sf-{scale:g}"
-    report = output / f"sf-{scale:g}.json"
+    # repr keeps distinct binary floats distinct while preserving short names.
+    fixture = output / f"sf-{scale!r}"
+    report = output / f"sf-{scale!r}.json"
     directory = Path(__file__).parent
     prepare = [sys.executable, str(directory / "tpch_prepare.py"),
                "--scale-factor", str(scale), "--output", str(fixture)]
