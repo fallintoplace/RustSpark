@@ -11,7 +11,11 @@ use datafusion::{
 
 /// Spark LOCATE returns the one-based Unicode position of a substring.
 fn evaluate(needle: &str, haystack: &str) -> Option<i64> {
-    Some(haystack.find(needle).map_or(0, |offset| haystack[..offset].chars().count() as i64 + 1))
+    Some(
+        haystack
+            .find(needle)
+            .map_or(0, |offset| haystack[..offset].chars().count() as i64 + 1),
+    )
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -21,6 +25,57 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Utf8(needle)),
+                ColumnarValue::Scalar(ScalarValue::Utf8(haystack)),
+            ] = args
+            {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                    needle
+                        .as_deref()
+                        .zip(haystack.as_deref())
+                        .and_then(|(needle, haystack)| evaluate(needle, haystack)),
+                )));
+            }
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Utf8(needle)),
+                ColumnarValue::Array(haystack),
+            ] = args
+            {
+                let haystack = haystack
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| DataFusionError::Internal("locate expects Utf8".into()))?;
+                let result: Int64Array = haystack
+                    .iter()
+                    .map(|value| {
+                        needle
+                            .as_deref()
+                            .zip(value)
+                            .and_then(|(needle, value)| evaluate(needle, value))
+                    })
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(result)));
+            }
+            if let [
+                ColumnarValue::Array(needle),
+                ColumnarValue::Scalar(ScalarValue::Utf8(haystack)),
+            ] = args
+            {
+                let needle = needle
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| DataFusionError::Internal("locate expects Utf8".into()))?;
+                let result: Int64Array = needle
+                    .iter()
+                    .map(|value| {
+                        value
+                            .zip(haystack.as_deref())
+                            .and_then(|(needle, haystack)| evaluate(needle, haystack))
+                    })
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(result)));
+            }
             let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let input0 = arrays[0]
@@ -76,6 +131,26 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(values.value(0), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn locates_constant_needle_in_nullable_column() -> datafusion::error::Result<()> {
+        let batches = RustSparkSession::new()
+            .sql(concat!(
+                "SELECT LOCATE('é', v) FROM ",
+                "(VALUES (0, 'café'), (1, CAST(NULL AS VARCHAR)), (2, 'xyz')) ",
+                "AS t(id, v) ORDER BY id"
+            ))
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(4), None, Some(0)]);
         Ok(())
     }
 }
