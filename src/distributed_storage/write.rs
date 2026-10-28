@@ -239,3 +239,52 @@ mod tests {
         );
     }
 }
+
+impl ReplicaStore {
+    /// Ingest a regular local file with bounded memory and immutable replica
+    /// semantics. Symlink and directory sources are rejected.
+    pub fn put_file(&self, key: &str, source: &Path) -> io::Result<u64> {
+        if !fs::symlink_metadata(source)?.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Source must be a regular file",
+            ));
+        }
+        let file = File::open(source)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Source must be a regular file",
+            ));
+        }
+        self.put_reader(key, file)
+    }
+}
+
+#[cfg(test)]
+mod put_file_feature_tests {
+    use super::*;
+    use crate::distributed_storage::StorageNode;
+
+    #[test]
+    fn ingests_local_file_and_preserves_immutable_retry_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("input.parquet");
+        let content = vec![0x5a; 2 * 1024 * 1024 + 1];
+        fs::write(&source, &content).unwrap();
+        let store = ReplicaStore::new(
+            vec![StorageNode::new("a", root.path()).unwrap()],
+            1,
+        )
+        .unwrap();
+        assert_eq!(store.put_file("part.parquet", &source).unwrap(), content.len() as u64);
+        assert_eq!(store.put_file("part.parquet", &source).unwrap(), content.len() as u64);
+        assert_eq!(store.get("part.parquet").unwrap(), content);
+        fs::write(&source, b"changed").unwrap();
+        assert_eq!(
+            store.put_file("part.parquet", &source).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(store.put_file("dir.parquet", root.path()).is_err());
+    }
+}
