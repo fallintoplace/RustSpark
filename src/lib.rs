@@ -83,6 +83,8 @@ mod set_operations;
 mod sources;
 #[path = "sql_compat/acos.rs"]
 mod sql_compat_acos;
+#[path = "sql_compat/is_valid_utf8.rs"]
+mod sql_compat_is_valid_utf8;
 #[path = "sql_compat/year.rs"]
 mod sql_compat_year;
 #[path = "sql_compat/acosh.rs"]
@@ -414,6 +416,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_timestamp_millis::udf());
         context.register_udf(sql_compat_monthname::udf());
         context.register_udf(sql_compat_acos::udf());
+        context.register_udf(sql_compat_is_valid_utf8::udf());
         context.register_udf(sql_compat_dayname::udf());
         context.register_udf(sql_compat_year::udf());
         context.register_udf(sql_compat_zeroifnull::udf());
