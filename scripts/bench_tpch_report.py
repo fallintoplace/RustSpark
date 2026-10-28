@@ -28,6 +28,17 @@ def render_query_row(row):
     return f"| {row['id']:02} | {status} | {cells[0]} | {cells[1]} |"
 
 
+def append_latency_concentration(lines, ok, results):
+    if len(ok) == 22 and len(results) == 22:
+        total_ms = sum(checked_time(row["median_ms"], "median") for row in ok)
+        if total_ms > 0:
+            slowest = sorted(ok, key=lambda row: row["median_ms"], reverse=True)[:3]
+            lines.extend(["", "## Latency concentration", ""])
+            for row in slowest:
+                share = checked_time(row["median_ms"], "median") / total_ms * 100
+                lines.append(f"- Q{row['id']:02}: {share:.1f}% of summed query medians")
+
+
 def render(report):
     results = report.get("results")
     if not isinstance(results, list) or not results:
@@ -46,14 +57,7 @@ def render(report):
     ]
     for row in sorted(results, key=lambda item: item["id"]):
         lines.append(render_query_row(row))
-    if len(ok) == 22 and len(results) == 22:
-        total_ms = sum(checked_time(row["median_ms"], "median") for row in ok)
-        if total_ms > 0:
-            slowest = sorted(ok, key=lambda row: row["median_ms"], reverse=True)[:3]
-            lines.extend(["", "## Latency concentration", ""])
-            for row in slowest:
-                share = checked_time(row["median_ms"], "median") / total_ms * 100
-                lines.append(f"- Q{row['id']:02}: {share:.1f}% of summed query medians")
+    append_latency_concentration(lines, ok, results)
     failures = [row for row in results if row.get("status") != "ok"]
     if failures:
         lines.extend(["", "## Failures", ""])
