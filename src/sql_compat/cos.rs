@@ -14,16 +14,16 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Float64,
         Volatility::Immutable,
         Arc::new(|args| {
-            let scalar = args.iter().all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            let scalar = args
+                .iter()
+                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
             let arrays = ColumnarValue::values_to_arrays(args)?;
             let values = arrays[0]
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| DataFusionError::Internal("cos expects Float64".into()))?;
-            let result: Vec<Option<f64>> = values
-                .iter()
-                .map(|value| value.map(|x| x.cos()))
-                .collect();
+            let result: Vec<Option<f64>> =
+                values.iter().map(|value| value.map(|x| x.cos())).collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Float64(
                     result.into_iter().next().flatten(),
