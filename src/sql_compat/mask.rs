@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -10,21 +10,20 @@ use datafusion::{
 };
 
 /// Default Spark MASK characters: X for uppercase, x for lowercase, n for digits.
+fn mask_character(character: char) -> char {
+    if character.is_uppercase() {
+        'X'
+    } else if character.is_lowercase() {
+        'x'
+    } else if character.is_numeric() {
+        'n'
+    } else {
+        character
+    }
+}
+
 fn mask_default(input: &str) -> String {
-    input
-        .chars()
-        .map(|character| {
-            if character.is_uppercase() {
-                'X'
-            } else if character.is_lowercase() {
-                'x'
-            } else if character.is_numeric() {
-                'n'
-            } else {
-                character
-            }
-        })
-        .collect()
+    input.chars().map(mask_character).collect()
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -47,7 +46,14 @@ pub(crate) fn udf() -> ScalarUDF {
             let mut result = StringBuilder::with_capacity(input.len(), input.value_data().len());
             for value in input.iter() {
                 match value {
-                    Some(value) => result.append_value(mask_default(value)),
+                    Some(value) => {
+                        for character in value.chars() {
+                            result
+                                .write_char(mask_character(character))
+                                .expect("writing into Arrow string buffer cannot fail");
+                        }
+                        result.append_value("");
+                    }
                     None => result.append_null(),
                 }
             }
