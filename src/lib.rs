@@ -101,6 +101,8 @@ mod sql_compat_atan2;
 mod sql_compat_try_validate_utf8;
 #[path = "sql_compat/atanh.rs"]
 mod sql_compat_atanh;
+#[path = "sql_compat/dayofyear.rs"]
+mod sql_compat_dayofyear;
 #[path = "sql_compat/day.rs"]
 mod sql_compat_day;
 #[path = "sql_compat/bin.rs"]
@@ -388,6 +390,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_weekday::udf());
         context.register_udf(sql_compat_bround::udf());
         context.register_udf(sql_compat_startswith::udf());
+        context.register_udf(sql_compat_dayofyear::udf());
         context.register_udf(sql_compat_asin::udf());
         context.register_udf(sql_compat_oct::udf());
         context.register_udf(sql_compat_quarter::udf());
