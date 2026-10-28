@@ -1,9 +1,20 @@
 use std::{
     fs,
     io::{self, ErrorKind},
+    path::Path,
 };
 
 use super::ReplicaStore;
+
+fn read_regular_replica(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Replica is not a regular file",
+        ));
+    }
+    fs::read(path)
+}
 
 impl ReplicaStore {
     /// Open the first available replica as a File so callers can read large
@@ -36,15 +47,7 @@ impl ReplicaStore {
         let mut last_error = None;
         for node in self.placements(key)? {
             let path = node.root.join("objects").join(key);
-            let attempt = (|| {
-                if !fs::symlink_metadata(&path)?.file_type().is_file() {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidData,
-                        "Replica is not a regular file",
-                    ));
-                }
-                fs::read(path)
-            })();
+            let attempt = read_regular_replica(&path);
             match attempt {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => last_error = Some(error),
