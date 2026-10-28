@@ -159,6 +159,8 @@ mod sql_compat_luhn_check;
 #[path = "sql_compat/factorial.rs"]
 mod sql_compat_factorial;
 mod sql_results;
+#[path = "features/grouped_row_counts.rs"]
+mod feature_grouped_row_counts;
 mod joins_multi_range;
 pub use joins_multi_range::RangeTableJoin;
 
