@@ -313,6 +313,14 @@ struct Args {
     )]
     sort_read_ahead_bytes: Option<usize>,
 
+    /// tune multi-branch SQL planning concurrency, measured in concurrent planning tasks.
+    #[arg(
+        long = "planning-concurrency",
+        value_name = "SIZE",
+        value_parser = parse_planning_concurrency_override
+    )]
+    planning_concurrency_override: Option<usize>,
+
     /// Put temporary spill files for large queries on a chosen disk.
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
@@ -790,6 +798,12 @@ fn parse_sort_read_ahead_bytes(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--sort-read-ahead-mb")?
         .checked_mul(1048576)
         .ok_or_else(|| "--sort-read-ahead-mb is too large".to_owned())
+}
+
+fn parse_planning_concurrency_override(value: &str) -> Result<usize, String> {
+    parse_positive_usize(value, "--planning-concurrency")?
+        .checked_mul(1)
+        .ok_or_else(|| "--planning-concurrency is too large".to_owned())
 }
 
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
