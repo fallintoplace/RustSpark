@@ -31,6 +31,8 @@ mod manifest;
 
 mod snapshots;
 
+mod snapshot_list;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
