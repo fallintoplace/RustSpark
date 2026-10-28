@@ -11,21 +11,23 @@ use datafusion::{
 
 /// Luhn digit-checksum validation for text identifiers.
 fn valid_luhn(input: &str) -> bool {
-    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    let mut sum = 0_u32;
+    let mut sum = 0_u64;
+    let mut has_digits = false;
     for (index, byte) in input.bytes().rev().enumerate() {
-        let mut digit = u32::from(byte - b'0');
+        if !byte.is_ascii_digit() {
+            return false;
+        }
+        has_digits = true;
+        let mut digit = u64::from(byte - b'0');
         if index % 2 == 1 {
             digit *= 2;
             if digit > 9 {
                 digit -= 9;
             }
         }
-        sum = (sum + digit) % 10;
+        sum += digit;
     }
-    sum == 0
+    has_digits && sum % 10 == 0
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -56,4 +58,20 @@ pub(crate) fn udf() -> ScalarUDF {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_luhn;
+
+    #[test]
+    fn validates_digits_and_rejects_invalid_input() {
+        assert!(valid_luhn("79927398713"));
+        assert!(!valid_luhn("79927398714"));
+        assert!(valid_luhn("0"));
+        assert!(!valid_luhn(""));
+        assert!(!valid_luhn("7992 7398713"));
+        assert!(!valid_luhn("79927398713x"));
+        assert!(!valid_luhn("９９"));
+    }
 }
