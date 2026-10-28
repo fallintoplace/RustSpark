@@ -29,12 +29,26 @@ impl RustSparkSession {
             return Err(DataFusionError::Plan(format!("Output column already exists: {output_column}")));
         }
         let source = quote_catalog_table(table, "with_group_ranks requires a table path")?;
-        let partition_by = partitions.iter().map(|name| quote_join_identifier(name)).collect::<Vec<_>>().join(", ");
-        let ordering = order.iter().map(|(name, ascending)| {
+        let mut partition_by = String::new();
+        for name in partitions {
+            if !partition_by.is_empty() {
+                partition_by.push_str(", ");
+            }
+            partition_by.push_str(&quote_join_identifier(name));
+        }
+        let mut ordering = String::new();
+        for (name, ascending) in order {
+            if !ordering.is_empty() {
+                ordering.push_str(", ");
+            }
             let direction = if *ascending { "ASC" } else { "DESC" };
             let nulls = if *ascending { "FIRST" } else { "LAST" };
-            format!("{} {direction} NULLS {nulls}", quote_join_identifier(name))
-        }).collect::<Vec<_>>().join(", ");
+            ordering.push_str(&quote_join_identifier(name));
+            ordering.push_str(" ");
+            ordering.push_str(direction);
+            ordering.push_str(" NULLS ");
+            ordering.push_str(nulls);
+        }
         let function = if dense { "DENSE_RANK" } else { "RANK" };
         let alias = quote_join_identifier(output_column);
         self.sql_read_only(&format!(
