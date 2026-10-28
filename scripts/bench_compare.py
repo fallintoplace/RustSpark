@@ -94,15 +94,25 @@ def measure_engine_workload(engine, workload, command, expected_digest, repeat, 
     return {**summarize_samples(samples), "result_sha256": expected_digest}
 
 
+def _median_ratio(competitor, rustspark):
+    if (not all(type(value) in (int, float) and math.isfinite(value) and value >= 0
+                for value in (competitor, rustspark))):
+        raise ValueError("Median latencies must be finite and nonnegative")
+    if rustspark == 0:
+        return None
+    ratio = competitor / rustspark
+    if not math.isfinite(ratio):
+        raise ValueError("Cross-engine latency ratio overflow")
+    return round(ratio, 3)
+
+
 def competitor_median_ratios(results, engines):
     if "rustspark" not in results:
         return {}
     return {
         engine: {
             workload: (
-                round(measured["median_ms"]
-                      / results["rustspark"][workload]["median_ms"], 3)
-                if results["rustspark"][workload]["median_ms"] > 0 else None
+                _median_ratio(measured["median_ms"], results["rustspark"][workload]["median_ms"])
             )
             for workload, measured in results[engine].items()
         }

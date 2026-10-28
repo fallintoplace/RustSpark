@@ -132,9 +132,11 @@ def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partiti
         command = command_for(binary, args, path, partitions,
                               batch_size=batch_size, memory_limit_mb=memory_limit_mb,
                               pushdown_filters=pushdown_filters)
-        entry = {"id": number, "sql_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        entry = {"id": number}
         try:
-            sql = path.read_text(encoding="utf-8")
+            sql_bytes = path.read_bytes()
+            sql = sql_bytes.decode("utf-8")
+            entry["sql_sha256"] = hashlib.sha256(sql_bytes).hexdigest()
             entry.update(measure(
                 command, repeat, warmup, timeout,
                 ordered=has_top_level_order_by(sql),

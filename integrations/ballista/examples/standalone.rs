@@ -10,6 +10,9 @@ use rustspark::RustSparkSession;
 #[path = "../src/remote_inputs.rs"]
 mod remote_inputs;
 
+#[path = "../src/replicated_inputs.rs"]
+mod replicated_inputs;
+
 const MAX_STANDALONE_PARALLELISM: usize = 256;
 const DEFAULT_STANDALONE_PARALLELISM_CAP: usize = 16;
 
@@ -63,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     }
     remote_inputs::register(&session).await?;
+    replicated_inputs::register(&session).await?;
     let query = default_if_unset(
         std::env::var("RUSTSPARK_SQL"),
         "SELECT SUM(id) AS total FROM (VALUES (1), (2), (3)) AS t(id)",

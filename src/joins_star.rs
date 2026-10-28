@@ -43,8 +43,8 @@ impl RustSparkSession {
         }
         let fact = "\"__rustspark_fact\"";
         let fact_frame = self.table(fact_table).await?;
-        let fact_columns: HashSet<String> = fact_frame.schema().fields()
-            .iter().map(|f| f.name().to_string()).collect();
+        let fact_columns: HashSet<&str> = fact_frame.schema().fields()
+            .iter().map(|f| f.name().as_str()).collect();
         let mut output_names: HashSet<String> = fact_columns.iter()
             .map(|name| name.to_ascii_lowercase()).collect();
         let mut seen_aliases: HashSet<String> = HashSet::from([
@@ -86,8 +86,8 @@ impl RustSparkSession {
                 ));
             }
             let dimension_frame = self.table(dimension.table).await?;
-            let dimension_columns: HashSet<String> = dimension_frame.schema().fields()
-                .iter().map(|f| f.name().to_string()).collect();
+            let dimension_columns: HashSet<&str> = dimension_frame.schema().fields()
+                .iter().map(|f| f.name().as_str()).collect();
             let right_alias = quote_join_identifier(dimension.alias);
             let right_table = quote_catalog_table(
                 dimension.table, "Invalid star dimension table name"

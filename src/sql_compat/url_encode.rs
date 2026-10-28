@@ -6,20 +6,22 @@ use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
 
-/// RFC 3986 percent encoding of UTF-8 strings.
+/// Spark URL_ENCODE form encoding of UTF-8 strings.
 fn percent_encode(input: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let unreserved = |byte: u8| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'*')
     };
     let Some(first_escape) = input.bytes().position(|byte| !unreserved(byte)) else {
         return input.to_owned();
     };
     let mut encoded = String::with_capacity(input.len());
-    // The prefix is ASCII unreserved, so the byte offset is a UTF-8 boundary.
+    // The unreserved ASCII prefix ends at a valid UTF-8 boundary.
     encoded.push_str(&input[..first_escape]);
     for &byte in &input.as_bytes()[first_escape..] {
-        if unreserved(byte) {
+        if byte == b' ' {
+            encoded.push('+');
+        } else if unreserved(byte) {
             encoded.push(char::from(byte));
         } else {
             encoded.push('%');
@@ -65,11 +67,13 @@ mod tests {
     use super::percent_encode;
 
     #[test]
-    fn copies_unreserved_prefix_and_encodes_utf8_bytes() {
-        assert_eq!(percent_encode("abcXYZ-_.~"), "abcXYZ-_.~");
-        assert_eq!(percent_encode("abc def"), "abc%20def");
+    fn copies_safe_prefix_and_preserves_spark_form_encoding() {
+        assert_eq!(percent_encode("abcXYZ-_*."), "abcXYZ-_*.");
+        assert_eq!(percent_encode("abc def"), "abc+def");
         assert_eq!(percent_encode("café"), "caf%C3%A9");
         assert_eq!(percent_encode("a/b?c=d"), "a%2Fb%3Fc%3Dd");
+        assert_eq!(percent_encode("prefix~"), "prefix%7E");
+        assert_eq!(percent_encode("a+b"), "a%2Bb");
         assert_eq!(percent_encode(""), "");
     }
 }

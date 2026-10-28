@@ -38,3 +38,12 @@ async fn url_decode_handles_nulls_and_utf8_rows() -> Result<(), Box<dyn std::err
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn url_decode_distinguishes_plus_from_percent_encoded_plus() -> Result<(), Box<dyn std::error::Error>> {
+    let batches = RustSparkSession::new()
+        .sql("SELECT URL_DECODE('a+b%2Bc')").await?.collect().await?;
+    let values = batches[0].column(0).as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(values.value(0), "a b+c");
+    Ok(())
+}

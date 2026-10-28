@@ -142,23 +142,28 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
     true
 }
 
+fn parse_preview_selection(arguments: &str) -> Option<(&str, usize)> {
+    let parts: Vec<_> = arguments.split_whitespace().collect();
+    match parts.as_slice() {
+        [table] => Some((*table, 10)),
+        [table, count] => count
+            .parse::<usize>()
+            .ok()
+            .filter(|rows| (1..=1000).contains(rows))
+            .map(|rows| (*table, rows)),
+        _ => None,
+    }
+}
+
 // Use quoted identifiers so a shell table name cannot change the SQL plan.
 async fn handle_preview_command(session: &RustSparkSession, args: &Args, command: &str) -> bool {
     let Some(arguments) = shell_arguments(command, ".preview") else {
         return false;
     };
     let usage = "Shell error: .preview requires TABLE [ROWS] (ROWS must be 1..=1000)";
-    let parts: Vec<_> = arguments.split_whitespace().collect();
-    let (table, rows) = match parts.as_slice() {
-        [table] => (*table, 10),
-        [table, count] => match count.parse::<usize>() {
-            Ok(rows) if (1..=1000).contains(&rows) => (*table, rows),
-            _ => {
-                eprintln!("{usage}");
-                return true;
-            }
-        },
-        _ => {
+    let (table, rows) = match parse_preview_selection(arguments) {
+        Some(selection) => selection,
+        None => {
             eprintln!("{usage}");
             return true;
         }
@@ -318,7 +323,9 @@ pub(super) async fn run_interactive(
 
 #[cfg(test)]
 mod tests {
-    use super::{SqlTerminatorScanner, is_single_table_argument, shell_arguments};
+    use super::{
+        SqlTerminatorScanner, is_single_table_argument, parse_preview_selection, shell_arguments,
+    };
 
     #[test]
     fn shell_commands_require_an_exact_keyword_boundary() {
@@ -342,6 +349,16 @@ mod tests {
         assert!(!is_single_table_argument(""));
         assert!(!is_single_table_argument("events logs"));
         assert!(!is_single_table_argument("  "));
+    }
+
+    #[test]
+    fn preview_selection_defaults_and_rejects_invalid_limits() {
+        assert_eq!(parse_preview_selection("data"), Some(("data", 10)));
+        assert_eq!(parse_preview_selection("db.table 1000"), Some(("db.table", 1000)));
+        assert_eq!(parse_preview_selection("data 0"), None);
+        assert_eq!(parse_preview_selection("data 1001"), None);
+        assert_eq!(parse_preview_selection("data NaN"), None);
+        assert_eq!(parse_preview_selection("data 1 extra"), None);
     }
 
     #[test]

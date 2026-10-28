@@ -12,13 +12,24 @@ def check_samples(entry):
     samples = entry.get("samples_ms")
     if not isinstance(samples, list) or len(samples) < 3:
         raise ValueError("At least three measured samples are required")
-    if any(type(x) not in (int, float) or not math.isfinite(x) or x < 0 for x in samples):
+    if any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0 for x in samples):
         raise ValueError("Invalid timing sample")
     median = statistics.median(samples)
     recorded = entry.get("median_ms")
     if type(recorded) not in (int, float) or not math.isfinite(recorded) or abs(recorded - median) > 0.002:
         raise ValueError("Reported median differs from timing samples")
     return samples
+
+
+def variability_row(number, entry, threshold):
+    samples = check_samples(entry)
+    mean = statistics.fmean(samples)
+    cv = statistics.pstdev(samples) / mean if mean else 0.0
+    median = statistics.median(samples)
+    mad = statistics.median(abs(x - median) for x in samples)
+    return {"id": number, "coefficient_of_variation": round(cv, 4),
+                 "median_absolute_deviation_ms": round(mad, 3),
+                 "unstable": cv > threshold, "samples": len(samples)}
 
 
 def inspect(report, threshold=0.15):
@@ -36,14 +47,7 @@ def inspect(report, threshold=0.15):
         seen.add(number)
         if entry.get("status") != "ok":
             raise ValueError(f"Query Q{number:02} did not succeed")
-        samples = check_samples(entry)
-        mean = statistics.fmean(samples)
-        cv = statistics.pstdev(samples) / mean if mean else 0.0
-        median = statistics.median(samples)
-        mad = statistics.median(abs(x - median) for x in samples)
-        rows.append({"id": number, "coefficient_of_variation": round(cv, 4),
-                     "median_absolute_deviation_ms": round(mad, 3),
-                     "unstable": cv > threshold, "samples": len(samples)})
+        rows.append(variability_row(number, entry, threshold))
     return {"metric": "sample variability for cold TPC-H query timings",
             "warning": "Noise diagnostics; not statistical proof of a speedup",
             "max_cv": threshold, "unstable_queries": sorted(x["id"] for x in rows if x["unstable"]),

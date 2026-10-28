@@ -36,5 +36,23 @@ class ProvenanceTests(unittest.TestCase):
                 provenance.enrich({"provenance": {}}, binary)
 
 
+    def test_git_revision_rejects_fake_sha(self):
+        with mock.patch.object(
+            provenance.subprocess, "run",
+            return_value=mock.Mock(returncode=0, stdout="z" * 40),
+        ):
+            self.assertIsNone(provenance.git_revision("."))
+        with mock.patch.object(
+            provenance.subprocess, "run",
+            return_value=mock.Mock(returncode=0, stdout="a" * 40 + "\n"),
+        ):
+            self.assertEqual(provenance.git_revision("."), "a" * 40)
+        with mock.patch.object(
+            provenance.subprocess, "run",
+            return_value=mock.Mock(returncode=0, stdout="A" * 40),
+        ):
+            self.assertEqual(provenance.git_revision("."), "a" * 40)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -63,6 +63,20 @@ fn requested_file_export(args: &Args) -> Option<(&Path, FileExport)> {
     }
 }
 
+fn temporary_export_staging(
+    parent: &Path,
+    single_file: bool,
+) -> Result<Option<tempfile::TempDir>, Box<dyn std::error::Error>> {
+    if !single_file {
+        return Ok(None);
+    }
+    Ok(Some(
+        tempfile::Builder::new()
+            .prefix(".rustspark-export-")
+            .tempdir_in(parent)?,
+    ))
+}
+
 /// Keep the old destination untouched until the entire single-file export
 /// completes. The temporary directory is deleted on every error path.
 async fn write_file_export(
@@ -75,15 +89,7 @@ async fn write_file_export(
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let staging = if single_file {
-        Some(
-            tempfile::Builder::new()
-                .prefix(".rustspark-export-")
-                .tempdir_in(parent)?,
-        )
-    } else {
-        None
-    };
+    let staging = temporary_export_staging(parent, single_file)?;
     let path = staging
         .as_ref()
         .map(|directory| directory.path().join("result"))
@@ -611,4 +617,17 @@ async fn present_query_result(
         dataframe.show().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod export_staging_tests {
+    use super::temporary_export_staging;
+
+    #[test]
+    fn only_single_file_exports_allocate_staging() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(temporary_export_staging(root.path(), false).unwrap().is_none());
+        let staged = temporary_export_staging(root.path(), true).unwrap();
+        assert!(staged.unwrap().path().is_dir());
+    }
 }

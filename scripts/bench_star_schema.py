@@ -7,6 +7,7 @@ Times include process startup, CSV registration, query and JSON serialization.
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import tempfile
@@ -77,12 +78,16 @@ def answers(rows, products, regions):
     revenue = {}
     filtered = 0
     total = 0
-    for index in range(rows):
+    # Product keys and amounts repeat after their least common multiple.
+    period = math.lcm(products, 100)
+    cycles, remainder = divmod(rows, period)
+    for index in range(min(rows, period)):
+        occurrences = cycles + (index < remainder)
         region = (index % products) % regions
         amount = (index * 17) % 100
-        revenue[region] = revenue.get(region, 0) + amount
-        total += amount
-        filtered += amount >= 50
+        revenue[region] = revenue.get(region, 0) + amount * occurrences
+        total += amount * occurrences
+        filtered += (amount >= 50) * occurrences
     return {
         "fact_product_count": [{"n": rows}],
         "three_table_sum": [{"total": total}],

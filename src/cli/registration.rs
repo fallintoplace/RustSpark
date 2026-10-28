@@ -52,14 +52,24 @@ async fn register_csv_input(
     reject_duplicate_csv_headers(session, name).await
 }
 
+async fn finish_next_registration(
+    jobs: &mut tokio::task::JoinSet<datafusion::error::Result<()>>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match jobs.join_next().await {
+        Some(result) => {
+            result??;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 async fn finish_registration_when_full(
     jobs: &mut tokio::task::JoinSet<datafusion::error::Result<()>>,
     max_parallel: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if jobs.len() >= max_parallel {
-        jobs.join_next()
-            .await
-            .expect("registration task exists")??;
+        finish_next_registration(jobs).await?;
     }
     Ok(())
 }
@@ -172,9 +182,7 @@ async fn register_named_inputs(
         });
         finish_registration_when_full(&mut registration_jobs, max_parallel).await?;
     }
-    while let Some(result) = registration_jobs.join_next().await {
-        result??;
-    }
+    while finish_next_registration(&mut registration_jobs).await? {}
     Ok(())
 }
 

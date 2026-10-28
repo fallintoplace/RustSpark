@@ -160,6 +160,8 @@ def main(argv=None):
         report = parse_report(args.input.read_text(encoding="utf-8"))
         rendered = render_report(report)
         if args.output:
+            if args.output.resolve() == args.input.resolve():
+                raise ValueError("Markdown output must differ from source JSON report")
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(rendered, encoding="utf-8")
         else:

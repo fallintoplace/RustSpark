@@ -31,7 +31,14 @@ fn bucket(value: f64, lower: f64, upper: f64, count: i64) -> datafusion::error::
     if (lower < upper && value >= upper) || (lower > upper && value <= upper) {
         return Ok(above);
     }
-    let fraction = (value - lower) / (upper - lower);
+    let span = upper - lower;
+    // Halving all terms avoids overflow when valid finite bounds straddle
+    // a range larger than f64::MAX.
+    let fraction = if span.is_finite() {
+        (value - lower) / span
+    } else {
+        (value / 2.0 - lower / 2.0) / (upper / 2.0 - lower / 2.0)
+    };
     if !fraction.is_finite() {
         return Err(DataFusionError::Execution(
             "WIDTH_BUCKET range calculation overflowed".into(),

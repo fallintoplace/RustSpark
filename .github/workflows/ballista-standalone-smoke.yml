@@ -9,6 +9,10 @@ on:
       - 'scripts/test_ballista_smoke.py'
       - '.github/workflows/ballista-standalone-smoke.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -16,6 +20,8 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -24,5 +30,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 scripts/quality.py test --suite bench
-      - run: cargo test --manifest-path integrations/ballista/Cargo.toml
+      - name: Test default remote-client configuration
+        run: cargo test --manifest-path integrations/ballista/Cargo.toml
+      - name: Test the standalone feature configuration
+        run: cargo test --manifest-path integrations/ballista/Cargo.toml --features standalone
       - run: python3 scripts/ballista_smoke.py --mode standalone --timeout 900

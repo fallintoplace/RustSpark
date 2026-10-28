@@ -14,6 +14,15 @@ pub(crate) fn udf() -> ScalarUDF {
         DataType::Int64,
         Volatility::Immutable,
         Arc::new(|args| {
+            // A SQL literal remains a scalar. Avoid expanding it into a full input array.
+            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(rhs))] = args {
+                let left = left.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("try_multiply expects Int64".into()))?;
+                let result: Vec<Option<i64>> = left.iter()
+                    .map(|left| left.zip(*rhs).and_then(|(left, right)| left.checked_mul(right)))
+                    .collect();
+                return Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))));
+            }
             let scalar = args
                 .iter()
                 .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
@@ -26,7 +35,7 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("try_multiply expects Int64".into()))?;
-            let result: Vec<Option<i64>> = lhs
+            let result: Int64Array = lhs
                 .iter()
                 .zip(rhs.iter())
                 .map(|(left, right)| {
@@ -36,10 +45,10 @@ pub(crate) fn udf() -> ScalarUDF {
                 .collect();
             if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    result.into_iter().next().flatten(),
+                    result.iter().next().flatten(),
                 )))
             } else {
-                Ok(ColumnarValue::Array(Arc::new(Int64Array::from(result))))
+                Ok(ColumnarValue::Array(Arc::new(result)))
             }
         }),
     )

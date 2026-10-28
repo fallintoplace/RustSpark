@@ -21,6 +21,22 @@ class ScaleTests(unittest.TestCase):
         self.assertIn("tpch_run.py", run[1])
         self.assertNotIn("--query-ids", run)
 
+    def test_rejects_duplicate_successful_query_ids(self):
+        import json
+        from tempfile import TemporaryDirectory
+        from unittest import mock
+        with TemporaryDirectory() as tmp:
+            report = Path(tmp) / "result.json"
+            rows = [{"id": n, "status": "ok"} for n in range(1, 22)]
+            rows.append({"id": 1, "status": "ok"})
+            def run(command, **kwargs):
+                report.write_text(json.dumps({"results": rows}))
+                return mock.Mock(returncode=0)
+            with mock.patch.object(sweep.subprocess, "run", side_effect=run):
+                result = sweep.run_scale(["prepare"], ["run"], report)
+            self.assertEqual(result["passed"], 22)
+            self.assertEqual(result["status"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()
