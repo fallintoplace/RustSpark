@@ -72,11 +72,11 @@ mod tests {
         assert_eq!(values.value(0), 0.0);
         Ok(())
     }
+
     #[test]
     fn preserves_logarithm_domain_and_precision() {
         assert_eq!(evaluate(-1.0), Some(f64::NEG_INFINITY));
         assert!(evaluate(-2.0).unwrap().is_nan());
         assert_eq!(evaluate(0.0), Some(0.0));
     }
-
 }
