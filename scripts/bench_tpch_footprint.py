@@ -49,7 +49,8 @@ def compare(a, b):
         raise ValueError("TPC-H scale factors differ")
     changes = []
     for table in sorted(TABLES):
-        if a["tables"][table]["sha256"] != b["tables"][table]["sha256"]:
+        if (a["tables"][table]["sha256"] != b["tables"][table]["sha256"]
+                or a["tables"][table]["rows"] != b["tables"][table]["rows"]):
             changes.append(table)
     changed_sql = [number for number in range(1, 23)
                    if a["query_sha256"][number] != b["query_sha256"][number]]
