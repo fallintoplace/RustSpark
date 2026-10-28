@@ -136,6 +136,8 @@ mod sql_compat_url_decode;
 mod sql_compat_json;
 #[path = "sql_compat/width_bucket.rs"]
 mod sql_compat_width_bucket;
+#[path = "features/approx_quantile_summary.rs"]
+mod feature_approx_quantile_summary;
 #[path = "sql_compat/soundex.rs"]
 mod sql_compat_soundex;
 #[path = "sql_compat/luhn_check.rs"]
