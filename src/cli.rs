@@ -257,6 +257,10 @@ struct Args {
     #[arg(long = "spill-dir", value_name = "DIR")]
     spill_dir: Option<PathBuf>,
 
+    /// Statistics-aware file-group sorting (opt-in for benchmarking).
+    #[arg(long = "split-file-groups-by-statistics")]
+    split_file_groups_by_statistics: bool,
+
     #[arg(long = "batch-size", value_name = "ROWS", value_parser = parse_batch_size)]
     batch_size: Option<usize>,
 
