@@ -1207,15 +1207,14 @@ impl RustSparkSession {
         // Reuse the same key and duplicate checks as sort_rows without
         // executing the resulting plan.
         Self::sort_dataframe(dataframe, order)?;
-        let ordering = order
-            .iter()
-            .map(|(name, ascending)| {
-                let direction = if *ascending { "ASC" } else { "DESC" };
-                let nulls = if *ascending { "FIRST" } else { "LAST" };
-                format!("{} {direction} NULLS {nulls}", quote_join_identifier(name))
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut ordering = String::new();
+        for (name, ascending) in order {
+            if !ordering.is_empty() {
+                ordering.push_str(", ");
+            }
+            ordering.push_str(&quote_join_identifier(name));
+            ordering.push_str(if *ascending { " ASC NULLS FIRST" } else { " DESC NULLS LAST" });
+        }
         let source =
             quote_catalog_table(table, "with_row_numbers requires a non-empty table path")?;
         let alias = quote_join_identifier(output_column);
