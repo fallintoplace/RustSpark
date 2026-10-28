@@ -143,24 +143,35 @@ async fn handle_count_command(session: &RustSparkSession, args: &Args, command: 
 }
 
 fn parse_preview_selection(arguments: &str) -> Option<(&str, usize)> {
-    let parts: Vec<_> = arguments.split_whitespace().collect();
-    match parts.as_slice() {
-        [table] => Some((*table, 10)),
-        [table, count] => count
+    let mut parts = arguments.split_whitespace();
+    let table = parts.next()?;
+    match (parts.next(), parts.next()) {
+        (None, None) => Some((table, 10)),
+        (Some(count), None) => count
             .parse::<usize>()
             .ok()
             .filter(|rows| (1..=1000).contains(rows))
-            .map(|rows| (*table, rows)),
+            .map(|rows| (table, rows)),
         _ => None,
     }
 }
 
 fn quote_shell_table(table: &str) -> String {
-    table
-        .split('.')
-        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(".")
+    let mut quoted = String::with_capacity(table.len() + 2);
+    for (index, part) in table.split('.').enumerate() {
+        if index != 0 {
+            quoted.push('.');
+        }
+        quoted.push('"');
+        for character in part.chars() {
+            if character == '"' {
+                quoted.push('"');
+            }
+            quoted.push(character);
+        }
+        quoted.push('"');
+    }
+    quoted
 }
 
 // Use quoted identifiers so a shell table name cannot change the SQL plan.
