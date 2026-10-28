@@ -80,6 +80,10 @@ struct Args {
     )]
     parquet_reorder_filters: bool,
 
+    /// Heap-based ROW_NUMBER TopK optimization; benchmark on high-cardinality keys.
+    #[arg(long = "window-topn")]
+    window_topn: bool,
+
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
