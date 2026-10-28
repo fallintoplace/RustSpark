@@ -21,6 +21,8 @@ mod joins_many;
 pub use joins_many::MultiJoinStep;
 #[path = "features/regex_filter.rs"]
 mod feature_regex_filter;
+#[path = "features/grouped_null_counts.rs"]
+mod feature_grouped_null_counts;
 mod set_operations;
 #[path = "features/null_safe_equality.rs"]
 mod feature_null_safe_equality;
