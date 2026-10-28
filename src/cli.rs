@@ -387,6 +387,10 @@ struct Args {
     #[arg(long = "prefer-existing-sort")]
     prefer_existing_sort: bool,
 
+    /// Maximum queued RecordBatches per output file, at least two.
+    #[arg(long = "max-buffered-output-batches", value_name = "COUNT", value_parser = parse_output_buffer_batches)]
+    max_buffered_output_batches: Option<usize>,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
@@ -809,6 +813,14 @@ fn parse_scan_split_min_kb(value: &str) -> Result<usize, String> {
 
 fn parse_positive_metadata_concurrency(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--metadata-fetch-concurrency")
+}
+
+fn parse_output_buffer_batches(value: &str) -> Result<usize, String> {
+    let count = parse_positive_usize(value, "--max-buffered-output-batches")?;
+    if count < 2 {
+        return Err("--max-buffered-output-batches must be at least 2".to_owned());
+    }
+    Ok(count)
 }
 
 fn parse_positive_tuning_usize(value: &str) -> Result<usize, String> {
