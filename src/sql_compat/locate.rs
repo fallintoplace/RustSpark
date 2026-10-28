@@ -11,7 +11,11 @@ use datafusion::{
 
 /// Spark LOCATE returns the one-based Unicode position of a substring.
 fn evaluate(needle: &str, haystack: &str) -> Option<i64> {
-    Some(haystack.find(needle).map_or(0, |offset| haystack[..offset].chars().count() as i64 + 1))
+    Some(
+        haystack
+            .find(needle)
+            .map_or(0, |offset| haystack[..offset].chars().count() as i64 + 1),
+    )
 }
 
 pub(crate) fn udf() -> ScalarUDF {
@@ -129,6 +133,7 @@ mod tests {
         assert_eq!(values.value(0), 4);
         Ok(())
     }
+
     #[tokio::test]
     async fn locates_constant_needle_in_nullable_column() -> datafusion::error::Result<()> {
         let batches = RustSparkSession::new()
@@ -148,5 +153,4 @@ mod tests {
         assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(4), None, Some(0)]);
         Ok(())
     }
-
 }
