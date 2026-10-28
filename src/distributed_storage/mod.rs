@@ -33,6 +33,8 @@ mod snapshots;
 
 mod snapshot_list;
 
+mod retention;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageNode {
     pub id: String,
