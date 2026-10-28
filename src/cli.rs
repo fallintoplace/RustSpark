@@ -287,6 +287,66 @@ struct Args {
     #[arg(long = "parquet-force-row-selection", requires = "parquet_pushdown_filters")]
     parquet_force_row_selection: bool,
 
+    /// Opt-in Parquet performance setting; preserves DataFusion defaults otherwise.
+    #[arg(long = "parquet-write-bloom-filters")]
+    parquet_write_bloom_filters: bool,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-row-group-rows", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_rows: Option<usize>,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-page-size-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_page_size_bytes: Option<usize>,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-page-row-limit", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_page_row_limit: Option<usize>,
+
+    /// Opt-in Parquet writer tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-write-batch-rows", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_write_batch_rows: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-row-group-writers", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_row_group_writers: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "parquet-write-buffered-batches", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    parquet_write_buffered_batches: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "perfect-hash-key-range", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    perfect_hash_key_range: Option<usize>,
+
+    /// Opt-in execution tuning; existing defaults remain unchanged.
+    #[arg(long = "hash-join-probe-buffer-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    hash_join_probe_buffer_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "join-inlist-pushdown-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    join_inlist_pushdown_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "join-inlist-pushdown-values", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    join_inlist_pushdown_values: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "sort-in-place-bytes", value_name = "VALUE", value_parser = parse_positive_tuning_usize)]
+    sort_in_place_bytes: Option<usize>,
+
+    /// Opt-in optimizer tuning; existing defaults remain unchanged.
+    #[arg(long = "window-topn")]
+    window_topn: bool,
+
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "prefer-existing-sort")]
+    prefer_existing_sort: bool,
+
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "split-file-groups-by-statistics")]
+    split_file_groups_by_statistics: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
