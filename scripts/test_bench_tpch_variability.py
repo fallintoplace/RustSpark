@@ -17,6 +17,16 @@ class VariabilityTests(unittest.TestCase):
         self.assertEqual(result["unstable_queries"], [])
         self.assertEqual(result["results"][0]["coefficient_of_variation"], 0)
 
+    def test_reported_p95_must_match_samples(self):
+        data = report([1, 1, 2, 4])
+        data["results"][0]["p95_ms"] = 4.0
+        self.assertEqual(variation.inspect(data)["unstable_queries"], [1])
+        for invalid in (3.0, float("inf"), True):
+            with self.subTest(invalid=invalid):
+                data["results"][0]["p95_ms"] = invalid
+                with self.assertRaisesRegex(ValueError, "p95"):
+                    variation.inspect(data)
+
     def test_noisy_samples_flagged(self):
         result = variation.inspect(report([10, 20, 10, 20]))
         self.assertEqual(result["unstable_queries"], [1])
