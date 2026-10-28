@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Predicate cache capacity in MiB for selective Parquet decoding.
+    #[arg(long = "parquet-predicate-cache-mb", value_name = "MIB", value_parser = parse_memory_limit_mib, requires = "parquet_pushdown_filters")]
+    parquet_predicate_cache_bytes: Option<usize>,
+
     /// Bytes to prefetch from each Parquet footer, supplied in KiB.
     #[arg(long = "parquet-metadata-hint-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
     parquet_metadata_hint_bytes: Option<usize>,
