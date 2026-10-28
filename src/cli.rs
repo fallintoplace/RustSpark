@@ -949,7 +949,7 @@ fn parse_csv_schema(value: &str) -> Result<Schema, String> {
 }
 
 fn parse_json_schema(value: &str) -> Result<Schema, String> {
-    parse_column_schema(value, "JSON")
+    nested_schema::parse_json_schema(value)
 }
 
 fn parse_hash_join_inlist_max_bytes(value: &str) -> Result<usize, String> {
@@ -1031,6 +1031,8 @@ fn parse_csv_schema_rows(value: &str) -> Result<usize, String> {
 fn parse_json_schema_rows(value: &str) -> Result<usize, String> {
     parse_positive_usize(value, "--json-schema-rows")
 }
+
+mod nested_schema;
 
 mod read_options;
 use read_options::{csv_read_options, json_read_options, parquet_read_options};
