@@ -81,6 +81,15 @@ fn build_session_config(args: &Args) -> SessionConfig {
     if let Some(value) = args.sort_in_place_bytes {
         config.options_mut().execution.sort_in_place_threshold_bytes = value;
     }
+    if args.window_topn {
+        config.options_mut().optimizer.enable_window_topn = true;
+    }
+    if args.prefer_existing_sort {
+        config.options_mut().optimizer.prefer_existing_sort = true;
+    }
+    if args.split_file_groups_by_statistics {
+        config.options_mut().execution.split_file_groups_by_statistics = true;
+    }
     config
 }
 
@@ -255,6 +264,27 @@ mod tests {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-bytes", "8388608"]).unwrap();
         let config = super::build_session_config(&args);
         assert_eq!(config.options().execution.sort_in_place_threshold_bytes, 8388608);
+    }
+
+    #[test]
+    fn sets_window_topn_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--window-topn"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert_eq!(config.options().optimizer.enable_window_topn, true);
+    }
+
+    #[test]
+    fn sets_prefer_existing_sort_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--prefer-existing-sort"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert!(config.options().optimizer.prefer_existing_sort);
+    }
+
+    #[test]
+    fn sets_split_file_groups_by_statistics_when_requested() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--split-file-groups-by-statistics"]).unwrap();
+        let config = super::build_session_config(&args);
+        assert!(config.options().execution.split_file_groups_by_statistics);
     }
 
     #[test]
