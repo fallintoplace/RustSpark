@@ -119,6 +119,8 @@ mod sql_compat_bitwise_not;
 mod sql_compat_cot;
 #[path = "sql_compat/positive.rs"]
 mod sql_compat_positive;
+#[path = "sql_compat/timestamp_micros.rs"]
+mod sql_compat_timestamp_micros;
 #[path = "sql_compat/crc32.rs"]
 mod sql_compat_crc32;
 #[path = "sql_compat/negative.rs"]
@@ -373,6 +375,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_ucase::udf());
         context.register_udf(sql_compat_sec::udf());
         context.register_udf(sql_compat_csc::udf());
+        context.register_udf(sql_compat_timestamp_micros::udf());
         context.register_udf(sql_compat_hypot::udf());
         context.register_udf(sql_compat_log1p::udf());
         context.register_udf(sql_compat_crc32::udf());
