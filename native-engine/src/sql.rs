@@ -289,6 +289,7 @@ impl Parser {
             }
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let grouped = has_aggregates || !group_columns.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
         if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
@@ -333,6 +334,12 @@ impl Parser {
                 })
                 .collect();
             plan = plan.project(selections);
+        }
+        if self.take_word("HAVING") {
+            if !grouped {
+                return Err(Error::Unsupported("HAVING requires aggregation or GROUP BY".into()));
+            }
+            plan = plan.filter(self.expression(0)?);
         }
         if is_distinct {
             plan = Plan::Distinct { input: Box::new(plan) };
