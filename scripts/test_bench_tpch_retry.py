@@ -26,6 +26,27 @@ class RetryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             retry.retry_command("rs", "queries", "data", [], "out.json")
 
+    def test_retry_rejects_boolean_id(self):
+        self.assertFalse(retry.retry_completed({"results": [
+            {"id": True, "status": "ok"}]}, [1]))
+
+    def test_retry_does_not_reuse_old_output(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest import mock
+        with TemporaryDirectory() as tmp:
+            prior = Path(tmp) / "prior.json"
+            output = Path(tmp) / "retry.json"
+            prior.write_text(json.dumps({"results": [{"id": 1, "status": "error"}]}))
+            output.write_text(json.dumps({"results": [{"id": 1, "status": "ok"}]}))
+            with mock.patch.object(retry.subprocess, "run", return_value=mock.Mock(returncode=0)):
+                with self.assertRaises(SystemExit) as exit_info:
+                    retry.main([str(prior), "--queries-dir", tmp, "--parquet-dir", tmp,
+                                "--json-out", str(output)])
+            self.assertEqual(exit_info.exception.code, 1)
+            self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
