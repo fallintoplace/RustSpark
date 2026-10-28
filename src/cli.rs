@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "parquet-binary-as-string")]
     parquet_binary_as_string: bool,
 
+    /// Bytes to prefetch from each Parquet footer, supplied in KiB.
+    #[arg(long = "parquet-metadata-hint-kb", value_name = "KIB", value_parser = parse_scan_split_min_kb)]
+    parquet_metadata_hint_bytes: Option<usize>,
+
     /// Allow larger literal IN lists to participate in Parquet pruning.
     #[arg(long = "parquet-max-in-list-size", value_name = "VALUES", value_parser = parse_target_partitions)]
     parquet_max_in_list_size: Option<usize>,
