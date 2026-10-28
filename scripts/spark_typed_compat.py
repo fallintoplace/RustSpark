@@ -45,11 +45,12 @@ def canonical_type(value: str) -> str:
         "int16": "smallint",
         "int8": "tinyint",
         "utf8": "string",
+        "utf8view": "string",
         "float64": "double",
         "float32": "float",
         "date32": "date",
     }
-    value = re.sub(r"\b(?:int64|int32|int16|int8|utf8|float64|float32|date32)\b",
+    value = re.sub(r"\b(?:int64|int32|int16|int8|utf8view|utf8|float64|float32|date32)\b",
                    lambda match: aliases[match.group(0)], value)
     value = re.sub(r"decimal128\((\d+),(\d+)\)", r"decimal(\1,\2)", value)
     if value.startswith("timestamp("):

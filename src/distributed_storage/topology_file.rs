@@ -58,7 +58,11 @@ mod tests {
         assert_eq!(store.nodes()[0].id, "a");
         fs::write(&config, "a=relative/path\n").unwrap();
         assert!(ReplicaStore::from_topology_file(&config, 1).is_err());
-        fs::write(&config, format!("a={}\na={}\n", node.display(), node.display())).unwrap();
+        fs::write(
+            &config,
+            format!("a={}\na={}\n", node.display(), node.display()),
+        )
+        .unwrap();
         assert!(ReplicaStore::from_topology_file(&config, 1).is_err());
     }
 }

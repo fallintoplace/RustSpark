@@ -80,8 +80,7 @@ fn first_invalid_parallel(paths: &[(usize, PathBuf)], workers: usize) -> Result<
             .enumerate()
             .map(|(chunk_index, chunk)| {
                 scope.spawn(move || {
-                    first_missing_file_position(chunk)
-                        .map(|index| chunk_index * chunk_size + index)
+                    first_missing_file_position(chunk).map(|index| chunk_index * chunk_size + index)
                 })
             })
             .collect::<Vec<_>>();
@@ -155,7 +154,8 @@ mod tests {
         let paths = parse_manifest_reader(
             Cursor::new("\u{feff}# header\r\n\r\n part-1.parquet \r\n# skip\npart-2.parquet\n"),
             Path::new("data"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             paths,
             vec![
@@ -227,10 +227,11 @@ mod tests {
             });
             let error = earliest_invalid_worker_result([worker]).unwrap_err();
             assert!(
-                error.to_string().contains("Parquet manifest validation worker panicked"),
+                error
+                    .to_string()
+                    .contains("Parquet manifest validation worker panicked"),
                 "{error}"
             );
         });
     }
-
 }

@@ -1,0 +1,4 @@
+# Increase the Windows main-thread stack for nested DataFusion SQL plans.
+# Apply to the shipped CLI and test executables, not just GitHub Actions.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

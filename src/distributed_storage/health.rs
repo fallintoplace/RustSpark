@@ -38,11 +38,8 @@ mod tests {
     #[test]
     fn detects_unavailable_object_mounts() {
         let root = tempfile::tempdir().unwrap();
-        let store = ReplicaStore::new(
-            vec![StorageNode::new("a", root.path()).unwrap()],
-            1,
-        )
-        .unwrap();
+        let store =
+            ReplicaStore::new(vec![StorageNode::new("a", root.path()).unwrap()], 1).unwrap();
         assert!(store.probe_nodes()[0].writable);
         fs::remove_dir(root.path().join("objects")).unwrap();
         assert!(!store.probe_nodes()[0].writable);

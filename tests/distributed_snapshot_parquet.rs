@@ -1,4 +1,7 @@
-use std::{fs::{self, File}, sync::Arc};
+use std::{
+    fs::{self, File},
+    sync::Arc,
+};
 
 use datafusion::{
     arrow::{

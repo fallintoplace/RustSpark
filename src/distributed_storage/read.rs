@@ -78,7 +78,11 @@ mod tests {
         let first = store.placements("events.parquet").unwrap()[0];
         fs::remove_file(first.root.join("objects/events.parquet")).unwrap();
         let mut result = Vec::new();
-        store.open_object("events.parquet").unwrap().read_to_end(&mut result).unwrap();
+        store
+            .open_object("events.parquet")
+            .unwrap()
+            .read_to_end(&mut result)
+            .unwrap();
         assert_eq!(result, content);
         assert_eq!(
             store.open_object("absent.parquet").unwrap_err().kind(),

@@ -13,7 +13,9 @@ async fn grouped_correlation_handles_groups_with_missing_pairs() -> TestResult {
              UNION ALL SELECT 'b', 5, 1",
         )
         .await?;
-    let result = session.correlation_per_group("events", "segment", "metric", "weight").await?;
+    let result = session
+        .correlation_per_group("events", "segment", "metric", "weight")
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
         session
@@ -22,6 +24,11 @@ async fn grouped_correlation_handles_groups_with_missing_pairs() -> TestResult {
             .to_string(),
         "1"
     );
-    assert!(session.correlation_per_group("events", "segment", "missing", "weight").await.is_err());
+    assert!(
+        session
+            .correlation_per_group("events", "segment", "missing", "weight")
+            .await
+            .is_err()
+    );
     Ok(())
 }

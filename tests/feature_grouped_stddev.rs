@@ -12,7 +12,9 @@ async fn grouped_stddev_runs_grouped_native_aggregate() -> TestResult {
              SELECT 'b', CAST(NULL AS INT) UNION ALL SELECT 'b', 5",
         )
         .await?;
-    let result = session.stddev_per_group("events", "segment", "metric").await?;
+    let result = session
+        .stddev_per_group("events", "segment", "metric")
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
         session
@@ -21,6 +23,11 @@ async fn grouped_stddev_runs_grouped_native_aggregate() -> TestResult {
             .to_string(),
         "1"
     );
-    assert!(session.stddev_per_group("events", "missing", "metric").await.is_err());
+    assert!(
+        session
+            .stddev_per_group("events", "missing", "metric")
+            .await
+            .is_err()
+    );
     Ok(())
 }

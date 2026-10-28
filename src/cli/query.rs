@@ -626,7 +626,11 @@ mod export_staging_tests {
     #[test]
     fn only_single_file_exports_allocate_staging() {
         let root = tempfile::tempdir().unwrap();
-        assert!(temporary_export_staging(root.path(), false).unwrap().is_none());
+        assert!(
+            temporary_export_staging(root.path(), false)
+                .unwrap()
+                .is_none()
+        );
         let staged = temporary_export_staging(root.path(), true).unwrap();
         assert!(staged.unwrap().path().is_dir());
     }

@@ -13,12 +13,22 @@ async fn grouped_null_counts_aggregates_without_collect() -> TestResult {
              UNION ALL SELECT 'b', 5, 1",
         )
         .await?;
-    let result = session.null_counts_per_group("events", "segment", "metric").await?;
+    let result = session
+        .null_counts_per_group("events", "segment", "metric")
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
-        session.sql_scalar("SELECT SUM(null_count) FROM analytics").await?.to_string(),
+        session
+            .sql_scalar("SELECT SUM(null_count) FROM analytics")
+            .await?
+            .to_string(),
         "1"
     );
-    assert!(session.null_counts_per_group("events", "segment", "missing").await.is_err());
+    assert!(
+        session
+            .null_counts_per_group("events", "segment", "missing")
+            .await
+            .is_err()
+    );
     Ok(())
 }

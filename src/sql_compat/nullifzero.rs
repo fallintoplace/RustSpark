@@ -46,7 +46,11 @@ mod tests {
             .await?;
         let mut actual = Vec::new();
         for batch in batches {
-            let values = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             actual.extend(values.iter());
         }
         assert_eq!(actual, vec![None, Some(-5), None]);

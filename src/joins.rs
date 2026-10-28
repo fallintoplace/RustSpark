@@ -59,14 +59,9 @@ impl RustSparkSession {
                 "exclude_overlapping_intervals requires non-empty key pairs",
             )?;
         }
-        if [
-            left_bounds.0,
-            left_bounds.1,
-            right_bounds.0,
-            right_bounds.1,
-        ]
-        .iter()
-        .any(|column| column.trim().is_empty())
+        if [left_bounds.0, left_bounds.1, right_bounds.0, right_bounds.1]
+            .iter()
+            .any(|column| column.trim().is_empty())
         {
             return Err(DataFusionError::Plan(
                 "Interval exclusion requires non-empty boundary columns".into(),
@@ -78,9 +73,7 @@ impl RustSparkSession {
         let le = format!("{left_alias}.{}", quote_join_identifier(left_bounds.1));
         let rs = format!("{right_alias}.{}", quote_join_identifier(right_bounds.0));
         let re = format!("{right_alias}.{}", quote_join_identifier(right_bounds.1));
-        let mut predicates = format!(
-            "{ls} < {le} AND {rs} < {re} AND {ls} < {re} AND {rs} < {le}"
-        );
+        let mut predicates = format!("{ls} < {le} AND {rs} < {re} AND {ls} < {re} AND {rs} < {le}");
         for (left_key, right_key) in keys {
             write!(
                 &mut predicates,
@@ -196,8 +189,11 @@ impl RustSparkSession {
             if !predicates.is_empty() {
                 predicates.push_str(" AND ");
             }
-            write!(&mut predicates, "{left_alias}.{key} {comparison} {right_alias}.{key}")
-                .expect("writing to a String cannot fail");
+            write!(
+                &mut predicates,
+                "{left_alias}.{key} {comparison} {right_alias}.{key}"
+            )
+            .expect("writing to a String cannot fail");
         }
         for (frame, alias) in [(&left_frame, left_alias), (&right_frame, right_alias)] {
             for field in frame.schema().fields() {
@@ -256,7 +252,12 @@ impl RustSparkSession {
             .iter()
             .map(|field| field.name().as_str())
             .collect();
-        let left_fields = left_frame.schema().fields().iter().cloned().collect::<Vec<_>>();
+        let left_fields = left_frame
+            .schema()
+            .fields()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let columns: Vec<&str> = left_fields
             .iter()
             .map(|field| field.name().as_str())
@@ -317,7 +318,12 @@ impl RustSparkSession {
                 return Err(DataFusionError::Plan(format!("Duplicate join key: {key}")));
             }
             for (table, frame) in [(left, &left_frame), (right, &right_frame)] {
-                if !frame.schema().fields().iter().any(|field| field.name() == *key) {
+                if !frame
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name() == *key)
+                {
                     return Err(DataFusionError::Plan(format!(
                         "Join column {key} does not exist in table {table}"
                     )));
@@ -333,8 +339,11 @@ impl RustSparkSession {
                 "COALESCE({left_alias}.{name}, {right_alias}.{name}) AS {name}"
             )
             .expect("writing to a String cannot fail");
-            write!(&mut predicates, "{left_alias}.{name} = {right_alias}.{name}")
-                .expect("writing to a String cannot fail");
+            write!(
+                &mut predicates,
+                "{left_alias}.{name} = {right_alias}.{name}"
+            )
+            .expect("writing to a String cannot fail");
         }
         for (table, frame, alias, columns) in [
             (left, &left_frame, left_alias, left_payload),
@@ -342,7 +351,11 @@ impl RustSparkSession {
         ] {
             for column in columns {
                 if column.trim().is_empty()
-                    || !frame.schema().fields().iter().any(|field| field.name() == *column)
+                    || !frame
+                        .schema()
+                        .fields()
+                        .iter()
+                        .any(|field| field.name() == *column)
                 {
                     return Err(DataFusionError::Plan(format!(
                         "Payload column {column} does not exist in table {table}"
@@ -754,8 +767,14 @@ impl RustSparkSession {
         };
         let left_alias = "\"__rustspark_left\"";
         let right_alias = "\"__rustspark_right\"";
-        let l = format!("CAST({left_alias}.{} AS DOUBLE)", quote_join_identifier(left_value));
-        let r = format!("CAST({right_alias}.{} AS DOUBLE)", quote_join_identifier(right_value));
+        let l = format!(
+            "CAST({left_alias}.{} AS DOUBLE)",
+            quote_join_identifier(left_value)
+        );
+        let r = format!(
+            "CAST({right_alias}.{} AS DOUBLE)",
+            quote_join_identifier(right_value)
+        );
         let query = format!(
             "SELECT * FROM {} AS {left_alias} {operator} JOIN {} AS {right_alias} ON {l} >= {r} - {tolerance} AND {l} <= {r} + {tolerance}",
             quote_join_table(left)?,
@@ -906,14 +925,9 @@ impl RustSparkSession {
     ) -> Result<DataFrame> {
         use datafusion::logical_expr::JoinType;
 
-        if [
-            left_bounds.0,
-            left_bounds.1,
-            right_bounds.0,
-            right_bounds.1,
-        ]
-        .iter()
-        .any(|column| column.trim().is_empty())
+        if [left_bounds.0, left_bounds.1, right_bounds.0, right_bounds.1]
+            .iter()
+            .any(|column| column.trim().is_empty())
         {
             return Err(DataFusionError::Plan(
                 "Interval overlap joins require non-empty boundary columns".into(),
@@ -1032,7 +1046,6 @@ impl RustSparkSession {
         );
         self.sql(&query).await
     }
-
 }
 
 #[cfg(test)]

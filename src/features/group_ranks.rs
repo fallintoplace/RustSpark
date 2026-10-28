@@ -1,5 +1,8 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
+use datafusion::{
+    error::{DataFusionError, Result},
+    prelude::DataFrame,
+};
 
 impl RustSparkSession {
     /// Append a rank inside each partition, preserving equal-key ties.
@@ -16,17 +19,28 @@ impl RustSparkSession {
         dense: bool,
     ) -> Result<DataFrame> {
         if partitions.is_empty() || order.is_empty() {
-            return Err(DataFusionError::Plan("with_group_ranks requires partition and sort keys".into()));
+            return Err(DataFusionError::Plan(
+                "with_group_ranks requires partition and sort keys".into(),
+            ));
         }
         if output_column.trim().is_empty() || output_column.trim() != output_column {
-            return Err(DataFusionError::Plan("with_group_ranks requires a non-empty, unpadded output name".into()));
+            return Err(DataFusionError::Plan(
+                "with_group_ranks requires a non-empty, unpadded output name".into(),
+            ));
         }
         let dataframe = self.table(table).await?;
         Self::validate_selected_columns(&dataframe, partitions)?;
         let keys = order.iter().map(|(name, _)| *name).collect::<Vec<_>>();
         Self::validate_selected_columns(&dataframe, &keys)?;
-        if dataframe.schema().fields().iter().any(|field| field.name().eq_ignore_ascii_case(output_column)) {
-            return Err(DataFusionError::Plan(format!("Output column already exists: {output_column}")));
+        if dataframe
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name().eq_ignore_ascii_case(output_column))
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Output column already exists: {output_column}"
+            )));
         }
         let source = quote_catalog_table(table, "with_group_ranks requires a table path")?;
         let mut partition_by = String::new();
@@ -44,7 +58,7 @@ impl RustSparkSession {
             let direction = if *ascending { "ASC" } else { "DESC" };
             let nulls = if *ascending { "FIRST" } else { "LAST" };
             ordering.push_str(&quote_join_identifier(name));
-            ordering.push_str(" ");
+            ordering.push(' ');
             ordering.push_str(direction);
             ordering.push_str(" NULLS ");
             ordering.push_str(nulls);

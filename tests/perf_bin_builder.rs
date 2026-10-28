@@ -9,9 +9,21 @@ async fn bin_builder_handles_negative_zero_and_nulls() -> Result<(), Box<dyn std
     ).await?.collect().await?;
     let mut values = Vec::new();
     for batch in &batches {
-        let column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         values.extend(column.iter().map(|value| value.map(str::to_owned)));
     }
-    assert_eq!(values, vec![Some("1010".to_owned()), Some(format!("{:b}", -7_i64 as u64)), Some("0".to_owned()), None]);
+    assert_eq!(
+        values,
+        vec![
+            Some("1010".to_owned()),
+            Some(format!("{:b}", -7_i64 as u64)),
+            Some("0".to_owned()),
+            None
+        ]
+    );
     Ok(())
 }

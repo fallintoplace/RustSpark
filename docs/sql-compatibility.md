@@ -72,6 +72,10 @@ Run the real PySpark 4 suite with `--check-nullability` to see NULL metadata
 differences. Every mismatch and error remains visible in the JSON report.
 Normalization does not establish full Spark compatibility.
 
+Arrow `Utf8View` and `Utf8` both represent SQL strings. The typed differential
+harness normalizes both to Spark's `string` for type comparisons. This does
+not change the returned values or relax other type and nullability checks.
+
 ## Parquet-backed Spark SQL differential checks
 
 Run the existing typed table-backed queries using identical Parquet files

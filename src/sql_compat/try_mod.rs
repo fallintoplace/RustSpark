@@ -20,24 +20,43 @@ pub(crate) fn udf() -> ScalarUDF {
             ] = args
             {
                 return Ok(ColumnarValue::Scalar(ScalarValue::Int64(
-                    (*lhs).zip(*rhs).and_then(|(left, right)| left.checked_rem(right)),
+                    (*lhs)
+                        .zip(*rhs)
+                        .and_then(|(left, right)| left.checked_rem(right)),
                 )));
             }
             // A constant left argument does not need an Arrow broadcast array.
-            if let [ColumnarValue::Scalar(ScalarValue::Int64(lhs)), ColumnarValue::Array(right)] = args {
-                let right = right.as_any().downcast_ref::<Int64Array>()
+            if let [
+                ColumnarValue::Scalar(ScalarValue::Int64(lhs)),
+                ColumnarValue::Array(right),
+            ] = args
+            {
+                let right = right
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("try_mod expects Int64".into()))?;
-                let result: Int64Array = right.iter()
+                let result: Int64Array = right
+                    .iter()
                     .map(|right| (*lhs).zip(right).and_then(|(a, b)| a.checked_rem(b)))
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
             // A SQL literal remains a scalar. Avoid expanding it into a full input array.
-            if let [ColumnarValue::Array(left), ColumnarValue::Scalar(ScalarValue::Int64(rhs))] = args {
-                let left = left.as_any().downcast_ref::<Int64Array>()
+            if let [
+                ColumnarValue::Array(left),
+                ColumnarValue::Scalar(ScalarValue::Int64(rhs)),
+            ] = args
+            {
+                let left = left
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or_else(|| DataFusionError::Internal("try_mod expects Int64".into()))?;
-                let result: Int64Array = left.iter()
-                    .map(|left| left.zip(*rhs).and_then(|(left, right)| left.checked_rem(right)))
+                let result: Int64Array = left
+                    .iter()
+                    .map(|left| {
+                        left.zip(*rhs)
+                            .and_then(|(left, right)| left.checked_rem(right))
+                    })
                     .collect();
                 return Ok(ColumnarValue::Array(Arc::new(result)));
             }
@@ -72,7 +91,11 @@ mod constant_left_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let column = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             actual.extend(column.iter());
         }
         assert_eq!(actual, vec![Some(1), Some(1), None, None]);

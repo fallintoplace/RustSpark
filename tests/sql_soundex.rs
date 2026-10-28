@@ -21,14 +21,21 @@ async fn soundex_handles_rows_and_nulls() -> Result<(), Box<dyn std::error::Erro
             .unwrap();
         actual.extend(column.iter().map(|value| value.map(str::to_owned)));
     }
-    assert_eq!(actual, vec![
+    assert_eq!(
+        actual,
+        vec![
             Some("R163".to_owned()),
             Some("R163".to_owned()),
             Some("A261".to_owned()),
             None,
             Some(String::new()),
-        ]);
-    let scalar = session.sql("SELECT SOUNDEX('Pfister')").await?.collect().await?;
+        ]
+    );
+    let scalar = session
+        .sql("SELECT SOUNDEX('Pfister')")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

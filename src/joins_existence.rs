@@ -61,8 +61,10 @@ fn append_existence_predicate(
     let match_alias = format!("\"__rustspark_match_{index}\"");
     let lookup = quote_catalog_table(filter.table, "Invalid existence filter table name")?;
     write!(
-        query, "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
-    ).expect("writing to a String cannot fail");
+        query,
+        "{operator} (SELECT 1 FROM {lookup} AS {match_alias} WHERE "
+    )
+    .expect("writing to a String cannot fail");
 
     for (key_index, (source_key, match_key)) in filter.keys.iter().enumerate() {
         if key_index != 0 {
@@ -73,7 +75,8 @@ fn append_existence_predicate(
             "{source_alias}.{} = {match_alias}.{}",
             quote_join_identifier(source_key),
             quote_join_identifier(match_key)
-        ).expect("writing to a String cannot fail");
+        )
+        .expect("writing to a String cannot fail");
     }
     query.push(')');
     Ok(())

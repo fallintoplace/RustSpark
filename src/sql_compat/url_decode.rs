@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::{StringArray, StringBuilder}, datatypes::DataType},
+    arrow::{
+        array::{Array, StringArray, StringBuilder},
+        datatypes::DataType,
+    },
     common::{DataFusionError, ScalarValue},
     logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
 };
@@ -41,7 +44,11 @@ fn percent_decode(input: &str) -> datafusion::error::Result<String> {
             result.push((high << 4) | low);
             index += 3;
         } else {
-            result.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
+            result.push(if bytes[index] == b'+' {
+                b' '
+            } else {
+                bytes[index]
+            });
             index += 1;
         }
     }
@@ -57,22 +64,25 @@ pub(crate) fn udf() -> ScalarUDF {
         Volatility::Immutable,
         Arc::new(|args| {
             match args {
-                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => {
-                    Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                        value.as_deref().map(percent_decode).transpose()?,
-                    )))
-                }
+                [ColumnarValue::Scalar(ScalarValue::Utf8(value))] => Ok(ColumnarValue::Scalar(
+                    ScalarValue::Utf8(value.as_deref().map(percent_decode).transpose()?),
+                )),
                 [ColumnarValue::Array(array)] => {
-                    let input = array.as_any().downcast_ref::<StringArray>()
-                        .ok_or_else(|| DataFusionError::Internal("url_decode expects Utf8".into()))?;
-                    let mut result = StringBuilder::with_capacity(
-                        input.len(), input.value_data().len(),
-                    );
+                    let input = array
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            DataFusionError::Internal("url_decode expects Utf8".into())
+                        })?;
+                    let mut result =
+                        StringBuilder::with_capacity(input.len(), input.value_data().len());
                     for value in input.iter() {
                         match value {
                             None => result.append_null(),
-                            Some(value) if !value.as_bytes().contains(&b'%')
-                                && !value.as_bytes().contains(&b'+') => {
+                            Some(value)
+                                if !value.as_bytes().contains(&b'%')
+                                    && !value.as_bytes().contains(&b'+') =>
+                            {
                                 // Common case: copy the existing string into Arrow once.
                                 result.append_value(value);
                             }
@@ -119,13 +129,22 @@ mod array_regression {
             .await?.collect().await?;
         let mut actual = Vec::new();
         for batch in rows {
-            let values = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
             actual.extend(values.iter().map(|value| value.map(str::to_owned)));
         }
-        assert_eq!(actual, vec![
-            Some("spark sql".into()), Some("café".into()),
-            Some("plain/café".into()), None,
-        ]);
+        assert_eq!(
+            actual,
+            vec![
+                Some("spark sql".into()),
+                Some("café".into()),
+                Some("plain/café".into()),
+                None,
+            ]
+        );
         Ok(())
     }
 }

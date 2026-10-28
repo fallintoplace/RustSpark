@@ -21,12 +21,15 @@ async fn url_decode_handles_nulls_and_utf8_rows() -> Result<(), Box<dyn std::err
             .unwrap();
         actual.extend(column.iter().map(|value| value.map(str::to_owned)));
     }
-    assert_eq!(actual, vec![
-            Some("hello world/+".to_owned()),
-            Some("é".to_owned()),
-            None,
-        ]);
-    let scalar = session.sql("SELECT URL_DECODE('a%20b')").await?.collect().await?;
+    assert_eq!(
+        actual,
+        vec![Some("hello world/+".to_owned()), Some("é".to_owned()), None,]
+    );
+    let scalar = session
+        .sql("SELECT URL_DECODE('a%20b')")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()
@@ -40,10 +43,18 @@ async fn url_decode_handles_nulls_and_utf8_rows() -> Result<(), Box<dyn std::err
 }
 
 #[tokio::test]
-async fn url_decode_distinguishes_plus_from_percent_encoded_plus() -> Result<(), Box<dyn std::error::Error>> {
+async fn url_decode_distinguishes_plus_from_percent_encoded_plus()
+-> Result<(), Box<dyn std::error::Error>> {
     let batches = RustSparkSession::new()
-        .sql("SELECT URL_DECODE('a+b%2Bc')").await?.collect().await?;
-    let values = batches[0].column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        .sql("SELECT URL_DECODE('a+b%2Bc')")
+        .await?
+        .collect()
+        .await?;
+    let values = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
     assert_eq!(values.value(0), "a b+c");
     Ok(())
 }

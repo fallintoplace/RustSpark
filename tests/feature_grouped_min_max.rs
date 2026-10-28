@@ -12,7 +12,9 @@ async fn grouped_min_max_reports_group_aggregates() -> TestResult {
              SELECT 'b', CAST(NULL AS INT) UNION ALL SELECT 'b', 5",
         )
         .await?;
-    let result = session.min_max_per_group("events", "segment", "metric").await?;
+    let result = session
+        .min_max_per_group("events", "segment", "metric")
+        .await?;
     session.register_dataframe("analytics", result)?;
     assert_eq!(
         session
@@ -21,6 +23,11 @@ async fn grouped_min_max_reports_group_aggregates() -> TestResult {
             .to_string(),
         "2"
     );
-    assert!(session.min_max_per_group("events", "segment", "missing").await.is_err());
+    assert!(
+        session
+            .min_max_per_group("events", "segment", "missing")
+            .await
+            .is_err()
+    );
     Ok(())
 }

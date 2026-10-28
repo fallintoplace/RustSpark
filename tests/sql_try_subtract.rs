@@ -2,7 +2,8 @@ use datafusion::arrow::array::Int64Array;
 use rustspark::RustSparkSession;
 
 #[tokio::test]
-async fn try_subtract_handles_vectors_nulls_and_overflow() -> Result<(), Box<dyn std::error::Error>> {
+async fn try_subtract_handles_vectors_nulls_and_overflow() -> Result<(), Box<dyn std::error::Error>>
+{
     let session = RustSparkSession::new();
     let batches = session
         .sql(
@@ -22,7 +23,11 @@ async fn try_subtract_handles_vectors_nulls_and_overflow() -> Result<(), Box<dyn
         actual.extend(column.iter());
     }
     assert_eq!(actual, vec![Some(3), None, None, Some(-7)]);
-    let scalar = session.sql("SELECT TRY_SUBTRACT(10, 4)").await?.collect().await?;
+    let scalar = session
+        .sql("SELECT TRY_SUBTRACT(10, 4)")
+        .await?
+        .collect()
+        .await?;
     let values = scalar[0]
         .column(0)
         .as_any()

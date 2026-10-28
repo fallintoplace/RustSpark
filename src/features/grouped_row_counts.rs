@@ -15,7 +15,6 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, &[group_key, value_column])?;
         let source = quote_catalog_table(table, "expected a table path")?;
         let group_key = quote_join_identifier(group_key);
-        let value_column = quote_join_identifier(value_column);
         self.sql_read_only(&format!(
             "SELECT {group_key} AS group_key, COUNT(*) AS row_count FROM {source} GROUP BY {group_key}"
         ))

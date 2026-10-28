@@ -24,6 +24,7 @@ class TypedSparkCompatibilityTests(unittest.TestCase):
         self.assertEqual(mod.canonical_type("Decimal128(10, 2)"), "decimal(10,2)")
         self.assertEqual(mod.canonical_type("Timestamp(Microsecond, None)"), "timestamp")
         self.assertEqual(mod.canonical_type("Utf8"), "string")
+        self.assertEqual(mod.canonical_type("Utf8View"), "string")
 
 
     def test_rustspark_description_preserves_column_tabs(self):

@@ -40,7 +40,10 @@ pub(crate) fn udf() -> ScalarUDF {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| DataFusionError::Internal("factorial expects Int64".into()))?;
-            let result: Int64Array = values.iter().map(|value| value.and_then(factorial)).collect();
+            let result: Int64Array = values
+                .iter()
+                .map(|value| value.and_then(factorial))
+                .collect();
             Ok(ColumnarValue::Array(Arc::new(result)))
         }),
     )

@@ -1,5 +1,8 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{error::{DataFusionError, Result}, prelude::DataFrame};
+use datafusion::{
+    error::{DataFusionError, Result},
+    prelude::DataFrame,
+};
 
 impl RustSparkSession {
     /// Append one-based row numbers within each partition.
@@ -27,8 +30,15 @@ impl RustSparkSession {
         Self::validate_selected_columns(&dataframe, partitions)?;
         let keys = order.iter().map(|(name, _)| *name).collect::<Vec<_>>();
         Self::validate_selected_columns(&dataframe, &keys)?;
-        if dataframe.schema().fields().iter().any(|field| field.name().eq_ignore_ascii_case(output_column)) {
-            return Err(DataFusionError::Plan(format!("Output column already exists: {output_column}")));
+        if dataframe
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name().eq_ignore_ascii_case(output_column))
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Output column already exists: {output_column}"
+            )));
         }
         let source = quote_catalog_table(table, "with_group_row_numbers requires a table path")?;
         let mut group_by = String::new();
@@ -44,7 +54,11 @@ impl RustSparkSession {
                 ordering.push_str(", ");
             }
             ordering.push_str(&quote_join_identifier(name));
-            ordering.push_str(if *ascending { " ASC NULLS FIRST" } else { " DESC NULLS LAST" });
+            ordering.push_str(if *ascending {
+                " ASC NULLS FIRST"
+            } else {
+                " DESC NULLS LAST"
+            });
         }
         let output = quote_join_identifier(output_column);
         self.sql_read_only(&format!(

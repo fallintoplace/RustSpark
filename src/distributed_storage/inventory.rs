@@ -54,7 +54,10 @@ mod tests {
         assert_eq!(replica_length(&path).unwrap(), Some(3));
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert_eq!(replica_length(&path).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            replica_length(&path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
     }
 
     #[test]

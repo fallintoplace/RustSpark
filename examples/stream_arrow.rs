@@ -5,12 +5,9 @@ use rustspark::RustSparkSession;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = RustSparkSession::new();
-    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sales.csv");
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sales.csv");
     session.register_csv("sales", file).await?;
-    let mut stream = session
-        .sql_stream("SELECT city, amount FROM sales")
-        .await?;
+    let mut stream = session.sql_stream("SELECT city, amount FROM sales").await?;
     let mut batches = 0usize;
     let mut rows = 0usize;
     while let Some(batch) = stream.next().await {

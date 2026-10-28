@@ -1,5 +1,5 @@
 use crate::{RustSparkSession, quote_catalog_table, quote_join_identifier};
-use datafusion::{error::{Result}, prelude::DataFrame};
+use datafusion::{error::Result, prelude::DataFrame};
 
 impl RustSparkSession {
     /// Estimate duplicates with a bounded-size approximate-distinct sketch.
