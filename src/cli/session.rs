@@ -15,9 +15,96 @@ fn build_session_config(args: &Args) -> SessionConfig {
         parquet.pushdown_filters = args.parquet_pushdown_filters;
         parquet.reorder_filters = args.parquet_reorder_filters;
         parquet.binary_as_string = args.parquet_binary_as_string;
+        if args.parquet_view_arrays {
+            parquet.schema_force_view_types = true;
+        }
+        if args.parquet_force_filter_selections {
+            parquet.force_filter_selections = true;
+        }
+        if let Some(bytes) = args.parquet_predicate_cache_mb_bytes {
+            parquet.max_predicate_cache_size = Some(bytes);
+        }
+        if let Some(bytes) = args.parquet_metadata_hint_kb_bytes {
+            parquet.metadata_size_hint = Some(bytes);
+        }
+        if let Some(size) = args.parquet_max_in_list_size {
+            parquet.max_in_list_size = size;
+        }
+        if args.parquet_bloom_filters {
+            parquet.bloom_filter_on_read = true;
+        }
     }
     if args.distinct_soft_limit {
         config.options_mut().optimizer.enable_distinct_aggregation_soft_limit = true;
+    }
+    if let Some(value) = args.hash_join_inlist_max_bytes {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = value;
+    }
+    if let Some(value) = args.hash_join_inlist_max_values {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = value;
+    }
+    if let Some(value) = args.hash_join_single_partition_bytes {
+        config.options_mut().optimizer.hash_join_single_partition_threshold = value;
+    }
+    if let Some(value) = args.hash_join_single_partition_rows {
+        config.options_mut().optimizer.hash_join_single_partition_threshold_rows = value;
+    }
+    if let Some(value) = args.perfect_hash_small_build_rows {
+        config.options_mut().execution.perfect_hash_join_small_build_threshold = value;
+    }
+    if let Some(value) = args.sort_read_ahead_bytes {
+        config.options_mut().execution.sort_pushdown_buffer_capacity = value;
+    }
+    if let Some(value) = args.planning_concurrency_override {
+        config.options_mut().execution.planning_concurrency = value;
+    }
+    if let Some(value) = args.partial_aggregate_probe_rows {
+        config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
+    }
+    if let Some(value) = args.subset_repartition_threshold {
+        config.options_mut().optimizer.subset_repartition_threshold = value;
+    }
+    if args.use_statistics_registry {
+        config.options_mut().optimizer.use_statistics_registry = true;
+    }
+    if args.leaf_expression_pushdown {
+        config.options_mut().optimizer.enable_leaf_expression_pushdown = true;
+    }
+    if args.union_filter_rewrite {
+        config.options_mut().optimizer.enable_unions_to_filter = true;
+    }
+    if let Some(value) = args.hash_join_probe_buffer_mb {
+        config.options_mut().execution.hash_join_buffering_capacity = value;
+    }
+    if let Some(value) = args.sort_in_place_kb {
+        config.options_mut().execution.sort_in_place_threshold_bytes = value;
+    }
+    if let Some(bytes) = args.join_dynamic_inlist_bytes {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_size = bytes;
+    }
+    if let Some(count) = args.join_dynamic_inlist_distinct {
+        config.options_mut().optimizer.hash_join_inlist_pushdown_max_distinct_values = count;
+    }
+    if let Some(count) = args.perfect_hash_small_range {
+        config.options_mut().execution.perfect_hash_join_small_build_threshold = count;
+    }
+    if let Some(bytes) = args.sort_spill_reserve_bytes {
+        config.options_mut().execution.sort_spill_reservation_bytes = bytes;
+    }
+    if let Some(bytes) = args.sort_in_place_threshold_bytes {
+        config.options_mut().execution.sort_in_place_threshold_bytes = bytes;
+    }
+    if let Some(bytes) = args.sort_pushdown_buffer_bytes {
+        config.options_mut().execution.sort_pushdown_buffer_capacity = bytes;
+    }
+    if let Some(value) = args.partial_agg_probe_rows {
+        config.options_mut().execution.skip_partial_aggregation_probe_rows_threshold = value;
+    }
+    if let Some(value) = args.partial_agg_skip_ratio {
+        config.options_mut().execution.skip_partial_aggregation_probe_ratio_threshold = value;
+    }
+    if let Some(value) = args.subset_repartition_min_partitions {
+        config.options_mut().optimizer.subset_repartition_threshold = value;
     }
     if let Some(batch_size) = args.batch_size {
         config = config.with_batch_size(batch_size);
@@ -104,6 +191,27 @@ fn build_session_config(args: &Args) -> SessionConfig {
     }
     if let Some(value) = args.optimizer_passes {
         config = config.set_usize("datafusion.optimizer.max_passes", value);
+    }
+    if args.parquet_serial_file_write {
+        config.options_mut().execution.parquet.allow_single_file_parallelism = false;
+    }
+    if let Some(value) = args.min_parallel_output_files {
+        config = config.set_usize("datafusion.execution.minimum_parallel_output_files", value);
+    }
+    if args.disable_file_work_stealing {
+        config.options_mut().execution.enable_file_stream_work_stealing = false;
+    }
+    if args.enforce_join_batch_size {
+        config.options_mut().execution.enforce_batch_size_in_joins = true;
+    }
+    if args.skip_table_statistics {
+        config.options_mut().execution.collect_statistics = false;
+    }
+    if let Some(count) = args.preserve_file_partitions {
+        config = config.set_usize("datafusion.optimizer.preserve_file_partitions", count);
+    }
+    if args.prefer_existing_union {
+        config.options_mut().optimizer.prefer_existing_union = true;
     }
     config
 }
@@ -327,6 +435,275 @@ mod tests {
     }
 
     #[test]
+    fn toggles_parquet_serial_file_write_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--parquet-serial-file-write",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(baseline.options().execution.parquet.allow_single_file_parallelism, defaults.options().execution.parquet.allow_single_file_parallelism);
+        assert_eq!(configured.options().execution.parquet.allow_single_file_parallelism, false);
+    }
+
+    #[test]
+    fn configures_min_parallel_output_files_without_changing_defaults() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--min-parallel-output-files",
+            "8",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.minimum_parallel_output_files.get(),
+            defaults.options().execution.minimum_parallel_output_files.get()
+        );
+        assert_eq!(configured.options().execution.minimum_parallel_output_files.get(), 8);
+    }
+
+    #[test]
+    fn toggles_disable_file_work_stealing_only_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--disable-file-work-stealing",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.enable_file_stream_work_stealing,
+            defaults.options().execution.enable_file_stream_work_stealing
+        );
+        assert_eq!(configured.options().execution.enable_file_stream_work_stealing, false);
+    }
+
+    #[test]
+    fn toggles_enforce_join_batch_size_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--enforce-join-batch-size",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.enforce_batch_size_in_joins,
+            datafusion_default.options().execution.enforce_batch_size_in_joins
+        );
+        assert_eq!(configured.options().execution.enforce_batch_size_in_joins, true);
+    }
+
+    #[test]
+    fn toggles_skip_table_statistics_only_when_requested() {
+        let default_args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned_args = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--skip-table-statistics",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&default_args);
+        let configured = super::build_session_config(&tuned_args);
+        let datafusion_default = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().execution.collect_statistics,
+            datafusion_default.options().execution.collect_statistics
+        );
+        assert_eq!(configured.options().execution.collect_statistics, false);
+    }
+
+    #[test]
+    fn preserves_hive_file_partitions_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--preserve-file-partitions",
+            "365",
+        ])
+        .unwrap();
+        let base_config = super::build_session_config(&original);
+        let tuned_config = super::build_session_config(&tuned);
+        let default_config = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            base_config.options().optimizer.preserve_file_partitions,
+            default_config.options().optimizer.preserve_file_partitions
+        );
+        assert_eq!(tuned_config.options().optimizer.preserve_file_partitions, 365);
+    }
+
+    #[test]
+    fn toggles_prefer_existing_union_only_when_requested() {
+        let original = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
+        let tuned = Args::try_parse_from([
+            "rustspark",
+            "--sql",
+            "SELECT 1",
+            "--prefer-existing-union",
+        ])
+        .unwrap();
+        let baseline = super::build_session_config(&original);
+        let configured = super::build_session_config(&tuned);
+        let defaults = datafusion::prelude::SessionConfig::new();
+        assert_eq!(
+            baseline.options().optimizer.prefer_existing_union,
+            defaults.options().optimizer.prefer_existing_union
+        );
+        assert_eq!(configured.options().optimizer.prefer_existing_union, true);
+    }
+
+    #[test]
+    fn can_enable_parquet_bloom_filter_pruning() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--parquet-bloom-filters",
+        ]).unwrap();
+        let config = super::build_session_config(&args);
+        assert!(config.options().execution.parquet.bloom_filter_on_read);
+    }
+
+    #[test]
+    fn configures_parquet_in_list_pruning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-max-in-list-size", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.parquet.max_in_list_size, 64);
+    }
+
+    #[test]
+    fn configures_parquet_metadata_prefetch_hint() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-metadata-hint-kb", "512"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.parquet.metadata_size_hint,
+            Some(512 * 1024));
+    }
+
+    #[test]
+    fn configures_parquet_predicate_cache() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-pushdown-filters", "--parquet-predicate-cache-mb", "32"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.parquet.max_predicate_cache_size,
+            Some(32 * 1024 * 1024));
+    }
+
+    #[test]
+    fn configures_parquet_filter_selections() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-pushdown-filters", "--parquet-force-filter-selections"]).unwrap();
+        assert!(super::build_session_config(&args).options().execution.parquet.force_filter_selections);
+    }
+
+    #[test]
+    fn configures_parquet_view_arrays() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--parquet-view-arrays"]).unwrap();
+        assert!(super::build_session_config(&args).options().execution.parquet.schema_force_view_types);
+    }
+
+    #[test]
+    fn configures_hash_join_probe_buffer_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--hash-join-probe-buffer-mb", "32"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.hash_join_buffering_capacity, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_hash_join_single_partition_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--hash-join-single-partition-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_single_partition_threshold, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_join_dynamic_inlist_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--join-dynamic-inlist-kb", "256"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_inlist_pushdown_max_size, 256 * 1024);
+    }
+
+    #[test]
+    fn configures_join_dynamic_inlist_distinct() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--join-dynamic-inlist-distinct", "512"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_inlist_pushdown_max_distinct_values, 512);
+    }
+
+    #[test]
+    fn configures_perfect_hash_small_range() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--perfect-hash-small-range", "16384"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.perfect_hash_join_small_build_threshold, 16384);
+    }
+
+    #[test]
+    fn configures_hash_join_single_partition_rows() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--hash-join-single-partition-rows", "1000000"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.hash_join_single_partition_threshold_rows, 1000000);
+    }
+
+    #[test]
+    fn configures_sort_spill_reserve_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-spill-reserve-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_spill_reservation_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_sort_in_place_threshold_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-in-place-max-mb", "16"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_in_place_threshold_bytes, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_sort_pushdown_buffer_bytes() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--sort-pushdown-buffer-mb", "64"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.sort_pushdown_buffer_capacity, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configures_partial_agg_probe_rows() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--partial-agg-probe-rows", "50000"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_rows_threshold, 50000);
+    }
+
+    #[test]
+    fn configures_partial_agg_skip_ratio() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--partial-agg-skip-ratio", "0.85"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().execution.skip_partial_aggregation_probe_ratio_threshold, 0.85);
+    }
+
+    #[test]
+    fn configures_subset_repartition_min_partitions() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1",
+            "--subset-repartition-min-partitions", "8"]).unwrap();
+        assert_eq!(super::build_session_config(&args).options().optimizer.subset_repartition_threshold, 8);
+    }
+
+    #[test]
     fn leaves_the_default_session_without_custom_runtime() {
         let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1"]).unwrap();
         assert!(custom_runtime(&args).unwrap().is_none());
@@ -345,5 +722,205 @@ mod tests {
         assert!(validate_spill_directory(&nested, Some(&database)).is_err());
         assert!(validate_spill_directory(&database, Some(&database)).is_err());
         assert!(validate_spill_directory(&directory.path().join("missing"), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_inlist_size {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn config_uses_requested_value() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-kb", "8",
+        ])
+        .unwrap();
+        let config = build_session_config(&args);
+        assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_size, 8192);
+        assert!(Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-kb", "0",
+        ])
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_inlist_values {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn config_uses_requested_value() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-values", "8",
+        ])
+        .unwrap();
+        let config = build_session_config(&args);
+        assert_eq!(config.options().optimizer.hash_join_inlist_pushdown_max_distinct_values, 8);
+        assert!(Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-inlist-max-values", "0",
+        ])
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_single_partition_bytes {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn reads_nonzero_tuning_value() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-mb", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().optimizer.hash_join_single_partition_threshold, 8388608);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-mb", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_single_partition_rows {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn reads_nonzero_tuning_value() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-rows", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().optimizer.hash_join_single_partition_threshold_rows, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--hash-join-single-partition-rows", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_perfect_hash_small_build {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn reads_nonzero_tuning_value() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--perfect-hash-small-build-rows", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.perfect_hash_join_small_build_threshold, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--perfect-hash-small-build-rows", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_sort_read_ahead {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn validates_and_applies_tuning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-read-ahead-mb", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.sort_pushdown_buffer_capacity, 8388608);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-read-ahead-mb", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_parallel_planning {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn validates_and_applies_tuning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--planning-concurrency", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.planning_concurrency, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--planning-concurrency", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_partial_aggregate_probe {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_flag_updates_optimizer_config() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--partial-aggregate-probe-rows", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.skip_partial_aggregation_probe_rows_threshold, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--partial-aggregate-probe-rows", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_subset_repartition {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_flag_updates_optimizer_config() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--subset-repartition-threshold", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().optimizer.subset_repartition_threshold, 8);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--subset-repartition-threshold", "0"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_statistics_registry {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_flag_updates_optimizer_config() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--use-statistics-registry"]).unwrap();
+        assert_eq!(build_session_config(&args).options().optimizer.use_statistics_registry, true);
+    }
+}
+
+#[cfg(test)]
+mod perf_leaf_expression_pushdown {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_enables_optimizer_flag() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--leaf-expression-pushdown"]).unwrap();
+        assert!(build_session_config(&args).options().optimizer.enable_leaf_expression_pushdown);
+    }
+}
+
+#[cfg(test)]
+mod perf_union_filter_rewrite {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn cli_enables_optimizer_flag() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--union-filter-rewrite"]).unwrap();
+        assert!(build_session_config(&args).options().optimizer.enable_unions_to_filter);
+    }
+}
+
+#[cfg(test)]
+mod perf_hash_join_probe_buffer {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn config_uses_requested_value() {
+        let args = Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-probe-buffer-mb", "8",
+        ])
+        .unwrap();
+        let config = build_session_config(&args);
+        assert_eq!(config.options().execution.hash_join_buffering_capacity, 8388608);
+        assert!(Args::try_parse_from([
+            "rustspark", "--sql", "SELECT 1", "--hash-join-probe-buffer-mb", "0",
+        ])
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod perf_sort_in_place {
+    use super::{Args, build_session_config};
+    use clap::Parser;
+
+    #[test]
+    fn validates_and_applies_tuning() {
+        let args = Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-kb", "8"]).unwrap();
+        assert_eq!(build_session_config(&args).options().execution.sort_in_place_threshold_bytes, 8192);
+        assert!(Args::try_parse_from(["rustspark", "--sql", "SELECT 1", "--sort-in-place-kb", "0"]).is_err());
     }
 }
