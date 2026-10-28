@@ -40,9 +40,15 @@ def run_scale(prepare, run, report):
         run, check=False, capture_output=True, text=True, timeout=7200,
     )
     rows = json.loads(report.read_text())["results"]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("Invalid TPC-H query results")
     ok = sum(row.get("status") == "ok" for row in rows)
+    ids = [row.get("id") for row in rows]
+    complete = (len(rows) == 22 and ok == 22 and process.returncode == 0
+                and all(type(number) is int for number in ids)
+                and set(ids) == set(range(1, 23)))
     return {"attempted": len(rows), "passed": ok,
-            "status": "ok" if len(rows) == 22 and ok == 22 and process.returncode == 0 else "error"}
+            "status": "ok" if complete else "error"}
 
 
 def measure(binary, output, factors):
