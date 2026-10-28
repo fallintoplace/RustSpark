@@ -229,6 +229,8 @@ mod sql_compat_spark_dates;
 mod sql_compat_date_add;
 #[path = "sql_compat/date_sub.rs"]
 mod sql_compat_date_sub;
+#[path = "sql_compat/datediff.rs"]
+mod sql_compat_datediff;
 mod sql_results;
 pub use joins_multi_range::RangeTableJoin;
 
@@ -398,6 +400,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_hex::udf());
         context.register_udf(sql_compat_date_add::udf());
         context.register_udf(sql_compat_date_sub::udf());
+        context.register_udf(sql_compat_datediff::udf());
         Self { context }
     }
 
