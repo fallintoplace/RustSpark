@@ -10,6 +10,26 @@ def report(*items):
 
 
 class RegressionTests(unittest.TestCase):
+    def test_different_environment_blocks_comparison(self):
+        first = report((1, 10))
+        second = report((1, 9))
+        first["platform"] = "linux-a"
+        second["platform"] = "linux-b"
+        with self.assertRaisesRegex(ValueError, "platform"):
+            regress.compare(first, second)
+        second["platform"] = "linux-a"
+        first["target_partitions"] = 4
+        with self.assertRaisesRegex(ValueError, "target_partitions"):
+            regress.compare(first, second)
+
+    def test_matching_environment_is_accepted(self):
+        first = report((1, 10))
+        second = report((1, 9))
+        for run in (first, second):
+            run.update({"platform": "linux", "target_partitions": 4,
+                        "metric": "cold", "repeat": 3, "warmup": 1})
+        self.assertFalse(regress.compare(first, second)["regressions"])
+
     def test_detects_regression(self):
         result = regress.compare(report((1, 100), (2, 30)), report((1, 130), (2, 10)))
         self.assertEqual(result["regressions"], [1])
