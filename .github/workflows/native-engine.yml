@@ -1,0 +1,30 @@
+name: Native engine
+
+on:
+  pull_request:
+    paths:
+      - 'native-engine/**'
+      - '.github/workflows/native-engine.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native-engine/**'
+      - '.github/workflows/native-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Build and test native engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native-engine
+      - run: cargo test --manifest-path native-engine/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path native-engine/Cargo.toml --all-targets -- -D warnings
