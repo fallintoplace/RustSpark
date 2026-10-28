@@ -23,3 +23,4 @@ Start with `--target-partitions N`, typed Parquet partitions, and `--parquet-pus
 - `--join-inlist-pushdown-values 256`: Limit distinct join keys pushed as IN lists. High values cost more planning and probe memory.
 - `--sort-in-place-bytes 8388608`: Sort data in a single RecordBatch below this byte threshold. Higher values can increase peak memory.
 - `--window-topn`: Use PartitionedTopK for filtered ROW_NUMBER windows. Can regress high-cardinality partitions.
+- `--prefer-existing-sort`: Use existing input ordering over maximizing repartition parallelism. Can reduce parallel throughput.

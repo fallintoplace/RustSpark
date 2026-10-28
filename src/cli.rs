@@ -339,6 +339,10 @@ struct Args {
     #[arg(long = "window-topn")]
     window_topn: bool,
 
+    /// Opt-in scan/order tuning; existing defaults remain unchanged.
+    #[arg(long = "prefer-existing-sort")]
+    prefer_existing_sort: bool,
+
     #[arg(
         long = "output-parquet",
         value_name = "DIR",
