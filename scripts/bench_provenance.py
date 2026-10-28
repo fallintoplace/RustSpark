@@ -10,12 +10,19 @@ import re
 import subprocess
 
 
-def sha256(path):
+def sha256_and_size(path):
+    """Hash and count the bytes from the same binary file handle."""
     digest = hashlib.sha256()
+    count = 0
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+            count += len(chunk)
+    return digest.hexdigest(), count
+
+
+def sha256(path):
+    return sha256_and_size(path)[0]
 
 
 def git_revision(directory):
@@ -57,9 +64,10 @@ def host_metadata():
 
 
 def collect_provenance(executable, repository):
+    digest, size = sha256_and_size(executable)
     return {
-        "binary_sha256": sha256(executable),
-        "binary_bytes": executable.stat().st_size,
+        "binary_sha256": digest,
+        "binary_bytes": size,
         **host_metadata(),
         "git_revision": git_revision(repository),
         "git_dirty": git_dirty(repository),

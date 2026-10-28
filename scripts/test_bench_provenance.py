@@ -17,6 +17,14 @@ class ProvenanceTests(unittest.TestCase):
             binary.write_bytes(b"changed")
             self.assertNotEqual(provenance.sha256(binary), provenance.sha256.__globals__["hashlib"].sha256(b"hello world").hexdigest())
 
+    def test_hash_and_size_are_measured_from_same_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "rs"
+            binary.write_bytes(b"binary" * 1024)
+            digest, size = provenance.sha256_and_size(binary)
+            self.assertEqual(size, len(b"binary" * 1024))
+            self.assertEqual(digest, provenance.hashlib.sha256(b"binary" * 1024).hexdigest())
+
     def test_enrich_does_not_mutate_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "rs"
