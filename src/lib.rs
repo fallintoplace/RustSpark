@@ -191,6 +191,8 @@ mod sql_compat_format_number;
 mod sql_compat_soundex;
 #[path = "sql_compat/locate.rs"]
 mod sql_compat_locate;
+#[path = "sql_compat/weekofyear.rs"]
+mod sql_compat_weekofyear;
 #[path = "sql_compat/space.rs"]
 mod sql_compat_space;
 #[path = "sql_compat/startswith.rs"]
@@ -350,6 +352,7 @@ impl RustSparkSession {
         context.register_udf(sql_compat_atanh::udf());
         context.register_udf(sql_compat_try_multiply::udf());
         context.register_udf(sql_compat_cosh::udf());
+        context.register_udf(sql_compat_weekofyear::udf());
         context.register_udf(sql_compat_bitwise_not::udf());
         context.register_udf(sql_compat_try_negate::udf());
         context.register_udf(sql_compat_sinh::udf());
