@@ -135,6 +135,13 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
         "BIT_COUNT" => bit_count::output_type(args, schema),
         "BIT_GET" => bit_get::output_type(args, schema),
+        "TYPEOF" => {
+            check_arity(name, args, 1, 1)?;
+            if !matches!(&args[0], Expr::Literal(Value::Null)) {
+                args[0].output_type(schema)?;
+            }
+            Ok(DataType::Text)
+        },
         _ => {
             if crate::builtin::supports(name) {
                 crate::builtin::output_type(name, args, schema)
@@ -170,6 +177,18 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
         "BIT_COUNT" => bit_count::eval(args, batch, row),
         "BIT_GET" => bit_get::eval(args, batch, row),
+        "TYPEOF" => {
+            let kind = match &args[0] {
+                Expr::Literal(Value::Null) => "void",
+                _ => match args[0].output_type(batch.schema())? {
+                    DataType::Boolean => "boolean",
+                    DataType::Integer => "bigint",
+                    DataType::Float => "double",
+                    DataType::Text => "string",
+                },
+            };
+            Ok(Value::Text(kind.into()))
+        },
         _ => {
             if crate::builtin::supports(name) {
                 crate::builtin::evaluate(name, args, batch, row)
