@@ -88,10 +88,10 @@ impl Iterator for BatchChunks<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.position >= self.input.num_rows() { return None; }
-        let end = self.position.saturating_add(self.batch_rows).min(self.input.num_rows());
-        let indices = (self.position..end).collect::<Vec<_>>();
+        let start = self.position;
+        let end = start.saturating_add(self.batch_rows).min(self.input.num_rows());
         self.position = end;
-        Some(self.input.take(&indices))
+        Some(self.input.slice_rows(start, end))
     }
 }
 
@@ -157,5 +157,24 @@ mod consolidated_bounded_row_batch_tests {
         let batches = RowBatcher::new(rows, schema, usize::MAX)
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![65_536, 1]);
+    }
+}
+
+#[cfg(test)]
+mod scale_contiguous_chunk_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn slice_iterator_preserves_nullable_data_and_zero_width_counts() {
+        let source = Batch::from_rows(Schema::new(vec![Field::new("x", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Text("one".into())], vec![Value::Null]]).unwrap();
+        let parts = BatchChunks::new(&source, 2).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(parts.iter().flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>(), source.rows().unwrap());
+
+        let zero_width = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
+        let parts = BatchChunks::new(&zero_width, 2).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 2, 1]);
     }
 }
