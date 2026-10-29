@@ -15,10 +15,14 @@ pub struct Batch {
 
 impl Batch {
     pub fn new(schema: Schema, columns: Vec<Vec<Value>>) -> Result<Self> {
+        let rows = columns.first().map_or(0, Vec::len);
+        Self::new_with_row_count(schema, columns, rows)
+    }
+
+    pub fn new_with_row_count(schema: Schema, columns: Vec<Vec<Value>>, rows: usize) -> Result<Self> {
         if columns.len() != schema.len() {
             return Err(Error::Schema("column count does not match schema".into()));
         }
-        let rows = columns.first().map_or(0, Vec::len);
         for (index, column) in columns.iter().enumerate() {
             if column.len() != rows {
                 return Err(Error::Schema("all columns must have the same length".into()));
@@ -119,6 +123,16 @@ mod tests {
 
     fn schema() -> Schema {
         Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap()
+    }
+
+    #[test]
+    fn explicit_cardinality_supports_zero_column_batches() {
+        let empty = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(empty.clone(), vec![], 3).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.rows().unwrap(), vec![vec![], vec![], vec![]]);
+        assert_eq!(Batch::new(empty, vec![]).unwrap().num_rows(), 0);
+        assert!(Batch::new_with_row_count(schema(), vec![vec![Value::Integer(1)]], 2).is_err());
     }
 
     #[test]
