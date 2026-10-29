@@ -200,6 +200,13 @@ impl Parser {
                     continue;
                 }
             }
+            if self.peek() == Some(&Token::Operator("%".into())) {
+                if min_precedence > 5 { break; }
+                let _ = self.next();
+                let right = self.expression(6)?;
+                left = Expr::Call { name: "mod".into(), args: vec![left, right] };
+                continue;
+            }
             let Some((op, precedence)) = self.binary_operator() else {
                 break;
             };
@@ -679,6 +686,16 @@ mod tests {
         assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(), vec![
             vec![Value::Integer(2)], vec![Value::Integer(3)]
         ]);
+    }
+
+    #[test]
+    fn modulo_operator_executes_with_native_overflow_handling() {
+        let rows = execute(
+            &parse_sql("SELECT amount % 2 AS remainder FROM sales").unwrap(),
+            &sales(),
+        ).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Null]]);
+        assert!(execute(&parse_sql("SELECT amount % 0 FROM sales").unwrap(), &sales()).is_err());
     }
 
     #[test]
