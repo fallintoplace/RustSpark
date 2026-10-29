@@ -27,7 +27,6 @@ fn unsupported_sources_and_deep_subqueries_are_rejected() {
     for sql in [
         "SELECT * FROM (DELETE FROM users) bad",
         "SELECT * FROM (SELECT 1 AS value)",
-        "SELECT * FROM (SELECT 1 AS value) t(other)",
     ] {
         assert!(parse_sql(sql).is_err(), "{sql}");
     }

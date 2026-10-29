@@ -18,6 +18,8 @@ pub enum Plan {
     },
     /// Preserve a source alias so qualified column references stay unambiguous.
     Alias { input: Box<Plan>, alias: String },
+    /// A derived relation's positional column alias list.
+    Rename { input: Box<Plan>, columns: Vec<String> },
     Scan {
         table: String,
     },
