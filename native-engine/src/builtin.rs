@@ -16,6 +16,14 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(kind.unwrap_or(DataType::Text))
         }
+        "NULLIF" => {
+            if args.len() != 2 { return Err(Error::Parse("NULLIF requires two arguments".into())); }
+            let first = args[0].output_type(schema)?;
+            if first != args[1].output_type(schema)? && !matches!(&args[1], Expr::Literal(Value::Null)) {
+                return Err(Error::Type("NULLIF arguments must have the same type".into()));
+            }
+            Ok(first)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -23,6 +31,10 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
 pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
     match name.to_ascii_uppercase().as_str() {
         "COALESCE" => Ok(args.iter().find(|value| !value.is_null()).cloned().unwrap_or(Value::Null)),
+        "NULLIF" => match args {
+            [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
+            _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
