@@ -1,5 +1,5 @@
 //! Typed filter fast path over native column buffers with SQL-null semantics.
-use crate::{batch::Batch, expr::{BinaryOp, Expr}, scalar::Value, Result};
+use crate::{batch::Batch, expr::{BinaryOp, Expr}, scalar::Value, schema::DataType, Error, Result};
 
 fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
     Some(match op {
@@ -33,6 +33,10 @@ fn fast_integer_predicate<'a>(
 
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
+    let kind = predicate.output_type(batch.schema())?;
+    if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
+        return Err(Error::Type("vector filter predicate must be boolean".into()));
+    }
     let mut selected = Vec::new();
     if let Some((column, op, rhs)) = fast_integer_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -60,6 +64,14 @@ pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
 mod tests {
     use super::*;
     use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn empty_batches_reject_invalid_predicates() {
+        let batch = Batch::empty(Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap());
+        assert!(select_indices(&batch, &Expr::Column("n".into())).is_err());
+        assert!(select_indices(&batch, &Expr::Column("missing".into())).is_err());
+        assert!(select_indices(&batch, &Expr::Literal(Value::Null)).unwrap().is_empty());
+    }
 
     #[test]
     fn fast_path_matches_general_expression_semantics() {
