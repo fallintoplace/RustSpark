@@ -12,7 +12,12 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
     }
     if let Some(compiled) = CACHE.with(|cache| {
-        cache.borrow().iter().find(|(key, _)| key == pattern).map(|(_, regex)| regex.clone())
+        let mut cache = cache.borrow_mut();
+        let index = cache.iter().position(|(key, _)| key == pattern)?;
+        let entry = cache.remove(index);
+        let compiled = entry.1.clone();
+        cache.push(entry);
+        Some(compiled)
     }) {
         return Ok(compiled);
     }
@@ -49,5 +54,23 @@ mod tests {
             assert!(compile(pattern).unwrap().is_match(pattern));
         }
         CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
+    }
+}
+
+#[cfg(test)]
+mod regex_recent_pattern_cache_tests {
+    use super::*;
+    #[test]
+    fn a_recent_cache_hit_survives_a_new_pattern() {
+        CACHE.with(|cache| cache.borrow_mut().clear());
+        for pattern in ["keep", "one", "two", "three"] { compile(pattern).unwrap(); }
+        compile("keep").unwrap();
+        compile("four").unwrap();
+        CACHE.with(|cache| {
+            let cache = cache.borrow();
+            assert_eq!(cache.len(), CACHE_ENTRIES);
+            assert!(cache.iter().any(|(pattern, _)| pattern == "keep"));
+            assert!(!cache.iter().any(|(pattern, _)| pattern == "one"));
+        });
     }
 }
