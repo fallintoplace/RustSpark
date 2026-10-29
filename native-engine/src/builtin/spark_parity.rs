@@ -254,6 +254,163 @@ fn elt(args: &[Value]) -> Result<Value> {
     Ok(args.get(zero_based + 1).cloned().unwrap_or(Value::Null))
 }
 
+fn number_float_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 1 && matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(DataType::Float)
+    } else { Err(Error::Type("function requires one numeric argument".into())) }
+}
+fn signum(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
+    let sign = if value > 0.0 { 1.0 } else if value < 0.0 { -1.0 } else { 0.0 };
+    Ok(Value::Float(sign))
+}
+
+fn cot(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
+    super::finite(1.0 / value.tan())
+}
+
+fn sec(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
+    super::finite(1.0 / value.cos())
+}
+
+fn csc(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
+    super::finite(1.0 / value.sin())
+}
+
+fn bin_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 1 && matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(DataType::Text)
+    } else { Err(Error::Type("BIN requires numeric input".into())) }
+}
+fn bin(args: &[Value]) -> Result<Value> {
+    let number = match &args[0] {
+        Value::Integer(value) => *value,
+        Value::Float(value) if value.is_finite() => *value as i64,
+        Value::Null => return Ok(Value::Null),
+        _ => return Err(Error::Type("BIN requires a finite number".into())),
+    };
+    Ok(Value::Text(format!("{number:b}")))
+}
+
+fn same_numeric_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 1 && matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(types[0])
+    } else { Err(Error::Type("numeric unary function requires a number".into())) }
+}
+fn positive(args: &[Value]) -> Result<Value> {
+    match &args[0] {
+        Value::Integer(_) | Value::Float(_) | Value::Null => Ok(args[0].clone()),
+        _ => Err(Error::Type("POSITIVE requires numeric input".into())),
+    }
+}
+
+fn negative(args: &[Value]) -> Result<Value> {
+    match &args[0] {
+        Value::Integer(number) => number.checked_neg().map(Value::Integer)
+            .ok_or_else(|| Error::Execution("NEGATIVE integer overflow".into())),
+        Value::Float(number) => super::finite(-number),
+        Value::Null => Ok(Value::Null),
+        _ => Err(Error::Type("NEGATIVE requires numeric input".into())),
+    }
+}
+
+fn char_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Integer] { Ok(DataType::Text) }
+    else { Err(Error::Type("CHAR requires an integer code".into())) }
+}
+fn char_code(args: &[Value]) -> Result<Value> {
+    let Some(code) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let byte = code.rem_euclid(256) as u8;
+    Ok(Value::Text(char::from(byte).to_string()))
+}
+
+fn url_encode(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' =>
+                output.push(char::from(byte)),
+            b' ' => output.push('+'),
+            _ => {
+                output.push('%');
+                output.push(char::from(HEX[usize::from(byte >> 4)]));
+                output.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+        }
+    }
+    Ok(Value::Text(output))
+}
+
+fn form_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+fn decode_form(text: &str) -> Result<String> {
+    let input = text.as_bytes();
+    let mut output = Vec::with_capacity(input.len());
+    let mut pos = 0;
+    while pos < input.len() {
+        match input[pos] {
+            b'+' => output.push(b' '),
+            b'%' => {
+                let high = input.get(pos + 1).and_then(|byte| form_hex(*byte));
+                let low = input.get(pos + 2).and_then(|byte| form_hex(*byte));
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Err(Error::Execution("URL_DECODE malformed percent escape".into()));
+                };
+                output.push((high << 4) | low);
+                pos += 2;
+            }
+            byte => output.push(byte),
+        }
+        pos += 1;
+    }
+    String::from_utf8(output)
+        .map_err(|_| Error::Execution("URL_DECODE produced invalid UTF-8".into()))
+}
+fn url_decode(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    decode_form(text).map(Value::Text)
+}
+
+fn try_url_decode(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    Ok(decode_form(text).map(Value::Text).unwrap_or(Value::Null))
+}
+
+fn two_text_text_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text, DataType::Text] { Ok(DataType::Text) }
+    else { Err(Error::Type("function requires two text arguments".into())) }
+}
+fn regexp_substr(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
+    super::regex_support::check_input(text)?;
+    let regex = super::regex_support::compile(pattern)?;
+    Ok(regex.find(text).map(|matched| Value::Text(matched.as_str().to_owned()))
+        .unwrap_or(Value::Null))
+}
+
+fn regexp_instr(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
+    super::regex_support::check_input(text)?;
+    let regex = super::regex_support::compile(pattern)?;
+    let Some(matched) = regex.find(text) else { return Ok(Value::Integer(0)); };
+    let position = i64::try_from(text[..matched.start()].chars().count())
+        .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()))?;
+    Ok(Value::Integer(position + 1))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -274,6 +431,19 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "luhn_check", min_args: 1, max_args: 1, result_type: luhn_type, call: luhn_check },
     Function { name: "soundex", min_args: 1, max_args: 1, result_type: text_text_type, call: soundex },
     Function { name: "elt", min_args: 2, max_args: 128, result_type: elt_type, call: elt },
+    Function { name: "signum", min_args: 1, max_args: 1, result_type: number_float_type, call: signum },
+    Function { name: "cot", min_args: 1, max_args: 1, result_type: number_float_type, call: cot },
+    Function { name: "sec", min_args: 1, max_args: 1, result_type: number_float_type, call: sec },
+    Function { name: "csc", min_args: 1, max_args: 1, result_type: number_float_type, call: csc },
+    Function { name: "bin", min_args: 1, max_args: 1, result_type: bin_type, call: bin },
+    Function { name: "positive", min_args: 1, max_args: 1, result_type: same_numeric_type, call: positive },
+    Function { name: "negative", min_args: 1, max_args: 1, result_type: same_numeric_type, call: negative },
+    Function { name: "char", min_args: 1, max_args: 1, result_type: char_type, call: char_code },
+    Function { name: "url_encode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_encode },
+    Function { name: "url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_decode },
+    Function { name: "try_url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: try_url_decode },
+    Function { name: "regexp_substr", min_args: 2, max_args: 2, result_type: two_text_text_type, call: regexp_substr },
+    Function { name: "regexp_instr", min_args: 2, max_args: 2, result_type: two_text_integer_type, call: regexp_instr },
     // PARITY_FUNCTIONS
 ];
 
@@ -416,6 +586,105 @@ mod tests {
         assert_eq!(sql_result("elt(2, 'scala', 'java')").unwrap(), Value::Text("java".into()));
         assert_eq!(sql_result("elt(9, 'scala', 'java')").unwrap(), Value::Null);
         assert_eq!(elt(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_signum_returns_float_sign() {
+        assert_eq!(sql_result("signum(-3)").unwrap(), Value::Float(-1.0));
+        assert_eq!(sql_result("signum(0)").unwrap(), Value::Float(0.0));
+        assert_eq!(sql_result("signum(3)").unwrap(), Value::Float(1.0));
+        assert_eq!(signum(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_cot_matches_reciprocal_tangent() {
+        let Value::Float(actual) = sql_result("cot(1)").unwrap() else { panic!("expected float") };
+        assert!((actual - 0.6420926159343306).abs() < 1e-12);
+        assert_eq!(cot(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_sec_matches_reciprocal_cosine() {
+        assert_eq!(sql_result("sec(0)").unwrap(), Value::Float(1.0));
+        assert_eq!(sec(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_csc_matches_reciprocal_sine() {
+        let Value::Float(actual) = sql_result("csc(1)").unwrap() else { panic!("expected float") };
+        assert!((actual - 1.1883951057781212).abs() < 1e-12);
+        assert_eq!(csc(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_bin_uses_twos_complement_for_negative_numbers() {
+        assert_eq!(sql_result("bin(13)").unwrap(), Value::Text("1101".into()));
+        assert_eq!(sql_result("bin(-13)").unwrap(),
+            Value::Text("1111111111111111111111111111111111111111111111111111111111110011".into()));
+        assert_eq!(sql_result("bin(13.3)").unwrap(), Value::Text("1101".into()));
+    }
+
+    #[test]
+    fn spark_positive_preserves_value_and_type() {
+        assert_eq!(sql_result("positive(-5)").unwrap(), Value::Integer(-5));
+        assert_eq!(positive(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_negative_checked_negation() {
+        assert_eq!(sql_result("negative(5)").unwrap(), Value::Integer(-5));
+        assert_eq!(negative(&[Value::Null]).unwrap(), Value::Null);
+        assert!(negative(&[Value::Integer(i64::MIN)]).is_err());
+    }
+
+    #[test]
+    fn spark_char_wraps_byte_values() {
+        assert_eq!(sql_result("char(65)").unwrap(), Value::Text("A".into()));
+        assert_eq!(sql_result("char(321)").unwrap(), Value::Text("A".into()));
+        assert_eq!(char_code(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_url_encode_uses_form_rules_and_utf8() {
+        assert_eq!(sql_result("url_encode('a b+c')").unwrap(), Value::Text("a+b%2Bc".into()));
+        assert_eq!(url_encode(&[Value::Text("é".into())]).unwrap(),
+            Value::Text("%C3%A9".into()));
+        assert_eq!(url_encode(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_url_decode_reconstructs_utf8_and_rejects_bad_escapes() {
+        assert_eq!(sql_result("url_decode('a+b%2Bc')").unwrap(), Value::Text("a b+c".into()));
+        assert_eq!(url_decode(&[Value::Text("%C3%A9".into())]).unwrap(),
+            Value::Text("é".into()));
+        assert!(url_decode(&[Value::Text("%ZZ".into())]).is_err());
+        assert!(url_decode(&[Value::Text("%FF".into())]).is_err());
+    }
+
+    #[test]
+    fn spark_try_url_decode_returns_null_on_bad_input() {
+        assert_eq!(sql_result("try_url_decode('a+b%2Bc')").unwrap(), Value::Text("a b+c".into()));
+        assert_eq!(sql_result("try_url_decode('%ZZ')").unwrap(), Value::Null);
+        assert_eq!(try_url_decode(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_regexp_substr_returns_first_match() {
+        assert_eq!(sql_result("regexp_substr('abc123xyz', '[0-9]+')").unwrap(),
+            Value::Text("123".into()));
+        assert_eq!(sql_result("regexp_substr('abc', '[0-9]+')").unwrap(), Value::Null);
+        assert!(sql_result("regexp_substr('abc', '[')").is_err());
+    }
+
+    #[test]
+    fn spark_regexp_instr_uses_unicode_character_positions() {
+        assert_eq!(sql_result("regexp_instr('abc123xyz', '[0-9]+')").unwrap(),
+            Value::Integer(4));
+        assert_eq!(sql_result("regexp_instr('café 123', '[0-9]+')").unwrap(),
+            Value::Integer(6));
+        assert_eq!(sql_result("regexp_instr('abc', '[0-9]+')").unwrap(),
+            Value::Integer(0));
+        assert!(sql_result("regexp_instr('abc', '[')").is_err());
     }
 
     // PARITY_TESTS
