@@ -78,6 +78,7 @@ mod luhn_check;
 mod quote;
 mod cot;
 mod csc;
+mod sec;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -176,6 +177,7 @@ const MODULES: &[&[Function]] = &[
     &quote::FUNCTIONS,
     &cot::FUNCTIONS,
     &csc::FUNCTIONS,
+    &sec::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
