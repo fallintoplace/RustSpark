@@ -1,7 +1,8 @@
 import json
 import unittest
+import tempfile
 from pathlib import Path
-from server import command_for_template, validate_params
+from server import command_for_template, list_query_templates, validate_params
 
 
 class GatewayTests(unittest.TestCase):
@@ -25,6 +26,16 @@ class GatewayTests(unittest.TestCase):
         for body in invalid:
             with self.subTest(body=body), self.assertRaises((ValueError, json.JSONDecodeError)):
                 validate_params(body)
+
+    def test_only_safe_regular_templates_are_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queries = Path(directory)
+            (queries / "first.sql").write_text("SELECT 1")
+            (queries / "second.sql").write_text("SELECT 2")
+            (queries / "hidden.txt").write_text("SELECT 3")
+            (queries / "bad.name.sql").write_text("SELECT 4")
+            (queries / "link.sql").symlink_to(queries / "first.sql")
+            self.assertEqual(list_query_templates(queries), ["first", "second"])
 
 
 if __name__ == "__main__":

@@ -34,6 +34,14 @@ def validate_params(body: bytes) -> dict[str, str]:
     return params
 
 
+def list_query_templates(directory: Path) -> list[str]:
+    return sorted(
+        path.stem for path in directory.iterdir()
+        if path.is_file() and not path.is_symlink()
+        and path.suffix == ".sql" and TEMPLATE.fullmatch(path.stem)
+    )
+
+
 def command_for_template(binary: str, database: Path, template: Path,
                          params: dict[str, str], max_rows: int, timeout: int) -> list[str]:
     args = [
@@ -62,6 +70,12 @@ def make_handler(*, secret: str, queries: Path, database: Path,
         def do_GET(self):
             if self.path == "/healthz":
                 self.send_json(200, {"status": "ok"})
+            elif self.path == "/v1/queries":
+                token = self.headers.get("Authorization", "")
+                if not hmac.compare_digest(token, "Bearer " + secret):
+                    self.send_json(401, {"error": "Unauthorized"})
+                    return
+                self.send_json(200, {"queries": list_query_templates(queries)})
             else:
                 self.send_json(404, {"error": "Not found"})
 
