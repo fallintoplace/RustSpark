@@ -34,6 +34,7 @@ fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
 }
 
 fn floor(args: &[Value]) -> Result<Value> {
+    if args.len() == 2 { return scale_round(args, false); }
     match super::number(&args[0])? {
         Some(v) => checked_integer(v.floor()),
         None => Ok(Value::Null),
@@ -47,7 +48,7 @@ fn ceil(args: &[Value]) -> Result<Value> {
     }
 }
 pub(super) const FUNCTIONS: &[Function] = &[
-    Function { name: "floor", min_args: 1, max_args: 1, result_type: output, call: floor },
+    Function { name: "floor", min_args: 1, max_args: 2, result_type: output, call: floor },
     Function { name: "ceil", min_args: 1, max_args: 2, result_type: output, call: ceil },
     Function { name: "ceiling", min_args: 1, max_args: 2, result_type: output, call: ceil },
 ];
@@ -65,5 +66,9 @@ mod tests {
         assert_eq!(ceil(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
         assert!(ceil(&[Value::Float(3.14), Value::Integer(100)]).is_err());
         assert_eq!(output(&[DataType::Float, DataType::Integer]).unwrap(), DataType::Float);
+        assert_eq!(floor(&[Value::Float(3.1411), Value::Integer(3)]).unwrap(), Value::Float(3.141));
+        assert_eq!(floor(&[Value::Float(3.1411), Value::Integer(-3)]).unwrap(), Value::Float(0.0));
+        assert_eq!(floor(&[Value::Float(-3.1411), Value::Integer(-3)]).unwrap(), Value::Float(-1000.0));
+        assert!(floor(&[Value::Float(1.0), Value::Integer(30)]).is_err());
     }
 }
