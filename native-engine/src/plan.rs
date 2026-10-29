@@ -52,6 +52,14 @@ pub enum Plan {
         left: Box<Plan>,
         right: Box<Plan>,
     },
+    IntersectAll {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
+    ExceptAll {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
     Except {
         left: Box<Plan>,
         right: Box<Plan>,

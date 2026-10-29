@@ -50,6 +50,8 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             Plan::Join { left, right, .. }
             | Plan::UnionAll { left, right }
             | Plan::Intersect { left, right }
+            | Plan::IntersectAll { left, right }
+            | Plan::ExceptAll { left, right }
             | Plan::Except { left, right } => {
                 pending.push((left, depth + 1));
                 pending.push((right, depth + 1));
@@ -126,6 +128,8 @@ fn execute_inner(
         )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
+        Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
+        Plan::ExceptAll { left, right } => set_ops::except_all(&descend(left)?, &descend(right)?)?,
         Plan::Except { left, right } => set_ops::except_distinct(&descend(left)?, &descend(right)?)?,
     };
     guard.check()?;
