@@ -123,7 +123,7 @@ impl StageGraph {
                     (StageKind::Filter, vec![visit(input, stages, depth + 1)?]),
                 Plan::Project { input, .. } =>
                     (StageKind::Project, vec![visit(input, stages, depth + 1)?]),
-                Plan::Aggregate { input, .. } =>
+                Plan::Aggregate { input, .. } | Plan::GroupingSets { input, .. } =>
                     (StageKind::Aggregate, vec![visit(input, stages, depth + 1)?]),
                 Plan::Sort { input, .. } =>
                     (StageKind::Sort, vec![visit(input, stages, depth + 1)?]),

@@ -489,9 +489,23 @@ impl Parser {
 
 
         let mut group_expressions = Vec::new();
+        let mut grouping_sets: Option<Vec<Vec<usize>>> = None;
         if self.take_word("GROUP") {
             self.expect_word("BY")?;
-            if self.take_word("ALL") {
+            if self.take_word("ROLLUP") {
+                self.expect_symbol('(')?;
+                loop {
+                    if group_expressions.len() >= 8 {
+                        return Err(Error::Parse("ROLLUP exceeds 8 grouping keys".into()));
+                    }
+                    group_expressions.push(self.expression(0)?);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                let count = group_expressions.len();
+                grouping_sets = Some((0..=count).rev()
+                    .map(|length| (0..length).collect()).collect());
+            } else if self.take_word("ALL") {
                 // Spark GROUP BY ALL derives keys from non-aggregate output expressions.
                 for item in &select {
                     if let SelectItem::Scalar(Selection { expression, .. }) = item {
@@ -507,6 +521,7 @@ impl Parser {
                 }
             }
         }
+        let group_expressions_len = group_expressions.len();
         let mut group_by = Vec::<(Expr, String)>::new();
         for (index, expression) in group_expressions.into_iter().enumerate() {
             // Spark accepts GROUP BY 1 and GROUP BY projected_alias.
@@ -570,10 +585,13 @@ impl Parser {
                     SelectItem::Star => unreachable!(),
                 }
             }
-            plan = Plan::Aggregate {
-                input: Box::new(plan),
-                group_by,
-                aggregates,
+            plan = if let Some(sets) = grouping_sets {
+                if group_by.len() != group_expressions_len {
+                    return Err(Error::Parse("ROLLUP grouping keys must be unique".into()));
+                }
+                Plan::GroupingSets { input: Box::new(plan), group_by, sets, aggregates }
+            } else {
+                Plan::Aggregate { input: Box::new(plan), group_by, aggregates }
             };
             plan = plan.project(selections);
         } else if !star {

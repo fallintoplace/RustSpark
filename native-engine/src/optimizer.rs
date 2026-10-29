@@ -22,6 +22,9 @@ pub fn optimize(plan: Plan) -> Plan {
             input: Box::new(optimize(*input)),
             selections,
         },
+        Plan::GroupingSets { input, group_by, sets, aggregates } => Plan::GroupingSets {
+            input: Box::new(optimize(*input)), group_by, sets, aggregates,
+        },
         Plan::Aggregate { input, group_by, aggregates } => Plan::Aggregate {
             input: Box::new(optimize(*input)),
             group_by,
