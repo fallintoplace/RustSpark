@@ -53,6 +53,16 @@ impl StageGraph {
             if stage.inputs.iter().any(|dependency| !unique.contains(dependency)) {
                 return Err(Error::Schema("stage depends on an unknown stage".into()));
             }
+            let required_inputs = match stage.kind {
+                StageKind::Scan => 0,
+                StageKind::Filter | StageKind::Project | StageKind::Aggregate |
+                StageKind::Sort | StageKind::Limit | StageKind::Distinct => 1,
+                StageKind::HashJoin | StageKind::UnionAll | StageKind::Intersect |
+                StageKind::Except => 2,
+            };
+            if stage.inputs.len() != required_inputs {
+                return Err(Error::Schema("invalid physical stage input count".into()));
+            }
         }
         let graph = Self { stages };
         graph.execution_order()?;
@@ -62,7 +72,14 @@ impl StageGraph {
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
     pub fn root(&self) -> Option<usize> {
-        self.stages.last().map(|stage| stage.id)
+        let dependencies = self.stages.iter()
+            .flat_map(|stage| stage.inputs.iter().copied())
+            .collect::<HashSet<_>>();
+        let mut roots = self.stages.iter().filter(|stage| !dependencies.contains(&stage.id));
+        match (roots.next(), roots.next()) {
+            (Some(root), None) => Some(root.id),
+            _ => None,
+        }
     }
 
     /// Deterministic topological order. Rejects cycles before any task starts.
@@ -215,5 +232,31 @@ mod duplicate_stage_edges_tests {
             Stage { id: 1, kind: StageKind::Project, inputs: vec![0, 0] },
         ]);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod stage_graph_invariant_consolidation_tests {
+    use super::*;
+    #[test]
+    fn root_is_derived_from_edges_not_caller_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 2, kind: StageKind::Filter, inputs: vec![1] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+        ]).unwrap();
+        assert_eq!(graph.root(), Some(2));
+        assert_eq!(graph.execution_order().unwrap(), vec![0, 1, 2]);
+    }
+    #[test]
+    fn rejects_malformed_operator_input_arity() {
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![1] },
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] },
+        ]).is_err());
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::HashJoin, inputs: vec![0] },
+        ]).is_err());
     }
 }
