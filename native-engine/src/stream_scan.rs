@@ -66,7 +66,10 @@ impl Iterator for ScanCursor<'_> {
             if result.is_err() { self.failed = true; }
             return Some(result);
         }
-        let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
+        // Only rows after the cursor can fill this batch. Avoid reserving a
+        // full-sized selection bitmap for tiny trailing scan windows.
+        let available = self.source.num_rows().saturating_sub(self.next_row);
+        let mut selected = Vec::with_capacity(self.target_rows.min(available));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
             self.next_row += 1;
@@ -266,5 +269,24 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod trailing_scan_selection_capacity_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn large_target_batches_keep_correct_rows_near_tail() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let data = Batch::from_rows(schema, (0..1025)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(1020)));
+        let mut cursor = scan(&data, Some(predicate), &["n"], 1_000_000).unwrap();
+        let rows = cursor.next().unwrap().unwrap().rows().unwrap();
+        assert_eq!(rows, (1020..1025).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+        assert!(cursor.next().is_none());
     }
 }
