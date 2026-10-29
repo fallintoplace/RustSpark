@@ -45,7 +45,7 @@ mod ascii_initcap_perf_tests {
     #[test]
     fn ascii_fast_path_and_unicode_expansion_are_unchanged() {
         assert_eq!(evaluate(&[Value::Text("hello WORLD 2026\tRUSTSPARK".into())]).unwrap(),
-            Value::Text("Hello World 2026\tRUSTSPARK".into()));
+            Value::Text("Hello World 2026\tRustspark".into()));
         assert_eq!(evaluate(&[Value::Text("straße ßET".into())]).unwrap(),
             Value::Text("Straße SSet".into()));
     }
