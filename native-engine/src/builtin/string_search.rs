@@ -70,7 +70,23 @@ fn locate(args: &[Value]) -> Result<Value> {
 fn instr(args: &[Value]) -> Result<Value> {
     locate_values(&args[1], &args[0], None)
 }
+fn strcmp_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Integer)
+}
+fn strcmp(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let ordering = match left.cmp(right) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    };
+    Ok(Value::Integer(ordering))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "strcmp", min_args: 2, max_args: 2, result_type: strcmp_type, call: strcmp },
     Function { name: "split_part", min_args: 3, max_args: 3, result_type: split_type, call: split_part },
     Function { name: "locate", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
     Function { name: "position", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
@@ -138,5 +154,18 @@ mod locate_offset_fast_path_tests {
             Value::Integer(0));
         assert_eq!(locate(&[empty, text, Value::Integer(1)]).unwrap(),
             Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod strcmp_extension_tests {
+    use super::*;
+    #[test]
+    fn covers_null_and_boundary_values() {
+        assert!(crate::builtin::supports("strcmp"));
+        assert_eq!(strcmp(&[Value::Text("a".into()), Value::Text("b".into())]).unwrap(), Value::Integer(-1));
+        assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
+        assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }
