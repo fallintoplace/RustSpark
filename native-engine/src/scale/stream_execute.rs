@@ -298,6 +298,10 @@ fn infer(
                 let kind = match op {
                     AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
                         crate::schema::DataType::Integer,
+                    AggregateOp::CountDistinctTuple(exprs) => {
+                        for expr in exprs { expr.output_type(&source)?; }
+                        crate::schema::DataType::Integer
+                    },
                     AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) => match expr.output_type(&source)? {
                         crate::schema::DataType::Integer | crate::schema::DataType::Float =>
                             crate::schema::DataType::Float,

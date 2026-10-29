@@ -44,6 +44,7 @@ const MAX_DISTINCT_BYTES_PER_GROUP: usize = 16 * 1024 * 1024;
 enum State {
     Count(i64),
     CountDistinct { keys: HashSet<Value>, bytes: usize },
+    CountDistinctTuples { keys: HashSet<Vec<Value>>, bytes: usize },
     Distinct { keys: HashSet<Value>, bytes: usize, inner: Box<State> },
     Sum(Option<Value>),
     Avg { sum: f64, count: i64 },
@@ -67,6 +68,9 @@ fn new_state(op: &AggregateOp) -> Result<State> {
             inner: Box::new(new_state(&AggregateOp::Avg(expr.clone()))?),
         }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
+        AggregateOp::CountDistinctTuple(_) => Ok(State::CountDistinctTuples {
+            keys: HashSet::new(), bytes: 0,
+        }),
         AggregateOp::Filtered { op, .. } => new_state(op),
     }
 }
@@ -77,6 +81,29 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
             return Ok(());
         }
         return add_to_state(state, op, batch, row);
+    }
+    if let AggregateOp::CountDistinctTuple(expressions) = op {
+        let State::CountDistinctTuples { keys, bytes } = state else {
+            return Err(Error::Execution("invalid composite DISTINCT spill state".into()));
+        };
+        let mut tuple = Vec::with_capacity(expressions.len());
+        let mut footprint = 64usize;
+        for expression in expressions {
+            let value = expression.evaluate(batch, row)?;
+            if value.is_null() { return Ok(()); }
+            footprint = footprint.saturating_add(std::mem::size_of::<Value>())
+                .saturating_add(match &value { Value::Text(text) => text.len(), _ => 0 });
+            tuple.push(value);
+        }
+        if keys.contains(&tuple) { return Ok(()); }
+        if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
+            return Err(Error::Execution("spill COUNT DISTINCT tuple limit exceeded".into()));
+        }
+        *bytes = bytes.checked_add(footprint)
+            .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
+            .ok_or_else(|| Error::Execution("spill COUNT DISTINCT tuple bytes exceeded".into()))?;
+        keys.insert(tuple);
+        return Ok(());
     }
     if matches!(op, AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_)) {
         let State::Distinct { keys, bytes, inner } = state else {
@@ -102,6 +129,7 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
     }
     let value = match op {
         AggregateOp::CountAll => Value::Integer(1),
+        AggregateOp::CountDistinctTuple(_) => unreachable!("tuple aggregate handled above"),
         AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
             unreachable!("distinct aggregate handled above"),
         AggregateOp::Filtered { .. } => unreachable!("filtered op handled before evaluation"),
@@ -157,7 +185,8 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
             *sum = next;
             *count = next_count;
         }
-        State::Distinct { .. } => unreachable!("DISTINCT handled before normal state update"),
+        State::Distinct { .. } | State::CountDistinctTuples { .. } =>
+            unreachable!("DISTINCT handled before normal state update"),
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
                 let order = value.sql_compare(existing)?
@@ -176,6 +205,9 @@ fn finish_state(state: State) -> Result<Value> {
     Ok(match state {
         State::Count(value) => Value::Integer(value),
         State::CountDistinct { keys, .. } => Value::Integer(
+            i64::try_from(keys.len()).map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
+        ),
+        State::CountDistinctTuples { keys, .. } => Value::Integer(
             i64::try_from(keys.len()).map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
         ),
         State::Distinct { inner, .. } => finish_state(*inner)?,
@@ -204,6 +236,10 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
         }
         let ty = match op {
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) => DataType::Integer,
+            AggregateOp::CountDistinctTuple(exprs) => {
+                for expr in exprs { expr.output_type(input)?; }
+                DataType::Integer
+            },
             AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) => match expr.output_type(input)? {
                 DataType::Integer => DataType::Integer,
                 DataType::Float => DataType::Float,
@@ -217,7 +253,7 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
             AggregateOp::Filtered { .. } =>
                 return Err(Error::Unsupported("nested aggregate FILTER is unsupported".into())),
         };
-        let nullable = !matches!(op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
+        let nullable = !matches!(op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) | AggregateOp::CountDistinctTuple(_));
         fields.push(Field::new(&item.alias, ty, nullable));
     }
     Schema::new(fields)
