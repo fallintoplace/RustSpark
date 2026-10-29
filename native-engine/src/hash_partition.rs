@@ -75,17 +75,34 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
         return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
     }
     let first = input.first().ok_or_else(|| Error::Schema("partition input needs a schema".into()))?;
-    let schema = first.schema();
-    let mut buckets: Vec<Vec<Batch>> = vec![Vec::new(); partitions];
+    let schema = first.schema().clone();
+    let key_indices = keys.iter().map(|key| schema.column(key))
+        .collect::<Result<Vec<_>>>()?;
+    let mut counts = vec![0usize; partitions];
+    let mut buckets: Vec<Vec<Vec<crate::scalar::Value>>> = (0..partitions)
+        .map(|_| (0..schema.len()).map(|_| Vec::new()).collect()).collect();
     for batch in input {
-        if batch.schema() != schema {
+        if batch.schema() != &schema {
             return Err(Error::Schema("partition input schemas differ".into()));
         }
-        for (bucket, part) in partition(batch, keys, partitions)?.into_iter().enumerate() {
-            buckets[bucket].push(part);
+        let columns = (0..schema.len()).map(|i| batch.column(i))
+            .collect::<Result<Vec<_>>>()?;
+        for row in 0..batch.num_rows() {
+            let mut hasher = PartitionHasher::default();
+            for &key in &key_indices {
+                columns[key][row].hash(&mut hasher);
+            }
+            let bucket = (hasher.finish() % partitions as u64) as usize;
+            counts[bucket] = counts[bucket].checked_add(1)
+                .ok_or_else(|| Error::Execution("partition row count overflow".into()))?;
+            for (destination, source) in buckets[bucket].iter_mut().zip(&columns) {
+                destination.push(source[row].clone());
+            }
         }
     }
-    buckets.iter().map(|pieces| crate::batch_chunks::concatenate(pieces)).collect()
+    buckets.into_iter().zip(counts)
+        .map(|(columns, rows)| Batch::new_with_row_count(schema.clone(), columns, rows))
+        .collect()
 }
 
 #[cfg(test)]
