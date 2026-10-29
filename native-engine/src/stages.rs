@@ -147,6 +147,14 @@ impl StageGraph {
                     StageKind::Intersect,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
+                Plan::IntersectAll { left, right } => (
+                    StageKind::Intersect,
+                    vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
+                ),
+                Plan::ExceptAll { left, right } => (
+                    StageKind::Except,
+                    vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
+                ),
                 Plan::Except { left, right } => (
                     StageKind::Except,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],

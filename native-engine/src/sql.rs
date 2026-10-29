@@ -733,9 +733,14 @@ impl Parser {
     fn select_with_intersections(&mut self) -> Result<Plan> {
         let mut plan = self.select_body()?;
         while self.take_word("INTERSECT") {
-            self.take_word("DISTINCT");
+            let all = self.take_word("ALL");
+            if !all { self.take_word("DISTINCT"); }
             let right = self.select_body()?;
-            plan = Plan::Intersect { left: Box::new(plan), right: Box::new(right) };
+            plan = if all {
+                Plan::IntersectAll { left: Box::new(plan), right: Box::new(right) }
+            } else {
+                Plan::Intersect { left: Box::new(plan), right: Box::new(right) }
+            };
         }
         Ok(plan)
     }
@@ -842,9 +847,14 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
             plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
             if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
         } else if parser.take_word("EXCEPT") {
-            parser.take_word("DISTINCT");
+            let all = parser.take_word("ALL");
+            if !all { parser.take_word("DISTINCT"); }
             let right = parser.select_with_intersections()?;
-            plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
+            plan = if all {
+                Plan::ExceptAll { left: Box::new(plan), right: Box::new(right) }
+            } else {
+                Plan::Except { left: Box::new(plan), right: Box::new(right) }
+            };
         } else {
             break;
         }
