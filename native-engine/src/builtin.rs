@@ -57,6 +57,13 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Text)
         },
+        "SUBSTRING" => {
+            if args.len() != 3 { return Err(Error::Parse("SUBSTRING requires text, start, and length".into())); }
+            if args[0].output_type(schema)? != DataType::Text || args[1].output_type(schema)? != DataType::Integer || args[2].output_type(schema)? != DataType::Integer {
+                return Err(Error::Type("SUBSTRING requires text and integer positions".into()));
+            }
+            Ok(DataType::Text)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -105,6 +112,21 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
             Ok(Value::Text(text))
+        },
+        "SUBSTRING" => match args {
+            [Value::Text(text), Value::Integer(start), Value::Integer(length)] => {
+                if *length < 0 { return Err(Error::Execution("SUBSTRING length must be nonnegative".into())); }
+                let chars: Vec<char> = text.chars().collect();
+                let begin = if *start > 0 {
+                    usize::try_from(start - 1).unwrap_or(usize::MAX)
+                } else if *start < 0 {
+                    chars.len().saturating_sub(usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
+                } else { 0 };
+                let count = usize::try_from(*length).unwrap_or(usize::MAX);
+                Ok(Value::Text(chars.into_iter().skip(begin).take(count).collect()))
+            }
+            [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
+            _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
