@@ -48,7 +48,7 @@ pub fn external_sort(
                 return Err(Error::Execution("too many external sort runs".into()));
             }
             let end = start.saturating_add(run_rows).min(input_batch.num_rows());
-            let batch = input_batch.take(&(start..end).collect::<Vec<_>>())?;
+            let batch = input_batch.slice_rows(start, end)?;
             let sorted = sort::sort(&batch, keys)?;
             let spill = spill_ipc::spill(spill_dir.as_ref(), schema, &[sorted])?;
             let mut reader = spill.read()?;
@@ -179,5 +179,25 @@ mod output_allocation_tests {
         let mut output = external_sort(Vec::<Batch>::new(), &schema, &[],
             std::env::temp_dir(), 1, usize::MAX).unwrap();
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod external_sort_contiguous_run_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn repeated_small_spill_runs_preserve_sorted_order_and_duplicates() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(6)], vec![Value::Integer(3)], vec![Value::Integer(3)],
+            vec![Value::Integer(1)], vec![Value::Integer(9)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let result = external_sort([input.clone()], &schema, &keys, std::env::temp_dir(), 1, 2)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let ordered = result.into_iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(ordered, sort::sort(&input, &keys).unwrap().rows().unwrap());
     }
 }
