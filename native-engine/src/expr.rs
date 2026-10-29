@@ -35,6 +35,7 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
+    Call { name: String, args: Vec<Expr> },
 }
 
 impl Expr {
@@ -56,6 +57,7 @@ impl Expr {
                 Value::Float(_) => DataType::Float,
             }),
             Self::Not(_) | Self::IsNull(_) => Ok(DataType::Boolean),
+            Self::Call { name, args } => crate::builtin::return_type(name, args, schema),
             Self::Binary { left, op, right } => match op {
                 BinaryOp::Equal
                 | BinaryOp::NotEqual
@@ -90,6 +92,17 @@ impl Expr {
                 None => Value::Null,
             }),
             Self::IsNull(expr) => Ok(Value::Boolean(expr.evaluate(batch, row)?.is_null())),
+            Self::Call { name, args } if name.eq_ignore_ascii_case("COALESCE") => {
+                for expr in args {
+                    let value = expr.evaluate(batch, row)?;
+                    if !value.is_null() { return Ok(value); }
+                }
+                Ok(Value::Null)
+            }
+            Self::Call { name, args } => {
+                let values = args.iter().map(|expr| expr.evaluate(batch, row)).collect::<Result<Vec<_>>>()?;
+                crate::builtin::evaluate(name, &values)
+            },
             Self::Binary { left, op, right } => {
                 let left = left.evaluate(batch, row)?;
                 let right = right.evaluate(batch, row)?;
