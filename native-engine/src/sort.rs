@@ -55,6 +55,21 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
+    if keys.iter().all(|key| matches!(key.expression, Expr::Column(_))) {
+        let columns = keys.iter().map(|key| match &key.expression {
+            Expr::Column(name) => batch.column(batch.schema().column(name)?),
+            _ => unreachable!("all sort keys are columns"),
+        }).collect::<Result<Vec<_>>>()?;
+        let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+        indices.sort_by(|&left, &right| {
+            for (column, key) in columns.iter().zip(keys) {
+                let cmp = compare_values(&column[left], &column[right], key.descending, key.nulls_first);
+                if cmp != Ordering::Equal { return cmp; }
+            }
+            Ordering::Equal
+        });
+        return batch.take(&indices);
+    }
     let mut decorated = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         let values = keys
@@ -153,5 +168,32 @@ mod sort_key_preflight_regression {
         assert!(sort(&batch, &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
         assert_eq!(sort(&batch, &[SortKey::ascending(Expr::Column("x".into()))])
             .unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod direct_column_sort_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn column_sort_preserves_ties_and_mixed_null_ordering() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("grp", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("x".into()), Value::Integer(3)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("x".into()), Value::Integer(1)],
+            vec![Value::Text("x".into()), Value::Integer(1)],
+        ]).unwrap();
+        let keys = [
+            SortKey { expression: Expr::Column("grp".into()), descending: false, nulls_first: false },
+            SortKey { expression: Expr::Column("id".into()), descending: true, nulls_first: true },
+        ];
+        let result = sort(&input, &keys).unwrap();
+        assert_eq!(result.column(1).unwrap(), &[
+            Value::Integer(3), Value::Integer(1), Value::Integer(1), Value::Integer(2)]);
+        assert!(sort(&input, &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
     }
 }
