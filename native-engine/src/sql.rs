@@ -26,12 +26,14 @@ struct Parser {
     // globally in Catalog. Keep names case-insensitive like native schemas.
     ctes: std::collections::HashMap<String, Plan>,
     active_cte: Option<String>,
+    subquery_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
         Self {
-            tokens, index: 0, ctes: std::collections::HashMap::new(), active_cte: None,
+            tokens, index: 0, ctes: std::collections::HashMap::new(),
+            active_cte: None, subquery_depth: 0,
         }
     }
 
@@ -443,8 +445,7 @@ impl Parser {
             }
         }
         self.expect_word("FROM")?;
-        let source = self.identifier()?;
-        let mut plan = self.scan_or_cte(source)?;
+        let mut plan = self.from_relation()?;
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
@@ -475,7 +476,7 @@ impl Parser {
                 None
             };
             let Some(kind) = kind else { break };
-            let right = self.identifier()?;
+            let right = self.from_relation()?;
             self.expect_word("ON")?;
             let left_key = self.identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {
@@ -484,7 +485,7 @@ impl Parser {
             let right_key = self.identifier()?;
             plan = Plan::Join {
                 left: Box::new(plan),
-                right: Box::new(self.scan_or_cte(right)?),
+                right: Box::new(right),
                 left_key,
                 right_key,
                 kind,
@@ -577,6 +578,52 @@ impl Parser {
         Ok(plan)
     }
 
+
+
+    fn from_relation(&mut self) -> Result<Plan> {
+        let mut plan = if self.take_symbol('(') {
+            if self.subquery_depth >= 32 {
+                return Err(Error::Parse("derived table exceeds 32 subquery levels".into()));
+            }
+            self.subquery_depth += 1;
+            let mut query = self.select_with_intersections()?;
+            query = self.finish_query(query)?;
+            self.expect_symbol(')')?;
+            self.subquery_depth -= 1;
+            query
+        } else {
+            let source = self.identifier()?;
+            self.scan_or_cte(source)?
+        };
+        if self.take_word("AS") {
+            self.identifier()?;
+            if self.take_symbol('(') {
+                let mut names = Vec::new();
+                loop {
+                    names.push(self.identifier()?);
+                    if names.len() > 256 {
+                        return Err(Error::Parse("derived table aliases exceed 256 columns".into()));
+                    }
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                let source_names = match &plan {
+                    Plan::Project { selections, .. } =>
+                        selections.iter().map(|selection| selection.alias.clone()).collect::<Vec<_>>(),
+                    _ => return Err(Error::Unsupported(
+                        "derived table column aliases require explicit projection".into())),
+                };
+                if names.len() != source_names.len() {
+                    return Err(Error::Parse("derived alias count differs from output width".into()));
+                }
+                let selections = source_names.into_iter().zip(names).map(|(source, alias)|
+                    Selection::new(Expr::Column(source), alias)
+                ).collect();
+                plan = plan.project(selections);
+            }
+        }
+        Ok(plan)
+    }
 
     fn scan_or_cte(&self, name: String) -> Result<Plan> {
         let normalized = name.to_ascii_lowercase();
