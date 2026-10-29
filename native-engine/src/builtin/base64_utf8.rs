@@ -7,25 +7,30 @@ fn base64(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let bytes = text.as_bytes();
     if bytes.len() > MAX_BYTES { return Err(Error::Execution("BASE64 input exceeds byte limit".into())); }
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    // Encoded output is ASCII, so write four output bytes at a time.
+    let mut output = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut chunks = bytes.chunks_exact(3);
     for chunk in &mut chunks {
         let (a, b, c) = (chunk[0], chunk[1], chunk[2]);
-        output.push(DIGITS[(a >> 2) as usize] as char);
-        output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(DIGITS[(((b & 15) << 2) | (c >> 6)) as usize] as char);
-        output.push(DIGITS[(c & 63) as usize] as char);
+        output.extend_from_slice(&[
+            DIGITS[(a >> 2) as usize],
+            DIGITS[(((a & 3) << 4) | (b >> 4)) as usize],
+            DIGITS[(((b & 15) << 2) | (c >> 6)) as usize],
+            DIGITS[(c & 63) as usize],
+        ]);
     }
     let tail = chunks.remainder();
     if !tail.is_empty() {
         let a = tail[0];
         let b = if tail.len() == 2 { tail[1] } else { 0 };
-        output.push(DIGITS[(a >> 2) as usize] as char);
-        output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(if tail.len() == 2 { DIGITS[((b & 15) << 2) as usize] as char } else { '=' });
-        output.push('=');
+        output.extend_from_slice(&[
+            DIGITS[(a >> 2) as usize],
+            DIGITS[(((a & 3) << 4) | (b >> 4)) as usize],
+            if tail.len() == 2 { DIGITS[((b & 15) << 2) as usize] } else { b'=' },
+            b'=',
+        ]);
     }
-    Ok(Value::Text(output))
+    Ok(Value::Text(String::from_utf8(output).expect("BASE64 alphabet is ASCII")))
 }
 const REVERSE_DIGITS: [u8; 256] = {
     let mut table = [u8::MAX; 256];
@@ -108,5 +113,27 @@ mod base64_reverse_table_perf_tests {
             Value::Text("abcXYZ+/".into()));
         assert!(unbase64_utf8(&[Value::Text("!!!!".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("____".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod base64_ascii_buffer_tests {
+    use super::*;
+    #[test]
+    fn encodes_padding_boundaries_and_long_unicode_inputs() {
+        for input in ["", "a", "ab", "abc", "abcd", "abcde", "é🙂東京"] {
+            let encoded = base64(&[Value::Text(input.into())]).unwrap();
+            let decoded = unbase64_utf8(&[encoded]).unwrap();
+            assert_eq!(decoded, Value::Text(input.into()));
+        }
+        assert_eq!(base64(&[Value::Text("a".into())]).unwrap(),
+            Value::Text("YQ==".into()));
+        assert_eq!(base64(&[Value::Text("ab".into())]).unwrap(),
+            Value::Text("YWI=".into()));
+        assert_eq!(base64(&[Value::Text("abc".into())]).unwrap(),
+            Value::Text("YWJj".into()));
+        let data = Value::Text("é🙂x".repeat(20_000));
+        let encoded = base64(&[data.clone()]).unwrap();
+        assert_eq!(unbase64_utf8(&[encoded]).unwrap(), data);
     }
 }
