@@ -14,11 +14,16 @@ impl Catalog {
 
     pub fn register(&mut self, name: &str, batch: Batch) -> Result<()> {
         let normalized = normalize(name)?;
-        if self.tables.contains_key(&normalized) {
-            return Err(Error::Schema(format!("table already exists: {name}")));
+        // Register once through the entry API instead of probing the table
+        // for existence and hashing the same key again for insertion.
+        match self.tables.entry(normalized) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(batch);
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(_) =>
+                Err(Error::Schema(format!("table already exists: {name}"))),
         }
-        let _ = self.tables.insert(normalized, batch);
-        Ok(())
     }
 
     pub fn replace(&mut self, name: &str, batch: Batch) -> Result<()> {
@@ -130,5 +135,21 @@ mod catalog_rename_engine_tests {
         assert!(catalog.get("source").is_err());
         assert_eq!(catalog.get("RENAMED").unwrap().row(0).unwrap(), vec![Value::Integer(7)]);
         catalog.rename("renamed", "RENAMED").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod single_probe_catalog_register_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn duplicate_registration_keeps_the_original_table() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        let original = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(10)]]).unwrap();
+        let replacement = Batch::from_rows(schema, vec![vec![Value::Integer(99)]]).unwrap();
+        catalog.register("Sales", original).unwrap();
+        assert!(catalog.register("sales", replacement).is_err());
+        assert_eq!(catalog.get("SALES").unwrap().row(0).unwrap(), vec![Value::Integer(10)]);
     }
 }
