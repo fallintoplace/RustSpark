@@ -48,14 +48,20 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
-    let Some(start) = text.char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()))
-        .nth(offset) else {
-        return Ok(Value::Integer(0));
+    let start = if text.is_ascii() {
+        if offset > text.len() { return Ok(Value::Integer(0)); }
+        offset
+    } else {
+        let Some(start) = text.char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+            .nth(offset) else {
+            return Ok(Value::Integer(0));
+        };
+        start
     };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
-    let characters = text[start..start + found].chars().count();
+    let characters = if text.is_ascii() { found } else { text[start..start + found].chars().count() };
     let position = offset.checked_add(characters).and_then(|n| n.checked_add(1))
         .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
     let position = i64::try_from(position)
@@ -167,5 +173,18 @@ mod strcmp_extension_tests {
         assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
         assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
         assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_locate_scan_regression_tests {
+    use super::*;
+    #[test]
+    fn handles_long_ascii_offsets_and_unicode_boundaries() {
+        let haystack = Value::Text(format!("{}END", "x".repeat(50_000)));
+        assert_eq!(locate(&[Value::Text("END".into()), haystack.clone(), Value::Integer(50_001)]).unwrap(), Value::Integer(50_001));
+        assert_eq!(locate(&[Value::Text("".into()), haystack, Value::Integer(50_004)]).unwrap(), Value::Integer(50_004));
+        assert_eq!(locate(&[Value::Text("".into()), Value::Text("abc".into()), Value::Integer(i64::MAX)]).unwrap(), Value::Integer(0));
+        assert_eq!(locate(&[Value::Text("京".into()), Value::Text("a東京".into()), Value::Integer(2)]).unwrap(), Value::Integer(3));
     }
 }
