@@ -9,7 +9,7 @@ use crate::{
 
 pub fn optimize(plan: Plan) -> Plan {
     match plan {
-        Plan::Scan { .. } => plan,
+        Plan::Scan { .. } | Plan::OneRow => plan,
         Plan::Filter { input, predicate } => {
             let input = optimize(*input);
             if matches!(&predicate, Expr::Literal(Value::Boolean(true))) {

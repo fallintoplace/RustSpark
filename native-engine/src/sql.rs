@@ -436,8 +436,14 @@ impl Parser {
                 break;
             }
         }
-        self.expect_word("FROM")?;
-        let mut plan = Plan::scan(self.identifier()?);
+        let mut plan = if self.take_word("FROM") {
+            Plan::scan(self.identifier()?)
+        } else {
+            if select.iter().any(|entry| matches!(entry, SelectItem::Star)) {
+                return Err(Error::Parse("SELECT * requires FROM".into()));
+            }
+            Plan::OneRow
+        };
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)

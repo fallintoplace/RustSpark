@@ -9,6 +9,8 @@ use crate::{
 /// An owned, DataFusion-independent logical query tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plan {
+    /// A single zero-column row used by Spark's SELECT without FROM.
+    OneRow,
     Scan {
         table: String,
     },
