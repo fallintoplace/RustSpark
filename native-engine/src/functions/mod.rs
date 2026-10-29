@@ -13,6 +13,8 @@ mod round;
 
 mod pmod;
 
+mod modulo;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -83,6 +85,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "ABS" => abs::output_type(args, schema),
         "ROUND" => round::output_type(args, schema),
         "PMOD" => pmod::output_type(args, schema),
+        "MOD" => modulo::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -95,6 +98,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "ABS" => abs::eval(args, batch, row),
         "ROUND" => round::eval(args, batch, row),
         "PMOD" => pmod::eval(args, batch, row),
+        "MOD" => modulo::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -151,6 +155,13 @@ mod tests {
     fn pmod_works_in_native_sql() {
         assert_eq!(run("SELECT PMOD(x, 3) FROM t").unwrap(), vec![
             vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(2)],
+        ]);
+    }
+
+    #[test]
+    fn modulo_works_in_native_sql() {
+        assert_eq!(run("SELECT MOD(x, 3) FROM t").unwrap(), vec![
+            vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(-1)],
         ]);
     }
 
