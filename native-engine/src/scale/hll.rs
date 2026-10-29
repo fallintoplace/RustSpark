@@ -111,3 +111,44 @@ mod approximate_column_feature_tests {
     }
 }
 
+
+/// Merge distinct-count sketches across compatible input batches.
+pub fn approximate_distinct_batches(
+    batches: &[crate::batch::Batch],
+    column: &str,
+) -> Result<f64> {
+    let mut combined = HyperLogLog::new();
+    let mut expected_type = None;
+    for batch in batches {
+        let index = batch.schema().column(column)?;
+        let kind = batch.schema().field(index)?.data_type;
+        if expected_type.is_some_and(|previous| previous != kind) {
+            return Err(Error::Type("approximate distinct column types differ".into()));
+        }
+        expected_type = Some(kind);
+        let mut partial = HyperLogLog::new();
+        for value in batch.column(index)? {
+            partial.add(value);
+        }
+        combined.merge(&partial);
+    }
+    Ok(combined.estimate())
+}
+
+#[cfg(test)]
+mod approximate_distinct_batch_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn counts_unique_keys_across_overlapping_batch_ranges() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(),
+            (0..2000).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let second = Batch::from_rows(schema,
+            (1000..3000).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let estimate = approximate_distinct_batches(&[first, second], "key").unwrap();
+        assert!((estimate - 3000.0).abs() / 3000.0 < 0.15);
+        assert_eq!(approximate_distinct_batches(&[], "key").unwrap(), 0.0);
+    }
+}
