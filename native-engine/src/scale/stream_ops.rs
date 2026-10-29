@@ -21,9 +21,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
         loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                return Some(Err(error));
+            }
             let next = self.input.next()?;
-            let result = self.control.check().and_then(|_| next)
-                .and_then(|batch| filter::filter(&batch, &self.predicate));
+            let result = next.and_then(|batch| filter::filter(&batch, &self.predicate));
             match result {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
@@ -54,9 +57,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Err(error) = self.control.check() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         let next = self.input.next()?;
-        let result = self.control.check().and_then(|_| next)
-            .and_then(|batch| project::project(&batch, &self.selections));
+        let result = next.and_then(|batch| project::project(&batch, &self.selections));
         if result.is_err() { self.stopped = true; }
         Some(result)
     }
@@ -82,11 +88,11 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped || self.remaining == Some(0) { return None; }
         loop {
-            let next = self.input.next()?;
             if let Err(error) = self.control.check() {
                 self.stopped = true;
                 return Some(Err(error));
             }
+            let next = self.input.next()?;
             let batch = match next {
                 Ok(batch) => batch,
                 Err(error) => {
@@ -100,7 +106,9 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
             let count = self.remaining.map_or(available, |left| left.min(available));
             if count == 0 { continue; }
             if let Some(remaining) = self.remaining.as_mut() { *remaining -= count; }
-            return Some(batch.take(&(skipped..skipped + count).collect::<Vec<_>>()));
+            let result = batch.take(&(skipped..skipped + count).collect::<Vec<_>>());
+            if result.is_err() { self.stopped = true; }
+            return Some(result);
         }
     }
 }
@@ -128,5 +136,27 @@ mod tests {
             vec![Value::Integer(10)], vec![Value::Integer(11)],
             vec![Value::Integer(12)], vec![Value::Integer(13)]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod cancelled_io_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    use crate::{Error, scalar::Value};
+    #[test]
+    fn pre_cancelled_filter_does_not_read_upstream() {
+        let reads = Rc::new(Cell::new(0));
+        let calls = Rc::clone(&reads);
+        let source = std::iter::once_with(move || {
+            calls.set(calls.get() + 1);
+            Err::<Batch, Error>(Error::Execution("unexpected read".into()))
+        });
+        let control = QueryControl::default();
+        control.cancel();
+        let mut stream = FilterStream::new(source, Expr::Literal(Value::Boolean(true)), control);
+        assert!(stream.next().unwrap().unwrap_err().to_string().contains("cancelled"));
+        assert!(stream.next().is_none());
+        assert_eq!(reads.get(), 0);
     }
 }
