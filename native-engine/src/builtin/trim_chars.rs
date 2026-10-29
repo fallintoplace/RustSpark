@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Result};
 
@@ -16,9 +17,14 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
             for byte in chars.bytes() { lookup[byte as usize] = true; }
             lookup
         });
+    let unicode_set = characters
+        .filter(|chars| chars.len() >= 32 && !chars.is_ascii())
+        .map(|chars| chars.chars().collect::<HashSet<_>>());
     let contains = |ch: char| {
         if let Some(lookup) = &ascii_set {
             ch.is_ascii() && lookup[ch as usize]
+        } else if let Some(lookup) = &unicode_set {
+            lookup.contains(&ch)
         } else {
             characters.is_some_and(|chars| chars.contains(ch))
         }
@@ -79,5 +85,16 @@ mod ascii_trim_lookup_perf_tests {
         assert_eq!(btrim(&[
             Value::Text("ééhelloé".into()), Value::Text("é".into()),
         ]).unwrap(), Value::Text("hello".into()));
+    }
+}
+
+#[cfg(test)]
+mod unicode_trim_hash_set_tests {
+    use super::*;
+    #[test]
+    fn trims_wide_unicode_sets_without_touching_middle() {
+        let chars = Value::Text("αβγδεζηθικλμνξοπρστυφχψω🙂".into());
+        assert_eq!(btrim(&[Value::Text("ωαhelloβ🙂".into()), chars]).unwrap(),
+            Value::Text("hello".into()));
     }
 }
