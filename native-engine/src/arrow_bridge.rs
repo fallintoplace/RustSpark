@@ -2,8 +2,9 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array,
-    Int64Array, LargeStringArray, RecordBatch, StringArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array,
+    Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
+    LargeStringArray, RecordBatch, StringArray, UInt64Array,
     builder::StringBuilder,
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
@@ -73,7 +74,9 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
         let array = input.column(index);
         let data_type = match field.data_type() {
             ArrowType::Boolean => DataType::Boolean,
-            ArrowType::Int32 | ArrowType::Int64 | ArrowType::UInt64 => DataType::Integer,
+            ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
+            ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
+            ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
             other => return Err(Error::Unsupported(format!("unsupported Arrow type: {other}"))),
@@ -88,6 +91,16 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             let value = match field.data_type() {
                 ArrowType::Boolean => Value::Boolean(array.as_any().downcast_ref::<BooleanArray>()
                     .ok_or_else(|| Error::Type("invalid Boolean Arrow array".into()))?.value(row)),
+                ArrowType::Int8 => Value::Integer(i64::from(array.as_any().downcast_ref::<Int8Array>()
+                    .ok_or_else(|| Error::Type("invalid Int8 Arrow array".into()))?.value(row))),
+                ArrowType::Int16 => Value::Integer(i64::from(array.as_any().downcast_ref::<Int16Array>()
+                    .ok_or_else(|| Error::Type("invalid Int16 Arrow array".into()))?.value(row))),
+                ArrowType::UInt8 => Value::Integer(i64::from(array.as_any().downcast_ref::<UInt8Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt8 Arrow array".into()))?.value(row))),
+                ArrowType::UInt16 => Value::Integer(i64::from(array.as_any().downcast_ref::<UInt16Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt16 Arrow array".into()))?.value(row))),
+                ArrowType::UInt32 => Value::Integer(i64::from(array.as_any().downcast_ref::<UInt32Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt32 Arrow array".into()))?.value(row))),
                 ArrowType::Int32 => Value::Integer(i64::from(array.as_any().downcast_ref::<Int32Array>()
                     .ok_or_else(|| Error::Type("invalid Int32 Arrow array".into()))?.value(row))),
                 ArrowType::Int64 => Value::Integer(array.as_any().downcast_ref::<Int64Array>()
@@ -137,5 +150,28 @@ mod tests {
         let array = Arc::new(UInt64Array::from(vec![u64::MAX])) as ArrayRef;
         let record = RecordBatch::try_from_iter(vec![("n", array)]).unwrap();
         assert!(from_arrow(&record).is_err());
+    }
+}
+
+#[cfg(test)]
+mod arrow_narrow_integer_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_nullable_signed_and_unsigned_small_integers() {
+        let record = RecordBatch::try_from_iter(vec![
+            ("tiny", Arc::new(Int8Array::from(vec![Some(-7), None])) as ArrayRef),
+            ("small", Arc::new(Int16Array::from(vec![Some(-32000), None])) as ArrayRef),
+            ("u8", Arc::new(UInt8Array::from(vec![Some(255), None])) as ArrayRef),
+            ("u16", Arc::new(UInt16Array::from(vec![Some(65535), None])) as ArrayRef),
+            ("u32", Arc::new(UInt32Array::from(vec![Some(u32::MAX), None])) as ArrayRef),
+        ]).unwrap();
+        let decoded = from_arrow(&record).unwrap();
+        assert_eq!(decoded.row(0).unwrap(), vec![
+            Value::Integer(-7), Value::Integer(-32000), Value::Integer(255),
+            Value::Integer(65535), Value::Integer(i64::from(u32::MAX)),
+        ]);
+        assert_eq!(decoded.row(1).unwrap(), vec![Value::Null; 5]);
+        assert_eq!(from_arrow(&to_arrow(&decoded).unwrap()).unwrap(), decoded);
     }
 }
