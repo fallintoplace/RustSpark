@@ -56,3 +56,30 @@ mod tests {
         assert_eq!(merged.row(1).unwrap(), vec![Value::Null]);
     }
 }
+
+ 
+/// UNION DISTINCT matches columns by position and removes repeated complete rows.
+pub fn union_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    crate::distinct::distinct(&union_all(left, right)?)
+}
+
+#[cfg(test)]
+mod union_distinct_feature_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn distinct_set_union_collapses_null_and_duplicate_rows() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null],
+        ]).unwrap();
+        let b = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)],
+        ]).unwrap();
+        assert_eq!(union_distinct(&a, &b).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)],
+        ]);
+    }
+}
+
