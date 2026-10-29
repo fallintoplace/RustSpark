@@ -81,6 +81,16 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "result_sha256 mismatch"):
             regress.compare(old, new)
 
+    def test_reports_absolute_latency_delta_and_speedup(self):
+        result = regress.compare(report((1, 20.0)), report((1, 5.0)))
+        row = result["results"][0]
+        self.assertEqual(row["delta_ms"], -15.0)
+        self.assertEqual(row["speedup"], 4.0)
+        self.assertEqual(row["ratio"], 0.25)
+        slower = regress.compare(report((1, 4.0)), report((1, 8.0)))
+        self.assertEqual(slower["results"][0]["delta_ms"], 4.0)
+        self.assertEqual(slower["results"][0]["speedup"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

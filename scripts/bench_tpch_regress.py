@@ -86,6 +86,8 @@ def compare(baseline, candidate, max_regression=0.20):
             "id": number,
             "baseline_ms": old[number],
             "candidate_ms": new[number],
+            "delta_ms": round(new[number] - old[number], 3),
+            "speedup": round(old[number] / new[number], 4),
             "ratio": round(ratio, 4),
             "regression": ratio > 1 + max_regression,
         })
