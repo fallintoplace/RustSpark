@@ -1,4 +1,4 @@
-use super::{Function, json_path};
+use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
@@ -11,7 +11,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("JSON_VALID document exceeds 16 MiB".into()));
     }
-    Ok(Value::Boolean(json_path::parse(text).is_ok()))
+    // The result only needs syntax validity, not an allocated JSON value tree.
+    Ok(Value::Boolean(
+        serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
+    ))
 }
 
 
@@ -51,6 +54,10 @@ mod tests {
         assert_eq!(rows, vec![
             vec![Value::Boolean(true)], vec![Value::Boolean(false)], vec![Value::Null],
         ]);
+        assert_eq!(evaluate(&[Value::Text(r#"{"a":[true,null,{"x":"🙂"}]}"#.into())]).unwrap(), Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Text("[] trailing".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("{".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("[]".into())]).unwrap(), Value::Boolean(true));
     }
 }
 
