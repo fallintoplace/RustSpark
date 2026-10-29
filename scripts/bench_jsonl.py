@@ -54,15 +54,22 @@ def measure(binary, file, sql, digest, repeat, warmup, timeout):
     return {**summarize_samples(samples), "result_sha256": digest}
 
 
-def benchmark(binary, rows=100000, repeat=3, warmup=1, timeout=120):
+def benchmark(binary, rows=100000, repeat=3, warmup=1, timeout=120,
+              workloads=None):
     if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
         raise ValueError("Invalid JSONL benchmark settings")
+    selected = tuple(WORKLOADS) if workloads is None else tuple(workloads)
+    if not selected or len(set(selected)) != len(selected) or any(
+        name not in WORKLOADS for name in selected
+    ):
+        raise ValueError("Choose unique, known JSONL benchmark workloads")
     with tempfile.TemporaryDirectory(prefix="rustspark-jsonl-") as folder:
         file = Path(folder) / "events.ndjson"
         write_jsonl(file, rows)
         expected = expected_results(rows)
         results = []
-        for name, sql in WORKLOADS.items():
+        for name in selected:
+            sql = WORKLOADS[name]
             digest = output_signature("\n".join(json.dumps(row) for row in expected[name]))[0]
             results.append({
                 "name": name, "sql": sql,
@@ -80,10 +87,12 @@ def main(argv=None):
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--workloads", nargs="+", choices=sorted(WORKLOADS))
     parser.add_argument("--json-out", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        result = benchmark(args.binary, args.rows, args.repeat, args.warmup, args.timeout)
+        result = benchmark(args.binary, args.rows, args.repeat, args.warmup,
+                           args.timeout, args.workloads)
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, subprocess.SubprocessError) as error:
