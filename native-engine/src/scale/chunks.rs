@@ -32,8 +32,13 @@ where I: Iterator<Item = Result<Vec<Value>>>
             return Some(Err(error));
         }
 
-        let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
-        while rows.len() < self.batch_rows.min(65_536) {
+        let limit = self.batch_rows.min(65_536);
+        // Exact or bounded iterators often have far fewer rows remaining than
+        // the requested batch size. Avoid reserving tens of thousands of slots
+        // for a tiny final batch.
+        let capacity = self.input.size_hint().1.map_or(limit, |upper| upper.min(limit));
+        let mut rows = Vec::with_capacity(capacity);
+        while rows.len() < limit {
             match self.input.next() {
                 Some(Ok(row)) => {
                     if row.len() != self.schema.len() {
@@ -176,5 +181,22 @@ mod scale_contiguous_chunk_perf_tests {
         let zero_width = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
         let parts = BatchChunks::new(&zero_width, 2).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 2, 1]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_remaining_rows_capacity_tests {
+    use super::*;
+    #[test]
+    fn short_iterators_are_collected_with_oversized_batch_targets() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "n", crate::schema::DataType::Integer, false)]).unwrap();
+        let input = (0..3).map(|n| Ok(vec![Value::Integer(n)]));
+        let batches = RowBatcher::new(input, schema, 65_536).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].rows().unwrap(), vec![
+            vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]);
     }
 }
