@@ -236,6 +236,24 @@ fn soundex(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
+fn elt_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() < 2 || types[0] != DataType::Integer {
+        return Err(Error::Type("ELT requires an integer index and values".into()));
+    }
+    let selected = types[1];
+    if types[1..].iter().any(|kind| *kind != selected) {
+        return Err(Error::Type("ELT values must have one native type".into()));
+    }
+    Ok(selected)
+}
+fn elt(args: &[Value]) -> Result<Value> {
+    let Some(index) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let Some(zero_based) = index.checked_sub(1).and_then(|value| usize::try_from(value).ok()) else {
+        return Ok(Value::Null);
+    };
+    Ok(args.get(zero_based + 1).cloned().unwrap_or(Value::Null))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -255,6 +273,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "substr", min_args: 2, max_args: 3, result_type: substr_type, call: substr },
     Function { name: "luhn_check", min_args: 1, max_args: 1, result_type: luhn_type, call: luhn_check },
     Function { name: "soundex", min_args: 1, max_args: 1, result_type: text_text_type, call: soundex },
+    Function { name: "elt", min_args: 2, max_args: 128, result_type: elt_type, call: elt },
     // PARITY_FUNCTIONS
 ];
 
@@ -390,6 +409,13 @@ mod tests {
         assert_eq!(sql_result("soundex('Miller')").unwrap(), Value::Text("M460".into()));
         assert_eq!(sql_result("soundex('Robert')").unwrap(), Value::Text("R163".into()));
         assert_eq!(soundex(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_elt_selects_one_based_argument() {
+        assert_eq!(sql_result("elt(2, 'scala', 'java')").unwrap(), Value::Text("java".into()));
+        assert_eq!(sql_result("elt(9, 'scala', 'java')").unwrap(), Value::Null);
+        assert_eq!(elt(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
