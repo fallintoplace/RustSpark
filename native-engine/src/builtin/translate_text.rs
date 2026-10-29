@@ -11,6 +11,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 || from.len() > 16_384 || to.len() > 16_384 {
         return Err(Error::Execution("TRANSLATE input exceeds memory budget".into()));
     }
+    if from.is_empty() { return Ok(Value::Text(text.to_owned())); }
     let mut mapping: HashMap<char, Option<char>> = HashMap::new();
     let mut replacement = to.chars();
     for character in from.chars() {
@@ -54,6 +55,20 @@ mod tests {
         ]).unwrap(), Value::Text("aX".into()));
         assert_eq!(evaluate(&[
             Value::Null, Value::Text("a".into()), Value::Text("b".into()),
+        ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod empty_translation_perf_tests {
+    use super::*;
+    #[test]
+    fn empty_source_keeps_unicode_and_null_semantics() {
+        assert_eq!(evaluate(&[
+            Value::Text("é🙂東京".into()), Value::Text("".into()), Value::Text("replacement".into())
+        ]).unwrap(), Value::Text("é🙂東京".into()));
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text("".into()), Value::Text("".into())
         ]).unwrap(), Value::Null);
     }
 }
