@@ -14,7 +14,21 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Boolean(json_path::parse(text).is_ok()))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn json_pretty_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn json_pretty(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let doc = json_path::parse(text)?;
+    let formatted = serde_json::to_string_pretty(&doc)
+        .map_err(|error| Error::Execution(format!("JSON_PRETTY failed: {error}")))?;
+    if formatted.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("JSON_PRETTY output exceeds 16 MiB".into()));
+    }
+    Ok(Value::Text(formatted))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "json_pretty", min_args: 1, max_args: 1, result_type: json_pretty_type, call: json_pretty },Function {
     name: "json_valid", min_args: 1, max_args: 1,
     result_type: output, call: evaluate,
 }];
@@ -37,5 +51,20 @@ mod tests {
         assert_eq!(rows, vec![
             vec![Value::Boolean(true)], vec![Value::Boolean(false)], vec![Value::Null],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod json_pretty_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_data_shapes_and_nulls() {
+        assert!(crate::builtin::supports("json_pretty"));
+        let output = json_pretty(&[Value::Text(r#"{"a":[1,2]}"#.into())]).unwrap();
+        let Value::Text(formatted) = output else { panic!("expected text"); };
+        assert!(formatted.contains("\n"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&formatted).unwrap(), serde_json::json!({"a":[1,2]}));
+        assert_eq!(json_pretty(&[Value::Null]).unwrap(), Value::Null);
+        assert!(json_pretty(&[Value::Text("{broken".into())]).is_err());
     }
 }
