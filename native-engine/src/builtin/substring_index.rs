@@ -35,8 +35,11 @@ fn split_count_type(types: &[DataType]) -> Result<DataType> {
 fn split_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
-    let count = if delimiter.is_empty() { input.chars().count() }
-        else { input.match_indices(delimiter).count().saturating_add(1) };
+    let count = if delimiter.is_empty() {
+        if input.is_ascii() { input.len() } else { input.chars().count() }
+    } else {
+        input.match_indices(delimiter).count().saturating_add(1)
+    };
     Ok(Value::Integer(i64::try_from(count)
         .map_err(|_| Error::Execution("SPLIT_COUNT overflow".into()))?))
 }
@@ -75,5 +78,19 @@ mod split_count_extension_tests {
         assert_eq!(split_count(&[Value::Text("abc".into()), Value::Text(",".into())]).unwrap(), Value::Integer(1));
         assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text("".into())]).unwrap(), Value::Integer(2));
         assert_eq!(split_count(&[Value::Null, Value::Text(",".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod empty_delimiter_ascii_count_tests {
+    use super::*;
+    #[test]
+    fn counts_bytes_only_when_each_byte_is_a_character() {
+        let ascii = "a1".repeat(32_768);
+        assert_eq!(split_count(&[Value::Text(ascii), Value::Text("".into())]).unwrap(),
+            Value::Integer(65_536));
+        assert_eq!(split_count(&[Value::Text("é🙂a".into()), Value::Text("".into())]).unwrap(),
+            Value::Integer(3));
+        assert_eq!(split_count(&[Value::Null, Value::Text("".into())]).unwrap(), Value::Null);
     }
 }
