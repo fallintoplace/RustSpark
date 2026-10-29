@@ -41,6 +41,10 @@ pub fn execute_with_guard(
     options: ExecutionOptions,
     guard: &QueryGuard,
 ) -> Result<Batch> {
+    guard.check()?;
+    if options.max_plan_depth == 0 {
+        return Err(Error::Execution("query plan exceeds maximum depth".into()));
+    }
     let optimized = crate::optimizer::optimize(plan.clone());
     execute_inner(&optimized, catalog, &options, 0, guard)
 }
