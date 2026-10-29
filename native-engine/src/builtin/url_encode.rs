@@ -9,8 +9,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > MAX_OUTPUT_BYTES {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
+    let bytes = text.as_bytes();
+    let Some(first_escaped) = bytes.iter().position(|&byte| {
+        !matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*')
+    }) else {
+        return Ok(Value::Text(text.to_owned()));
+    };
     let mut encoded = String::with_capacity(text.len());
-    for &byte in text.as_bytes() {
+    encoded.push_str(&text[..first_escaped]);
+    for &byte in &bytes[first_escaped..] {
         let escaped = !matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ');
         if encoded.len() > MAX_OUTPUT_BYTES - if escaped { 3 } else { 1 } {
             return Err(Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()));
@@ -43,5 +50,17 @@ mod tests {
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(evaluate(&[Value::Text("🙂".repeat(1_400_000))]).is_err());
         assert!(evaluate(&[Value::Text("a".repeat(MAX_OUTPUT_BYTES + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ascii_prefix_url_encode_tests {
+    use super::*;
+    #[test]
+    fn preserves_safe_ascii_prefix_and_escapes_first_unsafe_byte() {
+        let safe = "Abc-_.09*".repeat(128);
+        assert_eq!(evaluate(&[Value::Text(safe.clone())]).unwrap(), Value::Text(safe));
+        assert_eq!(evaluate(&[Value::Text("prefix xyz/é".into())]).unwrap(), Value::Text("prefix+xyz%2F%C3%A9".into()));
+        assert_eq!(evaluate(&[Value::Text("".into())]).unwrap(), Value::Text("".into()));
     }
 }
