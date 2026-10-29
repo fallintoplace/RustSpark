@@ -202,7 +202,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "SUM", "MIN", "MAX"]
+                if ["COUNT", "SUM", "AVG", "MIN", "MAX"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -221,6 +221,7 @@ impl Parser {
                 match function.as_str() {
                     "COUNT" => AggregateOp::Count(expr),
                     "SUM" => AggregateOp::Sum(expr),
+                    "AVG" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
                     _ => unreachable!(),

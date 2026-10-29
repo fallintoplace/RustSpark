@@ -13,6 +13,7 @@ use crate::{
 pub enum AggregateOp {
     CountAll,
     Count(Expr),
+    Avg(Expr),
     Sum(Expr),
     Min(Expr),
     Max(Expr),
@@ -35,6 +36,10 @@ impl AggregateItem {
     fn output_type(&self, schema: &Schema) -> Result<DataType> {
         match &self.op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Ok(DataType::Integer),
+            AggregateOp::Avg(expr) => match expr.output_type(schema)? {
+                DataType::Integer | DataType::Float => Ok(DataType::Float),
+                _ => Err(Error::Type("AVG requires numeric input".into())),
+            },
             AggregateOp::Sum(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
@@ -50,6 +55,7 @@ impl AggregateItem {
 #[derive(Clone)]
 enum State {
     Count(i64),
+    Avg { sum: f64, count: i64 },
     Sum(Option<Value>),
     Min(Option<Value>),
     Max(Option<Value>),
@@ -59,6 +65,7 @@ impl State {
     fn new(op: &AggregateOp) -> Self {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
+            AggregateOp::Avg(_) => Self::Avg { sum: 0.0, count: 0 },
             AggregateOp::Sum(_) => Self::Sum(None),
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
@@ -69,6 +76,7 @@ impl State {
         let value = match op {
             AggregateOp::CountAll => Value::Integer(1),
             AggregateOp::Count(expr)
+            | AggregateOp::Avg(expr)
             | AggregateOp::Sum(expr)
             | AggregateOp::Min(expr)
             | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
@@ -80,6 +88,18 @@ impl State {
                         .checked_add(1)
                         .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
                 }
+            }
+            Self::Avg { sum, count } => {
+                if value.is_null() { return Ok(()); }
+                let number = match value {
+                    Value::Integer(n) => n as f64,
+                    Value::Float(n) => n,
+                    _ => return Err(Error::Type("AVG requires numeric input".into())),
+                };
+                let next = *sum + number;
+                if !next.is_finite() { return Err(Error::Execution("AVG overflow".into())); }
+                *sum = next;
+                *count = count.checked_add(1).ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
             }
             Self::Sum(total) => {
                 if value.is_null() {
@@ -110,6 +130,9 @@ impl State {
     fn finish(self) -> Value {
         match self {
             Self::Count(value) => Value::Integer(value),
+            Self::Avg { sum, count } => {
+                if count == 0 { Value::Null } else { Value::Float(sum / count as f64) }
+            },
             Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
                 value.unwrap_or(Value::Null)
             }
