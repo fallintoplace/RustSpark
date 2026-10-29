@@ -46,6 +46,13 @@ class TemplatesTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_query_rows(text)
 
+    def test_mixed_type_parameter_keys_are_rejected_before_sorting(self):
+        for invalid in (None, 3):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "parameter name"):
+                make_command("rustspark", Path("/db"), Path("q.sql"),
+                             {"good": "int64:1", invalid: "int64:2"})
+
+
 
 if __name__ == "__main__":
     unittest.main()
