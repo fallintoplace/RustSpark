@@ -18,6 +18,9 @@ fn split_part(args: &[Value]) -> Result<Value> {
     if index == 0 {
         return Err(Error::Execution("SPLIT_PART position cannot be zero".into()));
     }
+    if delimiter.is_empty() {
+        return Ok(Value::Text(if index == 1 || index == -1 { text } else { "" }.to_string()));
+    }
     let result = if index > 0 {
         usize::try_from(index - 1).ok()
             .and_then(|offset| text.split(delimiter).nth(offset))
@@ -68,5 +71,8 @@ mod tests {
         assert!(split_part(&[Value::Text("x".into()), Value::Text(",".into()), Value::Integer(0)]).is_err());
         assert_eq!(split_part(&[Value::Text("a,b,c".into()), Value::Text(",".into()), Value::Integer(-2)]).unwrap(), Value::Text("b".into()));
         assert_eq!(split_part(&[Value::Text("a,b".into()), Value::Text(",".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
+        assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(1)]).unwrap(), Value::Text("abc".into()));
+        assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(-1)]).unwrap(), Value::Text("abc".into()));
+        assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(2)]).unwrap(), Value::Text("".into()));
     }
 }
