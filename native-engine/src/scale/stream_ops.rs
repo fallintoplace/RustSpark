@@ -26,6 +26,14 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
                 return Some(Err(error));
             }
             let next = self.input.next()?;
+            if matches!(&self.predicate,
+                Expr::Literal(crate::scalar::Value::Boolean(false) | crate::scalar::Value::Null)) {
+                if let Err(error) = next {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+                continue;
+            }
             let result = next.and_then(|batch| {
                 if matches!(&self.predicate,
                     Expr::Literal(crate::scalar::Value::Boolean(true))) {
@@ -233,5 +241,25 @@ mod whole_limit_stream_batch_perf_tests {
         assert_eq!(result.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
         assert_eq!(result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>(),
             (3..8).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod false_literal_stream_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}, Error};
+    #[test]
+    fn false_or_unknown_predicates_drop_rows_but_keep_upstream_errors() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap();
+        for literal in [Value::Boolean(false), Value::Null] {
+            let stream = FilterStream::new([Ok(batch.clone())].into_iter(), Expr::Literal(literal.clone()), QueryControl::default());
+            assert!(stream.collect::<Result<Vec<_>>>().unwrap().is_empty());
+            let mut errors = FilterStream::new([
+                Ok(batch.clone()), Err(Error::Execution("upstream failure".into()))
+            ].into_iter(), Expr::Literal(literal), QueryControl::default());
+            assert!(errors.next().unwrap().is_err());
+            assert!(errors.next().is_none());
+        }
     }
 }
