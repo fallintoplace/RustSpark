@@ -34,6 +34,7 @@ pub struct PartitionWriter {
     batch_rows: usize,
 }
 
+#[cfg(test)]
 fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usize> {
     let mut hash = crate::hash_partition::PartitionHasher::default();
     for &column in keys { batch.value(row, column)?.hash(&mut hash); }
