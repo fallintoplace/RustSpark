@@ -34,7 +34,7 @@ pub fn concat(
             output.extend_from_slice(batch.column(index)?);
         }
     }
-    Batch::new(schema.clone(), columns)
+    Batch::new_with_row_count(schema.clone(), columns, total)
 }
 
 #[cfg(test)]
@@ -74,5 +74,18 @@ mod tests {
         let a = Schema::new(vec![Field::new("a", DataType::Text, true)]).unwrap();
         let b = Schema::new(vec![Field::new("b", DataType::Text, true)]).unwrap();
         assert!(concat(&a, [Batch::empty(b)], 10).is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_column_concat_consolidation_tests {
+    use super::*;
+    #[test]
+    fn concat_preserves_zero_column_row_counts() {
+        let schema = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        let b = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
+        assert_eq!(concat(&schema, [a.clone(), b.clone()], 5).unwrap().num_rows(), 5);
+        assert!(concat(&schema, [a, b], 4).is_err());
     }
 }
