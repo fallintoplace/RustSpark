@@ -67,3 +67,45 @@ mod tests {
         assert!(partition(&batch, &["id"], 0).is_err());
     }
 }
+
+ 
+/// Partition successive batches using identical hash keys and concatenate each bucket.
+pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
+    let first = input.first().ok_or_else(|| Error::Schema("partition input needs a schema".into()))?;
+    let schema = first.schema();
+    let mut buckets: Vec<Vec<Batch>> = vec![Vec::new(); partitions];
+    for batch in input {
+        if batch.schema() != schema {
+            return Err(Error::Schema("partition input schemas differ".into()));
+        }
+        for (bucket, part) in partition(batch, keys, partitions)?.into_iter().enumerate() {
+            buckets[bucket].push(part);
+        }
+    }
+    buckets.iter().map(|pieces| crate::batch_chunks::concatenate(pieces)).collect()
+}
+
+#[cfg(test)]
+mod partition_batches_feature_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn keys_remain_colocated_across_batch_boundaries() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(9)], vec![Value::Null]
+        ]).unwrap();
+        let second = Batch::from_rows(schema, vec![
+            vec![Value::Integer(9)], vec![Value::Null]
+        ]).unwrap();
+        let result = partition_batches(&[first, second], &["key"], 8).unwrap();
+        assert_eq!(result.iter().map(Batch::num_rows).sum::<usize>(), 4);
+        assert!(result.iter().any(|bucket| bucket.column(0).unwrap() ==
+            [Value::Integer(9), Value::Integer(9)]));
+        assert!(result.iter().any(|bucket| bucket.column(0).unwrap() ==
+            [Value::Null, Value::Null]));
+        assert!(partition_batches(&[], &["key"], 2).is_err());
+    }
+}
+
