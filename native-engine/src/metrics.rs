@@ -22,6 +22,7 @@ pub struct Snapshot {
 }
 
 fn charge(counter: &AtomicU64, amount: u64) -> Result<()> {
+    if amount == 0 { return Ok(()); }
     counter.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
         current.checked_add(amount)
     }).map_err(|_| Error::Execution("native query metric overflow".into()))?;
@@ -122,5 +123,20 @@ mod metrics_merge_feature_tests {
             input_rows: 105, output_rows: 22, input_batches: 4, output_batches: 2,
         });
         assert!(Snapshot { input_rows: u64::MAX, ..first }.merge(second).is_err());
+    }
+}
+
+#[cfg(test)]
+mod metrics_zero_row_charge_tests {
+    use super::*;
+    #[test]
+    fn empty_batches_still_count_as_events() {
+        let metrics = QueryMetrics::new();
+        metrics.record_input(0).unwrap();
+        metrics.record_input(0).unwrap();
+        metrics.record_output(0).unwrap();
+        assert_eq!(metrics.snapshot(), Snapshot {
+            input_rows: 0, output_rows: 0, input_batches: 2, output_batches: 1,
+        });
     }
 }
