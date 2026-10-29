@@ -89,6 +89,22 @@ class CompareWarmTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Reference verification uses different SQL"):
             compare.compare(report(10, "rs"), report(20, "duckdb"), reference)
 
+    def test_rejects_mismatched_warmup_and_repeat_counts(self):
+        rs, duckdb = report(10, "rs"), report(20, "duckdb")
+        rs.update({"warmup": 1, "repeat": 5})
+        duckdb.update({"warmup": 1, "repeat": 5})
+        self.assertEqual(compare.compare(rs, duckdb, verification())["verified_queries"], 22)
+        duckdb["warmup"] = 2
+        with self.assertRaisesRegex(ValueError, "warmup"):
+            compare.compare(rs, duckdb, verification())
+        duckdb["warmup"] = 1
+        duckdb["repeat"] = 3
+        with self.assertRaisesRegex(ValueError, "repeat"):
+            compare.compare(rs, duckdb, verification())
+        duckdb["repeat"] = True
+        with self.assertRaisesRegex(ValueError, "repeat"):
+            compare.compare(rs, duckdb, verification())
+
 
 if __name__ == "__main__":
     unittest.main()
