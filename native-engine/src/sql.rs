@@ -6,6 +6,7 @@ use crate::{
     plan::Plan,
     project::Selection,
     scalar::Value,
+    schema::DataType,
     sort::SortKey,
     Error,
     Result,
@@ -161,6 +162,20 @@ impl Parser {
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("CAST") => {
+                self.expect_symbol('(')?;
+                let expr = self.expression(0)?;
+                self.expect_word("AS")?;
+                let data_type = match self.identifier()?.to_ascii_uppercase().as_str() {
+                    "BIGINT" | "INT" | "INTEGER" => DataType::Integer,
+                    "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
+                    "BOOLEAN" | "BOOL" => DataType::Boolean,
+                    "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
+                    other => return Err(Error::Unsupported(format!("native CAST type: {other}"))),
+                };
+                self.expect_symbol(')')?;
+                Ok(Expr::Cast { expr: Box::new(expr), data_type })
             }
             Some(Token::Word(word)) => Ok(Expr::Column(word)),
             Some(Token::Text(text)) => Ok(Expr::Literal(Value::Text(text))),
@@ -486,5 +501,25 @@ mod tests {
         assert!(parse_sql("SELECT * FROM sales; DROP TABLE sales").is_err());
         assert!(parse_sql("SELECT * FROM sales JOIN customers ON id > id").is_err());
         assert!(parse_sql("SELECT city, SUM(amount) FROM sales").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod sql_cast_feature_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute, schema::{Field, Schema}};
+
+    #[test]
+    fn sql_cast_runs_through_native_expression_evaluator() {
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("12".into())], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        let plan = parse_sql("SELECT CAST(value AS BIGINT) AS id FROM t").unwrap();
+        assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(12)], vec![Value::Null]]);
+        assert!(parse_sql("SELECT CAST(value AS DATE) FROM t").is_err());
     }
 }
