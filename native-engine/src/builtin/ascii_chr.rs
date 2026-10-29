@@ -2,18 +2,23 @@ use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn ascii_type(types: &[DataType]) -> Result<DataType> {
-    if types[0] == DataType::Text { Ok(DataType::Integer) }
-    else { Err(Error::Type("ASCII requires text".into())) }
+    if matches!(types[0], DataType::Text | DataType::Integer | DataType::Float) {
+        Ok(DataType::Integer)
+    } else { Err(Error::Type("ASCII requires text or numeric input".into())) }
 }
 fn chr_type(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Integer { Ok(DataType::Text) }
     else { Err(Error::Type("CHR requires integer code point".into())) }
 }
 fn ascii(args: &[Value]) -> Result<Value> {
-    match super::string(&args[0])? {
-        None => Ok(Value::Null),
-        Some(s) => Ok(Value::Integer(s.as_bytes().first().copied().unwrap_or(0) as i64)),
-    }
+    let byte = match &args[0] {
+        Value::Null => return Ok(Value::Null),
+        Value::Text(text) => text.as_bytes().first().copied().unwrap_or(0),
+        Value::Integer(number) => number.to_string().as_bytes()[0],
+        Value::Float(number) => number.to_string().as_bytes()[0],
+        _ => return Err(Error::Type("ASCII requires text or numeric input".into())),
+    };
+    Ok(Value::Integer(i64::from(byte)))
 }
 fn chr(args: &[Value]) -> Result<Value> {
     let Some(code) = super::integer(&args[0])? else { return Ok(Value::Null) };
@@ -35,5 +40,9 @@ mod tests {
         assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("🙂".into()));
         assert!(chr(&[Value::Integer(0xd800)]).is_err());
         assert_eq!(chr(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(ascii_type(&[DataType::Integer]).unwrap(), DataType::Integer);
+        assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));
+        assert_eq!(ascii(&[Value::Integer(-42)]).unwrap(), Value::Integer(45));
+        assert_eq!(ascii(&[Value::Float(3.14)]).unwrap(), Value::Integer(51));
     }
 }
