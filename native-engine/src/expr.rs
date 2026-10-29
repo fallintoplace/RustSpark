@@ -35,6 +35,8 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
+    /// A native SQL function call with evaluated argument expressions.
+    Call { name: String, arguments: Vec<Expr> },
 }
 
 impl Expr {
@@ -56,6 +58,7 @@ impl Expr {
                 Value::Float(_) => DataType::Float,
             }),
             Self::Not(_) | Self::IsNull(_) => Ok(DataType::Boolean),
+            Self::Call { name, arguments } => crate::builtin::output_type(name, arguments, schema),
             Self::Binary { left, op, right } => match op {
                 BinaryOp::Equal
                 | BinaryOp::NotEqual
@@ -90,6 +93,7 @@ impl Expr {
                 None => Value::Null,
             }),
             Self::IsNull(expr) => Ok(Value::Boolean(expr.evaluate(batch, row)?.is_null())),
+            Self::Call { name, arguments } => crate::builtin::evaluate(name, arguments, batch, row),
             Self::Binary { left, op, right } => {
                 let left = left.evaluate(batch, row)?;
                 let right = right.evaluate(batch, row)?;
