@@ -212,14 +212,20 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "SUBSTRING" => match args {
             [Value::Text(text), Value::Integer(start), Value::Integer(length)] => {
                 if *length < 0 { return Err(Error::Execution("SUBSTRING length must be nonnegative".into())); }
-                let chars: Vec<char> = text.chars().collect();
+                // Convert character offsets into UTF-8 slice boundaries without
+                // allocating a Vec<char> for the entire input string.
                 let begin = if *start > 0 {
                     usize::try_from(start - 1).unwrap_or(usize::MAX)
                 } else if *start < 0 {
-                    chars.len().saturating_sub(usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
+                    text.chars().count().saturating_sub(
+                        usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
                 } else { 0 };
                 let count = usize::try_from(*length).unwrap_or(usize::MAX);
-                Ok(Value::Text(chars.into_iter().skip(begin).take(count).collect()))
+                let start_byte = text.char_indices().nth(begin)
+                    .map_or(text.len(), |(offset, _)| offset);
+                let end_byte = text[start_byte..].char_indices().nth(count)
+                    .map_or(text.len(), |(offset, _)| start_byte + offset);
+                Ok(Value::Text(text[start_byte..end_byte].into()))
             }
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
@@ -390,5 +396,23 @@ mod uppercase_dispatch_tests {
         assert_eq!(normalized_uppercase("upper").as_ref(), "UPPER");
         assert_eq!(normalized_uppercase("UpPeR").as_ref(), "UPPER");
         assert_eq!(evaluate("UPPER", &[Value::Text("abc".into())]).unwrap(), Value::Text("ABC".into()));
+    }
+}
+
+#[cfg(test)]
+mod substring_byte_slicing_tests {
+    use super::*;
+
+    #[test]
+    fn substring_preserves_unicode_and_negative_offsets() {
+        let arg = |start, length| evaluate("SUBSTRING", &[
+            Value::Text("aé🙂z".into()), Value::Integer(start), Value::Integer(length)
+        ]).unwrap();
+        assert_eq!(arg(2, 2), Value::Text("é🙂".into()));
+        assert_eq!(arg(-2, 2), Value::Text("🙂z".into()));
+        assert_eq!(arg(0, 1), Value::Text("a".into()));
+        assert_eq!(arg(9, 3), Value::Text("".into()));
+        assert_eq!(arg(i64::MIN, 3), Value::Text("aé🙂".into()));
+        assert_eq!(arg(2, 0), Value::Text("".into()));
     }
 }
