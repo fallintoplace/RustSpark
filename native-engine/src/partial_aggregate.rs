@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
     batch::Batch,
@@ -54,10 +54,16 @@ impl PartialGroupSum {
         self.key_type = Some(kind);
         for row in 0..batch.num_rows() {
             let key_value = batch.value(row, key)?.clone();
-            if !self.groups.contains_key(&key_value) && self.groups.len() >= self.max_groups {
-                return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
-            }
-            let state = self.groups.entry(key_value).or_default();
+            let full = self.groups.len() >= self.max_groups;
+            let state = match self.groups.entry(key_value) {
+                Entry::Occupied(occupied) => occupied.into_mut(),
+                Entry::Vacant(vacant) => {
+                    if full {
+                        return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
+                    }
+                    vacant.insert(State::default())
+                }
+            };
             state.rows = state.rows.checked_add(1)
                 .ok_or_else(|| Error::Execution("group count overflow".into()))?;
             match batch.value(row, amount)? {
@@ -224,5 +230,26 @@ mod consolidated_partial_merge_preflight_tests {
             let now = &first.groups[&key];
             assert_eq!((now.rows, now.sum, now.has_value), (previous.rows, previous.sum, previous.has_value));
         }
+    }
+}
+
+#[cfg(test)]
+mod partial_group_entry_perf_tests {
+    use super::*;
+    #[test]
+    fn existing_groups_are_allowed_at_cardinality_limit() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false), Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(5), Value::Integer(1)], vec![Value::Integer(5), Value::Integer(3)],
+        ]).unwrap();
+        let mut partial = PartialGroupSum::new("key", "amount", 1);
+        partial.update(&input).unwrap();
+        assert_eq!(partial.finish().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(5), Value::Integer(2), Value::Integer(4)],
+        ]);
+        let mut zero = PartialGroupSum::new("key", "amount", 0);
+        assert!(zero.update(&input).is_err());
     }
 }
