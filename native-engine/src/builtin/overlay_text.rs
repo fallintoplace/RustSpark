@@ -37,7 +37,21 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn common_suffix_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn common_suffix(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let mut start = left.len();
+    for ((offset, first), (_, second)) in left.char_indices().rev().zip(right.char_indices().rev()) {
+        if first != second { break; }
+        start = offset;
+    }
+    Ok(Value::Text(left[start..].to_string()))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "common_suffix", min_args: 2, max_args: 2, result_type: common_suffix_type, call: common_suffix },Function {
     name: "overlay", min_args: 3, max_args: 4,
     result_type: output, call: evaluate,
 }];
@@ -77,5 +91,18 @@ mod overlay_utf8_slice_perf_tests {
             Value::Text("é".into()), Value::Text("X".into()),
             Value::Integer(1), Value::Integer(0),
         ]).unwrap(), Value::Text("Xé".into()));
+    }
+}
+
+#[cfg(test)]
+mod common_suffix_extension_tests {
+    use super::*;
+    #[test]
+    fn preserves_unicode_and_null_semantics() {
+        assert!(crate::builtin::supports("common_suffix"));
+        assert_eq!(common_suffix(&[Value::Text("one/東京".into()), Value::Text("two/東京".into())]).unwrap(), Value::Text("/東京".into()));
+        assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
+        assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }
