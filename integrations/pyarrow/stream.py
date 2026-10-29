@@ -21,10 +21,10 @@ def build_command(
     selected = [("csv", csv), ("parquet", parquet), ("json", json_input)]
     if sum(value is not None for _, value in selected) > 1:
         raise ValueError("Exactly zero or one file input is allowed")
-    if max_rows is not None and max_rows < 0:
-        raise ValueError("max_rows must be nonnegative")
-    if query_timeout is not None and query_timeout <= 0:
-        raise ValueError("query_timeout must be positive")
+    if max_rows is not None and (type(max_rows) is not int or max_rows < 0):
+        raise ValueError("max_rows must be a nonnegative integer")
+    if query_timeout is not None and (type(query_timeout) is not int or query_timeout <= 0):
+        raise ValueError("query_timeout must be a positive integer")
     command = [binary, "--sql", sql, "--stdout-format", "arrow"]
     for format_name, path in selected:
         if path is not None:
