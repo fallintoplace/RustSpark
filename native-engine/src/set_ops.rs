@@ -91,7 +91,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
     let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
-    for row in right.rows()? {
+    for index in 0..right.num_rows() {
+        let row = right.row(index)?;
         let entry = counts.entry(row).or_insert(0);
         *entry = entry.checked_add(1)
             .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
