@@ -57,6 +57,11 @@ fn common_prefix_type(types: &[DataType]) -> Result<DataType> { super::text_type
 fn common_prefix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left.is_ascii() && right.is_ascii() {
+        let end = left.bytes().zip(right.bytes())
+            .take_while(|(first, second)| first == second).count();
+        return Ok(Value::Text(left[..end].to_owned()));
+    }
     let mut end = 0;
     for ((offset, first), (_, second)) in left.char_indices().zip(right.char_indices()) {
         if first != second { break; }
@@ -140,5 +145,19 @@ mod common_prefix_extension_tests {
         assert_eq!(common_prefix(&[Value::Text("café-one".into()), Value::Text("café-two".into())]).unwrap(), Value::Text("café-".into()));
         assert_eq!(common_prefix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod common_ascii_prefix_tests {
+    use super::*;
+    #[test]
+    fn ascii_fast_path_keeps_unicode_boundaries() {
+        let same = "a".repeat(2048);
+        let first = Value::Text(format!("{same}x"));
+        let second = Value::Text(format!("{same}y"));
+        assert_eq!(common_prefix(&[first, second]).unwrap(), Value::Text(same));
+        assert_eq!(common_prefix(&[Value::Text("é🙂x".into()), Value::Text("é🙂y".into())]).unwrap(),
+            Value::Text("é🙂".into()));
     }
 }
