@@ -28,7 +28,14 @@ fn round(args: &[Value]) -> Result<Value> {
     let Some(number) = super::number(&args[0])? else { return Ok(Value::Null) };
     let scale = 10_f64.powi(digits.unsigned_abs() as i32);
     let result = if digits >= 0 {
-        (number * scale).round() / scale
+        let scaled = number * scale;
+        // At enormous magnitudes every requested fractional digit is already
+        // below the f64 unit in the last place; scaling must not produce infinity.
+        if scaled.is_infinite() && number.is_finite() {
+            number
+        } else {
+            scaled.round() / scale
+        }
     } else {
         (number / scale).round() * scale
     };
@@ -89,5 +96,20 @@ mod bigint_round_exactness_tests {
         assert_eq!(round(&[Value::Integer(-125), Value::Integer(-1)]).unwrap(), Value::Integer(-130));
         assert_eq!(round(&[Value::Integer(-149), Value::Integer(-2)]).unwrap(), Value::Integer(-100));
         assert_eq!(round(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod round_huge_finite_float_tests {
+    use super::*;
+    #[test]
+    fn retains_huge_finite_inputs_at_fractional_precisions() {
+        assert_eq!(round(&[Value::Float(1e308), Value::Integer(12)]).unwrap(),
+            Value::Float(1e308));
+        assert_eq!(round(&[Value::Float(-1e308), Value::Integer(15)]).unwrap(),
+            Value::Float(-1e308));
+        assert_eq!(round(&[Value::Float(1.235), Value::Integer(2)]).unwrap(),
+            Value::Float(1.24));
+        assert!(round(&[Value::Float(f64::INFINITY), Value::Integer(2)]).is_err());
     }
 }
