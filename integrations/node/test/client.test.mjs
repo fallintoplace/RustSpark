@@ -32,3 +32,16 @@ test("reports process exit and invalid output", () => {
   assert.throws(() => new RustSpark({ runner: () => ({ status: 0, stdout: "{}" }) }).query("x"), RustSparkError);
   assert.throws(() => new RustSpark({ runner: () => ({ error: Error("ENOENT") }) }).query("x"), /ENOENT/);
 });
+
+test("queryOne bounds results and rejects non-unique rows", () => {
+  let args;
+  const client = new RustSpark({ runner: (_bin, argv) => {
+    args = argv;
+    return { status: 0, stdout: '[{"id":1}]' };
+  } });
+  assert.deepEqual(client.queryOne("SELECT id FROM t"), { id: 1 });
+  assert.equal(args[args.indexOf("--max-rows") + 1], "2");
+  assert.equal(new RustSpark({ runner: () => ({ status: 0, stdout: "[]" }) }).queryOne("SELECT 1"), null);
+  assert.throws(() => new RustSpark({ runner: () => ({ status: 0, stdout: "[{},{}]" }) }).queryOne("SELECT 1"), RustSparkError);
+  assert.throws(() => client.queryOne("SELECT 1", { maxRows: 1 }), TypeError);
+});

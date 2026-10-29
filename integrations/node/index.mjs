@@ -84,4 +84,13 @@ export class RustSpark {
     }
     return rows;
   }
+
+  queryOne(sql, options = {}) {
+    if (options.maxRows !== undefined) {
+      throw new TypeError("queryOne sets maxRows automatically");
+    }
+    const rows = this.query(sql, { ...options, maxRows: 2 });
+    if (rows.length > 1) throw new RustSparkError("queryOne expected at most one row");
+    return rows[0] ?? null;
+  }
 }
