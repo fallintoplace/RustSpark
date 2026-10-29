@@ -1,7 +1,8 @@
 //! Streaming physical execution of the supported native logical-plan subset.
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 use crate::{
-    batch::Batch, plan::Plan, project::Selection, scalar::Value,
+    aggregate::AggregateOp, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
+    project::Selection, scalar::Value,
     schema::{DataType, Field, Schema}, Error, Result,
 };
 use super::{
@@ -12,6 +13,8 @@ use super::{
     sorted_runs::write_sorted_runs,
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
+    grouped_spill::{grouped_aggregate, GroupFiles},
+    grace_join::{grace_join, JoinFiles}, spill::SpillReader,
 };
 
 pub type BatchStream = Box<dyn Iterator<Item = Result<Batch>> + Send>;
@@ -25,6 +28,118 @@ struct SortedOutput {
 impl Iterator for SortedOutput {
     type Item = Result<Batch>;
     fn next(&mut self) -> Option<Self::Item> { self.reader.next() }
+}
+
+/// The shard file ownership must outlive the active spill reader.
+struct GroupedOutput {
+    files: GroupFiles,
+    reader: Option<SpillReader<BufReader<File>>>,
+    next_file: usize,
+    batch_rows: usize,
+    control: QueryControl,
+    stopped: bool,
+}
+
+impl Iterator for GroupedOutput {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                self.reader = None;
+                return Some(Err(error));
+            }
+            if let Some(reader) = &mut self.reader {
+                match reader.next_batch() {
+                    Ok(Some(batch)) if batch.num_rows() == 0 => continue,
+                    Ok(Some(batch)) => return Some(Ok(batch)),
+                    Ok(None) => self.reader = None,
+                    Err(error) => {
+                        self.stopped = true;
+                        self.reader = None;
+                        return Some(Err(error));
+                    }
+                }
+                continue;
+            }
+            let Some(path) = self.files.paths().get(self.next_file) else {
+                self.stopped = true;
+                return None;
+            };
+            self.next_file += 1;
+            let next_reader = (|| {
+                let reader = SpillReader::new(BufReader::new(File::open(path)?), self.batch_rows)?;
+                if reader.schema() != self.files.schema() {
+                    return Err(Error::Schema("grouped result spill schema mismatch".into()));
+                }
+                Ok(reader)
+            })();
+            match next_reader {
+                Ok(reader) => self.reader = Some(reader),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
+/// Keep hash join shard paths owned until the active reader has finished.
+struct JoinedOutput {
+    files: JoinFiles,
+    reader: Option<SpillReader<BufReader<File>>>,
+    next_file: usize,
+    batch_rows: usize,
+    control: QueryControl,
+    stopped: bool,
+}
+impl Iterator for JoinedOutput {
+    type Item = Result<Batch>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                self.reader = None;
+                return Some(Err(error));
+            }
+            if let Some(reader) = &mut self.reader {
+                match reader.next_batch() {
+                    Ok(Some(batch)) if batch.num_rows() == 0 => continue,
+                    Ok(Some(batch)) => return Some(Ok(batch)),
+                    Ok(None) => self.reader = None,
+                    Err(error) => {
+                        self.stopped = true;
+                        self.reader = None;
+                        return Some(Err(error));
+                    }
+                }
+                continue;
+            }
+            let Some(path) = self.files.paths().get(self.next_file) else {
+                self.stopped = true;
+                return None;
+            };
+            self.next_file += 1;
+            let next_reader = (|| {
+                let reader = SpillReader::new(BufReader::new(File::open(path)?), self.batch_rows)?;
+                if reader.schema() != self.files.schema() {
+                    return Err(Error::Schema("join result spill schema mismatch".into()));
+                }
+                Ok(reader)
+            })();
+            match next_reader {
+                Ok(reader) => self.reader = Some(reader),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
 }
 
 const MAX_STREAM_DISTINCT_KEYS: usize = 200_000;
@@ -148,6 +263,47 @@ fn infer(
         }
         Plan::Limit { input, .. } |
         Plan::Distinct { input } => child(input),
+        Plan::Join { left, right, left_key, right_key, kind } => {
+            let left_schema = child(left)?;
+            let right_schema = child(right)?;
+            Ok(join::hash_join(
+                &Batch::empty(left_schema), &Batch::empty(right_schema),
+                left_key, right_key, *kind
+            )?.schema().clone())
+        }
+        Plan::Aggregate { input, group_by, aggregates } => {
+            if group_by.is_empty() {
+                return Err(Error::Unsupported("streaming global aggregates are not implemented".into()));
+            }
+            let source = child(input)?;
+            let mut fields = Vec::new();
+            for (expr, alias) in group_by {
+                let Expr::Column(name) = expr else {
+                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
+                };
+                let source_field = source.field(source.column(name)?)?;
+                fields.push(Field::new(alias, source_field.data_type, true));
+            }
+            for item in aggregates {
+                let kind = match &item.op {
+                    AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
+                        crate::schema::DataType::Integer,
+                    AggregateOp::Avg(expr) => match expr.output_type(&source)? {
+                        crate::schema::DataType::Integer | crate::schema::DataType::Float =>
+                            crate::schema::DataType::Float,
+                        _ => return Err(Error::Type("AVG requires numeric input".into())),
+                    },
+                    AggregateOp::Sum(expr) => match expr.output_type(&source)? {
+                        crate::schema::DataType::Integer => crate::schema::DataType::Integer,
+                        crate::schema::DataType::Float => crate::schema::DataType::Float,
+                        _ => return Err(Error::Type("SUM requires numeric input".into())),
+                    },
+                    AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                };
+                fields.push(Field::new(&item.alias, kind, true));
+            }
+            Schema::new(fields)
+        }
         Plan::Project { input, selections } => {
             let source = child(input)?;
             let fields = selections.iter().map(|selection: &Selection| {
@@ -206,6 +362,42 @@ fn lower(
         Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
             child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
         ))),
+        Plan::Join { left, right, left_key, right_key, kind } => {
+            if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                return Err(Error::Unsupported(
+                    "streaming RIGHT/FULL join requires partition-wide unmatched row tracking".into()
+                ));
+            }
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            let files = grace_join(
+                child(left)?, child(right)?, left_schema, right_schema,
+                left_key, right_key, *kind, &options.scratch_directory,
+                16, 200_000, options.batch_rows, control
+            )?;
+            Ok(Box::new(JoinedOutput {
+                files, reader: None, next_file: 0,
+                batch_rows: options.batch_rows, control: control.clone(), stopped: false,
+            }))
+        }
+        Plan::Aggregate { input, group_by, aggregates } => {
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            let mut groups = Vec::with_capacity(group_by.len());
+            for (expr, alias) in group_by {
+                let Expr::Column(name) = expr else {
+                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
+                };
+                groups.push((name.clone(), alias.clone()));
+            }
+            let files = grouped_aggregate(
+                child(input)?, schema, &groups, aggregates,
+                &options.scratch_directory, 16, 200_000, options.batch_rows, control
+            )?;
+            Ok(Box::new(GroupedOutput {
+                files, reader: None, next_file: 0, batch_rows: options.batch_rows,
+                control: control.clone(), stopped: false,
+            }))
+        }
         Plan::Project { input, selections } =>
             Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
         Plan::Limit { input, offset, count } =>
@@ -471,5 +663,87 @@ mod consolidated_external_sort_preflight_tests {
             keys: vec![SortKey::ascending(Expr::Literal(Value::Integer(1)))] };
         let result = execute(&plan, &catalog, &StreamOptions::default(), QueryControl::default());
         assert!(matches!(result, Err(Error::Unsupported(_))));
+    }
+}
+
+#[cfg(test)]
+mod native_streamed_group_by_tests {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp}, expr::Expr,
+        schema::{DataType, Field}, scalar::Value};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn sql_grouping_spills_and_merges_across_csv_batches() {
+        let dir = std::env::temp_dir().join(format!("rustspark-stream-group-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("data.csv");
+        fs::write(&csv, "g,n\n1,3\n2,5\n1,7\n2,\n").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("g", DataType::Integer, false),
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("data", &csv, schema, 1024).unwrap();
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("data")),
+            group_by: vec![(Expr::Column("g".into()), "g".into())],
+            aggregates: vec![
+                AggregateItem::new(AggregateOp::CountAll, "rows"),
+                AggregateItem::new(AggregateOp::Sum(Expr::Column("n".into())), "sum"),
+            ],
+        };
+        let options = StreamOptions {
+            batch_rows: 1, scratch_directory: dir.clone(), ..StreamOptions::default()
+        };
+        let rows = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap().iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&vec![Value::Integer(1), Value::Integer(2), Value::Integer(10)]));
+        assert!(rows.contains(&vec![Value::Integer(2), Value::Integer(2), Value::Integer(5)]));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_streamed_join_tests {
+    use super::*;
+    use crate::{join::JoinKind, scalar::Value, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn partitioned_left_join_emits_matches_and_unmatched_once() {
+        let dir = std::env::temp_dir().join(format!("rustspark-stream-join-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let left = dir.join("left.csv");
+        let right = dir.join("right.csv");
+        fs::write(&left, "id\n1\n2\n3\n").unwrap();
+        fs::write(&right, "id\n2\n3\n").unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("lhs", &left, schema.clone(), 1024).unwrap();
+        catalog.register_csv("rhs", &right, schema, 1024).unwrap();
+        let plan = Plan::Join {
+            left: Box::new(Plan::scan("lhs")),
+            right: Box::new(Plan::scan("rhs")),
+            left_key: "id".into(), right_key: "id".into(), kind: JoinKind::Left,
+        };
+        let options = StreamOptions { batch_rows: 1, scratch_directory: dir.clone(),
+            ..StreamOptions::default() };
+        let rows = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap().iter()
+            .flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.contains(&vec![Value::Integer(1), Value::Null]));
+        assert!(rows.contains(&vec![Value::Integer(2), Value::Integer(2)]));
+        assert!(rows.contains(&vec![Value::Integer(3), Value::Integer(3)]));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
