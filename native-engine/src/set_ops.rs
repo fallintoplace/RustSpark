@@ -1,18 +1,52 @@
 //! Native SQL set operators with explicit schema compatibility checks.
-use std::collections::{HashMap, HashSet};
-use crate::{batch::Batch, schema::{Field, Schema}, Error, Result};
+use std::{borrow::Cow, collections::{HashMap, HashSet}};
+use crate::{
+    batch::Batch, scalar::Value, schema::{DataType, Field, Schema}, Error, Result,
+};
 
 pub fn compatible_schema(left: &Batch, right: &Batch) -> Result<Schema> {
     if left.schema().len() != right.schema().len() {
         return Err(Error::Schema("set operation column counts must match".into()));
     }
     let fields = left.schema().fields().iter().zip(right.schema().fields()).map(|(a, b)| {
-        if a.data_type != b.data_type {
-            return Err(Error::Type(format!("set operation type mismatch at {}", a.name)));
-        }
-        Ok(Field::new(&a.name, a.data_type, a.nullable || b.nullable))
+        let kind = match (a.data_type, b.data_type) {
+            (left, right) if left == right => left,
+            (DataType::Integer, DataType::Float) |
+            (DataType::Float, DataType::Integer) => DataType::Float,
+            _ => return Err(Error::Type(format!(
+                "set operation type mismatch at {}", a.name
+            ))),
+        };
+        Ok(Field::new(&a.name, kind, a.nullable || b.nullable))
     }).collect::<Result<Vec<_>>>()?;
     Schema::new(fields)
+}
+
+/// Widen numeric inputs before equality/hash operations. Without this, a
+/// numerically equal INT and DOUBLE are different native hash keys.
+pub fn align_set_inputs<'a>(
+    left: &'a Batch, right: &'a Batch,
+) -> Result<(Cow<'a, Batch>, Cow<'a, Batch>, Schema)> {
+    let schema = compatible_schema(left, right)?;
+    let align = |batch: &'a Batch| -> Result<Cow<'a, Batch>> {
+        let unchanged = schema.fields().iter().zip(batch.schema().fields())
+            .all(|(expected, actual)| expected.data_type == actual.data_type);
+        if unchanged { return Ok(Cow::Borrowed(batch)); }
+        let mut columns = Vec::with_capacity(schema.len());
+        for (i, expected) in schema.fields().iter().enumerate() {
+            let values = batch.column(i)?.iter().map(|value| {
+                match (expected.data_type, value) {
+                    (DataType::Float, Value::Integer(n)) => Value::Float(*n as f64),
+                    _ => value.clone(),
+                }
+            }).collect::<Vec<_>>();
+            columns.push(values);
+        }
+        Ok(Cow::Owned(Batch::new_with_row_count(
+            schema.clone(), columns, batch.num_rows(),
+        )?))
+    };
+    Ok((align(left)?, align(right)?, schema))
 }
 
 const MAX_DISTINCT_SET_KEYS: usize = 1_000_000;
@@ -30,8 +64,8 @@ fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crat
 }
 
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
-    let schema = compatible_schema(left, right)?;
-    let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
+    let (left, right, schema) = align_set_inputs(left, right)?;
+    let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
     for row in left.rows()? {
@@ -43,7 +77,7 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 }
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
-    let schema = compatible_schema(left, right)?;
+    let (left, right, schema) = align_set_inputs(left, right)?;
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
@@ -67,8 +101,8 @@ fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usiz
 
 /// Keep each left row up to its multiplicity in the right input.
 pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
-    let schema = compatible_schema(left, right)?;
-    let mut counts = right_counts(right)?;
+    let (left, right, schema) = align_set_inputs(left, right)?;
+    let mut counts = right_counts(&right)?;
     let mut rows = Vec::new();
     for row in left.rows()? {
         if let Some(remaining) = counts.get_mut(&row) {
@@ -83,7 +117,7 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
 
 /// Keep left occurrences after subtracting right row multiplicities.
 pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
-    let schema = compatible_schema(left, right)?;
+    let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(right)?;
     let mut rows = Vec::new();
     for row in left.rows()? {

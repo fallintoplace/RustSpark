@@ -1,30 +1,9 @@
-use crate::{
-    batch::Batch,
-    schema::{Field, Schema},
-    Error,
-    Result,
-};
-
-fn compatible_union_schema(left: &Batch, right: &Batch) -> Result<Schema> {
-    if left.schema().len() != right.schema().len() {
-        return Err(Error::Schema("UNION column counts must match".into()));
-    }
-    let mut fields = Vec::new();
-    for (a, b) in left.schema().fields().iter().zip(right.schema().fields()) {
-        if a.data_type != b.data_type {
-            return Err(Error::Type(format!("UNION type mismatch in column {}", a.name)));
-        }
-        fields.push(Field::new(
-            &a.name,
-            a.data_type,
-            a.nullable || b.nullable,
-        ));
-    }
-    Schema::new(fields)
-}
+use crate::{batch::Batch, Error, Result};
+#[cfg(test)]
+use crate::schema::Schema;
 
 pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
-    let schema = compatible_union_schema(left, right)?;
+    let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
     let count = left
         .num_rows()
         .checked_add(right.num_rows())
@@ -68,10 +47,10 @@ mod tests {
  
 /// UNION DISTINCT matches columns by position and removes repeated complete rows.
 pub fn union_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
-    let schema = compatible_union_schema(left, right)?;
+    let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
     let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
-    for input in [left, right] {
+    for input in [&*left, &*right] {
         for index in 0..input.num_rows() {
             let row = input.row(index)?;
             if seen.insert(row.clone()) {
