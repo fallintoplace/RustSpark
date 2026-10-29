@@ -178,6 +178,7 @@ const MODULES: &[&[Function]] = &[
     &cot::FUNCTIONS,
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
+    &assert_true::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
