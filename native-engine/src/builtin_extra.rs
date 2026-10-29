@@ -1,8 +1,18 @@
 //! Scalar SQL functions implemented by the native expression evaluator.
+use std::borrow::Cow;
 use crate::{expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
+fn normalized_uppercase(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        Cow::Owned(name.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
-    match name.to_ascii_uppercase().as_str() {
+    match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
             if args.is_empty() { return Err(Error::Parse("COALESCE needs at least one argument".into())); }
             let mut kind = None;
@@ -147,7 +157,7 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
 }
 
 pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
-    match name.to_ascii_uppercase().as_str() {
+    match normalized_uppercase(name).as_ref() {
         "COALESCE" => Ok(args.iter().find(|value| !value.is_null()).cloned().unwrap_or(Value::Null)),
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
@@ -368,5 +378,17 @@ mod ascii_length_tests {
         assert_eq!(evaluate("LENGTH", &[Value::Text("ABC".into())]).unwrap(), Value::Integer(3));
         assert_eq!(evaluate("LENGTH", &[Value::Text("é🙂".into())]).unwrap(), Value::Integer(2));
         assert_eq!(evaluate("LENGTH", &[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod uppercase_dispatch_tests {
+    use super::*;
+    #[test]
+    fn uppercase_function_names_borrow_without_allocation() {
+        assert!(matches!(normalized_uppercase("UPPER"), Cow::Borrowed(_)));
+        assert_eq!(normalized_uppercase("upper").as_ref(), "UPPER");
+        assert_eq!(normalized_uppercase("UpPeR").as_ref(), "UPPER");
+        assert_eq!(evaluate("UPPER", &[Value::Text("abc".into())]).unwrap(), Value::Text("ABC".into()));
     }
 }
