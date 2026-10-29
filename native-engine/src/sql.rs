@@ -437,6 +437,10 @@ impl Parser {
             }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
+                if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
+                    self.expect_symbol(')')?;
+                    return Ok(Expr::Call { name: "__spark_count_star".into(), args: vec![] });
+                }
                 let mut args = Vec::new();
                 if !self.take_symbol(')') {
                     loop {
@@ -627,6 +631,14 @@ impl Parser {
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
         let grouped = has_aggregates || has_group_by;
+        let having = if self.take_word("HAVING") {
+            if !grouped {
+                return Err(Error::Unsupported("HAVING requires aggregation or GROUP BY".into()));
+            }
+            Some(self.expression(0)?)
+        } else {
+            None
+        };
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
         if star && (select.len() > 1 || grouped) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
@@ -666,11 +678,17 @@ impl Parser {
                     SelectItem::Star => unreachable!(),
                 }
             }
+            let having = having.map(|predicate|
+                rewrite_having(predicate, &group_by, &selections, &mut aggregates)
+            ).transpose()?;
             plan = Plan::Aggregate {
                 input: Box::new(plan),
                 group_by,
                 aggregates,
             };
+            if let Some(predicate) = having {
+                plan = plan.filter(predicate);
+            }
             plan = plan.project(selections);
         } else if !star {
             let selections = select
@@ -681,12 +699,6 @@ impl Parser {
                 })
                 .collect();
             plan = plan.project(selections);
-        }
-        if self.take_word("HAVING") {
-            if !grouped {
-                return Err(Error::Unsupported("HAVING requires aggregation or GROUP BY".into()));
-            }
-            plan = plan.filter(self.expression(0)?);
         }
         if is_distinct {
             plan = Plan::Distinct { input: Box::new(plan) };
@@ -923,6 +935,105 @@ impl Parser {
             plan = plan.limit(offset, count);
         }
         Ok(plan)
+    }
+}
+
+/// Bind HAVING against aggregate output before the final SELECT projection.
+/// Aggregates absent from SELECT use hidden output slots that do not change the
+/// visible result schema. All remaining column references must be grouped.
+fn rewrite_having(
+    expression: Expr,
+    group_by: &[(Expr, String)],
+    selections: &[Selection],
+    aggregates: &mut Vec<AggregateItem>,
+) -> Result<Expr> {
+    if let Some((_, alias)) = group_by.iter().find(|(expr, _)| *expr == expression) {
+        return Ok(Expr::Column(alias.clone()));
+    }
+    match expression {
+        Expr::Column(name) => {
+            if let Some(selection) = selections.iter().find(
+                |selection| selection.alias.eq_ignore_ascii_case(&name)
+            ) {
+                return Ok(selection.expression.clone());
+            }
+            Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
+        }
+        Expr::Call { name, args } if
+            ["COUNT", "SUM", "AVG", "MIN", "MAX", "__spark_count_star"]
+                .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
+        {
+            let op = if name.eq_ignore_ascii_case("__spark_count_star") {
+                AggregateOp::CountAll
+            } else {
+                if args.len() != 1 {
+                    return Err(Error::Parse(format!("HAVING {name} expects one argument")));
+                }
+                let argument = args.into_iter().next().expect("one checked argument");
+                match name.to_ascii_uppercase().as_str() {
+                    "COUNT" => AggregateOp::Count(argument),
+                    "SUM" => AggregateOp::Sum(argument),
+                    "AVG" => AggregateOp::Avg(argument),
+                    "MIN" => AggregateOp::Min(argument),
+                    "MAX" => AggregateOp::Max(argument),
+                    _ => unreachable!(),
+                }
+            };
+            if let Some(item) = aggregates.iter().find(|item| item.op == op) {
+                return Ok(Expr::Column(item.alias.clone()));
+            }
+            let mut alias = format!("__rustspark_having_{}", aggregates.len());
+            while selections.iter().any(|item| item.alias.eq_ignore_ascii_case(&alias))
+                || group_by.iter().any(|(_, name)| name.eq_ignore_ascii_case(&alias))
+                || aggregates.iter().any(|item| item.alias.eq_ignore_ascii_case(&alias))
+            { alias.push('_'); }
+            aggregates.push(AggregateItem::new(op, &alias));
+            Ok(Expr::Column(alias))
+        }
+        Expr::Call { name, args } => Ok(Expr::Call {
+            name,
+            args: args.into_iter().map(|arg| rewrite_having(arg, group_by, selections, aggregates))
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        Expr::Binary { left, op, right } =>
+            Ok(Expr::binary(
+                rewrite_having(*left, group_by, selections, aggregates)?,
+                op,
+                rewrite_having(*right, group_by, selections, aggregates)?,
+            )),
+        Expr::Not(expr) =>
+            Ok(Expr::Not(Box::new(rewrite_having(*expr, group_by, selections, aggregates)?))),
+        Expr::IsNull(expr) =>
+            Ok(Expr::IsNull(Box::new(rewrite_having(*expr, group_by, selections, aggregates)?))),
+        Expr::Like { value, pattern } =>
+            Ok(Expr::Like {
+                value: Box::new(rewrite_having(*value, group_by, selections, aggregates)?),
+                pattern: Box::new(rewrite_having(*pattern, group_by, selections, aggregates)?),
+            }),
+        Expr::IsDistinctFrom { left, right, negated } =>
+            Ok(Expr::IsDistinctFrom {
+                left: Box::new(rewrite_having(*left, group_by, selections, aggregates)?),
+                right: Box::new(rewrite_having(*right, group_by, selections, aggregates)?),
+                negated,
+            }),
+        Expr::Cast { expression, target } =>
+            Ok(Expr::Cast { expression: Box::new(
+                rewrite_having(*expression, group_by, selections, aggregates)?
+            ), target }),
+        Expr::TryCast { expression, target } =>
+            Ok(Expr::TryCast { expression: Box::new(
+                rewrite_having(*expression, group_by, selections, aggregates)?
+            ), target }),
+        Expr::Case { branches, else_expr } => Ok(Expr::Case {
+            branches: branches.into_iter().map(|(condition, value)| Ok((
+                rewrite_having(condition, group_by, selections, aggregates)?,
+                rewrite_having(value, group_by, selections, aggregates)?,
+            ))).collect::<Result<Vec<_>>>()?,
+            else_expr: else_expr.map(|expr|
+                rewrite_having(*expr, group_by, selections, aggregates).map(Box::new)
+            ).transpose()?,
+        }),
+        literal @ Expr::Literal(_) => Ok(literal),
     }
 }
 
