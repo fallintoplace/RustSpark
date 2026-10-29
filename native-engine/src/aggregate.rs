@@ -15,7 +15,9 @@ pub enum AggregateOp {
     Count(Expr),
     CountDistinct(Expr),
     Sum(Expr),
+    SumDistinct(Expr),
     Avg(Expr),
+    AvgDistinct(Expr),
     Min(Expr),
     Max(Expr),
 }
@@ -38,14 +40,14 @@ impl AggregateItem {
         match &self.op {
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
                 Ok(DataType::Integer),
-            AggregateOp::Sum(expr) => {
+            AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
                     DataType::Integer | DataType::Float => Ok(kind),
                     _ => Err(Error::Type("SUM requires a numeric column".into())),
                 }
             }
-            AggregateOp::Avg(expr) => {
+            AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) => {
                 match expr.output_type(schema)? {
                     DataType::Integer | DataType::Float => Ok(DataType::Float),
                     _ => Err(Error::Type("AVG requires a numeric column".into())),
@@ -61,7 +63,9 @@ enum State {
     Count(i64),
     CountDistinct(HashSet<Value>),
     Sum(Option<Value>),
+    SumDistinct { seen: HashSet<Value>, total: Option<Value> },
     Avg { sum: f64, compensation: f64, count: i64 },
+    AvgDistinct { seen: HashSet<Value>, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
 }
@@ -72,7 +76,10 @@ impl State {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
             AggregateOp::CountDistinct(_) => Self::CountDistinct(HashSet::new()),
             AggregateOp::Sum(_) => Self::Sum(None),
+            AggregateOp::SumDistinct(_) => Self::SumDistinct { seen: HashSet::new(), total: None },
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
+            AggregateOp::AvgDistinct(_) =>
+                Self::AvgDistinct { seen: HashSet::new(), sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
         }
@@ -84,7 +91,9 @@ impl State {
             AggregateOp::Count(expr)
             | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr)
+            | AggregateOp::SumDistinct(expr)
             | AggregateOp::Avg(expr)
+            | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr)
             | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
         };
@@ -99,49 +108,21 @@ impl State {
             Self::CountDistinct(values) => {
                 if !value.is_null() { values.insert(value); }
             }
-            Self::Sum(total) => {
-                if value.is_null() {
-                    return Ok(());
+            Self::Sum(total) => add_sum(total, &value)?,
+            Self::SumDistinct { seen, total } => {
+                if !value.is_null() && !seen.contains(&value) {
+                    check_distinct_budget(seen)?;
+                    add_sum(total, &value)?;
+                    seen.insert(value);
                 }
-                let updated = match (total.as_ref(), &value) {
-                    (None, Value::Integer(_) | Value::Float(_)) => value.clone(),
-                    (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(
-                        a.checked_add(*b)
-                            .ok_or_else(|| Error::Execution("SUM overflow".into()))?,
-                    ),
-                    (Some(Value::Integer(a)), Value::Float(b)) => Value::Float(*a as f64 + *b),
-                    (Some(Value::Float(a)), Value::Integer(b)) => Value::Float(*a + *b as f64),
-                    (Some(Value::Float(a)), Value::Float(b)) => Value::Float(*a + *b),
-                    _ => return Err(Error::Type("SUM requires numeric values".into())),
-                };
-                if matches!(&updated, Value::Float(number) if !number.is_finite()) {
-                    return Err(Error::Execution("SUM overflow".into()));
-                }
-                *total = Some(updated);
             }
-            Self::Avg { sum, compensation, count } => {
-                if !value.is_null() {
-                    let number = match value {
-                        Value::Integer(value) => value as f64,
-                        Value::Float(value) => value,
-                        _ => return Err(Error::Type("AVG requires numeric values".into())),
-                    };
-                    let next = *sum + number;
-                    let correction = if sum.abs() >= number.abs() {
-                        (*sum - next) + number
-                    } else {
-                        (number - next) + *sum
-                    };
-                    let next_compensation = *compensation + correction;
-                    if !next.is_finite() || !next_compensation.is_finite() ||
-                        !(next + next_compensation).is_finite() {
-                        return Err(Error::Execution("AVG overflow".into()));
-                    }
-                    let next_count = count.checked_add(1)
-                        .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
-                    *sum = next;
-                    *compensation = next_compensation;
-                    *count = next_count;
+            Self::Avg { sum, compensation, count } =>
+                add_avg(sum, compensation, count, &value)?,
+            Self::AvgDistinct { seen, sum, compensation, count } => {
+                if !value.is_null() && !seen.contains(&value) {
+                    check_distinct_budget(seen)?;
+                    add_avg(sum, compensation, count, &value)?;
+                    seen.insert(value);
                 }
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
@@ -159,11 +140,69 @@ impl State {
             ),
             Self::Avg { sum, compensation, count } =>
                 if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
+            Self::AvgDistinct { sum, compensation, count, .. } =>
+                if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
+            Self::SumDistinct { total, .. } => total.unwrap_or(Value::Null),
             Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
                 value.unwrap_or(Value::Null)
             }
         })
     }
+}
+
+const MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP: usize = 65_536;
+
+fn check_distinct_budget(values: &HashSet<Value>) -> Result<()> {
+    if values.len() >= MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP {
+        Err(Error::Execution("DISTINCT numeric aggregate key budget exceeded".into()))
+    } else {
+        Ok(())
+    }
+}
+
+fn add_sum(total: &mut Option<Value>, value: &Value) -> Result<()> {
+    if value.is_null() { return Ok(()); }
+    let updated = match (total.as_ref(), value) {
+        (None, Value::Integer(_) | Value::Float(_)) => value.clone(),
+        (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(
+            a.checked_add(*b).ok_or_else(|| Error::Execution("SUM overflow".into()))?,
+        ),
+        (Some(Value::Integer(a)), Value::Float(b)) => Value::Float(*a as f64 + *b),
+        (Some(Value::Float(a)), Value::Integer(b)) => Value::Float(*a + *b as f64),
+        (Some(Value::Float(a)), Value::Float(b)) => Value::Float(*a + *b),
+        _ => return Err(Error::Type("SUM requires numeric values".into())),
+    };
+    if matches!(&updated, Value::Float(number) if !number.is_finite()) {
+        return Err(Error::Execution("SUM overflow".into()));
+    }
+    *total = Some(updated);
+    Ok(())
+}
+
+fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
+    let number = match value {
+        Value::Null => return Ok(()),
+        Value::Integer(value) => *value as f64,
+        Value::Float(value) => *value,
+        _ => return Err(Error::Type("AVG requires numeric values".into())),
+    };
+    let next = *sum + number;
+    let correction = if sum.abs() >= number.abs() {
+        (*sum - next) + number
+    } else {
+        (number - next) + *sum
+    };
+    let next_compensation = *compensation + correction;
+    if !next.is_finite() || !next_compensation.is_finite() ||
+        !(next + next_compensation).is_finite() {
+        return Err(Error::Execution("AVG overflow".into()));
+    }
+    let next_count = count.checked_add(1)
+        .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
+    *sum = next;
+    *compensation = next_compensation;
+    *count = next_count;
+    Ok(())
 }
 
 fn update_extreme(current: &mut Option<Value>, value: Value, minimum: bool) -> Result<()> {
