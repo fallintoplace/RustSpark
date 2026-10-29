@@ -50,8 +50,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
             heap.push(candidate);
         } else if let Some(worst) = heap.peek() {
             if candidate < *worst {
-                heap.pop();
-                heap.push(candidate);
+                *heap.peek_mut().expect("nonempty top-K heap") = candidate;
             }
         }
     }
