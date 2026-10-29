@@ -263,16 +263,17 @@ pub fn aggregate_with_max_groups(
                 .iter()
                 .map(|(expr, _)| expr.evaluate(batch, row))
                 .collect::<Result<Vec<_>>>()?;
-            if let Some(index) = group_indices.get(&key) {
-                *index
-            } else {
-                if groups.len() >= max_groups {
-                    return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+            match group_indices.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    if groups.len() >= max_groups {
+                        return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+                    }
+                    let index = groups.len();
+                    groups.push((entry.key().clone(), items.iter().map(|item| State::new(&item.op)).collect()));
+                    entry.insert(index);
+                    index
                 }
-                let index = groups.len();
-                let _ = group_indices.insert(key.clone(), index);
-                groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
-                index
             }
         };
         for (state, item) in groups[index].1.iter_mut().zip(items) {
@@ -388,5 +389,27 @@ mod consolidated_compensated_avg_tests {
         ]).unwrap();
         let Value::Float(value) = output.value(0, 0).unwrap() else { panic!("AVG result should be FLOAT") };
         assert!((value - 1.0 / 3.0).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod aggregate_hash_entry_perf_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_groups_do_not_consume_admission_budget() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("long repeated string".into())],
+            vec![Value::Text("long repeated string".into())],
+            vec![Value::Text("other".into())],
+            vec![Value::Text("other".into())],
+        ]).unwrap();
+        let groups = [(Expr::Column("s".into()), "s".into())];
+        let agg = [AggregateItem::new(AggregateOp::CountAll, "n")];
+        let result = aggregate_with_max_groups(&batch, &groups, &agg, 2).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.column(1).unwrap(), &[Value::Integer(2), Value::Integer(2)]);
+        assert!(aggregate_with_max_groups(&batch, &groups, &agg, 1).is_err());
     }
 }
