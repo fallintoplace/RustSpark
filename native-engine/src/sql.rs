@@ -280,6 +280,10 @@ impl Parser {
                 self.take_word("OUTER");
                 self.expect_word("JOIN")?;
                 Some(JoinKind::Right)
+            } else if self.take_word("FULL") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Full)
             } else {
                 None
             };

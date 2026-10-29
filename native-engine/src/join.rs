@@ -13,6 +13,7 @@ pub enum JoinKind {
     Inner,
     Left,
     Right,
+    Full,
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
@@ -36,7 +37,7 @@ pub fn hash_join(
         .map(|field| field.name.to_ascii_lowercase())
         .collect();
     let mut fields = left.schema().fields().iter().map(|field| {
-        Field::new(&field.name, field.data_type, field.nullable || kind == JoinKind::Right)
+        Field::new(&field.name, field.data_type, field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
     }).collect::<Vec<_>>();
     for field in right.schema().fields() {
         let mut name = field.name.clone();
@@ -44,7 +45,7 @@ pub fn hash_join(
             name = format!("right_{name}");
         }
         used.insert(name.to_ascii_lowercase());
-        fields.push(Field::new(name, field.data_type, field.nullable || kind == JoinKind::Left));
+        fields.push(Field::new(name, field.data_type, field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
     }
     let schema = Schema::new(fields)?;
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
@@ -69,7 +70,7 @@ pub fn hash_join(
                 row.extend(right.row(right_row)?);
                 output.push(row);
             }
-        } else if kind == JoinKind::Left {
+        } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
             if output.len() >= MAX_JOIN_ROWS {
                 return Err(Error::Execution("join output exceeds safety limit".into()));
             }
@@ -78,7 +79,7 @@ pub fn hash_join(
             output.push(row);
         }
     }
-    if kind == JoinKind::Right {
+    if matches!(kind, JoinKind::Right | JoinKind::Full) {
         for right_row in 0..right.num_rows() {
             if matched_right[right_row] { continue; }
             if output.len() >= MAX_JOIN_ROWS {
