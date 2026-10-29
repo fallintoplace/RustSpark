@@ -12,8 +12,9 @@ fn remainder(args: &[Value], positive: bool) -> Result<Value> {
     if let (Value::Integer(a), Value::Integer(b)) = (&args[0], &args[1]) {
         if *b == 0 { return Err(Error::Execution("MOD divisor must not be zero".into())); }
         if positive {
-            let divisor = i128::from(*b).abs();
-            let result = i128::from(*a).rem_euclid(divisor);
+            let divisor = i128::from(*b);
+            let dividend = i128::from(*a);
+            let result = if divisor > 0 { dividend.rem_euclid(divisor) } else { dividend % divisor };
             return i64::try_from(result).map(Value::Integer)
                 .map_err(|_| Error::Execution("PMOD integer overflow".into()));
         }
@@ -23,7 +24,7 @@ fn remainder(args: &[Value], positive: bool) -> Result<Value> {
     let a = super::number(&args[0])?.expect("NULL handled");
     let b = super::number(&args[1])?.expect("NULL handled");
     if b == 0.0 { return Err(Error::Execution("MOD divisor must not be zero".into())); }
-    super::finite(if positive { a.rem_euclid(b) } else { a % b })
+    super::finite(if positive && b > 0.0 { a.rem_euclid(b) } else { a % b })
 }
 fn modulo(args: &[Value]) -> Result<Value> { remainder(args, false) }
 fn pmod(args: &[Value]) -> Result<Value> { remainder(args, true) }
@@ -40,5 +41,8 @@ mod tests {
         assert_eq!(pmod(&[Value::Integer(-10), Value::Integer(3)]).unwrap(), Value::Integer(2));
         assert!(modulo(&[Value::Integer(i64::MIN), Value::Integer(-1)]).is_err());
         assert!(pmod(&[Value::Integer(1), Value::Integer(0)]).is_err());
+        assert_eq!(pmod(&[Value::Integer(-10), Value::Integer(-3)]).unwrap(), Value::Integer(-1));
+        assert_eq!(pmod(&[Value::Integer(10), Value::Integer(-3)]).unwrap(), Value::Integer(1));
+        assert_eq!(pmod(&[Value::Integer(i64::MIN), Value::Integer(-1)]).unwrap(), Value::Integer(0));
     }
 }
