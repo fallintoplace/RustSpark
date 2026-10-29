@@ -8,7 +8,7 @@ export class RustSparkError extends Error {
 }
 
 function addNamedTables(args, flag, tables = {}) {
-  for (const [table, path] of Object.entries(tables)) {
+  for (const [table, path] of Object.entries(tables).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table) || typeof path !== "string") {
       throw new TypeError("Table names must be SQL identifiers and paths must be strings");
     }
@@ -60,7 +60,7 @@ export class RustSpark {
     addNamedTables(args, "--csv-table", csvTables);
     addNamedTables(args, "--parquet-table", parquetTables);
     addNamedTables(args, "--json-table", jsonTables);
-    for (const [name, value] of Object.entries(namedParams ?? {})) {
+    for (const [name, value] of Object.entries(namedParams ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== "string" || !value.includes(":")) {
         throw new TypeError(`Invalid typed SQL parameter: ${name}`);
       }
