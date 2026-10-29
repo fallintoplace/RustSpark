@@ -23,10 +23,11 @@ pub(super) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
 pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
     let first = args[0].evaluate(batch, row)?;
     let result = args[if first.is_null() { 2 } else { 1 }].evaluate(batch, row)?;
-    Ok(match (output_type(args, batch.schema())?, result) {
-        (DataType::Float, Value::Integer(n)) => Value::Float(n as f64),
-        (_, result) => result,
-    })
+    match result {
+        Value::Integer(n) if output_type(args, batch.schema())? == DataType::Float =>
+            Ok(Value::Float(n as f64)),
+        result => Ok(result),
+    }
 }
 
 #[cfg(test)]
@@ -48,5 +49,26 @@ mod tests {
         assert_eq!(output_type(&args, batch.schema()).unwrap(), DataType::Float);
         assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Float(10.0));
         assert_eq!(eval(&args, &batch, 1).unwrap(), Value::Float(1.5));
+    }
+}
+
+#[cfg(test)]
+mod nvl2_noninteger_result_fast_path_tests {
+    use super::*;
+    #[test]
+    fn text_and_null_results_preserve_branch_selection() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 1).unwrap();
+        let text = [Expr::Literal(Value::Integer(1)),
+                    Expr::Literal(Value::Text("present".into())),
+                    Expr::Literal(Value::Text("missing".into()))];
+        assert_eq!(eval(&text, &batch, 0).unwrap(), Value::Text("present".into()));
+        let null = [Expr::Literal(Value::Null),
+                    Expr::Literal(Value::Integer(99)),
+                    Expr::Literal(Value::Null)];
+        assert_eq!(eval(&null, &batch, 0).unwrap(), Value::Null);
+        let widened = [Expr::Literal(Value::Integer(1)),
+                       Expr::Literal(Value::Integer(10)),
+                       Expr::Literal(Value::Float(2.5))];
+        assert_eq!(eval(&widened, &batch, 0).unwrap(), Value::Float(10.0));
     }
 }
