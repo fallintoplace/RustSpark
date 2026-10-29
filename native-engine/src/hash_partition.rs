@@ -92,13 +92,20 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
 
     // Keep only row coordinates until all source batches have been partitioned.
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
+        let columns = key_columns.iter().map(|&column| batch.column(column))
+            .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
             let mut hasher = PartitionHasher::default();
-            for &column in &key_columns {
-                batch.value(row, column)?.hash(&mut hasher);
+            for column in &columns {
+                column[row].hash(&mut hasher);
             }
-            let bucket = (hasher.finish() % partitions as u64) as usize;
+            let hash = hasher.finish();
+            let bucket = match mask {
+                Some(mask) => (hash as usize) & mask,
+                None => (hash % partitions as u64) as usize,
+            };
             buckets[bucket].push((batch_index, row));
         }
     }
@@ -206,6 +213,23 @@ mod bitmasked_bucket_tests {
             for (part, indices) in actual.iter().zip(expected) {
                 assert_eq!(part, &batch.take(&indices).unwrap());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod partition_batches_multi_key_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn fast_path_preserves_rows_for_multiple_keys_and_bucket_sizes() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true), Field::new("v", DataType::Text, false)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![vec![Value::Null, Value::Text("a".into())], vec![Value::Integer(1), Value::Text("b".into())]]).unwrap();
+        let second = Batch::from_rows(schema, vec![vec![Value::Null, Value::Text("a".into())], vec![Value::Integer(1), Value::Text("b".into())]]).unwrap();
+        for fanout in [1, 2, 7, 16] {
+            let result = partition_batches(&[first.clone(), second.clone()], &["k", "v"], fanout).unwrap();
+            assert_eq!(result.iter().map(Batch::num_rows).sum::<usize>(), 4);
+            assert!(result.iter().any(|b| b.num_rows() == 2));
         }
     }
 }
