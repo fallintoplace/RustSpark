@@ -8,8 +8,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn parts(args: &[Value]) -> Result<Option<(i64, u32)>> {
     let Some(value) = super::integer(&args[0])? else { return Ok(None) };
     let Some(shift) = super::integer(&args[1])? else { return Ok(None) };
-    let shift = u32::try_from(shift).map_err(|_| Error::Execution("negative bit shift".into()))?;
-    if shift >= 64 { return Err(Error::Execution("bit shift must be less than 64".into())); }
+    // Spark follows JVM long-shift semantics: only the low six bits count.
+    let shift = (shift as u32) & 63;
     Ok(Some((value, shift)))
 }
 fn left(args: &[Value]) -> Result<Value> {
@@ -42,7 +42,12 @@ mod tests {
         assert_eq!(left(&[Value::Integer(1), Value::Integer(3)]).unwrap(), Value::Integer(8));
         assert_eq!(right(&[Value::Integer(-2), Value::Integer(1)]).unwrap(), Value::Integer(-1));
         assert_eq!(unsigned_right(&[Value::Integer(-2), Value::Integer(1)]).unwrap(), Value::Integer(i64::MAX));
-        assert!(left(&[Value::Integer(1), Value::Integer(64)]).is_err());
+        assert_eq!(left(&[Value::Integer(1), Value::Integer(64)]).unwrap(), Value::Integer(1));
+        assert_eq!(left(&[Value::Integer(1), Value::Integer(65)]).unwrap(), Value::Integer(2));
+        assert_eq!(left(&[Value::Integer(1), Value::Integer(-1)]).unwrap(), Value::Integer(i64::MIN));
+        assert_eq!(right(&[Value::Integer(-4), Value::Integer(65)]).unwrap(), Value::Integer(-2));
+        assert_eq!(unsigned_right(&[Value::Integer(-2), Value::Integer(65)]).unwrap(), Value::Integer(i64::MAX));
+        assert_eq!(left(&[Value::Null, Value::Integer(64)]).unwrap(), Value::Null);
     }
 }
 
