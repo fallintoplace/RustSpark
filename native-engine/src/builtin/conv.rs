@@ -8,16 +8,21 @@ fn output(types: &[DataType]) -> Result<DataType> {
     } else { Err(Error::Type("CONV requires text/integer and two integer bases".into())) }
 }
 fn encode(mut value: u64, base: u64, negative: bool) -> String {
-    let mut reversed = String::new();
+    const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    // 64 binary digits plus an optional sign fit in the stack buffer.
+    let mut buffer = [0_u8; 65];
+    let mut index = buffer.len();
     loop {
-        let digit = char::from_digit((value % base) as u32, base as u32)
-            .expect("base validated in CONV");
-        reversed.push(digit.to_ascii_uppercase());
+        index -= 1;
+        buffer[index] = DIGITS[(value % base) as usize];
         value /= base;
         if value == 0 { break; }
     }
-    if negative { reversed.push('-'); }
-    reversed.chars().rev().collect()
+    if negative {
+        index -= 1;
+        buffer[index] = b'-';
+    }
+    String::from_utf8(buffer[index..].to_vec()).expect("CONV produces ASCII digits")
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let input = match &args[0] {
@@ -65,5 +70,16 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("-1".into()), Value::Integer(10), Value::Integer(16)]).unwrap(), Value::Text("FFFFFFFFFFFFFFFF".into()));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod conv_stack_format_tests {
+    use super::*;
+    #[test]
+    fn formats_boundaries_in_binary_and_base_36() {
+        assert_eq!(encode(u64::MAX, 2, false), "1".repeat(64));
+        assert_eq!(encode(35, 36, false), "Z");
+        assert_eq!(encode(0, 16, true), "-0");
     }
 }
