@@ -175,7 +175,7 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("LENGTH requires text".into())),
         },
         "TRIM" => match args {
-            [Value::Text(value)] => Ok(Value::Text(value.trim().to_string())),
+            [Value::Text(value)] => Ok(Value::Text(value.trim_matches(' ').to_string())),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("TRIM requires text".into())),
         },
@@ -301,5 +301,19 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             Ok(best.unwrap_or(Value::Null))
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
+    }
+}
+
+#[cfg(test)]
+mod spark_trim_space_tests {
+    use super::*;
+
+    #[test]
+    fn trims_only_ascii_spaces_by_default() {
+        assert_eq!(evaluate("TRIM", &[Value::Text("  abc  ".into())]).unwrap(),
+            Value::Text("abc".into()));
+        assert_eq!(evaluate("TRIM", &[Value::Text(" \t abc \n ".into())]).unwrap(),
+            Value::Text("\t abc \n".into()));
+        assert_eq!(evaluate("TRIM", &[Value::Null]).unwrap(), Value::Null);
     }
 }
