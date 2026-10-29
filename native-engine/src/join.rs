@@ -119,13 +119,19 @@ pub fn hash_join(
         }
     }
     let mut output = Vec::new();
-    let mut matched_right = vec![false; right.num_rows()];
+    let mut matched_right = if matches!(kind, JoinKind::Right | JoinKind::Full) {
+        vec![false; right.num_rows()]
+    } else {
+        Vec::new()
+    };
     for left_row in 0..left.num_rows() {
         let key = left.value(left_row, left_column)?;
         let right_rows = if joinable(key) { right_hash.get(key) } else { None };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
-                matched_right[right_row] = true;
+                if !matched_right.is_empty() {
+                    matched_right[right_row] = true;
+                }
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
