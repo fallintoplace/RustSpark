@@ -12,6 +12,7 @@ mod power;
 mod exponential;
 mod logarithms;
 mod trigonometry;
+mod inverse_trig;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -46,6 +47,7 @@ const MODULES: &[&[Function]] = &[
     &exponential::FUNCTIONS,
     &logarithms::FUNCTIONS,
     &trigonometry::FUNCTIONS,
+    &inverse_trig::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
