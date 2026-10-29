@@ -91,18 +91,30 @@ impl PartialGroupSum {
                 return Err(Error::Schema("cannot merge different key types".into()));
             }
         }
-        self.key_type = self.key_type.or(other.key_type);
-        for (key, state) in other.groups {
-            if !self.groups.contains_key(&key) && self.groups.len() >= self.max_groups {
+        let mut new_groups = 0usize;
+        for (key, state) in &other.groups {
+            if !self.groups.contains_key(key) {
+                new_groups = new_groups.checked_add(1)
+                    .ok_or_else(|| Error::Execution("group cardinality overflow".into()))?;
+            }
+            if self.groups.len().checked_add(new_groups)
+                .is_none_or(|count| count > self.max_groups) {
                 return Err(Error::Execution("merged group cardinality exceeds limit".into()));
             }
-            let entry = self.groups.entry(key).or_default();
-            entry.rows = entry.rows.checked_add(state.rows)
+            let empty = State::default();
+            let current = self.groups.get(key).unwrap_or(&empty);
+            current.rows.checked_add(state.rows)
                 .ok_or_else(|| Error::Execution("group count overflow".into()))?;
-            entry.sum = entry.sum.checked_add(state.sum)
+            current.sum.checked_add(state.sum)
                 .ok_or_else(|| Error::Execution("group sum overflow".into()))?;
+        }
+        for (key, state) in other.groups {
+            let entry = self.groups.entry(key).or_default();
+            entry.rows += state.rows;
+            entry.sum += state.sum;
             entry.has_value |= state.has_value;
         }
+        self.key_type = self.key_type.or(other.key_type);
         Ok(())
     }
 
@@ -190,5 +202,27 @@ mod failed_partial_aggregation_tests {
         ]).unwrap();
         assert!(state.update(&valid).is_err());
         assert!(state.finish().is_err());
+    }
+}
+
+#[cfg(test)]
+mod consolidated_partial_merge_preflight_tests {
+    use super::*;
+    #[test]
+    fn overflow_keeps_all_previously_aggregated_groups_unmodified() {
+        let mut first = PartialGroupSum::new("key", "amount", 3);
+        first.key_type = Some(DataType::Integer);
+        first.groups.insert(Value::Integer(1), State { rows: 1, sum: 5, has_value: true });
+        first.groups.insert(Value::Integer(2), State { rows: i64::MAX, sum: 10, has_value: true });
+        let old = first.groups.clone();
+        let mut second = PartialGroupSum::new("key", "amount", 3);
+        second.key_type = Some(DataType::Integer);
+        second.groups.insert(Value::Integer(1), State { rows: 1, sum: 10, has_value: true });
+        second.groups.insert(Value::Integer(2), State { rows: 1, sum: 20, has_value: true });
+        assert!(first.merge(second).is_err());
+        for (key, previous) in old {
+            let now = &first.groups[&key];
+            assert_eq!((now.rows, now.sum, now.has_value), (previous.rows, previous.sum, previous.has_value));
+        }
     }
 }
