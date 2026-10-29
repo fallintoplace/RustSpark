@@ -15,6 +15,14 @@ class DataFrameCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")
 
+    def test_persistent_database_path_is_forwarded(self):
+        args = build_command("SELECT * FROM sales", Path("result.arrow"),
+                             database_dir="/tmp/warehouse with spaces")
+        self.assertEqual(args[args.index("--database-dir") + 1],
+                         "/tmp/warehouse with spaces")
+        self.assertNotIn("--csv", args)
+        self.assertIn("--max-rows", args)
+
 
 if __name__ == "__main__":
     unittest.main()
