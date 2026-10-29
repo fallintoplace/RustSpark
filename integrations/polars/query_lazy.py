@@ -36,7 +36,8 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   database_dir: str | Path | None = None,
                   max_rows: int | None = None,
                   csv_tables: Mapping[str, str | Path] | None = None,
-                  parquet_tables: Mapping[str, str | Path] | None = None) -> list[str]:
+                  parquet_tables: Mapping[str, str | Path] | None = None,
+                  named_params: Mapping[str, str] | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be blank")
     if sum(source is not None for source in (csv, parquet, json_input)) > 1:
@@ -56,6 +57,16 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
             command.extend([flag, os.fspath(source)])
     _add_named_tables(command, "--csv-table", csv_tables)
     _add_named_tables(command, "--parquet-table", parquet_tables)
+    if named_params:
+        if len(named_params) > 64:
+            raise ValueError("Too many SQL parameters")
+        for name in sorted(named_params):
+            value = named_params[name]
+            if not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None:
+                raise ValueError("Invalid SQL parameter name")
+            if not isinstance(value, str) or ":" not in value or len(value) > 8192:
+                raise ValueError("SQL parameters must be bounded typed values")
+            command.extend(["--named-param", f"{name}={value}"])
     if query_timeout is not None:
         command.extend(["--query-timeout", str(query_timeout)])
     if max_rows is not None:
@@ -73,6 +84,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                          max_rows: int | None = None,
                          csv_tables: Mapping[str, str | Path] | None = None,
                          parquet_tables: Mapping[str, str | Path] | None = None,
+                         named_params: Mapping[str, str] | None = None,
                          temp_dir: str | None = None,
                          process_timeout: float | None = None) -> Iterator[object]:
     """Export Arrow once and provide a lazy Polars scan while the file exists.
@@ -93,6 +105,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
             json_input=json_input, query_timeout=query_timeout,
             database_dir=database_dir, max_rows=max_rows,
             csv_tables=csv_tables, parquet_tables=parquet_tables,
+            named_params=named_params,
         )
         try:
             completed = subprocess.run(command, capture_output=True, text=True,
