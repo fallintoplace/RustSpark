@@ -210,6 +210,9 @@ impl Iterator for DistinctOutput {
                 selected.push(row);
             }
             if !selected.is_empty() {
+                if selected.len() == batch.num_rows() {
+                    return Some(Ok(batch));
+                }
                 return Some(batch.take(&selected));
             }
         }
