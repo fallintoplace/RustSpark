@@ -24,6 +24,7 @@ use rustspark_native::{
 struct Args {
     csv: Option<PathBuf>,
     parquet: Option<PathBuf>,
+    sources: Vec<(String, PathBuf)>,
     table: String,
     sql: String,
     stream: bool,
@@ -31,12 +32,13 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
+    let mut sources = Vec::new();
     let mut table = "data".to_string();
     let mut sql = None;
     let mut sql_file = None;
@@ -66,6 +68,19 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                     return Err(Error::Parse("duplicate --parquet".into()));
                 }
             }
+            "--source" => {
+                let (table_name, file) = value.split_once('=')
+                    .ok_or_else(|| Error::Parse("--source expects TABLE=FILE".into()))?;
+                if table_name.is_empty() || file.is_empty() {
+                    return Err(Error::Parse("--source requires a table and file path".into()));
+                }
+                let path = PathBuf::from(file);
+                if !matches!(path.extension().and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase()).as_deref(), Some("csv" | "parquet")) {
+                    return Err(Error::Unsupported("--source supports .csv or .parquet files".into()));
+                }
+                sources.push((table_name.to_string(), path));
+            },
             "--table" => table = value,
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
@@ -91,8 +106,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
-    if csv.is_some() == parquet.is_some() {
-        return Err(Error::Parse("choose exactly one of --csv or --parquet".into()));
+    if sources.is_empty() {
+        if csv.is_some() == parquet.is_some() {
+            return Err(Error::Parse("choose --csv, --parquet, or --source".into()));
+        }
+    } else if csv.is_some() || parquet.is_some() {
+        return Err(Error::Parse("--source cannot be mixed with --csv or --parquet".into()));
+    }
+    if stream && !sources.is_empty() {
+        return Err(Error::Unsupported("--stream does not yet support multiple file sources".into()));
     }
     if stream && parquet.is_some() {
         return Err(Error::Unsupported("--stream currently supports CSV input only".into()));
@@ -105,7 +127,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, table, sql, stream, csv_schema }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -265,14 +287,26 @@ fn run() -> Result<()> {
         return run_stream(&args);
     }
     let mut catalog = Catalog::new();
-    let data = if let Some(path) = &args.csv {
-        csv::read_csv(path)?
-    } else if let Some(path) = &args.parquet {
-        read_parquet_bounded(path)?
+    if args.sources.is_empty() {
+        let data = if let Some(path) = &args.csv {
+            csv::read_csv(path)?
+        } else if let Some(path) = &args.parquet {
+            read_parquet_bounded(path)?
+        } else {
+            return Err(Error::Parse("missing input file".into()));
+        };
+        catalog.register(&args.table, data)?;
     } else {
-        return Err(Error::Parse("missing input file".into()));
-    };
-    catalog.register(&args.table, data)?;
+        for (table, path) in &args.sources {
+            let data = match path.extension().and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase()).as_deref() {
+                Some("csv") => csv::read_csv(path)?,
+                Some("parquet") => read_parquet_bounded(path)?,
+                _ => return Err(Error::Unsupported("unsupported native table format".into())),
+            };
+            catalog.register(table, data)?;
+        }
+    }
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
     let stdout = io::stdout();
@@ -308,6 +342,26 @@ mod tests {
         assert!(parse_args(args.into_iter().map(String::from)).is_err());
         let args = ["--parquet", "data.parquet", "--sql", "SELECT * FROM data", "--stream"];
         assert!(parse_args(args.into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn multiple_native_sources_can_be_registered_without_datafusion() {
+        let args = parse_args([
+            "--source", "left=orders.csv",
+            "--source", "right=payments.parquet",
+            "--sql", "SELECT * FROM left",
+        ].into_iter().map(String::from)).unwrap().unwrap();
+        assert_eq!(args.sources.len(), 2);
+        assert_eq!(args.sources[0].0, "left");
+        assert_eq!(args.sources[1].1, PathBuf::from("payments.parquet"));
+        for options in [
+            vec!["--source", "missing", "--sql", "SELECT * FROM t"],
+            vec!["--source", "t=table.json", "--sql", "SELECT * FROM t"],
+            vec!["--source", "t=a.csv", "--csv", "a.csv", "--sql", "SELECT * FROM t"],
+            vec!["--source", "t=a.csv", "--sql", "SELECT * FROM t", "--stream"],
+        ] {
+            assert!(parse_args(options.into_iter().map(String::from)).is_err());
+        }
     }
 
     #[test]
