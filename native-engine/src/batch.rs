@@ -165,7 +165,7 @@ impl Batch {
         let columns = self.columns.iter()
             .map(|column| column[start..end].to_vec())
             .collect();
-        Self::new_with_row_count(self.schema.clone(), columns, end - start)
+        Ok(Self { schema: self.schema.clone(), columns, rows: end - start })
     }
 }
 
@@ -249,5 +249,20 @@ mod gathered_validity_fast_path_tests {
             vec![Value::Integer(2), Value::Text("large payload".into())],
         ]);
         assert!(input.take(&[2]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod slice_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn slicing_nullable_and_zero_width_rows_preserves_cardinality() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Integer(5)]]).unwrap();
+        assert_eq!(input.slice_rows(0, 1).unwrap().row(0).unwrap(), vec![Value::Null]);
+        assert!(input.slice_rows(1, 3).is_err());
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
+        assert_eq!(zero.slice_rows(1, 3).unwrap().rows().unwrap(), vec![vec![], vec![]]);
     }
 }
