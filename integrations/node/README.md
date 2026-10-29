@@ -25,3 +25,5 @@ Large results are held in memory. Use the raw RustSpark CLI with
 cd integrations/node
 npm test
 ```
+
+Use `query("", { sqlFile: "queries/report.sql" })` for reviewed SQL files instead of inline SQL. `queryOne(sql, options)` uses a two-row limit and returns one object, `null` for no rows, or an error for multiple rows. Named file sources and typed parameters are sent in stable key order.
