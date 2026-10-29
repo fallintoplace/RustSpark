@@ -24,12 +24,17 @@ pub struct FileCatalog {
 }
 
 fn normalized(name: &str) -> Result<Cow<'_, str>> {
-    if name.is_empty() || !name.bytes().all(|c|
-        c.is_ascii_alphanumeric() || c == b'_'
-    ) {
+    if name.is_empty() {
         return Err(Error::Schema("expected simple ASCII table identifier".into()));
     }
-    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+    let mut has_uppercase = false;
+    for byte in name.bytes() {
+        if !byte.is_ascii_alphanumeric() && byte != b'_' {
+            return Err(Error::Schema("expected simple ASCII table identifier".into()));
+        }
+        has_uppercase |= byte.is_ascii_uppercase();
+    }
+    if has_uppercase {
         Ok(Cow::Owned(name.to_ascii_lowercase()))
     } else {
         Ok(Cow::Borrowed(name))
@@ -159,5 +164,18 @@ mod borrowed_file_catalog_key_perf_tests {
         catalog.register_csv("SALES", "unused.csv", schema, 100).unwrap();
         assert!(catalog.get("sales").is_ok());
         assert!(catalog.get("Sales").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod catalog_single_pass_name_tests {
+    use super::*;
+    #[test]
+    fn ascii_validation_and_borrowed_lowercase_are_unchanged() {
+        assert!(matches!(normalized("abc_123").unwrap(), Cow::Borrowed(_)));
+        assert_eq!(normalized("AB_42").unwrap().as_ref(), "ab_42");
+        for invalid in ["", "é", "name.with.dots", "a b", "-"] {
+            assert!(normalized(invalid).is_err());
+        }
     }
 }
