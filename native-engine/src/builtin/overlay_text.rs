@@ -26,10 +26,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
-    let begin = text.char_indices().nth(index)
-        .map_or(text.len(), |(byte, _)| byte);
-    let end = text[begin..].char_indices().nth(count)
-        .map_or(text.len(), |(byte, _)| begin + byte);
+    let (begin, end) = if text.is_ascii() {
+        // ASCII character positions are byte positions.
+        let begin = index.min(text.len());
+        (begin, begin.saturating_add(count).min(text.len()))
+    } else {
+        let begin = text.char_indices().nth(index)
+            .map_or(text.len(), |(byte, _)| byte);
+        let end = text[begin..].char_indices().nth(count)
+            .map_or(text.len(), |(byte, _)| begin + byte);
+        (begin, end)
+    };
     let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
     result.push_str(&text[..begin]);
     result.push_str(replacement);
@@ -116,5 +123,28 @@ mod common_suffix_extension_tests {
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod overlay_ascii_offset_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_respects_width_boundaries_and_unicode() {
+        let ascii = Value::Text("a".repeat(50_000));
+        let changed = evaluate(&[
+            ascii.clone(), Value::Text("X".into()),
+            Value::Integer(50_000), Value::Integer(1),
+        ]).unwrap();
+        assert_eq!(changed, Value::Text(format!("{}X", "a".repeat(49_999))));
+        assert_eq!(evaluate(&[
+            Value::Text("abc".into()), Value::Text("X".into()),
+            Value::Integer(99), Value::Integer(2),
+        ]).unwrap(), Value::Text("abcX".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("a🙂b".into()), Value::Text("é".into()),
+            Value::Integer(2), Value::Integer(1),
+        ]).unwrap(), Value::Text("aéb".into()));
     }
 }
