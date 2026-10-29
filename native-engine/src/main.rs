@@ -29,10 +29,11 @@ struct Args {
     sql: String,
     stream: bool,
     csv_schema: Option<String>,
+    jsonl: bool,
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -44,10 +45,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut sql_file = None;
     let mut stream = false;
     let mut csv_schema = None;
+    let mut jsonl = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(None);
+        }
+        if arg == "--jsonl" {
+            if jsonl { return Err(Error::Parse("duplicate --jsonl".into())); }
+            jsonl = true;
+            continue;
         }
         if arg == "--stream" {
             if stream {
@@ -127,7 +134,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -171,6 +178,27 @@ fn print_csv_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
 fn print_csv(batch: &Batch, output: &mut impl Write) -> Result<()> {
     print_header(batch.schema(), output)?;
     print_csv_rows(batch, output)
+}
+
+fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
+    for row_index in 0..batch.num_rows() {
+        let row = batch.row(row_index)?;
+        let mut record = serde_json::Map::new();
+        for (field, value) in batch.schema().fields().iter().zip(&row) {
+            let json = match value {
+                Value::Null => serde_json::Value::Null,
+                Value::Boolean(value) => serde_json::Value::Bool(*value),
+                Value::Integer(value) => serde_json::Value::Number((*value).into()),
+                Value::Float(value) => serde_json::Number::from_f64(*value)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                Value::Text(value) => serde_json::Value::String(value.clone()),
+            };
+            record.insert(field.name.clone(), json);
+        }
+        writeln!(output, "{}", serde_json::Value::Object(record))?;
+    }
+    Ok(())
 }
 
 fn parse_stream_schema(spec: &str) -> Result<Schema> {
@@ -245,9 +273,11 @@ fn run_stream(args: &Args) -> Result<()> {
 
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    print_header(&output_schema, &mut output)?;
+    if !args.jsonl { print_header(&output_schema, &mut output)?; }
     for batch in pipeline {
-        print_csv_rows(&batch?, &mut output)?;
+        let batch = batch?;
+        if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
+        else { print_csv_rows(&batch, &mut output)?; }
     }
     output.flush()?;
     Ok(())
@@ -311,7 +341,8 @@ fn run() -> Result<()> {
     let batch = executor::execute(&plan, &catalog)?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    print_csv(&batch, &mut output)?;
+    if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
+    else { print_csv(&batch, &mut output)?; }
     output.flush()?;
     Ok(())
 }
@@ -362,6 +393,28 @@ mod tests {
         ] {
             assert!(parse_args(options.into_iter().map(String::from)).is_err());
         }
+    }
+
+    #[test]
+    fn json_lines_output_preserves_types_and_escapes_text() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+            Field::new("count", DataType::Integer, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("a\\\"b".into()), Value::Integer(4)],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let mut bytes = Vec::new();
+        print_jsonl_rows(&batch, &mut bytes).unwrap();
+        let content = String::from_utf8(bytes).unwrap();
+        let rows: Vec<serde_json::Value> = content.lines().map(|line|
+            serde_json::from_str(line).unwrap()
+        ).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "a\\\"b");
+        assert_eq!(rows[0]["count"], 4);
+        assert!(rows[1]["count"].is_null());
     }
 
     #[test]
