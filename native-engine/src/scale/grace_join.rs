@@ -1,5 +1,6 @@
 //! Disk-partitioned equijoins. The build side is bounded per partition.
 use std::{
+    collections::HashSet,
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
@@ -104,13 +105,57 @@ where L: IntoIterator<Item = Result<Batch>>,
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
+        let needs_right_tracking = matches!(kind, JoinKind::Right | JoinKind::Full);
+        let build_keys: HashSet<_> = if needs_right_tracking {
+            build.column(right_index)?.iter().filter(|key| !key.is_null()).cloned().collect()
+        } else {
+            HashSet::new()
+        };
+        let mut matched_keys = HashSet::new();
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
             for piece in BatchChunks::new(&batch, io_batch_rows.min(256))? {
-                let joined = join::hash_join(&piece?, &build, left_key, right_key, kind)?;
+                let piece = piece?;
+                if needs_right_tracking {
+                    for key in piece.column(left_index)? {
+                        if !key.is_null() && build_keys.contains(key) {
+                            matched_keys.insert(key.clone());
+                        }
+                    }
+                }
+                // Unmatched build rows must be emitted only after every probe chunk.
+                let chunk_kind = match kind {
+                    JoinKind::Right => JoinKind::Inner,
+                    JoinKind::Full => JoinKind::Left,
+                    other => other,
+                };
+                let joined = join::hash_join(&piece, &build, left_key, right_key, chunk_kind)?;
+                let joined = if joined.schema() == &result_schema { joined } else {
+                    Batch::from_rows(result_schema.clone(), joined.rows()?)?
+                };
                 for output_chunk in BatchChunks::new(&joined, io_batch_rows)? {
                     let output_chunk = output_chunk?;
                     if output_chunk.num_rows() != 0 { writer.write_batch(&output_chunk)?; }
+                }
+            }
+        }
+        if needs_right_tracking {
+            let mut unmatched = Vec::new();
+            for row in 0..build.num_rows() {
+                let key = build.value(row, right_index)?;
+                if key.is_null() || !matched_keys.contains(key) { unmatched.push(row); }
+            }
+            if !unmatched.is_empty() {
+                let remaining = build.take(&unmatched)?;
+                let joined = join::hash_join(
+                    &Batch::empty(left_schema.clone()), &remaining,
+                    left_key, right_key, JoinKind::Right
+                )?;
+                let joined = if joined.schema() == &result_schema { joined } else {
+                    Batch::from_rows(result_schema.clone(), joined.rows()?)?
+                };
+                for part in BatchChunks::new(&joined, io_batch_rows)? {
+                    writer.write_batch(&part?)?;
                 }
             }
         }
@@ -155,5 +200,43 @@ mod tests {
         assert!(all.contains(&vec![Value::Null, Value::Null]));
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod outer_join_chunk_tests {
+    use super::*;
+    use std::fs;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn unmatched_right_rows_are_emitted_once_across_probe_chunks() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-outer-{}-{:?}", std::process::id(), std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(99)],
+        ]).unwrap();
+        for kind in [JoinKind::Right, JoinKind::Full] {
+            let result = grace_join(
+                [Ok(left.clone())], [Ok(right.clone())],
+                schema.clone(), schema.clone(), "id", "id", kind,
+                &dir, 2, 10, 1, &QueryControl::default(),
+            ).unwrap();
+            let mut rows = Vec::new();
+            for path in result.paths() {
+                let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 1).unwrap();
+                while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
+            }
+            assert_eq!(rows.iter().filter(|row| row[0] == Value::Null && row[1] == Value::Integer(99)).count(), 1);
+            assert_eq!(rows.len(), if kind == JoinKind::Full { 4 } else { 3 });
+            drop(result);
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
