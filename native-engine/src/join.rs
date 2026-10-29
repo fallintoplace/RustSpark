@@ -119,13 +119,17 @@ pub fn hash_join(
         }
     }
     let mut output = Vec::new();
-    let mut matched_right = vec![false; right.num_rows()];
+    let mut matched_right = if matches!(kind, JoinKind::Right | JoinKind::Full) {
+        vec![false; right.num_rows()]
+    } else {
+        Vec::new()
+    };
     for left_row in 0..left.num_rows() {
         let key = left.value(left_row, left_column)?;
         let right_rows = if joinable(key) { right_hash.get(key) } else { None };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
-                matched_right[right_row] = true;
+                if !matched_right.is_empty() { matched_right[right_row] = true; }
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
@@ -237,5 +241,21 @@ mod nan_join_key_tests {
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Semi).unwrap().num_rows(), 2);
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Anti).unwrap().num_rows(), 0);
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Left).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod join_bitmap_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn inner_and_outer_joins_keep_expected_rows() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]).unwrap();
+        assert_eq!(hash_join(&left, &right, "id", "id", JoinKind::Inner).unwrap().num_rows(), 1);
+        assert_eq!(hash_join(&left, &right, "id", "id", JoinKind::Left).unwrap().num_rows(), 2);
+        assert_eq!(hash_join(&left, &right, "id", "id", JoinKind::Right).unwrap().num_rows(), 2);
+        assert_eq!(hash_join(&left, &right, "id", "id", JoinKind::Full).unwrap().num_rows(), 3);
     }
 }
