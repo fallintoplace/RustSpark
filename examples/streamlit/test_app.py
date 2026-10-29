@@ -1,10 +1,11 @@
 import csv
 import io
+import json
 import subprocess
 import unittest
 from unittest.mock import patch
 
-from app import MAX_UPLOAD_BYTES, as_csv, query_csv
+from app import MAX_UPLOAD_BYTES, as_csv, as_json, query_csv
 
 
 class StreamlitExampleTests(unittest.TestCase):
@@ -28,6 +29,13 @@ class StreamlitExampleTests(unittest.TestCase):
         rows = [{"city": "New York, NY", "sales": 2}]
         output = list(csv.DictReader(io.StringIO(as_csv(rows))))
         self.assertEqual(output, [{"city": "New York, NY", "sales": "2"}])
+
+    def test_json_export_preserves_unicode_nulls_and_numbers(self):
+        rows = [{"city": "Łódź", "count": 4, "fraction": 1.5, "missing": None}]
+        self.assertEqual(json.loads(as_json(rows)), rows)
+        self.assertIn("Łódź", as_json(rows))
+        with self.assertRaises(ValueError):
+            as_json([{"invalid": float("nan")}])
 
 
 if __name__ == "__main__":

@@ -48,6 +48,11 @@ def as_csv(rows):
     return text.getvalue()
 
 
+def as_json(rows):
+    """Preserve JSON scalar types and Unicode when exporting query results."""
+    return json.dumps(rows, ensure_ascii=False, allow_nan=False, indent=2)
+
+
 def main():
     import streamlit as st
 
@@ -75,6 +80,8 @@ def main():
         st.dataframe(rows, use_container_width=True)
         st.download_button("Download CSV result", data=as_csv(rows),
                            file_name="rustspark-result.csv", mime="text/csv")
+        st.download_button("Download JSON result", data=as_json(rows),
+                           file_name="rustspark-result.json", mime="application/json")
 
 
 if __name__ == "__main__":
