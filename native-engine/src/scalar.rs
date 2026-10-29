@@ -153,7 +153,13 @@ impl Value {
             (Self::Text(value), DataType::Text) => Ok(Self::Text(value.clone())),
             (Self::Boolean(value), DataType::Text) => Ok(Self::Text(value.to_string())),
             (Self::Integer(value), DataType::Text) => Ok(Self::Text(value.to_string())),
-            (Self::Float(value), DataType::Text) => Ok(Self::Text(value.to_string())),
+            (Self::Float(value), DataType::Text) => {
+                let mut text = value.to_string();
+                if value.is_finite() && !text.contains('.') && !text.contains('e') && !text.contains('E') {
+                    text.push_str(".0");
+                }
+                Ok(Self::Text(text))
+            },
             (Self::Integer(value), DataType::Float) => Ok(Self::Float(*value as f64)),
             (Self::Boolean(value), DataType::Integer) => Ok(Self::Integer(i64::from(*value))),
             (Self::Integer(value), DataType::Boolean) => Ok(Self::Boolean(*value != 0)),
@@ -246,5 +252,9 @@ mod consolidated_native_cast_tests {
         assert_eq!(Value::Text(" 1 ".into()).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
         assert_eq!(Value::Text("0".into()).cast_to(DataType::Boolean).unwrap(), Value::Boolean(false));
         assert!(Value::Text("2".into()).cast_to(DataType::Boolean).is_err());
+        assert_eq!(Value::Float(1.0).cast_to(DataType::Text).unwrap(), Value::Text("1.0".into()));
+        assert_eq!(Value::Float(-0.0).cast_to(DataType::Text).unwrap(), Value::Text("-0.0".into()));
+        assert_eq!(Value::Float(1.25).cast_to(DataType::Text).unwrap(), Value::Text("1.25".into()));
+        assert_eq!(Value::Integer(1).cast_to(DataType::Text).unwrap(), Value::Text("1".into()));
     }
 }
