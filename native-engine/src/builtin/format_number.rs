@@ -26,14 +26,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_or(("", formatted.as_str()), |rest| ("-", rest));
     let (whole, fractional) = unsigned.split_once('.')
         .map_or((unsigned, None), |(whole, fractional)| (whole, Some(fractional)));
-    let mut reversed = String::new();
-    for (index, ch) in whole.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 { reversed.push(','); }
-        reversed.push(ch);
+    let separators = whole.len().saturating_sub(1) / 3;
+    let mut output = String::with_capacity(formatted.len().saturating_add(separators));
+    output.push_str(negative);
+    for (index, byte) in whole.bytes().enumerate() {
+        if index != 0 && (whole.len() - index) % 3 == 0 {
+            output.push(',');
+        }
+        output.push(char::from(byte));
     }
-    let grouped: String = reversed.chars().rev().collect();
-    let suffix = fractional.map_or(String::new(), |part| format!(".{part}"));
-    Ok(Value::Text(format!("{negative}{grouped}{suffix}")))
+    if let Some(fractional) = fractional {
+        output.push('.');
+        output.push_str(fractional);
+    }
+    Ok(Value::Text(output))
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "format_number", min_args: 2, max_args: 2, result_type: output, call: evaluate,
