@@ -96,6 +96,11 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("vector filter predicate must be boolean".into()));
     }
+    match predicate {
+        Expr::Literal(Value::Boolean(true)) => return Ok((0..batch.num_rows()).collect()),
+        Expr::Literal(Value::Boolean(false) | Value::Null) => return Ok(Vec::new()),
+        _ => {}
+    }
     let mut selected = Vec::new();
     if let Some((column, op, rhs)) = fast_integer_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
