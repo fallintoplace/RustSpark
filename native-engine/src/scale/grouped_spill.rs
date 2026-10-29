@@ -45,12 +45,13 @@ enum State {
     Max(Option<Value>),
 }
 
-fn new_state(op: &AggregateOp) -> State {
+fn new_state(op: &AggregateOp) -> Result<State> {
     match op {
-        AggregateOp::CountAll | AggregateOp::Count(_) => State::Count(0),
-        AggregateOp::Sum(_) => State::Sum(None),
-        AggregateOp::Min(_) => State::Min(None),
-        AggregateOp::Max(_) => State::Max(None),
+        AggregateOp::CountAll | AggregateOp::Count(_) => Ok(State::Count(0)),
+        AggregateOp::Sum(_) => Ok(State::Sum(None)),
+        AggregateOp::Min(_) => Ok(State::Min(None)),
+        AggregateOp::Max(_) => Ok(State::Max(None)),
+        AggregateOp::Avg(_) => Err(Error::Unsupported("spill AVG is not implemented".into())),
     }
 }
 
@@ -59,6 +60,7 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         AggregateOp::CountAll => Value::Integer(1),
         AggregateOp::Count(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
+        AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -110,6 +112,7 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 _ => return Err(Error::Type("SUM requires numeric input".into())),
             },
             AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(input)?,
+            AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
         };
         fields.push(Field::new(&item.alias, ty, true));
     }
@@ -132,8 +135,15 @@ fn aggregate_shard(
             if !groups.contains_key(&key) && groups.len() >= max_groups {
                 return Err(Error::Execution("group state count exceeds partition budget".into()));
             }
-            let states = groups.entry(key).or_insert_with(|| items.iter()
-                .map(|item| new_state(&item.op)).collect());
+            let states = match groups.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let initial = items.iter()
+                        .map(|item| new_state(&item.op))
+                        .collect::<Result<Vec<_>>>()?;
+                    entry.insert(initial)
+                }
+            };
             for (state, item) in states.iter_mut().zip(items) {
                 add_to_state(state, &item.op, &batch, row)?;
             }
@@ -203,6 +213,21 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn native_spill_rejects_unsupported_avg() {
+        let schema = Schema::new(vec![
+            Field::new("g", DataType::Integer, false),
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        let error = grouped_aggregate(
+            Vec::<Result<Batch>>::new(), schema,
+            &[("g".into(), "g".into())],
+            &[AggregateItem::new(AggregateOp::Avg(Expr::Column("n".into())), "avg")],
+            Path::new("."), 2, 10, 2, &QueryControl::default(),
+        ).unwrap_err();
+        assert!(error.to_string().contains("spill AVG is not implemented"));
+    }
 
     #[test]
     fn group_counts_and_sums_cross_input_batch_boundaries() {
