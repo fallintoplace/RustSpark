@@ -31,6 +31,7 @@ mod ascii_chr;
 mod hex_utf8;
 mod base64_utf8;
 mod string_search;
+mod text_predicates;
 mod json_path;
 mod json_valid;
 mod json_type;
@@ -132,6 +133,7 @@ const MODULES: &[&[Function]] = &[
     &hex_utf8::FUNCTIONS,
     &base64_utf8::FUNCTIONS,
     &string_search::FUNCTIONS,
+    &text_predicates::FUNCTIONS,
     &json_valid::FUNCTIONS,
     &json_type::FUNCTIONS,
     &json_value::FUNCTIONS,
