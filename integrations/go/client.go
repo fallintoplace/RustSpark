@@ -16,7 +16,40 @@ import (
     "strings"
 )
 
-var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*// Package rustsparklocal invokes the local RustSpark CLI with typed bindings.
+// It is not a network driver and does not claim Spark API compatibility.
+package rustsparklocal
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "os/exec"
+    "regexp"
+    "sort"
+    "strconv"
+    "strings"
+)
+
+)
+
+var errOutputLimit = errors.New("RustSpark stdout exceeded MaxOutputBytes")
+
+// boundedOutput stops JSON accumulation when a large row exceeds the byte budget.
+type boundedOutput struct {
+    bytes.Buffer
+    limit int
+}
+
+func (output *boundedOutput) Write(chunk []byte) (int, error) {
+    if len(chunk) > output.limit-output.Len() {
+        return 0, errOutputLimit
+    }
+    return output.Buffer.Write(chunk)
+}
 
 // Client calls an installed RustSpark binary without a shell.
 type Client struct {
@@ -26,10 +59,12 @@ type Client struct {
 
 type Options struct {
     Input, CSV, Parquet, JSON string
+    SQLFile string
     CSVTables, ParquetTables, JSONTables map[string]string
     NamedParams map[string]string
     MaxRows int
     QueryTimeoutSeconds int
+    MaxOutputBytes int
 }
 
 func addNamed(args []string, flag string, tables map[string]string) ([]string, error) {
@@ -48,11 +83,17 @@ func addNamed(args []string, flag string, tables map[string]string) ([]string, e
 }
 
 func (c Client) arguments(sql string, opts Options) ([]string, error) {
-    if strings.TrimSpace(sql) == "" {
-        return nil, errors.New("SQL cannot be empty")
+    if (strings.TrimSpace(sql) == "") == (opts.SQLFile == "") {
+        return nil, errors.New("provide exactly one SQL text or SQLFile")
     }
     count := 0
-    args := []string{"--sql", sql, "--stdout-format", "json-array"}
+    args := make([]string, 0, 8)
+    if opts.SQLFile != "" {
+        args = append(args, "--sql-file", opts.SQLFile)
+    } else {
+        args = append(args, "--sql", sql)
+    }
+    args = append(args, "--stdout-format", "json-array")
     if c.DatabaseDir != "" {
         args = append(args, "--database-dir", c.DatabaseDir)
     }
@@ -85,8 +126,8 @@ func (c Client) arguments(sql string, opts Options) ([]string, error) {
         }
         args = append(args, "--named-param", name+"="+typedValue)
     }
-    if opts.MaxRows < 0 || opts.QueryTimeoutSeconds < 0 {
-        return nil, errors.New("max rows and query timeout must not be negative")
+    if opts.MaxRows < 0 || opts.QueryTimeoutSeconds < 0 || opts.MaxOutputBytes < 0 {
+        return nil, errors.New("max rows, query timeout and output byte limit must not be negative")
     }
     if opts.MaxRows > 0 {
         args = append(args, "--max-rows", strconv.Itoa(opts.MaxRows))
@@ -105,7 +146,9 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
     command := exec.CommandContext(ctx, binary, args...)
-    var output, stderr bytes.Buffer
+    output := boundedOutput{limit: opts.MaxOutputBytes}
+    if output.limit == 0 { output.limit = 64 * 1024 * 1024 }
+    var stderr bytes.Buffer
     command.Stdout, command.Stderr = &output, &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return nil, ctx.Err() }
@@ -123,6 +166,24 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
         return nil, fmt.Errorf("unexpected trailing output: %w", err)
     }
     return nil, errors.New("unexpected additional JSON output")
+}
+
+// QueryOne returns nil for no rows and an error when more than one row exists.
+// A two-row CLI limit bounds result collection for ordinary uniqueness lookups.
+func (c Client) QueryOne(ctx context.Context, sql string, opts Options) (map[string]any, error) {
+    if opts.MaxRows != 0 {
+        return nil, errors.New("QueryOne controls MaxRows automatically")
+    }
+    opts.MaxRows = 2
+    rows, err := c.Query(ctx, sql, opts)
+    if err != nil { return nil, err }
+    return oneRow(rows)
+}
+
+func oneRow(rows []map[string]any) (map[string]any, error) {
+    if len(rows) > 1 { return nil, errors.New("QueryOne expected at most one row") }
+    if len(rows) == 0 { return nil, nil }
+    return rows[0], nil
 }
 
 // QueryNDJSON streams newline-delimited JSON rows to output without storing

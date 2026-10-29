@@ -3,6 +3,7 @@ package rustsparklocal
 import (
     "bytes"
     "context"
+    "errors"
     "reflect"
     "strings"
     "testing"
@@ -59,5 +60,39 @@ func TestNDJSONStreamsProcessOutput(t *testing.T) {
     }
     if err := client.QueryNDJSON(context.Background(), "SELECT 1", Options{}, nil); err == nil {
         t.Fatal("nil writer must be rejected")
+    }
+}
+
+func TestQuerySQLFileInsteadOfInlineSQL(t *testing.T) {
+    c := Client{}
+    args, err := c.arguments("", Options{SQLFile: "/tmp/query files/report.sql"})
+    if err != nil { t.Fatal(err) }
+    if !reflect.DeepEqual(args[:4], []string{"--sql-file", "/tmp/query files/report.sql", "--stdout-format", "json-array"}) {
+        t.Fatalf("unexpected SQL file arguments: %v", args)
+    }
+    if _, err := c.arguments("SELECT 1", Options{SQLFile: "query.sql"}); err == nil {
+        t.Fatal("inline SQL and SQLFile cannot be combined")
+    }
+}
+
+func TestBufferedJSONStdoutIsLimited(t *testing.T) {
+    output := boundedOutput{limit: 3}
+    if _, err := output.Write([]byte("ab")); err != nil { t.Fatal(err) }
+    if _, err := output.Write([]byte("cd")); !errors.Is(err, errOutputLimit) {
+        t.Fatalf("expected output limit error, got %v", err)
+    }
+    if output.String() != "ab" { t.Fatalf("unexpected buffered output: %q", output.String()) }
+    if _, err := (Client{}).arguments("SELECT 1", Options{MaxOutputBytes: -1}); err == nil {
+        t.Fatal("negative byte budget must be rejected")
+    }
+}
+
+func TestQueryOneBoundsCardinality(t *testing.T) {
+    row, err := oneRow(nil)
+    if err != nil || row != nil { t.Fatalf("expected nil result, got %v: %v", row, err) }
+    row, err = oneRow([]map[string]any{{"id": 1}})
+    if err != nil || row["id"] != 1 { t.Fatalf("unexpected row %v: %v", row, err) }
+    if _, err := oneRow([]map[string]any{{"id": 1}, {"id": 2}}); err == nil {
+        t.Fatal("expected error for multiple rows")
     }
 }
