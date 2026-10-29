@@ -54,6 +54,13 @@ class GatewayTests(unittest.TestCase):
             (queries / "link.sql").symlink_to(queries / "first.sql")
             self.assertEqual(list_query_templates(queries), ["first", "second"])
 
+    def test_rejects_ambiguous_or_nonfinite_backend_result_json(self):
+        for invalid in ('[{"x":NaN}]', '[{"x":1e999}]',
+                        '[{"x":1,"x":2}]', '[{"nested":{"x":1,"x":2}}]'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_result_rows(invalid)
+
+
 
 if __name__ == "__main__":
     unittest.main()
