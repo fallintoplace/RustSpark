@@ -20,12 +20,14 @@ fn hex(args: &[Value]) -> Result<Value> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::Execution("HEX input exceeds byte limit".into()));
     }
-    let mut output = String::with_capacity(input.len() * 2);
+    // HEX digits are ASCII; append raw bytes and move the buffer into a String.
+    let mut output = Vec::with_capacity(input.len() * 2);
     for &byte in input {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 15) as usize] as char);
+        output.push(DIGITS[(byte >> 4) as usize]);
+        output.push(DIGITS[(byte & 15) as usize]);
     }
-    Ok(Value::Text(output))
+    Ok(Value::Text(String::from_utf8(output)
+        .expect("HEX lookup digits are valid ASCII")))
 }
 fn decode_hex_digit(byte: u8) -> Result<u8> {
     match byte {
@@ -64,6 +66,9 @@ mod tests {
         assert_eq!(encoded, Value::Text("636166C3A9".into()));
         assert_eq!(unhex_utf8(&[encoded]).unwrap(), Value::Text("café".into()));
         assert_eq!(hex(&[Value::Integer(255)]).unwrap(), Value::Text("FF".into()));
+        assert_eq!(hex(&[Value::Text("é🙂".into())]).unwrap(),
+            Value::Text("C3A9F09F9982".into()));
+        assert_eq!(hex(&[Value::Text("".into())]).unwrap(), Value::Text("".into()));
         assert!(unhex_utf8(&[Value::Text("FF".into())]).is_err());
         assert!(unhex_utf8(&[Value::Text("A".into())]).is_err());
     }
