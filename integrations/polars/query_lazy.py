@@ -10,12 +10,15 @@ from typing import Iterator
 
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | None = None, parquet: str | None = None,
-                  query_timeout: int | None = None) -> list[str]:
+                  query_timeout: int | None = None,
+                  database_dir: str | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be blank")
     if csv is not None and parquet is not None:
         raise ValueError("Use only one file source")
     command = [binary, "--sql", sql, "--output-arrow", str(output)]
+    if database_dir is not None:
+        command.extend(["--database-dir", str(database_dir)])
     if csv is not None:
         command.extend(["--csv", csv])
     if parquet is not None:
@@ -31,6 +34,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                          csv: str | None = None, parquet: str | None = None,
                          query_timeout: int | None = None,
+                         database_dir: str | None = None,
                          temp_dir: str | None = None) -> Iterator[object]:
     """Export Arrow once and provide a lazy Polars scan while the file exists.
 
@@ -42,7 +46,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
         result = Path(directory) / "result.arrow"
         command = build_command(
             sql, result, binary=binary, csv=csv, parquet=parquet,
-            query_timeout=query_timeout,
+            query_timeout=query_timeout, database_dir=database_dir,
         )
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode:
