@@ -20,12 +20,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if group > 100 { return Err(Error::Execution("REGEXP_EXTRACT group budget exceeded".into())); }
     regex_support::check_input(text)?;
     let re = regex_support::compile(pattern)?;
-    if group == 0 {
-        return Ok(re.find(text)
-            .map_or(Value::Null, |matched| Value::Text(matched.as_str().to_owned())));
+    if group >= re.captures_len() {
+        return Err(Error::Execution("REGEXP_EXTRACT group index exceeds regex capture count".into()));
     }
-    Ok(re.captures(text).and_then(|captures| captures.get(group))
-        .map_or(Value::Null, |value| Value::Text(value.as_str().into())))
+    // Group zero can avoid a capture allocation.
+    if group == 0 {
+        return Ok(Value::Text(re.find(text).map_or("", |matched| matched.as_str()).to_owned()));
+    }
+    Ok(Value::Text(re.captures(text).and_then(|captures| captures.get(group))
+        .map_or("", |value| value.as_str()).to_owned()))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -48,9 +51,30 @@ mod tests {
         ]).unwrap(), Value::Text("order-123".into()));
         assert_eq!(evaluate(&[
             Value::Text("missing".into()), Value::Text("[0-9]+".into()),
-        ]).unwrap(), Value::Null);
+        ]).unwrap(), Value::Text(String::new()));
         assert!(evaluate(&[
             Value::Text("x".into()), Value::Text("(x)".into()), Value::Integer(-1),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod spark_extract_regressions {
+    use super::*;
+
+    #[test]
+    fn returns_empty_strings_for_absent_matches_and_optional_groups() {
+        let value = |text: &str, pattern: &str, group: i64| {
+            evaluate(&[
+                Value::Text(text.into()), Value::Text(pattern.into()), Value::Integer(group),
+            ]).unwrap()
+        };
+        assert_eq!(value("abc", "z+", 0), Value::Text(String::new()));
+        assert_eq!(value("abc", "(z)?a", 1), Value::Text(String::new()));
+        assert_eq!(value("abc", "a(b)", 1), Value::Text("b".into()));
+        assert!(evaluate(&[
+            Value::Text("abc".into()), Value::Text("(a)".into()), Value::Integer(2),
+        ]).is_err());
+        assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
     }
 }
