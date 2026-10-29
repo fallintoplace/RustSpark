@@ -1,14 +1,6 @@
-use crate::{
-    batch::Batch,
-    schema::{Field, Schema},
-    Error,
-    Result,
-};
-
-// UNION and INTERSECT/EXCEPT share Spark's common numeric type rules.
-fn compatible_union_schema(left: &Batch, right: &Batch) -> Result<Schema> {
-    crate::set_ops::compatible_schema(left, right)
-}
+use crate::{batch::Batch, Error, Result};
+#[cfg(test)]
+use crate::schema::Schema;
 
 pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
