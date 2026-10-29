@@ -164,6 +164,9 @@ impl Expr {
 
 /// SQL LIKE wildcard matching with bounded working memory and work.
 fn sql_like(input: &str, pattern: &str) -> Result<bool> {
+    if !pattern.contains('%') && !pattern.contains('_') {
+        return Ok(input == pattern);
+    }
     let text: Vec<char> = input.chars().collect();
     let pattern: Vec<char> = pattern.chars().collect();
     if (text.len() + 1).checked_mul(pattern.len() + 1).is_none_or(|cells| cells > 8_000_000) {
@@ -321,5 +324,16 @@ mod short_circuit_feature_tests {
         let yes = Expr::binary(Expr::Literal(Value::Boolean(true)), BinaryOp::Or, bad);
         assert_eq!(no.evaluate(&batch(), 0).unwrap(), Value::Boolean(false));
         assert_eq!(yes.evaluate(&batch(), 0).unwrap(), Value::Boolean(true));
+    }
+#[cfg(test)]
+mod like_literal_fastpath_tests {
+    use super::*;
+
+    #[test]
+    fn large_literal_patterns_skip_quadratic_matching() {
+        let text = "é".repeat(4_000);
+        assert!(sql_like(&text, &text).unwrap());
+        assert!(!sql_like(&text, "not-equal").unwrap());
+        assert!(sql_like("abc", "a%c").unwrap());
     }
 }
