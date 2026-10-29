@@ -443,7 +443,8 @@ impl Parser {
             }
         }
         self.expect_word("FROM")?;
-        let mut plan = self.scan_or_cte(self.identifier()?)?;
+        let source = self.identifier()?;
+        let mut plan = self.scan_or_cte(source)?;
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
