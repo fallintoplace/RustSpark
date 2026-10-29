@@ -12,7 +12,13 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
     }
     if let Some(compiled) = CACHE.with(|cache| {
-        cache.borrow().iter().find(|(key, _)| key == pattern).map(|(_, regex)| regex.clone())
+        let mut cache = cache.borrow_mut();
+        let index = cache.iter().position(|(key, _)| key == pattern)?;
+        // Promote cache hits so occasional patterns do not evict hot queries.
+        let entry = cache.remove(index);
+        let compiled = entry.1.clone();
+        cache.push(entry);
+        Some(compiled)
     }) {
         return Ok(compiled);
     }
@@ -49,5 +55,25 @@ mod tests {
             assert!(compile(pattern).unwrap().is_match(pattern));
         }
         CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
+    }
+}
+
+#[cfg(test)]
+mod regex_lru_cache_tests {
+    use super::*;
+    #[test]
+    fn keeps_hot_patterns_when_a_fifth_pattern_is_seen() {
+        CACHE.with(|cache| cache.borrow_mut().clear());
+        for pattern in ["^cat$", "^dog$", "^bird$", "^fox$"] {
+            assert!(compile(pattern).unwrap().is_match(&pattern[1..pattern.len() - 1]));
+        }
+        assert!(compile("^cat$").unwrap().is_match("cat"));
+        assert!(compile("^owl$").unwrap().is_match("owl"));
+        CACHE.with(|cache| {
+            let cache = cache.borrow();
+            assert!(cache.iter().any(|(pattern, _)| pattern == "^cat$"));
+            assert!(!cache.iter().any(|(pattern, _)| pattern == "^dog$"));
+            assert_eq!(cache.len(), CACHE_ENTRIES);
+        });
     }
 }
