@@ -40,6 +40,17 @@ fn bit_length(args: &[Value]) -> Result<Value> {
     }
 }
 
+fn text_text_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text] { Ok(DataType::Text) }
+    else { Err(Error::Type("function requires text".into())) }
+}
+fn lcase(args: &[Value]) -> Result<Value> {
+    Ok(match super::string(&args[0])? {
+        Some(value) => Value::Text(value.to_lowercase()),
+        None => Value::Null,
+    })
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -48,6 +59,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "len", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
     Function { name: "octet_length", min_args: 1, max_args: 1, result_type: char_length_type, call: octet_length },
     Function { name: "bit_length", min_args: 1, max_args: 1, result_type: char_length_type, call: bit_length },
+    Function { name: "lcase", min_args: 1, max_args: 1, result_type: text_text_type, call: lcase },
     // PARITY_FUNCTIONS
 ];
 
@@ -100,6 +112,12 @@ mod tests {
     fn spark_bit_length_counts_utf8_bits() {
         assert_eq!(sql_result("bit_length(s)").unwrap(), Value::Integer(40));
         assert_eq!(bit_length(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_lcase_lowercases_unicode() {
+        assert_eq!(sql_result("lcase('CAFÉ')").unwrap(), Value::Text("café".into()));
+        assert_eq!(lcase(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
