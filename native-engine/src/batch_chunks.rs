@@ -53,7 +53,7 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         }
     }
-    Batch::new(schema, columns)
+    Batch::new_with_row_count(schema, columns, total)
 }
 
 #[cfg(test)]
@@ -75,6 +75,16 @@ mod tests {
         assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![4, 4, 1]);
         assert_eq!(concatenate(&parts).unwrap(), original);
         assert!(chunks(&original, 0).is_err());
+    }
+
+    #[test]
+    fn concatenate_preserves_rows_without_columns() {
+        let schema = Schema::new(vec![]).unwrap();
+        let first = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        let second = Batch::new_with_row_count(schema, vec![], 3).unwrap();
+        let result = concatenate(&[first, second]).unwrap();
+        assert_eq!(result.num_rows(), 5);
+        assert_eq!(result.rows().unwrap(), vec![vec![]; 5]);
     }
 
     #[test]
