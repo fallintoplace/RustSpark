@@ -19,7 +19,7 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
     let mut tail = &path[1..];
     while !tail.is_empty() {
         if let Some(rest) = tail.strip_prefix('.') {
-            let end = rest.find(|character: char| character == '.' || character == '[').unwrap_or(rest.len());
+            let end = rest.bytes().position(|byte| byte == b'.' || byte == b'[').unwrap_or(rest.len());
             let key = &rest[..end];
             if key.is_empty() || !key.bytes().all(|byte|
                 byte.is_ascii_alphanumeric() || byte == b'_') {
@@ -34,8 +34,13 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
             if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Err(Error::Parse("JSON array indices must be unsigned integers".into()));
             }
-            let index = digits.parse::<usize>()
-                .map_err(|_| Error::Parse("JSON array index overflow".into()))?;
+            // Avoid generic decimal parsing for common single-digit JSON arrays.
+            let index = if digits.len() == 1 {
+                usize::from(digits.as_bytes()[0] - b'0')
+            } else {
+                digits.parse::<usize>()
+                    .map_err(|_| Error::Parse("JSON array index overflow".into()))?
+            };
             node = node.and_then(|value| value.get(index));
             tail = &rest[end + 1..];
         } else {
@@ -55,5 +60,19 @@ mod tests {
         assert_eq!(lookup(Some(&doc), "$.a[2].n").unwrap(), None);
         assert!(lookup(Some(&doc), "$.a[-1]").is_err());
         assert!(lookup(Some(&doc), "a").is_err());
+    }
+}
+
+#[cfg(test)]
+mod ascii_json_path_perf_tests {
+    use super::*;
+    #[test]
+    fn matches_nested_single_and_multidigit_array_paths() {
+        let doc = parse(r#"{"rows":[0,1,2,3,4,5,6,7,8,9,10,11,12]}"#).unwrap();
+        assert_eq!(lookup(Some(&doc), "$.rows[0]").unwrap(), Some(&serde_json::json!(0)));
+        assert_eq!(lookup(Some(&doc), "$.rows[12]").unwrap(), Some(&serde_json::json!(12)));
+        assert_eq!(lookup(Some(&doc), "$.rows[200]").unwrap(), None);
+        assert!(lookup(Some(&doc), "$.rows[2x]").is_err());
+        assert!(lookup(Some(&doc), "$.café").is_err());
     }
 }
