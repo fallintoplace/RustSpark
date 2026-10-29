@@ -4,6 +4,7 @@ use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema},
 
 mod nullif;
 mod conditional;
+mod abs_sign;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -30,6 +31,7 @@ const CORE: &[Function] = &[
 const MODULES: &[&[Function]] = &[
     &nullif::FUNCTIONS,
     &conditional::FUNCTIONS,
+    &abs_sign::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
