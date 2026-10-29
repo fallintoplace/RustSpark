@@ -71,6 +71,15 @@ impl Reservation {
         self.bytes
     }
 
+    /// Transfer part of an existing reservation without changing total pool usage.
+    pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
+        if bytes > self.bytes {
+            return Err(Error::Execution("cannot split more memory than reserved".into()));
+        }
+        self.bytes -= bytes;
+        Ok(Self { pool: Arc::clone(&self.pool), bytes })
+    }
+
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
@@ -153,5 +162,18 @@ mod bulk_memory_feature_tests {
         drop(reservations);
         assert_eq!(pool.used(), 0);
     }
+    #[test]
+    fn split_reservations_release_exactly_once() {
+        let pool = MemoryPool::new(100);
+        let mut parent = pool.reserve(75).unwrap();
+        let child = parent.split_off(25).unwrap();
+        assert_eq!(parent.bytes(), 50);
+        assert_eq!(child.bytes(), 25);
+        assert_eq!(pool.used(), 75);
+        assert!(parent.split_off(51).is_err());
+        drop(parent);
+        assert_eq!(pool.used(), 25);
+        drop(child);
+        assert_eq!(pool.used(), 0);
+    }
 }
-
