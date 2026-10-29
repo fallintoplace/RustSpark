@@ -30,6 +30,16 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
         } else if let Some(rest) = tail.strip_prefix('[') {
             if rest.starts_with('\'') || rest.starts_with('"') {
                 let quote = rest.chars().next().expect("checked quoted key");
+                // Most quoted keys do not need unescaping. Borrow the key
+                // straight from the path rather than constructing a String.
+                if let Some(offset) = rest[1..].find(quote) {
+                    let key = &rest[1..1 + offset];
+                    if !key.contains('\\') && rest[2 + offset..].starts_with(']') {
+                        node = node.and_then(|value| value.get(key));
+                        tail = &rest[3 + offset..];
+                        continue;
+                    }
+                }
                 let mut end = quote.len_utf8();
                 let mut escaped = false;
                 let mut closed = false;
@@ -110,5 +120,23 @@ mod ascii_json_path_perf_tests {
         assert_eq!(lookup(Some(&doc), "$.rows[200]").unwrap(), None);
         assert!(lookup(Some(&doc), "$.rows[2x]").is_err());
         assert!(lookup(Some(&doc), "$.café").is_err());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_quoted_json_path_key_tests {
+    use super::*;
+    #[test]
+    fn finds_quoted_keys_without_losing_escape_support() {
+        let doc = parse(r#"{"a.b":{"é":"value"},"a'b":3,"":[]}"#).unwrap();
+        assert_eq!(lookup(Some(&doc), "$['a.b']['é']").unwrap(),
+            Some(&serde_json::json!("value")));
+        assert_eq!(lookup(Some(&doc), r#"$["a'b"]"#).unwrap(),
+            Some(&serde_json::json!(3)));
+        assert_eq!(lookup(Some(&doc), r#"$[""]"#).unwrap(),
+            Some(&serde_json::json!([])));
+        assert_eq!(lookup(Some(&doc), r#"$['a\'b']"#).unwrap(),
+            Some(&serde_json::json!(3)));
+        assert!(lookup(Some(&doc), "$['a.b'").is_err());
     }
 }
