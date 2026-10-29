@@ -20,6 +20,8 @@ pub enum Plan {
         input: Box<Plan>,
         selections: Vec<Selection>,
     },
+    /// Spark SELECT * EXCEPT expands relative to the source schema.
+    ProjectExcept { input: Box<Plan>, excluded: Vec<String> },
     Aggregate {
         input: Box<Plan>,
         group_by: Vec<(Expr, String)>,

@@ -15,6 +15,7 @@ use crate::{
 #[derive(Clone, Debug)]
 enum SelectItem {
     Star,
+    StarExcept(Vec<String>),
     Scalar(Selection),
     Aggregate(AggregateItem),
 }
@@ -379,6 +380,23 @@ impl Parser {
 
     fn select_item(&mut self, index: usize) -> Result<SelectItem> {
         if self.take_symbol('*') {
+            if self.take_word("EXCEPT") {
+                self.expect_symbol('(')?;
+                let mut excluded = Vec::new();
+                loop {
+                    if excluded.len() >= 256 {
+                        return Err(Error::Parse("SELECT * EXCEPT exceeds 256 columns".into()));
+                    }
+                    excluded.push(self.identifier()?);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                let mut seen = std::collections::HashSet::new();
+                if excluded.iter().any(|name| !seen.insert(name.to_ascii_lowercase())) {
+                    return Err(Error::Parse("duplicate SELECT * EXCEPT column".into()));
+                }
+                return Ok(SelectItem::StarExcept(excluded));
+            }
             return Ok(SelectItem::Star);
         }
         let function = match self.peek() {
@@ -512,7 +530,7 @@ impl Parser {
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
         let grouped = has_aggregates || !group_columns.is_empty();
-        let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
+        let star = select.iter().any(|entry| matches!(entry, SelectItem::Star | SelectItem::StarExcept(_)));
         if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
         }
@@ -535,7 +553,7 @@ impl Parser {
                         }
                         selections.push(item);
                     }
-                    SelectItem::Star => unreachable!(),
+                    SelectItem::Star | SelectItem::StarExcept(_) => unreachable!(),
                 }
             }
             plan = Plan::Aggregate {
@@ -547,6 +565,10 @@ impl Parser {
                 aggregates,
             };
             plan = plan.project(selections);
+        } else if star {
+            if let Some(SelectItem::StarExcept(excluded)) = select.first() {
+                plan = Plan::ProjectExcept { input: Box::new(plan), excluded: excluded.clone() };
+            }
         } else if !star {
             let selections = select
                 .into_iter()

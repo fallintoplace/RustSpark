@@ -18,6 +18,9 @@ pub fn optimize(plan: Plan) -> Plan {
                 Plan::Filter { input: Box::new(input), predicate }
             }
         }
+        Plan::ProjectExcept { input, excluded } => Plan::ProjectExcept {
+            input: Box::new(optimize(*input)), excluded,
+        },
         Plan::Project { input, selections } => Plan::Project {
             input: Box::new(optimize(*input)),
             selections,

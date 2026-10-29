@@ -43,6 +43,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             Plan::Scan { .. } => {}
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
+            | Plan::ProjectExcept { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
@@ -89,6 +90,20 @@ fn execute_inner(
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
         Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,
+        Plan::ProjectExcept { input, excluded } => {
+            let batch = descend(input)?;
+            let mut found = std::collections::HashSet::new();
+            for name in excluded {
+                let index = batch.schema().column(name)?;
+                if !found.insert(index) {
+                    return Err(Error::Schema("SELECT * EXCEPT overlaps columns".into()));
+                }
+            }
+            let selected = batch.schema().fields().iter().enumerate()
+                .filter(|(index, _)| !found.contains(index))
+                .map(|(_, field)| field.name.as_str()).collect::<Vec<_>>();
+            project::project_columns(&batch, &selected)?
+        },
         Plan::Aggregate { input, group_by, aggregates } => {
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }

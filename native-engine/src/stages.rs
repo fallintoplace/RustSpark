@@ -121,7 +121,7 @@ impl StageGraph {
                 Plan::Scan { .. } => (StageKind::Scan, vec![]),
                 Plan::Filter { input, .. } =>
                     (StageKind::Filter, vec![visit(input, stages, depth + 1)?]),
-                Plan::Project { input, .. } =>
+                Plan::Project { input, .. } | Plan::ProjectExcept { input, .. } =>
                     (StageKind::Project, vec![visit(input, stages, depth + 1)?]),
                 Plan::Aggregate { input, .. } =>
                     (StageKind::Aggregate, vec![visit(input, stages, depth + 1)?]),
