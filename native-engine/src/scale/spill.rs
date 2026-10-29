@@ -114,6 +114,7 @@ pub struct SpillReader<R: Read> {
     input: R,
     schema: Schema,
     max_rows_per_batch: usize,
+    stopped: bool,
 }
 
 impl<R: Read> SpillReader<R> {
@@ -145,12 +146,19 @@ impl<R: Read> SpillReader<R> {
             };
             fields.push(Field::new(name, data_type, nullable));
         }
-        Ok(Self { input, schema: Schema::new(fields)?, max_rows_per_batch })
+        Ok(Self { input, schema: Schema::new(fields)?, max_rows_per_batch, stopped: false })
     }
 
     pub fn schema(&self) -> &Schema { &self.schema }
 
     pub fn next_batch(&mut self) -> Result<Option<Batch>> {
+        if self.stopped { return Ok(None); }
+        let result = self.read_batch();
+        if !matches!(&result, Ok(Some(_))) { self.stopped = true; }
+        result
+    }
+
+    fn read_batch(&mut self) -> Result<Option<Batch>> {
         let mut first = [0u8; 1];
         if self.input.read(&mut first)? == 0 { return Ok(None); }
         let mut remaining = [0u8; 3];
@@ -234,5 +242,6 @@ mod tests {
         bytes.pop();
         let mut reader = SpillReader::new(Cursor::new(bytes), 100).unwrap();
         assert!(reader.next_batch().is_err());
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }
