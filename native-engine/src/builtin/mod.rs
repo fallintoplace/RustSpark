@@ -45,6 +45,7 @@ mod regexp_extract;
 mod regexp_count;
 mod concat_ws;
 mod trim_chars;
+mod repeat_text;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -110,6 +111,7 @@ const MODULES: &[&[Function]] = &[
     &regexp_count::FUNCTIONS,
     &concat_ws::FUNCTIONS,
     &trim_chars::FUNCTIONS,
+    &repeat_text::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
