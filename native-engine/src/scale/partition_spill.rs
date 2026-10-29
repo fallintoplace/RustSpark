@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use crate::{batch::Batch, schema::Schema, Error, Result};
-use super::{cancel::QueryControl, chunks::BatchChunks, spill::SpillWriter};
+use super::{cancel::QueryControl, spill::SpillWriter};
 
 static PARTITION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -63,21 +63,24 @@ impl PartitionWriter {
     }
 
     pub fn write_batch(&mut self, batch: &Batch, control: &QueryControl) -> Result<()> {
-        let schema = &self.owned.as_ref().ok_or_else(|| Error::Execution("writer finalized".into()))?.schema;
+        let schema = &self.owned.as_ref()
+            .ok_or_else(|| Error::Execution("writer finalized".into()))?.schema;
         if batch.schema() != schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
         let mut groups = vec![Vec::new(); writers.len()];
-        for part in BatchChunks::new(batch, self.batch_rows)? {
+        let mut start = 0;
+        while start < batch.num_rows() {
             control.check()?;
-            let part = part?;
+            let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
             for group in &mut groups { group.clear(); }
-            for row in 0..part.num_rows() {
-                let index = bucket(&part, row, &self.key_columns, writers.len())?;
+            for row in start..end {
+                let index = bucket(batch, row, &self.key_columns, writers.len())?;
                 groups[index].push(row);
             }
             for (writer, rows) in writers.iter_mut().zip(&groups) {
-                if !rows.is_empty() { writer.write_batch(&part.take(rows)?)?; }
+                if !rows.is_empty() { writer.write_batch(&batch.take(rows)?)?; }
             }
+            start = end;
         }
         Ok(())
     }
