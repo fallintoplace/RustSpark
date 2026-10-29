@@ -29,6 +29,29 @@ impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering { compare(self, other) }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ColumnCandidate<'a> {
+    row: usize,
+    column: &'a [Value],
+    descending: bool,
+    nulls_first: bool,
+}
+impl PartialEq for ColumnCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal }
+}
+impl Eq for ColumnCandidate<'_> {}
+impl PartialOrd for ColumnCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for ColumnCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        crate::sort::compare_values(
+            &self.column[self.row], &other.column[other.row],
+            self.descending, self.nulls_first,
+        ).then_with(|| self.row.cmp(&other.row))
+    }
+}
+
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
@@ -39,6 +62,27 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
+    }
+    if keys.len() == 1 {
+        if let crate::expr::Expr::Column(name) = &keys[0].expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            let mut heap = BinaryHeap::with_capacity(k);
+            for row in 0..batch.num_rows() {
+                let candidate = ColumnCandidate {
+                    row, column, descending: keys[0].descending,
+                    nulls_first: keys[0].nulls_first,
+                };
+                if heap.len() < k {
+                    heap.push(candidate);
+                } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+                    *heap.peek_mut().expect("nonempty Top-K heap") = candidate;
+                }
+            }
+            let mut retained = heap.into_vec();
+            retained.sort();
+            let indices = retained.iter().map(|value| value.row).collect::<Vec<_>>();
+            return batch.take(&indices);
+        }
     }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
