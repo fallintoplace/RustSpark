@@ -47,11 +47,11 @@ impl HyperLogLog {
     }
 
     pub fn estimate(&self) -> f64 {
+        if self.nonempty == 0 { return 0.0; }
         let m = REGISTERS as f64;
-        let mut zeros = 0usize;
+        let zeros = REGISTERS - self.nonempty;
         let mut harmonic = 0.0;
         for &rank in &self.registers {
-            zeros += usize::from(rank == 0);
             harmonic += RECIPROCAL_POWERS[usize::from(rank)];
         }
         let alpha = 0.7213 / (1.0 + 1.079 / m);
