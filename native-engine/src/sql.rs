@@ -565,7 +565,7 @@ mod tests {
         let plan = parse_sql("SELECT city FROM sales WHERE city LIKE 'Ber%' AND city NOT LIKE '%s'").unwrap();
         assert_eq!(execute(&plan, &sales()).unwrap().num_rows(), 2);
         let null_pattern = parse_sql("SELECT amount FROM sales WHERE amount LIKE NULL").unwrap();
-        assert!(execute(&null_pattern, &sales()).is_err());
+        assert_eq!(execute(&null_pattern, &sales()).unwrap().num_rows(), 0);
     }
 
     #[test]
