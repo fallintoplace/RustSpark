@@ -14,6 +14,7 @@ pub struct Pipeline<I> {
     selections: Option<Vec<Selection>>,
     skip: usize,
     remaining: Option<usize>,
+    invalid_limit: bool,
     guard: QueryGuard,
     metrics: Option<QueryMetrics>,
 }
@@ -26,6 +27,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
             selections: None,
             skip: 0,
             remaining: None,
+            invalid_limit: false,
             guard: QueryGuard::default(),
             metrics: None,
         }
@@ -44,6 +46,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     pub fn with_limit(mut self, offset: usize, count: Option<usize>) -> Self {
         self.skip = offset;
         self.remaining = count;
+        self.invalid_limit = count.is_some_and(|rows| offset.checked_add(rows).is_none());
         self
     }
 
@@ -62,6 +65,11 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.invalid_limit {
+            self.invalid_limit = false;
+            self.remaining = Some(0);
+            return Some(Err(crate::Error::Execution("LIMIT + OFFSET overflow".into())));
+        }
         if self.remaining == Some(0) {
             return None;
         }
@@ -155,5 +163,21 @@ mod tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(results[0].num_rows(), 2);
         assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod pipeline_limit_overflow_engine_tests {
+    use super::*;
+
+    #[test]
+    fn overflowing_window_does_not_poll_upstream() {
+        let source = std::iter::once_with(|| -> Result<Batch> {
+            panic!("invalid LIMIT must not read input")
+        });
+        let mut pipeline = Pipeline::new(source).with_limit(usize::MAX, Some(1));
+        let error = pipeline.next().unwrap().unwrap_err();
+        assert!(error.to_string().contains("LIMIT + OFFSET overflow"));
+        assert!(pipeline.next().is_none());
     }
 }
