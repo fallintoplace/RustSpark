@@ -24,7 +24,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             let mut result = value.to_string();
             if digits > 0 {
                 result.push('.');
-                result.push_str(&"0".repeat(digits));
+                // Precision is bounded to 15, so append in-place without
+                // allocating a separate repeated-zero string.
+                result.extend(std::iter::repeat_n('0', digits));
             }
             result
         }
@@ -90,4 +92,18 @@ mod grouped_number_single_output_perf_tests {
             Value::Text("-9,223,372,036,854,775,808".into()));
     }
 
+}
+
+#[cfg(test)]
+mod integer_fractional_zero_inplace_tests {
+    use super::*;
+    #[test]
+    fn preserves_integer_precision_and_fractional_zeros() {
+        assert_eq!(evaluate(&[Value::Integer(1234567), Value::Integer(4)]).unwrap(),
+            Value::Text("1,234,567.0000".into()));
+        assert_eq!(evaluate(&[Value::Integer(i64::MAX), Value::Integer(15)]).unwrap(),
+            Value::Text("9,223,372,036,854,775,807.000000000000000".into()));
+        assert_eq!(evaluate(&[Value::Integer(-1), Value::Integer(0)]).unwrap(),
+            Value::Text("-1".into()));
+    }
 }
