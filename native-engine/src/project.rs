@@ -21,6 +21,15 @@ impl Selection {
     }
 }
 
+fn expression_nullable(expression: &Expr, schema: &Schema) -> Result<bool> {
+    match expression {
+        Expr::Column(name) => Ok(schema.field(schema.column(name)?)?.nullable),
+        Expr::Literal(value) => Ok(value.is_null()),
+        Expr::IsNull(_) | Expr::IsDistinctFrom { .. } => Ok(false),
+        _ => Ok(true),
+    }
+}
+
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
     let schema = Schema::new(
         selections
@@ -29,7 +38,7 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
                 Ok(Field::new(
                     &selection.alias,
                     selection.expression.output_type(batch.schema())?,
-                    true,
+                    expression_nullable(&selection.expression, batch.schema())?,
                 ))
             })
             .collect::<Result<Vec<_>>>()?,
@@ -114,3 +123,25 @@ mod typed_projection_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod selected_nullability_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn projects_required_column_and_nonnull_literal_as_not_nullable() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(42)]],
+        ).unwrap();
+        let result = project(&input, &[
+            Selection::new(Expr::Column("id".into()), "key"),
+            Selection::new(Expr::Literal(Value::Integer(1)), "one"),
+            Selection::new(Expr::Literal(Value::Null), "missing"),
+        ]).unwrap();
+        assert!(!result.schema().field(0).unwrap().nullable);
+        assert!(!result.schema().field(1).unwrap().nullable);
+        assert!(result.schema().field(2).unwrap().nullable);
+    }
+}
