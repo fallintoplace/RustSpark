@@ -41,6 +41,8 @@ pub enum Expr {
     TryCast { expression: Box<Expr>, target: DataType },
     Cast { expression: Box<Expr>, target: DataType },
     IsDistinctFrom { left: Box<Expr>, right: Box<Expr>, negated: bool },
+    /// A bounded Spark IN/NOT IN list that evaluates its left operand once.
+    InList { needle: Box<Expr>, choices: Vec<Expr>, negated: bool },
 }
 
 impl Expr {
@@ -61,6 +63,21 @@ impl Expr {
                 Value::Integer(_) => DataType::Integer,
                 Value::Float(_) => DataType::Float,
             }),
+            Self::InList { needle, choices, .. } => {
+                let kind = needle.output_type(schema)?;
+                let needle_null = matches!(needle.as_ref(), Expr::Literal(Value::Null));
+                for choice in choices {
+                    if matches!(choice, Expr::Literal(Value::Null)) || needle_null { continue; }
+                    let other = choice.output_type(schema)?;
+                    if kind != other && !matches!(
+                        (kind, other),
+                        (DataType::Integer, DataType::Float) | (DataType::Float, DataType::Integer)
+                    ) {
+                        return Err(Error::Type("IN values require compatible SQL types".into()));
+                    }
+                }
+                Ok(DataType::Boolean)
+            },
             Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
             | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
@@ -117,6 +134,21 @@ impl Expr {
         match self {
             Self::Column(name) => Ok(batch.value(row, batch.schema().column(name)?)?.clone()),
             Self::Literal(value) => Ok(value.clone()),
+            Self::InList { needle, choices, negated } => {
+                let input = needle.evaluate(batch, row)?;
+                if input.is_null() { return Ok(Value::Null); }
+                let mut unknown = false;
+                for choice in choices {
+                    let candidate = choice.evaluate(batch, row)?;
+                    match input.sql_equal(&candidate)? {
+                        Some(true) => return Ok(Value::Boolean(!negated)),
+                        None => unknown = true,
+                        Some(false) => {}
+                    }
+                }
+                if unknown { Ok(Value::Null) }
+                else { Ok(Value::Boolean(*negated)) }
+            },
             Self::Not(expr) => Ok(match expr.evaluate(batch, row)?.as_boolean()? {
                 Some(value) => Value::Boolean(!value),
                 None => Value::Null,
