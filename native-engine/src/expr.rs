@@ -82,7 +82,19 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::IsDistinctFrom { left, right, .. } => {
+                let a = left.output_type(schema)?;
+                let b = right.output_type(schema)?;
+                if matches!(left.as_ref(), Expr::Literal(Value::Null))
+                    || matches!(right.as_ref(), Expr::Literal(Value::Null))
+                    || a == b
+                    || matches!((a, b), (DataType::Integer, DataType::Float)
+                        | (DataType::Float, DataType::Integer)) {
+                    Ok(DataType::Boolean)
+                } else {
+                    Err(Error::Type("IS DISTINCT FROM requires comparable operands".into()))
+                }
+            },
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -429,6 +441,29 @@ mod like_type_preflight_regression {
         assert!(make(Expr::Column("text".into()), Expr::Column("missing".into()))
             .output_type(&schema).is_err());
         assert_eq!(make(Expr::Column("text".into()), Expr::Literal(Value::Null))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod distinct_from_type_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn distinct_from_rejects_incompatible_and_missing_columns() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, true),
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        let distinct = |left: Expr, right: Expr| Expr::IsDistinctFrom {
+            left: Box::new(left), right: Box::new(right), negated: false,
+        };
+        assert!(distinct(Expr::Column("label".into()), Expr::Column("n".into()))
+            .output_type(&schema).is_err());
+        assert!(distinct(Expr::Column("missing".into()), Expr::Literal(Value::Null))
+            .output_type(&schema).is_err());
+        assert_eq!(distinct(Expr::Column("n".into()), Expr::Literal(Value::Null))
             .output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
