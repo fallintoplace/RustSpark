@@ -2,6 +2,7 @@ package rustsparklocal
 
 import (
     "reflect"
+    "errors"
     "strings"
     "testing"
 )
@@ -44,4 +45,16 @@ func TestRejectsConflictingAndInvalidInputs(t *testing.T) {
 func contains(values []string, needle string) bool {
     for _, value := range values { if value == needle { return true } }
     return false
+}
+
+func TestStdoutHasBoundedMemoryUse(t *testing.T) {
+    output := boundedOutput{limit: 3}
+    if _, err := output.Write([]byte("ab")); err != nil { t.Fatal(err) }
+    if _, err := output.Write([]byte("cd")); !errors.Is(err, errOutputLimit) {
+        t.Fatalf("expected output limit error, got %v", err)
+    }
+    if output.String() != "ab" { t.Fatalf("unexpected buffered output: %q", output.String()) }
+    if _, err := (Client{}).arguments("SELECT 1", Options{MaxOutputBytes: -1}); err == nil {
+        t.Fatal("negative byte limit must be rejected before launch")
+    }
 }
