@@ -21,7 +21,22 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     };
     Ok(Value::Text(result.to_string()))
 }
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn split_count_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Integer)
+}
+fn split_count(args: &[Value]) -> Result<Value> {
+    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let count = if delimiter.is_empty() { input.chars().count() }
+        else { input.match_indices(delimiter).count().saturating_add(1) };
+    Ok(Value::Integer(i64::try_from(count)
+        .map_err(|_| Error::Execution("SPLIT_COUNT overflow".into()))?))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "split_count", min_args: 2, max_args: 2, result_type: split_count_type, call: split_count },Function {
     name: "substring_index", min_args: 3, max_args: 3, result_type: output, call: evaluate,
 }];
 
@@ -37,5 +52,18 @@ mod tests {
         assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(0)]).unwrap(), Value::Text("".into()));
         assert_eq!(evaluate(&[text, delim, Value::Integer(i64::MIN)]).unwrap(), Value::Text("a.é.c".into()));
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into()), Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod split_count_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_data_shapes_and_nulls() {
+        assert!(crate::builtin::supports("split_count"));
+        assert_eq!(split_count(&[Value::Text("a,b,".into()), Value::Text(",".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(split_count(&[Value::Text("abc".into()), Value::Text(",".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text("".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(split_count(&[Value::Null, Value::Text(",".into())]).unwrap(), Value::Null);
     }
 }
