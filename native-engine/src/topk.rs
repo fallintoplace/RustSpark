@@ -12,15 +12,7 @@ struct Candidate {
 fn compare(left: &Candidate, right: &Candidate) -> Ordering {
     for ((a, b), (descending, nulls_first)) in left.values.iter()
         .zip(&right.values).zip(left.options.iter()) {
-        let order = match (a.is_null(), b.is_null()) {
-            (true, true) => Ordering::Equal,
-            (true, false) => if *nulls_first { Ordering::Less } else { Ordering::Greater },
-            (false, true) => if *nulls_first { Ordering::Greater } else { Ordering::Less },
-            (false, false) => {
-                let order = a.sql_compare(b).ok().flatten().unwrap_or(Ordering::Equal);
-                if *descending { order.reverse() } else { order }
-            }
-        };
+        let order = crate::sort::compare_values(a, b, *descending, *nulls_first);
         if order != Ordering::Equal { return order; }
     }
     left.row.cmp(&right.row)
