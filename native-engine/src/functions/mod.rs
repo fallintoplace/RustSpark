@@ -25,6 +25,8 @@ mod try_multiply;
 
 mod try_mod;
 
+mod nanvl;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -101,6 +103,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "TRY_SUBTRACT" => try_subtract::output_type(args, schema),
         "TRY_MULTIPLY" => try_multiply::output_type(args, schema),
         "TRY_MOD" => try_mod::output_type(args, schema),
+        "NANVL" => nanvl::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -119,6 +122,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "TRY_SUBTRACT" => try_subtract::eval(args, batch, row),
         "TRY_MULTIPLY" => try_multiply::eval(args, batch, row),
         "TRY_MOD" => try_mod::eval(args, batch, row),
+        "NANVL" => nanvl::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -220,6 +224,13 @@ mod tests {
             vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(-1)],
         ]);
         assert_eq!(run("SELECT TRY_MOD(1, 0) FROM t").unwrap()[0], vec![Value::Null]);
+    }
+
+    #[test]
+    fn nanvl_has_native_sql_semantics() {
+        assert_eq!(run("SELECT NANVL(y, 0) FROM t").unwrap(), vec![
+            vec![Value::Float(9.0)], vec![Value::Float(16.0)], vec![Value::Null],
+        ]);
     }
 
     #[test]
