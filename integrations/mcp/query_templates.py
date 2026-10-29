@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import json
 import re
 
@@ -53,7 +54,14 @@ def parse_query_rows(text: str) -> list[dict]:
     def reject_nonfinite(value):
         raise ValueError(f"Nonfinite SQL JSON constant: {value}")
 
-    rows = json.loads(text, parse_constant=reject_nonfinite)
+    def parse_finite_float(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("Nonfinite SQL JSON number")
+        return parsed
+
+    rows = json.loads(text, parse_constant=reject_nonfinite,
+                      parse_float=parse_finite_float)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL template results must be an array of row objects")
     return rows
