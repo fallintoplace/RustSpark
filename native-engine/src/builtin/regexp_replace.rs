@@ -23,7 +23,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
         let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        if text.is_ascii() { offset.min(text.len()) }
+        else { text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index) }
     } else { 0 };
     let compiled = regex_support::compile(pattern)?;
     let mut result = String::from(&text[..start]);
@@ -78,5 +79,17 @@ mod spark_position_regressions {
             Value::Text("éé11".into()), Value::Text("1".into()),
             Value::Text("x".into()), Value::Integer(3),
         ]).unwrap(), Value::Text("ééxx".into()));
+    }
+}
+
+#[cfg(test)]
+mod regex_ascii_offset_tests {
+    use super::*;
+    #[test]
+    fn start_positions_preserve_existing_regex_semantics() {
+        let args = |start| [Value::Text("abc123".into()), Value::Text("[0-9]".into()), Value::Text("X".into()), Value::Integer(start)];
+        assert_eq!(evaluate(&args(4)).unwrap(), Value::Text("abcXXX".into()));
+        assert_eq!(evaluate(&args(i64::MAX)).unwrap(), Value::Text("abc123".into()));
+        assert_eq!(evaluate(&[Value::Text("é1".into()), Value::Text("1".into()), Value::Text("x".into()), Value::Integer(2)]).unwrap(), Value::Text("éx".into()));
     }
 }
