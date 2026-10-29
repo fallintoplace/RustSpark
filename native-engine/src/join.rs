@@ -353,7 +353,18 @@ impl<'a> PreparedHashJoin<'a> {
 
     /// Reuse build-side hash lookup results to mark matched build rows during
     /// RIGHT/FULL outer joins without retaining a second set of cloned keys.
-    pub fn probe_with_matches(&self, left: &Batch, mut matched: Option<&mut [bool]>) -> Result<Batch> {
+    pub fn probe_with_matches(&self, left: &Batch, matched: Option<&mut [bool]>) -> Result<Batch> {
+        self.probe_range_with_matches(left, 0, left.num_rows(), matched)
+    }
+
+    /// Reuse the original columnar input when processing a bounded probe range.
+    pub fn probe_range_with_matches(
+        &self, left: &Batch, start: usize, end: usize,
+        mut matched: Option<&mut [bool]>,
+    ) -> Result<Batch> {
+        if start > end || end > left.num_rows() {
+            return Err(Error::Execution("prepared join probe row range out of bounds".into()));
+        }
         if let Some(flags) = matched.as_deref() {
             if flags.len() != self.right.num_rows() {
                 return Err(Error::Execution("prepared join match bitmap size mismatch".into()));
@@ -364,7 +375,7 @@ impl<'a> PreparedHashJoin<'a> {
         }
         if matches!(self.kind, JoinKind::Semi | JoinKind::Anti) {
             let mut selected = Vec::new();
-            for row in 0..left.num_rows() {
+            for row in start..end {
                 let key = left.value(row, self.left_column)?;
                 let matched = joinable(key) && self.right_hash.contains_key(key);
                 if (self.kind == JoinKind::Semi && matched) ||
@@ -378,7 +389,7 @@ impl<'a> PreparedHashJoin<'a> {
             return left.take(&selected);
         }
         let mut rows = Vec::new();
-        for left_row in 0..left.num_rows() {
+        for left_row in start..end {
             let key = left.value(left_row, self.left_column)?;
             let matches = if joinable(key) { self.right_hash.get(key) } else { None };
             if let Some(right_rows) = matches {
@@ -454,5 +465,24 @@ mod bitmap_outer_join_probe_tests {
         assert_eq!(prepared.probe_with_matches(&probe, Some(&mut flags)).unwrap().num_rows(), 2);
         assert_eq!(flags, vec![true, false, false, true]);
         assert!(prepared.probe_with_matches(&probe, Some(&mut [])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod prepared_join_range_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn row_ranges_match_full_and_chunked_probe_results() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let build = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null]]).unwrap();
+        let left = Batch::from_rows(schema, vec![vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(1)]]).unwrap();
+        for kind in [JoinKind::Inner, JoinKind::Left, JoinKind::Semi, JoinKind::Anti] {
+            let prepared = PreparedHashJoin::new(left.schema().clone(), &build, "k", "k", kind).unwrap();
+            let mut rows = prepared.probe_range_with_matches(&left, 0, 2, None).unwrap().rows().unwrap();
+            rows.extend(prepared.probe_range_with_matches(&left, 2, 4, None).unwrap().rows().unwrap());
+            assert_eq!(rows, prepared.probe(&left).unwrap().rows().unwrap());
+            assert!(prepared.probe_range_with_matches(&left, 2, 5, None).is_err());
+        }
     }
 }
