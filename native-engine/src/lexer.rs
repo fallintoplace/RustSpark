@@ -96,7 +96,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             }
         } else if matches!(character, ',' | '(' | ')' | '*' | ';') {
             Token::Symbol(character)
-        } else if matches!(character, '+' | '-' | '/' | '=' | '<' | '>' | '!') {
+        } else if matches!(character, '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!') {
             let mut operator = character.to_string();
             if let Some(next) = chars.peek() {
                 if matches!((character, *next), ('<', '=') | ('>', '=') | ('<', '>') | ('!', '=')) {
