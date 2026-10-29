@@ -27,12 +27,25 @@ fn hex(args: &[Value]) -> Result<Value> {
     }
     Ok(Value::Text(String::from_utf8(output).expect("HEX produces ASCII digits")))
 }
+const REVERSE_DIGITS: [u8; 256] = {
+    let mut table = [u8::MAX; 256];
+    let mut index = 0;
+    while index < 16 {
+        let upper = DIGITS[index] as usize;
+        table[upper] = index as u8;
+        if index >= 10 {
+            table[upper + (b'a' - b'A') as usize] = index as u8;
+        }
+        index += 1;
+    }
+    table
+};
 fn decode_hex_digit(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::Parse("invalid hexadecimal digit".into())),
+    let value = REVERSE_DIGITS[usize::from(byte)];
+    if value == u8::MAX {
+        Err(Error::Parse("invalid hexadecimal digit".into()))
+    } else {
+        Ok(value)
     }
 }
 
@@ -94,5 +107,20 @@ mod hex_byte_buffer_perf_tests {
         let input = Value::Text("x".repeat(1024));
         let encoded = hex(&[input.clone()]).unwrap();
         assert_eq!(unhex_utf8(&[encoded]).unwrap(), input);
+    }
+}
+
+#[cfg(test)]
+mod reverse_hex_digit_table_tests {
+    use super::*;
+    #[test]
+    fn matches_all_ascii_hex_digits_and_rejects_invalid_bytes() {
+        for digit in b'0'..=b'9' { assert_eq!(decode_hex_digit(digit).unwrap(), digit - b'0'); }
+        for offset in 0..6u8 {
+            assert_eq!(decode_hex_digit(b'a' + offset).unwrap(), offset + 10);
+            assert_eq!(decode_hex_digit(b'A' + offset).unwrap(), offset + 10);
+        }
+        for digit in [b'/', b':', b'G', b'g', b' ', 0xff] { assert!(decode_hex_digit(digit).is_err()); }
+        assert_eq!(unhex_utf8(&[Value::Text("C3a9".into())]).unwrap(), Value::Text("é".into()));
     }
 }
