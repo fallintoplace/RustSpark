@@ -160,11 +160,15 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("ABS requires numeric input".into())),
         },
         "LOWER" => match args {
+            [Value::Text(value)] if value.is_ascii() =>
+                Ok(Value::Text(value.to_ascii_lowercase())),
             [Value::Text(value)] => Ok(Value::Text(value.to_lowercase())),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("LOWER requires text".into())),
         },
         "UPPER" => match args {
+            [Value::Text(value)] if value.is_ascii() =>
+                Ok(Value::Text(value.to_ascii_uppercase())),
             [Value::Text(value)] => Ok(Value::Text(value.to_uppercase())),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("UPPER requires text".into())),
@@ -337,5 +341,17 @@ mod spark_replace_optional_tests {
         ]).unwrap(), Value::Text("baXYZXYZ".into()));
         assert_eq!(evaluate("REPLACE", &[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
         assert!(evaluate("REPLACE", &[Value::Text("x".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ascii_case_conversion_tests {
+    use super::*;
+    #[test]
+    fn lower_upper_preserve_unicode_expansion() {
+        assert_eq!(evaluate("LOWER", &[Value::Text("BeRLiN".into())]).unwrap(), Value::Text("berlin".into()));
+        assert_eq!(evaluate("UPPER", &[Value::Text("BeRLiN".into())]).unwrap(), Value::Text("BERLIN".into()));
+        assert_eq!(evaluate("UPPER", &[Value::Text("straße".into())]).unwrap(), Value::Text("STRASSE".into()));
+        assert_eq!(evaluate("LOWER", &[Value::Null]).unwrap(), Value::Null);
     }
 }
