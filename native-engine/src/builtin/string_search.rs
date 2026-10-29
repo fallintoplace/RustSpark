@@ -30,11 +30,11 @@ fn split_part(args: &[Value]) -> Result<Value> {
     };
     Ok(Value::Text(result.unwrap_or("").to_string()))
 }
-fn locate(args: &[Value]) -> Result<Value> {
-    let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null) };
-    let Some(text) = super::string(&args[1])? else { return Ok(Value::Null) };
-    let position = if args.len() == 3 {
-        let Some(position) = super::integer(&args[2])? else { return Ok(Value::Null) };
+fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Result<Value> {
+    let Some(needle) = super::string(needle)? else { return Ok(Value::Null) };
+    let Some(text) = super::string(input)? else { return Ok(Value::Null) };
+    let position = if let Some(value) = position {
+        let Some(position) = super::integer(value)? else { return Ok(Value::Null) };
         position
     } else { 1 };
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
@@ -51,8 +51,13 @@ fn locate(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Execution("LOCATE result outside signed integer range".into()))?;
     Ok(Value::Integer(position))
 }
+
+fn locate(args: &[Value]) -> Result<Value> {
+    locate_values(&args[0], &args[1], args.get(2))
+}
+
 fn instr(args: &[Value]) -> Result<Value> {
-    locate(&[args[1].clone(), args[0].clone()])
+    locate_values(&args[1], &args[0], None)
 }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "split_part", min_args: 3, max_args: 3, result_type: split_type, call: split_part },
@@ -74,5 +79,20 @@ mod tests {
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(1)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(-1)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(2)]).unwrap(), Value::Text("".into()));
+    }
+}
+
+#[cfg(test)]
+mod instr_borrowed_arguments_perf_tests {
+    use super::*;
+
+    #[test]
+    fn instr_and_locate_match_for_long_unicode_and_null_values() {
+        let content = format!("{}東京", "a".repeat(65_536));
+        let needle = Value::Text("東京".into());
+        let haystack = Value::Text(content);
+        assert_eq!(instr(&[haystack.clone(), needle.clone()]).unwrap(),
+            locate(&[needle, haystack]).unwrap());
+        assert_eq!(instr(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }
