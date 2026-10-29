@@ -58,6 +58,7 @@ mod ucase;
 mod initcap;
 mod space;
 mod substring_index;
+mod find_in_set;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -136,6 +137,7 @@ const MODULES: &[&[Function]] = &[
     &initcap::FUNCTIONS,
     &space::FUNCTIONS,
     &substring_index::FUNCTIONS,
+    &find_in_set::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
