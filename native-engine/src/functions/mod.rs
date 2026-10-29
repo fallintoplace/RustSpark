@@ -23,6 +23,8 @@ mod try_subtract;
 
 mod try_multiply;
 
+mod try_mod;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -98,6 +100,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "TRY_ADD" => try_add::output_type(args, schema),
         "TRY_SUBTRACT" => try_subtract::output_type(args, schema),
         "TRY_MULTIPLY" => try_multiply::output_type(args, schema),
+        "TRY_MOD" => try_mod::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -115,6 +118,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "TRY_ADD" => try_add::eval(args, batch, row),
         "TRY_SUBTRACT" => try_subtract::eval(args, batch, row),
         "TRY_MULTIPLY" => try_multiply::eval(args, batch, row),
+        "TRY_MOD" => try_mod::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -208,6 +212,14 @@ mod tests {
         assert_eq!(run("SELECT TRY_MULTIPLY(x, 3) FROM t").unwrap()[0], vec![Value::Null]);
         assert_eq!(run("SELECT TRY_MULTIPLY(x, 3) FROM t").unwrap()[1], vec![Value::Integer(15)]);
         assert_eq!(run("SELECT TRY_MULTIPLY(9223372036854775807, 2) FROM t").unwrap()[0], vec![Value::Null]);
+    }
+
+    #[test]
+    fn try_mod_has_native_sql_semantics() {
+        assert_eq!(run("SELECT TRY_MOD(x, 3) FROM t").unwrap(), vec![
+            vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(-1)],
+        ]);
+        assert_eq!(run("SELECT TRY_MOD(1, 0) FROM t").unwrap()[0], vec![Value::Null]);
     }
 
     #[test]
