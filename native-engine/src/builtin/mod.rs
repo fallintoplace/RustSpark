@@ -60,6 +60,7 @@ mod len;
 mod lcase;
 mod ucase;
 mod space;
+mod find_in_set;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -140,6 +141,7 @@ const MODULES: &[&[Function]] = &[
     &lcase::FUNCTIONS,
     &ucase::FUNCTIONS,
     &space::FUNCTIONS,
+    &find_in_set::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
