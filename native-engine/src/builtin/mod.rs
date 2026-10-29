@@ -19,6 +19,7 @@ mod angles;
 mod modular;
 mod bitwise;
 mod bitshift;
+mod bit_count;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -60,6 +61,7 @@ const MODULES: &[&[Function]] = &[
     &modular::FUNCTIONS,
     &bitwise::FUNCTIONS,
     &bitshift::FUNCTIONS,
+    &bit_count::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
