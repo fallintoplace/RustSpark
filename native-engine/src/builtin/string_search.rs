@@ -15,12 +15,17 @@ fn split_part(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
     let Some(index) = super::integer(&args[2])? else { return Ok(Value::Null) };
-    if delimiter.is_empty() || index <= 0 {
-        return Err(Error::Execution("SPLIT_PART needs nonempty delimiter and positive position".into()));
+    if index == 0 {
+        return Err(Error::Execution("SPLIT_PART position cannot be zero".into()));
     }
-    let index = usize::try_from(index)
-        .map_err(|_| Error::Execution("SPLIT_PART position overflow".into()))?;
-    Ok(Value::Text(text.split(delimiter).nth(index - 1).unwrap_or("").to_string()))
+    let result = if index > 0 {
+        usize::try_from(index - 1).ok()
+            .and_then(|offset| text.split(delimiter).nth(offset))
+    } else {
+        usize::try_from(index.unsigned_abs() - 1).ok()
+            .and_then(|offset| text.rsplit(delimiter).nth(offset))
+    };
+    Ok(Value::Text(result.unwrap_or("").to_string()))
 }
 fn locate(args: &[Value]) -> Result<Value> {
     let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null) };
@@ -61,5 +66,7 @@ mod tests {
         assert_eq!(instr(&[Value::Text("café".into()), Value::Text("é".into())]).unwrap(), Value::Integer(4));
         assert_eq!(locate(&[Value::Text("z".into()), Value::Text("café".into())]).unwrap(), Value::Integer(0));
         assert!(split_part(&[Value::Text("x".into()), Value::Text(",".into()), Value::Integer(0)]).is_err());
+        assert_eq!(split_part(&[Value::Text("a,b,c".into()), Value::Text(",".into()), Value::Integer(-2)]).unwrap(), Value::Text("b".into()));
+        assert_eq!(split_part(&[Value::Text("a,b".into()), Value::Text(",".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
     }
 }
