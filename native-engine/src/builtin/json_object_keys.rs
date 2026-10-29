@@ -20,7 +20,23 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn json_has_key_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Boolean)
+}
+fn json_has_key(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(key) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let doc = json_path::parse(text)?;
+    match doc {
+        serde_json::Value::Object(fields) => Ok(Value::Boolean(fields.contains_key(key))),
+        _ => Err(Error::Type("JSON_HAS_KEY requires an object".into())),
+    }
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "json_has_key", min_args: 2, max_args: 2, result_type: json_has_key_type, call: json_has_key },Function {
     name: "json_object_keys", min_args: 1, max_args: 2,
     result_type: output, call: evaluate,
 }];
@@ -35,5 +51,19 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text(r#"{"nested":{}}"#.into()),
             Value::Text("$.nested".into())]).unwrap(), Value::Text("[]".into()));
         assert!(evaluate(&[Value::Text("[]".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod json_has_key_extension_tests {
+    use super::*;
+    #[test]
+    fn handles_json_values_and_missing_data() {
+        assert!(crate::builtin::supports("json_has_key"));
+        let doc = Value::Text(r#"{"x":null,"y":1}"#.into());
+        assert_eq!(json_has_key(&[doc.clone(), Value::Text("x".into())]).unwrap(), Value::Boolean(true));
+        assert_eq!(json_has_key(&[doc, Value::Text("z".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(json_has_key(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+        assert!(json_has_key(&[Value::Text("[]".into()), Value::Text("x".into())]).is_err());
     }
 }
