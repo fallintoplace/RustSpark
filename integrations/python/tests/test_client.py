@@ -82,6 +82,15 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaisesRegex(RustSparkError, "process timeout"):
             RustSpark().query("SELECT 1", process_timeout=3)
 
+    def test_cli_identifier_rules_are_consistent(self):
+        for name in ("has-dash", "space name", "é", "1bad", ""):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                RustSpark().query("SELECT 1", csv_tables={name: "data.csv"})
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                RustSpark().query("SELECT 1", named_params={name: "int64:1"})
+        with self.assertRaises(ValueError):
+            RustSpark().query("SELECT 1", named_params={"valid_name": 12})
+
 
 if __name__ == "__main__":
     unittest.main()
