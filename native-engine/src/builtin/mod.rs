@@ -53,6 +53,7 @@ mod levenshtein;
 mod char_length;
 mod octet_length;
 mod bit_length;
+mod lcase;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -126,6 +127,7 @@ const MODULES: &[&[Function]] = &[
     &char_length::FUNCTIONS,
     &octet_length::FUNCTIONS,
     &bit_length::FUNCTIONS,
+    &lcase::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
