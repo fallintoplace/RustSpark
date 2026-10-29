@@ -11,7 +11,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    let length = i64::try_from(text.chars().count())
+    let characters = if text.is_ascii() { text.len() } else { text.chars().count() };
+    let length = i64::try_from(characters)
         .map_err(|_| Error::Execution("character length overflow".into()))?;
     Ok(Value::Integer(length))
 }
@@ -28,6 +29,8 @@ mod tests {
     #[test]
     fn counts_unicode_characters_including_trailing_spaces() {
         assert_eq!(evaluate(&[Value::Text("é🙂 ".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(evaluate(&[Value::Text("ASCII strings 123".into())]).unwrap(), Value::Integer(17));
+        assert_eq!(evaluate(&[Value::Text("hello é🙂".into())]).unwrap(), Value::Integer(7));
         assert_eq!(evaluate(&[Value::Text(String::new())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
