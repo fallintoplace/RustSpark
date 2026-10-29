@@ -117,7 +117,8 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
             AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
             AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
         };
-        fields.push(Field::new(&item.alias, ty, true));
+        let nullable = !matches!(&item.op, AggregateOp::CountAll | AggregateOp::Count(_));
+        fields.push(Field::new(&item.alias, ty, nullable));
     }
     Schema::new(fields)
 }
@@ -281,5 +282,26 @@ mod tests {
         assert!(all.contains(&vec![Value::Integer(2), Value::Integer(2), Value::Integer(9)]));
         drop(result);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod spill_count_schema_tests {
+    use super::*;
+
+    #[test]
+    fn only_null_producing_aggregates_are_nullable() {
+        let input = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let result = output_schema(&input, &[("key".into(), "key".into())], &[
+            AggregateItem::new(AggregateOp::CountAll, "count_all"),
+            AggregateItem::new(AggregateOp::Count(Expr::Column("amount".into())), "count_valid"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("amount".into())), "total"),
+        ]).unwrap();
+        assert!(!result.field(1).unwrap().nullable);
+        assert!(!result.field(2).unwrap().nullable);
+        assert!(result.field(3).unwrap().nullable);
     }
 }
