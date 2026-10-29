@@ -68,7 +68,8 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
@@ -81,7 +82,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if !right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
@@ -91,7 +93,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
     let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
-    for row in right.rows()? {
+    for index in 0..right.num_rows() {
+        let row = right.row(index)?;
         let entry = counts.entry(row).or_insert(0);
         *entry = entry.checked_add(1)
             .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
@@ -104,7 +107,8 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(&right)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -120,7 +124,8 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(right)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
