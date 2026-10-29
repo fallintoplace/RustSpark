@@ -50,6 +50,7 @@ mod translate_text;
 mod left_right;
 mod overlay_text;
 mod levenshtein;
+mod regexp_like;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -120,6 +121,7 @@ const MODULES: &[&[Function]] = &[
     &left_right::FUNCTIONS,
     &overlay_text::FUNCTIONS,
     &levenshtein::FUNCTIONS,
+    &regexp_like::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
