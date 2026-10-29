@@ -69,30 +69,26 @@ impl ColumnStatistics {
             return Err(Error::Execution("invalid NULL count".into()));
         }
         // Validate both extrema before committing counters or bounds.
-        let mut min = self.min.clone();
-        let mut max = self.max.clone();
-        if let Some(value) = &other.min {
-            if let Some(current) = &min {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
-                    min = Some(value.clone());
-                }
-            } else {
-                min = Some(value.clone());
-            }
-        }
-        if let Some(value) = &other.max {
-            if let Some(current) = &max {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
-                    max = Some(value.clone());
-                }
-            } else {
-                max = Some(value.clone());
-            }
-        }
+        let replace_min = match (&self.min, &other.min) {
+            (Some(current), Some(value)) =>
+                matches!(value.sql_compare(current)?, Some(Ordering::Less)),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let replace_max = match (&self.max, &other.max) {
+            (Some(current), Some(value)) =>
+                matches!(value.sql_compare(current)?, Some(Ordering::Greater)),
+            (None, Some(_)) => true,
+            _ => false,
+        };
         self.rows = rows;
         self.nulls = nulls;
-        self.min = min;
-        self.max = max;
+        if replace_min {
+            self.min = other.min.clone();
+        }
+        if replace_max {
+            self.max = other.max.clone();
+        }
         Ok(())
     }
 }
