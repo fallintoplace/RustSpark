@@ -35,28 +35,19 @@ impl ColumnStatistics {
         } else {
             self.nulls
         };
-        let mut min = self.min.clone();
-        let mut max = self.max.clone();
-        if !value.is_null() {
-            if let Some(current) = &min {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
-                    min = Some(value.clone());
-                }
-            } else {
-                min = Some(value.clone());
-            }
-            if let Some(current) = &max {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
-                    max = Some(value.clone());
-                }
-            } else {
-                max = Some(value.clone());
-            }
-        }
+        // Compare both extrema before mutating counters or bounds.
+        let replace_min = !value.is_null() && match self.min.as_ref() {
+            Some(current) => matches!(value.sql_compare(current)?, Some(Ordering::Less)),
+            None => true,
+        };
+        let replace_max = !value.is_null() && match self.max.as_ref() {
+            Some(current) => matches!(value.sql_compare(current)?, Some(Ordering::Greater)),
+            None => true,
+        };
         self.rows = rows;
         self.nulls = nulls;
-        self.min = min;
-        self.max = max;
+        if replace_min { self.min = Some(value.clone()); }
+        if replace_max { self.max = Some(value.clone()); }
         Ok(())
     }
 
@@ -208,5 +199,23 @@ mod merged_statistics_atomicity_consolidation_tests {
         let before = first.clone();
         assert!(first.merge(&other).is_err());
         assert_eq!(first, before);
+    }
+}
+
+#[cfg(test)]
+mod selective_extrema_perf_tests {
+    use super::*;
+    #[test]
+    fn stable_text_extrema_remain_unchanged_on_inner_values() {
+        let mut stats = ColumnStatistics::default();
+        for text in ["alpha", "zulu", "mike", "mid", "beta"] {
+            stats.observe(&Value::Text(text.to_string())).unwrap();
+        }
+        assert_eq!(stats.rows, 5);
+        assert_eq!(stats.min, Some(Value::Text("alpha".into())));
+        assert_eq!(stats.max, Some(Value::Text("zulu".into())));
+        let old = stats.clone();
+        assert!(stats.observe(&Value::Integer(100)).is_err());
+        assert_eq!(stats, old);
     }
 }
