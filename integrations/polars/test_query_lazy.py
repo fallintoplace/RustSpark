@@ -69,6 +69,15 @@ class PolarsCommandTests(unittest.TestCase):
                 with rustspark_lazy_frame("SELECT 1", process_timeout=3):
                     pass
 
+    def test_sql_query_files_use_cli_file_flag(self):
+        command = build_command(None, Path("out.arrow"), sql_file=Path("saved queries/summary.sql"))
+        self.assertEqual(command[command.index("--sql-file") + 1], "saved queries/summary.sql")
+        self.assertNotIn("--sql", command)
+        for sql, filename in (("SELECT 1", "saved.sql"), (None, ""), (" ", "saved.sql")):
+            with self.subTest(sql=sql, filename=filename), self.assertRaises(ValueError):
+                build_command(sql, Path("out.arrow"), sql_file=filename)
+
+
 
 if __name__ == "__main__":
     unittest.main()
