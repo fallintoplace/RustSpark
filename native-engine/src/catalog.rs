@@ -41,7 +41,7 @@ impl Catalog {
         }
         let batch = self.tables.remove(&from)
             .ok_or_else(|| Error::Schema(format!("unknown table: {source}")))?;
-        self.tables.insert(to, batch);
+        let _ = self.tables.insert(to, batch);
         Ok(())
     }
 
