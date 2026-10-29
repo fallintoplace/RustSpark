@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
+use crate::{batch::Batch, schema::Schema, Error, Result};
 use super::{cancel::QueryControl, chunks::BatchChunks, spill::SpillWriter};
 
 static PARTITION_ID: AtomicU64 = AtomicU64::new(1);
@@ -35,10 +35,10 @@ pub struct PartitionWriter {
     batch_rows: usize,
 }
 
-fn bucket(row: &[Value], keys: &[usize], count: usize) -> usize {
+fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usize> {
     let mut hash = DefaultHasher::new();
-    for &column in keys { row[column].hash(&mut hash); }
-    (hash.finish() as usize) % count
+    for &column in keys { batch.value(row, column)?.hash(&mut hash); }
+    Ok((hash.finish() as usize) % count)
 }
 
 impl PartitionWriter {
@@ -71,12 +71,12 @@ impl PartitionWriter {
             control.check()?;
             let part = part?;
             let mut groups = vec![Vec::new(); writers.len()];
-            for row in part.rows()? {
-                let index = bucket(&row, &self.key_columns, writers.len());
+            for row in 0..part.num_rows() {
+                let index = bucket(&part, row, &self.key_columns, writers.len())?;
                 groups[index].push(row);
             }
             for (writer, rows) in writers.iter_mut().zip(groups) {
-                if !rows.is_empty() { writer.write_batch(&Batch::from_rows(schema.clone(), rows)?)?; }
+                if !rows.is_empty() { writer.write_batch(&part.take(&rows)?)?; }
             }
         }
         Ok(())
@@ -123,5 +123,40 @@ mod tests {
         assert_eq!(seen, 4);
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod wide_exchange_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+    use super::super::spill::SpillReader;
+    #[test]
+    fn preserves_wide_payloads_and_repeated_hash_keys() {
+        let dir = std::env::temp_dir().join(format!("native-wide-shuffle-{}-{:?}",
+            std::process::id(), std::thread::current().id()));
+        fs::create_dir_all(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false)
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2), Value::Text("alpha".into())],
+            vec![Value::Null, Value::Text("beta".into())],
+            vec![Value::Integer(2), Value::Text("gamma".into())],
+        ]).unwrap();
+        let mut writer = PartitionWriter::new(&dir, schema, &["k"], 3, 2).unwrap();
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        let files = writer.finish().unwrap();
+        let mut all = Vec::new();
+        for path in files.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(part) = reader.next_batch().unwrap() { all.extend(part.rows().unwrap()); }
+        }
+        assert_eq!(all.len(), 3);
+        for row in batch.rows().unwrap() { assert!(all.contains(&row)); }
+        drop(files);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
