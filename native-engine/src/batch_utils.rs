@@ -4,7 +4,8 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     if rows_per_batch == 0 {
         return Err(Error::Execution("batch size must be positive".into()));
     }
-    let mut chunks = Vec::new();
+    // The number of output chunks is known before slicing.
+    let mut chunks = Vec::with_capacity(batch.num_rows().div_ceil(rows_per_batch));
     let mut start = 0;
     while start < batch.num_rows() {
         let end = start.saturating_add(rows_per_batch).min(batch.num_rows());
@@ -87,5 +88,21 @@ mod zero_column_concat_consolidation_tests {
         let b = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
         assert_eq!(concat(&schema, [a.clone(), b.clone()], 5).unwrap().num_rows(), 5);
         assert!(concat(&schema, [a, b], 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod preallocated_batch_split_tests {
+    use super::*;
+    #[test]
+    fn preserves_empty_and_nondivisible_batch_splits() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "n", crate::schema::DataType::Integer, false)]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        assert!(split(&empty, 10).unwrap().is_empty());
+        let populated = Batch::from_rows(schema,
+            (0..13).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let chunks = split(&populated, 5).unwrap();
+        assert_eq!(chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [5, 5, 3]);
     }
 }
