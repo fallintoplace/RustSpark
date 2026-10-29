@@ -105,3 +105,34 @@ mod tests {
         assert!(schema.column("unknown").is_err());
     }
 }
+
+ 
+impl Schema {
+    /// Retain named fields in the requested order; reject unknown and duplicate names.
+    pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
+        Self::new(names.iter().map(|name| {
+            Ok(self.field(self.column(name)?)?.clone())
+        }).collect::<Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod schema_projection_feature_tests {
+    use super::*;
+
+    #[test]
+    fn projections_preserve_types_nullability_and_user_order() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap();
+        let projected = schema.project_columns(&["TAG", "id"]).unwrap();
+        assert_eq!(projected.fields(), &[
+            Field::new("tag", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]);
+        assert!(schema.project_columns(&["id", "ID"]).is_err());
+        assert!(schema.project_columns(&["missing"]).is_err());
+    }
+}
+
