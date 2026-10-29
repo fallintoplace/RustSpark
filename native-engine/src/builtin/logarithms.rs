@@ -11,8 +11,16 @@ fn checked_log(value: &Value, base: Option<f64>) -> Result<Value> {
     super::finite(result)
 }
 fn ln(args: &[Value]) -> Result<Value> { checked_log(&args[0], None) }
-fn log2(args: &[Value]) -> Result<Value> { checked_log(&args[0], Some(2.0)) }
-fn log10(args: &[Value]) -> Result<Value> { checked_log(&args[0], Some(10.0)) }
+fn log2(args: &[Value]) -> Result<Value> {
+    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
+    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    super::finite(x.log2())
+}
+fn log10(args: &[Value]) -> Result<Value> {
+    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
+    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    super::finite(x.log10())
+}
 fn log(args: &[Value]) -> Result<Value> {
     if args.len() == 1 { return ln(args); }
     let Some(base) = super::number(&args[0])? else { return Ok(Value::Null) };
@@ -30,6 +38,9 @@ mod tests {
     #[test]
     fn logarithms_check_bases_and_negative_values() {
         assert_eq!(log2(&[Value::Integer(8)]).unwrap(), Value::Float(3.0));
+        assert_eq!(log10(&[Value::Integer(1000)]).unwrap(), Value::Float(3.0));
+        assert!(log10(&[Value::Integer(0)]).is_err());
+        assert_eq!(log2(&[Value::Null]).unwrap(), Value::Null);
         assert!(ln(&[Value::Integer(-1)]).is_err());
         assert!(log(&[Value::Integer(1), Value::Integer(8)]).is_err());
         assert_eq!(log(&[Value::Null, Value::Integer(8)]).unwrap(), Value::Null);
