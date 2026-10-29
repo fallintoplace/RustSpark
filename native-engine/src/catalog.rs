@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::{batch::Batch, Error, Result};
 
@@ -16,7 +16,7 @@ impl Catalog {
         let normalized = normalize(name)?;
         // Register once through the entry API instead of probing the table
         // for existence and hashing the same key again for insertion.
-        match self.tables.entry(normalized) {
+        match self.tables.entry(normalized.into_owned()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(batch);
                 Ok(())
@@ -28,7 +28,7 @@ impl Catalog {
 
     pub fn replace(&mut self, name: &str, batch: Batch) -> Result<()> {
         let normalized = normalize(name)?;
-        let _ = self.tables.insert(normalized, batch);
+        let _ = self.tables.insert(normalized.into_owned(), batch);
         Ok(())
     }
 
@@ -37,23 +37,23 @@ impl Catalog {
     pub fn rename(&mut self, source: &str, destination: &str) -> Result<()> {
         let from = normalize(source)?;
         let to = normalize(destination)?;
-        if !self.tables.contains_key(&from) {
+        if !self.tables.contains_key(from.as_ref()) {
             return Err(Error::Schema(format!("unknown table: {source}")));
         }
         if from == to { return Ok(()); }
-        if self.tables.contains_key(&to) {
+        if self.tables.contains_key(to.as_ref()) {
             return Err(Error::Schema(format!("table already exists: {destination}")));
         }
-        let batch = self.tables.remove(&from)
+        let batch = self.tables.remove(from.as_ref())
             .ok_or_else(|| Error::Schema(format!("unknown table: {source}")))?;
-        let _ = self.tables.insert(to, batch);
+        let _ = self.tables.insert(to.into_owned(), batch);
         Ok(())
     }
 
     pub fn get(&self, name: &str) -> Result<&Batch> {
         let normalized = normalize(name)?;
         self.tables
-            .get(&normalized)
+            .get(normalized.as_ref())
             .ok_or_else(|| Error::Schema(format!("unknown table: {name}")))
     }
 
@@ -64,11 +64,15 @@ impl Catalog {
     }
 }
 
-fn normalize(name: &str) -> Result<String> {
+fn normalize(name: &str) -> Result<Cow<'_, str>> {
     if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
         return Err(Error::Schema("expected a simple nonempty table name".into()));
     }
-    Ok(name.to_ascii_lowercase())
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Ok(Cow::Owned(name.to_ascii_lowercase()))
+    } else {
+        Ok(Cow::Borrowed(name))
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +95,7 @@ impl Catalog {
     /// Remove a registered table and return its data to the caller.
     pub fn unregister(&mut self, name: &str) -> Result<Batch> {
         let normalized = normalize(name)?;
-        self.tables.remove(&normalized)
+        self.tables.remove(normalized.as_ref())
             .ok_or_else(|| Error::Schema(format!("unknown table: {name}")))
     }
 }
@@ -151,5 +155,22 @@ mod single_probe_catalog_register_tests {
         catalog.register("Sales", original).unwrap();
         assert!(catalog.register("sales", replacement).is_err());
         assert_eq!(catalog.get("SALES").unwrap().row(0).unwrap(), vec![Value::Integer(10)]);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_catalog_key_tests {
+    use super::*;
+    #[test]
+    fn borrows_normalized_keys_and_preserves_case_insensitive_lookups() {
+        assert!(matches!(normalize("sales").unwrap(), Cow::Borrowed(_)));
+        assert!(matches!(normalize("Sales").unwrap(), Cow::Owned(_)));
+        let mut catalog = Catalog::new();
+        let batch = Batch::empty(crate::schema::Schema::new(vec![]).unwrap());
+        catalog.register("SALES", batch).unwrap();
+        assert!(catalog.get("sales").is_ok());
+        assert!(catalog.get("Sales").is_ok());
+        assert!(catalog.get("unknown").is_err());
+        assert!(normalize("has space").is_err());
     }
 }
