@@ -111,6 +111,7 @@ pub struct CsvStream<R> {
     schema: Schema,
     batch_rows: usize,
     exhausted: bool,
+    pending_error: Option<Error>,
 }
 
 impl<R: BufRead> CsvStream<R> {
@@ -150,7 +151,7 @@ impl<R: BufRead> CsvStream<R> {
             Schema::new(names.into_iter()
                 .map(|name| Field::new(name, DataType::Text, true)).collect())?
         };
-        Ok(Self { records, schema, batch_rows, exhausted: false })
+        Ok(Self { records, schema, batch_rows, exhausted: false, pending_error: None })
     }
 
     pub fn schema(&self) -> &Schema {
@@ -162,16 +163,23 @@ impl<R: BufRead> Iterator for CsvStream<R> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted {
-            return None;
+        if self.exhausted { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.exhausted = true;
+            return Some(Err(error));
         }
         let mut rows = Vec::new();
         for _ in 0..self.batch_rows {
             match self.records.record() {
                 Ok(Some(fields)) => {
                     if fields.len() != self.schema.len() {
-                        self.exhausted = true;
-                        return Some(Err(Error::Parse("CSV row width differs from header".into())));
+                        let error = Error::Parse("CSV row width differs from header".into());
+                        if rows.is_empty() {
+                            self.exhausted = true;
+                            return Some(Err(error));
+                        }
+                        self.pending_error = Some(error);
+                        break;
                     }
                     let converted = fields.into_iter().enumerate().map(|(index, text)| {
                         if text.is_empty() {
@@ -205,8 +213,12 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                     match converted {
                         Ok(row) => rows.push(row),
                         Err(error) => {
-                            self.exhausted = true;
-                            return Some(Err(error));
+                            if rows.is_empty() {
+                                self.exhausted = true;
+                                return Some(Err(error));
+                            }
+                            self.pending_error = Some(error);
+                            break;
                         }
                     }
                 }
@@ -215,8 +227,12 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                     break;
                 }
                 Err(error) => {
-                    self.exhausted = true;
-                    return Some(Err(error));
+                    if rows.is_empty() {
+                        self.exhausted = true;
+                        return Some(Err(error));
+                    }
+                    self.pending_error = Some(error);
+                    break;
                 }
             }
         }
@@ -319,5 +335,27 @@ mod csv_bom_engine_tests {
         assert_eq!(typed.next().unwrap().unwrap().row(0).unwrap(), vec![
             Value::Integer(1), Value::Text("Paris".into()),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_csv_prefix_regressions {
+    use super::*;
+    use std::io::Cursor;
+    #[test]
+    fn valid_rows_emit_before_terminal_conversion_error() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut stream = CsvStream::new_typed(Cursor::new(b"id\n1\n2\nbad\n3\n"), 10, 128, schema).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
+    }
+    #[test]
+    fn malformed_width_preserves_valid_prefix() {
+        let mut stream = CsvStream::new(Cursor::new(b"id,name\n1,ok\n2\n"), 10, 128).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }

@@ -122,7 +122,9 @@ pub fn read_frames_limited(
 ) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut total = 0_usize;
-    while let Some(frame) = read_frame(input, max_frame_bytes)? {
+    while let Some(frame) = read_frame(
+        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
+    )? {
         if frames.len() >= max_frames {
             return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
         }
@@ -168,5 +170,18 @@ mod frame_count_limit_tests {
         assert_eq!(read_frames_limited(&mut wire.as_slice(), 0, 0, 3)
             .unwrap().len(), 3);
         assert!(read_frames_limited(&mut wire.as_slice(), 0, 0, 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod consolidated_exchange_budget_tests {
+    use super::*;
+    #[test]
+    fn rejects_frame_payload_over_remaining_budget_at_header() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &Frame { stage: 1, task: 1, attempt: 1, payload: vec![1; 4] }, 16).unwrap();
+        write_frame(&mut wire, &Frame { stage: 1, task: 2, attempt: 1, payload: vec![2; 8] }, 16).unwrap();
+        assert!(read_frames(&mut wire.as_slice(), 16, 10).unwrap_err().to_string().contains("memory budget"));
+        assert_eq!(read_frames(&mut wire.as_slice(), 16, 12).unwrap().len(), 2);
     }
 }
