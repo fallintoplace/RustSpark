@@ -20,12 +20,21 @@ fn char_length(args: &[Value]) -> Result<Value> {
 
 
 
+fn octet_length(args: &[Value]) -> Result<Value> {
+    match super::string(&args[0])? {
+        Some(value) => Ok(Value::Integer(i64::try_from(value.len())
+            .map_err(|_| Error::Execution("string is too long".into()))?)),
+        None => Ok(Value::Null),
+    }
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "char_length", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
     Function { name: "character_length", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
     Function { name: "len", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
+    Function { name: "octet_length", min_args: 1, max_args: 1, result_type: char_length_type, call: octet_length },
     // PARITY_FUNCTIONS
 ];
 
@@ -66,6 +75,12 @@ mod tests {
     fn spark_len_alias_includes_trailing_spaces() {
         assert_eq!(sql_result("len('a  ')").unwrap(), Value::Integer(3));
         assert_eq!(sql_result("len(s)").unwrap(), Value::Integer(4));
+    }
+
+    #[test]
+    fn spark_octet_length_counts_utf8_bytes() {
+        assert_eq!(sql_result("octet_length(s)").unwrap(), Value::Integer(5));
+        assert_eq!(octet_length(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
