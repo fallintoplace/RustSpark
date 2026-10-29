@@ -525,6 +525,23 @@ impl Parser {
     }
 
 
+
+    fn column_alias_list(&mut self) -> Result<Option<Vec<String>>> {
+        if !self.take_symbol('(') {
+            return Ok(None);
+        }
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.identifier()?);
+            if columns.len() > 1024 {
+                return Err(Error::Parse("derived table has too many column aliases".into()));
+            }
+            if !self.take_symbol(',') { break; }
+        }
+        self.expect_symbol(')')?;
+        Ok(Some(columns))
+    }
+
     fn table_source(&mut self) -> Result<Plan> {
         if !self.take_symbol('(') {
             return self.named_source();
@@ -533,18 +550,10 @@ impl Parser {
             let (rows, types) = self.values_source()?;
             self.expect_symbol(')')?;
             self.take_word("AS");
-            self.identifier()?;
-            let names = if self.take_symbol('(') {
-                let mut columns = Vec::new();
-                loop {
-                    columns.push(self.identifier()?);
-                    if !self.take_symbol(',') { break; }
-                }
-                self.expect_symbol(')')?;
-                columns
-            } else {
-                (1..=types.len()).map(|index| format!("col{index}")).collect()
-            };
+            let alias = self.identifier()?;
+            let names = self.column_alias_list()?.unwrap_or_else(
+                || (1..=types.len()).map(|index| format!("col{index}")).collect()
+            );
             if names.len() != types.len() {
                 return Err(Error::Parse("VALUES alias column count mismatch".into()));
             }
@@ -553,7 +562,10 @@ impl Parser {
                     let nullable = rows.iter().any(|row| row[column].is_null());
                     crate::schema::Field::new(name, data_type, nullable)
                 }).collect();
-            return Ok(Plan::Values { schema: crate::schema::Schema::new(fields)?, rows });
+            return Ok(Plan::Alias {
+                input: Box::new(Plan::Values { schema: crate::schema::Schema::new(fields)?, rows }),
+                alias,
+            });
         }
         if !self.peek_word("SELECT") {
             return Err(Error::Unsupported("expected SELECT or VALUES in derived table".into()));
@@ -568,9 +580,10 @@ impl Parser {
         self.expect_symbol(')')?;
         self.take_word("AS");
         let alias = self.identifier()?;
-        if self.peek() == Some(&Token::Symbol('(')) {
-            return Err(Error::Unsupported("derived SELECT column alias lists are not supported".into()));
-        }
+        let inner = match self.column_alias_list()? {
+            Some(columns) => Plan::Rename { input: Box::new(inner), columns },
+            None => inner,
+        };
         Ok(Plan::Alias { input: Box::new(inner), alias })
     }
 
