@@ -280,6 +280,21 @@ fn csc(args: &[Value]) -> Result<Value> {
     super::finite(1.0 / value.sin())
 }
 
+fn bin_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 1 && matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(DataType::Text)
+    } else { Err(Error::Type("BIN requires numeric input".into())) }
+}
+fn bin(args: &[Value]) -> Result<Value> {
+    let number = match &args[0] {
+        Value::Integer(value) => *value,
+        Value::Float(value) if value.is_finite() => *value as i64,
+        Value::Null => return Ok(Value::Null),
+        _ => return Err(Error::Type("BIN requires a finite number".into())),
+    };
+    Ok(Value::Text(format!("{number:b}")))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -304,6 +319,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "cot", min_args: 1, max_args: 1, result_type: number_float_type, call: cot },
     Function { name: "sec", min_args: 1, max_args: 1, result_type: number_float_type, call: sec },
     Function { name: "csc", min_args: 1, max_args: 1, result_type: number_float_type, call: csc },
+    Function { name: "bin", min_args: 1, max_args: 1, result_type: bin_type, call: bin },
     // PARITY_FUNCTIONS
 ];
 
@@ -474,6 +490,14 @@ mod tests {
         let Value::Float(actual) = sql_result("csc(1)").unwrap() else { panic!("expected float") };
         assert!((actual - 1.1883951057781212).abs() < 1e-12);
         assert_eq!(csc(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_bin_uses_twos_complement_for_negative_numbers() {
+        assert_eq!(sql_result("bin(13)").unwrap(), Value::Text("1101".into()));
+        assert_eq!(sql_result("bin(-13)").unwrap(),
+            Value::Text("1111111111111111111111111111111111111111111111111111111111110011".into()));
+        assert_eq!(sql_result("bin(13.3)").unwrap(), Value::Text("1101".into()));
     }
 
     // PARITY_TESTS
