@@ -40,9 +40,26 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
             };
             match next {
                 Ok(batch) if batch.schema() == &self.schema => return Some(Ok(batch)),
-                Ok(_) => {
-                    self.stopped = true;
-                    return Some(Err(Error::Schema("UNION ALL input schemas differ".into())));
+                Ok(batch) => {
+                    // SQL UNION ALL uses column positions, not names. The output
+                    // adopts left input names and widened nullability.
+                    if batch.schema().len() != self.schema.len() ||
+                        !batch.schema().fields().iter().zip(self.schema.fields())
+                            .all(|(source, target)| source.data_type == target.data_type) {
+                        self.stopped = true;
+                        return Some(Err(Error::Schema("UNION ALL input schemas differ".into())));
+                    }
+                    let rebased = (0..self.schema.len())
+                        .map(|index| batch.column(index).map(|values| values.to_vec()))
+                        .collect::<Result<Vec<_>>>()
+                        .and_then(|columns| Batch::new(self.schema.clone(), columns));
+                    match rebased {
+                        Ok(batch) => return Some(Ok(batch)),
+                        Err(error) => {
+                            self.stopped = true;
+                            return Some(Err(error));
+                        }
+                    }
                 }
                 Err(error) => {
                     self.stopped = true;
@@ -201,3 +218,26 @@ mod union_distinct_stream_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod union_positional_schema_engine_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn renames_right_columns_to_the_union_output_schema() {
+        let a = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let b = Schema::new(vec![Field::new("alias", DataType::Integer, true)]).unwrap();
+        let output_schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let first = Batch::from_rows(a, vec![vec![Value::Integer(1)]]).unwrap();
+        let second = Batch::from_rows(b, vec![vec![Value::Null]]).unwrap();
+        let results = UnionAllStream::new(
+            [Ok(first)].into_iter(), [Ok(second)].into_iter(),
+            output_schema.clone(), QueryControl::default(),
+        ).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|part| part.schema() == &output_schema));
+        assert_eq!(results[0].row(0).unwrap(), vec![Value::Integer(1)]);
+        assert_eq!(results[1].row(0).unwrap(), vec![Value::Null]);
+    }
+}
