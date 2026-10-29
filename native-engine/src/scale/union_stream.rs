@@ -50,10 +50,7 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         self.stopped = true;
                         return Some(Err(Error::Schema("UNION ALL input schemas differ".into())));
                     }
-                    let rebased = (0..self.schema.len())
-                        .map(|index| batch.column(index).map(|values| values.to_vec()))
-                        .collect::<Result<Vec<_>>>()
-                        .and_then(|columns| Batch::new(self.schema.clone(), columns));
+                    let rebased = batch.relabel(self.schema.clone());
                     match rebased {
                         Ok(batch) if batch.num_rows() == 0 => continue,
                         Ok(batch) => return Some(Ok(batch)),
@@ -287,5 +284,31 @@ mod union_distinct_single_probe_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.into_iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod union_schema_move_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn right_side_aliasing_and_nullability_preserve_values() {
+        let output = Schema::new(vec![Field::new("unified", DataType::Text, true)]).unwrap();
+        let right_schema = Schema::new(vec![Field::new("other", DataType::Text, false)]).unwrap();
+        let right = Batch::from_rows(right_schema, vec![
+            vec![Value::Text("large-value".repeat(100))],
+            vec![Value::Text("another".into())],
+        ]).unwrap();
+        let output_stream = UnionAllStream::new(
+            std::iter::empty(), [Ok(right)].into_iter(), output.clone(),
+            QueryControl::default(),
+        );
+        let batches = output_stream.collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].schema(), &output);
+        assert_eq!(batches[0].num_rows(), 2);
+        assert_eq!(batches[0].value(0, 0).unwrap(),
+            &Value::Text("large-value".repeat(100)));
     }
 }
