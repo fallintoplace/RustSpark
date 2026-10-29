@@ -32,12 +32,19 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     let mut chars = pad.chars();
     let first = chars.next();
     let one_char = first.filter(|_| chars.next().is_none());
-    let mut result = String::with_capacity(
-        text.len().saturating_add((target - size).saturating_mul(pad.len().min(4))),
-    );
+    let capacity = if pad.is_ascii() {
+        text.len().saturating_add(target - size)
+    } else {
+        text.len().saturating_add((target - size).saturating_mul(pad.len().min(4)))
+    };
+    let mut result = String::with_capacity(capacity);
     if !left { result.push_str(text); }
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
+    } else if pad.is_ascii() {
+        let needed = target - size;
+        for _ in 0..needed / pad.len() { result.push_str(pad); }
+        result.push_str(&pad[..needed % pad.len()]);
     } else {
         let pad_chars = pad.chars().collect::<Vec<_>>();
         for i in 0..(target - size) {
@@ -116,5 +123,21 @@ mod single_character_padding_tests {
             Value::Text("x界界界".into()));
         assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("ab".into())]).unwrap(),
             Value::Text("xaba".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_padding_block_tests {
+    use super::*;
+    #[test]
+    fn repeated_ascii_patterns_fill_without_extra_characters() {
+        let output = rpad(&[Value::Text("x".into()), Value::Integer(100_002),
+            Value::Text("abc".into())]).unwrap();
+        let Value::Text(text) = output else { panic!("expected text"); };
+        assert_eq!(text.len(), 100_002);
+        assert!(text.starts_with("xabcabc"));
+        assert!(text.ends_with("cab"));
+        assert_eq!(lpad(&[Value::Text("x".into()), Value::Integer(6), Value::Text("ab".into())]).unwrap(), Value::Text("ababax".into()));
+        assert_eq!(rpad(&[Value::Text("🙂".into()), Value::Integer(3), Value::Text("éx".into())]).unwrap(), Value::Text("🙂éx".into()));
     }
 }
