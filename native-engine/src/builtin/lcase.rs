@@ -1,5 +1,5 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
@@ -8,11 +8,18 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    Ok(Value::Text(if text.is_ascii() {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("LCASE input exceeds 16 MiB".into()));
+    }
+    let converted = if text.is_ascii() {
         text.to_ascii_lowercase()
     } else {
         text.to_lowercase()
-    }))
+    };
+    if converted.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("LCASE output exceeds 16 MiB".into()));
+    }
+    Ok(Value::Text(converted))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -32,5 +39,17 @@ mod tests {
             Value::Text("i\u{307}stanbul".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_unicode_lcase_tests {
+    use super::*;
+    #[test]
+    fn preserves_expanding_unicode_case_mappings() {
+        assert_eq!(evaluate(&[Value::Text("İ".into())]).unwrap(),
+            Value::Text("i\u{307}".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate(&[Value::Text("X".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }
