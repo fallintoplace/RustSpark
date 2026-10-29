@@ -18,9 +18,9 @@ impl QueryCancellation {
 
     pub fn with_timeout(timeout: Duration) -> Self {
         let mut context = Self::new();
-        // A deadline overflow cannot be reached in practice; fall back to
-        // the largest supported (unbounded) deadline rather than panicking.
-        context.deadline = Instant::now().checked_add(timeout);
+        // If a deadline cannot be represented, fail closed rather than run forever.
+        let now = Instant::now();
+        context.deadline = Some(now.checked_add(timeout).unwrap_or(now));
         context
     }
 
@@ -69,5 +69,10 @@ mod tests {
     fn expired_deadline_fails_without_sleeping() {
         assert!(QueryCancellation::with_deadline(Instant::now()).checkpoint().is_err());
         assert!(QueryCancellation::with_timeout(Duration::from_secs(3600)).checkpoint().is_ok());
+    }
+    #[test]
+    fn unrepresentable_timeout_does_not_disable_deadlines() {
+        let context = QueryCancellation::with_timeout(Duration::MAX);
+        assert!(context.checkpoint().is_err());
     }
 }
