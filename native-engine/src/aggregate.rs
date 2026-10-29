@@ -255,13 +255,19 @@ pub fn aggregate_with_max_groups(
         }
         groups.push((Vec::new(), items.iter().map(|item| State::new(&item.op)).collect()));
     }
+    let bound_columns = group_by.iter().map(|(expr, _)| match expr {
+        Expr::Column(name) => Ok(Some(batch.column(batch.schema().column(name)?)?)),
+        _ => Ok(None),
+    }).collect::<Result<Vec<_>>>()?;
     for row in 0..batch.num_rows() {
         let index = if group_by.is_empty() {
             0
         } else {
-            let key = group_by
-                .iter()
-                .map(|(expr, _)| expr.evaluate(batch, row))
+            let key = group_by.iter().zip(&bound_columns)
+                .map(|((expr, _), column)| match column {
+                    Some(values) => Ok(values[row].clone()),
+                    None => expr.evaluate(batch, row),
+                })
                 .collect::<Result<Vec<_>>>()?;
             match group_indices.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
@@ -411,5 +417,29 @@ mod aggregate_hash_entry_perf_tests {
         assert_eq!(result.num_rows(), 2);
         assert_eq!(result.column(1).unwrap(), &[Value::Integer(2), Value::Integer(2)]);
         assert!(aggregate_with_max_groups(&batch, &groups, &agg, 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bound_group_columns_perf_tests {
+    use super::*;
+    use crate::expr::BinaryOp;
+    #[test]
+    fn direct_and_computed_keys_group_nullable_rows() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null]
+        ]).unwrap();
+        let groups = [(Expr::Column("X".into()), "key".into())];
+        let result = aggregate_with_max_groups(&batch, &groups,
+            &[AggregateItem::new(AggregateOp::CountAll, "count")], 2).unwrap();
+        let rows = result.rows().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&vec![Value::Integer(1), Value::Integer(2)]));
+        assert!(rows.contains(&vec![Value::Null, Value::Integer(1)]));
+        let computed = Expr::binary(Expr::Column("x".into()),
+            BinaryOp::Add, Expr::Literal(Value::Integer(1)));
+        assert_eq!(aggregate_with_max_groups(&batch,
+            &[(computed, "key".into())], &[], 2).unwrap().num_rows(), 2);
     }
 }
