@@ -125,6 +125,21 @@ fn substring_index(args: &[Value]) -> Result<Value> {
     }
 }
 
+fn two_text_integer_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text, DataType::Text] { Ok(DataType::Integer) }
+    else { Err(Error::Type("function requires two text arguments".into())) }
+}
+fn find_in_set(args: &[Value]) -> Result<Value> {
+    let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(haystack) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if needle.contains(',') { return Ok(Value::Integer(0)); }
+    let position = haystack.split(',').position(|item| item == needle)
+        .map(|index| i64::try_from(index + 1))
+        .transpose().map_err(|_| Error::Execution("FIND_IN_SET index overflow".into()))?
+        .unwrap_or(0);
+    Ok(Value::Integer(position))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -139,6 +154,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "space", min_args: 1, max_args: 1, result_type: space_type, call: space },
     Function { name: "quote", min_args: 1, max_args: 1, result_type: text_text_type, call: quote },
     Function { name: "substring_index", min_args: 3, max_args: 3, result_type: substring_index_type, call: substring_index },
+    Function { name: "find_in_set", min_args: 2, max_args: 2, result_type: two_text_integer_type, call: find_in_set },
     // PARITY_FUNCTIONS
 ];
 
@@ -236,6 +252,13 @@ mod tests {
             Value::Text("a.b".into()));
         assert_eq!(substring_index(&[Value::Null, Value::Text(".".into()), Value::Integer(1)]).unwrap(),
             Value::Null);
+    }
+
+    #[test]
+    fn spark_find_in_set_uses_one_based_items() {
+        assert_eq!(sql_result("find_in_set('ab', 'abc,b,ab,c,def')").unwrap(), Value::Integer(3));
+        assert_eq!(sql_result("find_in_set('missing', 'abc,b')").unwrap(), Value::Integer(0));
+        assert_eq!(sql_result("find_in_set('a,b', 'a,b')").unwrap(), Value::Integer(0));
     }
 
     // PARITY_TESTS
