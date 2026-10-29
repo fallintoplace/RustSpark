@@ -1,5 +1,5 @@
 //! Native execution stage graph for local and future distributed scheduling.
-use std::{cmp::Reverse, collections::{BinaryHeap, HashSet}};
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 use crate::{plan::Plan, Error, Result};
 
@@ -39,18 +39,17 @@ pub struct StageGraph {
 
 impl StageGraph {
     pub fn new(stages: Vec<Stage>) -> Result<Self> {
-        let mut unique = HashSet::new();
+        let mut present = vec![false; stages.len()];
         for stage in &stages {
-            if stage.id >= stages.len() || !unique.insert(stage.id) {
+            if stage.id >= stages.len() || std::mem::replace(&mut present[stage.id], true) {
                 return Err(Error::Schema("duplicate or invalid stage identifier".into()));
             }
         }
         for stage in &stages {
-            let mut seen = HashSet::new();
-            if stage.inputs.iter().any(|dependency| !seen.insert(*dependency)) {
+            if stage.inputs.len() == 2 && stage.inputs[0] == stage.inputs[1] {
                 return Err(Error::Schema("stage has duplicate dependencies".into()));
             }
-            if stage.inputs.iter().any(|dependency| !unique.contains(dependency)) {
+            if stage.inputs.iter().any(|&dependency| dependency >= present.len() || !present[dependency]) {
                 return Err(Error::Schema("stage depends on an unknown stage".into()));
             }
             let required_inputs = match stage.kind {
@@ -72,10 +71,11 @@ impl StageGraph {
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
     pub fn root(&self) -> Option<usize> {
-        let dependencies = self.stages.iter()
-            .flat_map(|stage| stage.inputs.iter().copied())
-            .collect::<HashSet<_>>();
-        let mut roots = self.stages.iter().filter(|stage| !dependencies.contains(&stage.id));
+        let mut referenced = vec![false; self.stages.len()];
+        for stage in &self.stages {
+            for &input in &stage.inputs { referenced[input] = true; }
+        }
+        let mut roots = self.stages.iter().filter(|stage| !referenced[stage.id]);
         match (roots.next(), roots.next()) {
             (Some(root), None) => Some(root.id),
             _ => None,
@@ -270,5 +270,44 @@ mod stage_graph_invariant_consolidation_tests {
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
             Stage { id: 1, kind: StageKind::HashJoin, inputs: vec![0] },
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bitmap_stage_validation_tests {
+    use super::*;
+    #[test]
+    fn accepts_nonsequential_stage_order_but_rejects_duplicate_ids() {
+        let valid = vec![
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ];
+        assert!(StageGraph::new(valid.clone()).is_ok());
+        let mut invalid = valid;
+        invalid[0].id = 0;
+        assert!(StageGraph::new(invalid).is_err());
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::HashJoin, inputs: vec![0, 0] },
+        ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod dense_root_lookup_tests {
+    use super::*;
+    #[test]
+    fn root_detection_preserves_empty_multiple_and_nonordered_graphs() {
+        assert_eq!(StageGraph::new(vec![]).unwrap().root(), None);
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(graph.root(), Some(1));
+        let multiple = StageGraph::new(vec![
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(multiple.root(), None);
     }
 }
