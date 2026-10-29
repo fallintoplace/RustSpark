@@ -20,7 +20,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("TRANSLATE map exceeds 4096 characters".into()));
         }
     }
-    let mut output = String::new();
+    // Most mappings keep byte width unchanged; reserve source length up front.
+    let mut output = String::with_capacity(text.len());
     for character in text.chars() {
         match mapping.get(&character) {
             Some(Some(replacement)) => output.push(*replacement),
@@ -52,6 +53,10 @@ mod tests {
             Value::Text("abc".into()), Value::Text("bc".into()),
             Value::Text("X".into()),
         ]).unwrap(), Value::Text("aX".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("aba".repeat(1000)), Value::Text("ab".into()),
+            Value::Text("bc".into()),
+        ]).unwrap(), Value::Text("bcb".repeat(1000)));
         assert_eq!(evaluate(&[
             Value::Null, Value::Text("a".into()), Value::Text("b".into()),
         ]).unwrap(), Value::Null);
