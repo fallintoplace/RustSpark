@@ -36,6 +36,7 @@ impl MemoryPool {
     }
 
     fn charge(&self, bytes: usize) -> Result<()> {
+        if bytes == 0 { return Ok(()); }
         let mut current = self.used.load(Ordering::Relaxed);
         loop {
             let next = current
@@ -203,5 +204,21 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod zero_byte_pool_reservation_tests {
+    use super::*;
+    #[test]
+    fn empty_reservations_work_at_full_capacity() {
+        let pool = MemoryPool::new(10);
+        let held = pool.reserve(10).unwrap();
+        let zero = pool.reserve(0).unwrap();
+        assert_eq!(zero.bytes(), 0);
+        assert_eq!(pool.used(), 10);
+        drop(zero);
+        drop(held);
+        assert_eq!(pool.used(), 0);
     }
 }
