@@ -28,19 +28,27 @@ fn charge(counter: &AtomicU64, amount: u64) -> Result<()> {
     Ok(())
 }
 
+fn charge_event(rows: &AtomicU64, batches: &AtomicU64, amount: u64) -> Result<()> {
+    // Reserve the event counter first, so a failed row charge can be rolled back.
+    charge(batches, 1)?;
+    if let Err(error) = charge(rows, amount) {
+        batches.fetch_sub(1, Ordering::AcqRel);
+        return Err(error);
+    }
+    Ok(())
+}
+
 impl QueryMetrics {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn record_input(&self, rows: u64) -> Result<()> {
-        charge(&self.0.input_rows, rows)?;
-        charge(&self.0.input_batches, 1)
+        charge_event(&self.0.input_rows, &self.0.input_batches, rows)
     }
 
     pub fn record_output(&self, rows: u64) -> Result<()> {
-        charge(&self.0.output_rows, rows)?;
-        charge(&self.0.output_batches, 1)
+        charge_event(&self.0.output_rows, &self.0.output_batches, rows)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -56,6 +64,24 @@ impl QueryMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_events_do_not_partially_increment_counters() {
+        let metrics = QueryMetrics::new();
+        metrics.0.input_rows.store(u64::MAX, Ordering::Release);
+        assert!(metrics.record_input(1).is_err());
+        assert_eq!(metrics.snapshot().input_batches, 0);
+        assert_eq!(metrics.snapshot().input_rows, u64::MAX);
+
+        metrics.0.input_rows.store(0, Ordering::Release);
+        metrics.0.input_batches.store(u64::MAX, Ordering::Release);
+        assert!(metrics.record_input(1).is_err());
+        assert_eq!(metrics.snapshot().input_rows, 0);
+
+        metrics.0.output_rows.store(u64::MAX, Ordering::Release);
+        assert!(metrics.record_output(1).is_err());
+        assert_eq!(metrics.snapshot().output_batches, 0);
+    }
 
     #[test]
     fn snapshots_include_metrics_from_clones() {
