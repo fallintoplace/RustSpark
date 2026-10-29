@@ -22,9 +22,9 @@ fn ascii(args: &[Value]) -> Result<Value> {
 }
 fn chr(args: &[Value]) -> Result<Value> {
     let Some(code) = super::integer(&args[0])? else { return Ok(Value::Null) };
-    let ch = u32::try_from(code).ok().and_then(char::from_u32)
-        .ok_or_else(|| Error::Execution("CHR code point is not a valid Unicode scalar".into()))?;
-    Ok(Value::Text(ch.to_string()))
+    // Spark CHR uses the low eight bits, not a Unicode scalar.
+    let byte = code as u8;
+    Ok(Value::Text(char::from(byte).to_string()))
 }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "ascii", min_args: 1, max_args: 1, result_type: ascii_type, call: ascii },
@@ -37,8 +37,10 @@ mod tests {
     fn ascii_first_byte_and_unicode_chr() {
         assert_eq!(ascii(&[Value::Text("Apple".into())]).unwrap(), Value::Integer(65));
         assert_eq!(ascii(&[Value::Text("".into())]).unwrap(), Value::Integer(0));
-        assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("🙂".into()));
-        assert!(chr(&[Value::Integer(0xd800)]).is_err());
+        assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("B".into()));
+        assert_eq!(chr(&[Value::Integer(321)]).unwrap(), Value::Text("A".into()));
+        assert_eq!(chr(&[Value::Integer(-191)]).unwrap(), Value::Text("A".into()));
+        assert_eq!(chr(&[Value::Integer(0xd800)]).unwrap(), Value::Text("\\0".into()));
         assert_eq!(chr(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(ascii_type(&[DataType::Integer]).unwrap(), DataType::Integer);
         assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));
