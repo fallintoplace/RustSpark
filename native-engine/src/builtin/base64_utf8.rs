@@ -8,14 +8,22 @@ fn base64(args: &[Value]) -> Result<Value> {
     let bytes = text.as_bytes();
     if bytes.len() > MAX_BYTES { return Err(Error::Execution("BASE64 input exceeds byte limit".into())); }
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = *chunk.get(1).unwrap_or(&0);
-        let c = *chunk.get(2).unwrap_or(&0);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in &mut chunks {
+        let (a, b, c) = (chunk[0], chunk[1], chunk[2]);
         output.push(DIGITS[(a >> 2) as usize] as char);
         output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(if chunk.len() >= 2 { DIGITS[(((b & 15) << 2) | (c >> 6)) as usize] as char } else { '=' });
-        output.push(if chunk.len() == 3 { DIGITS[(c & 63) as usize] as char } else { '=' });
+        output.push(DIGITS[(((b & 15) << 2) | (c >> 6)) as usize] as char);
+        output.push(DIGITS[(c & 63) as usize] as char);
+    }
+    let tail = chunks.remainder();
+    if !tail.is_empty() {
+        let a = tail[0];
+        let b = if tail.len() == 2 { tail[1] } else { 0 };
+        output.push(DIGITS[(a >> 2) as usize] as char);
+        output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+        output.push(if tail.len() == 2 { DIGITS[((b & 15) << 2) as usize] as char } else { '=' });
+        output.push('=');
     }
     Ok(Value::Text(output))
 }
@@ -78,6 +86,10 @@ mod tests {
         let encoded = base64(&[Value::Text("hello".into())]).unwrap();
         assert_eq!(encoded, Value::Text("aGVsbG8=".into()));
         assert_eq!(unbase64_utf8(&[encoded]).unwrap(), Value::Text("hello".into()));
+        for text in ["", "a", "ab", "abc", "abcd", "abcde", "é", "🙂"] {
+            let encoded = base64(&[Value::Text(text.into())]).unwrap();
+            assert_eq!(unbase64_utf8(&[encoded]).unwrap(), Value::Text(text.into()));
+        }
         assert!(unbase64_utf8(&[Value::Text("aGVsbG8==".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("////".into())]).is_err());
         assert_eq!(base64(&[Value::Null]).unwrap(), Value::Null);
