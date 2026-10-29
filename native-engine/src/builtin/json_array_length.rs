@@ -12,12 +12,18 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let Some(value) = super::string(&args[1])? else { return Ok(Value::Null); };
         value
     } else { "$" };
-    let doc = json_path::parse(text)?;
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    let doc = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(doc) => doc,
+        Err(_) => return Ok(Value::Null),
+    };
     match json_path::lookup(Some(&doc), path)? {
         None | Some(serde_json::Value::Null) => Ok(Value::Null),
         Some(serde_json::Value::Array(items)) => Ok(Value::Integer(i64::try_from(items.len())
             .map_err(|_| Error::Execution("JSON array length overflow".into()))?)),
-        _ => Err(Error::Type("JSON_ARRAY_LENGTH requires a JSON array".into())),
+        _ => Ok(Value::Null),
     }
 }
 
@@ -35,6 +41,10 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("[]".into())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Text("{}".into()), Value::Text("$.missing".into())])
             .unwrap(), Value::Null);
-        assert!(evaluate(&[Value::Text("{}".into())]).is_err());
+        assert_eq!(evaluate(&[Value::Text("{}".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("42".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("[1,2".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
