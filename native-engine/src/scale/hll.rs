@@ -20,10 +20,11 @@ const RECIPROCAL_POWERS: [f64; 54] = {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HyperLogLog {
     registers: [u8; REGISTERS],
+    nonempty: usize,
 }
 
 impl HyperLogLog {
-    pub fn new() -> Self { Self { registers: [0; REGISTERS] } }
+    pub fn new() -> Self { Self { registers: [0; REGISTERS], nonempty: 0 } }
 
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
     pub fn add(&mut self, value: &Value) {
@@ -34,11 +35,13 @@ impl HyperLogLog {
         let index = (hash >> (64 - PRECISION)) as usize;
         let rank = ((hash << PRECISION).leading_zeros() + 1)
             .min(65 - PRECISION) as u8;
+        if self.registers[index] == 0 { self.nonempty += 1; }
         self.registers[index] = self.registers[index].max(rank);
     }
 
     pub fn merge(&mut self, other: &Self) {
         for (dest, source) in self.registers.iter_mut().zip(other.registers) {
+            if *dest == 0 && source != 0 { self.nonempty += 1; }
             *dest = (*dest).max(source);
         }
     }
@@ -61,7 +64,7 @@ impl HyperLogLog {
     }
 
     pub fn nonempty_registers(&self) -> usize {
-        self.registers.iter().filter(|&&rank| rank != 0).count()
+        self.nonempty
     }
 }
 
@@ -207,5 +210,25 @@ mod hll_estimation_lookup_tests {
         let reference = if raw <= 2.5 * m && zeros > 0 { m * (m / zeros as f64).ln() } else { raw };
         assert_eq!(sketch.estimate(), reference);
         assert_eq!(HyperLogLog::new().estimate(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod cached_nonempty_register_count_tests {
+    use super::*;
+    #[test]
+    fn tracked_nonempty_count_matches_registers_after_merge_and_repeats() {
+        let mut a = HyperLogLog::new();
+        let mut b = HyperLogLog::new();
+        for n in 0..50_000 {
+            if n % 2 == 0 { a.add(&Value::Integer(n)); }
+            else { b.add(&Value::Integer(n)); }
+        }
+        for _ in 0..10 { a.add(&Value::Integer(2)); }
+        a.merge(&b);
+        assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&rank| rank != 0).count());
+        assert!(a.nonempty_registers() > 4000);
+        a.merge(&b);
+        assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&rank| rank != 0).count());
     }
 }
