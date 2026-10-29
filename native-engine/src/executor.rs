@@ -48,6 +48,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => pending.push((input, depth + 1)),
             Plan::Join { left, right, .. }
+            | Plan::CrossJoin { left, right }
             | Plan::UnionAll { left, right }
             | Plan::Intersect { left, right }
             | Plan::Except { left, right } => {
@@ -124,6 +125,7 @@ fn execute_inner(
             right_key,
             *kind,
         )?,
+        Plan::CrossJoin { left, right } => join::cross_join(&descend(left)?, &descend(right)?)?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
         Plan::Except { left, right } => set_ops::except_distinct(&descend(left)?, &descend(right)?)?,

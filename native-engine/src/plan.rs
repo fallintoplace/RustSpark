@@ -44,6 +44,10 @@ pub enum Plan {
         right_key: String,
         kind: JoinKind,
     },
+    CrossJoin {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
     UnionAll {
         left: Box<Plan>,
         right: Box<Plan>,

@@ -93,6 +93,10 @@ pub fn optimize(plan: Plan) -> Plan {
             right_key,
             kind,
         },
+        Plan::CrossJoin { left, right } => Plan::CrossJoin {
+            left: Box::new(optimize(*left)),
+            right: Box::new(optimize(*right)),
+        },
         Plan::UnionAll { left, right } => Plan::UnionAll {
             left: Box::new(optimize(*left)),
             right: Box::new(optimize(*right)),
