@@ -19,8 +19,17 @@ TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
 
 
+def _reject_duplicate_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON request field")
+        result[key] = value
+    return result
+
+
 def validate_params(body: bytes) -> dict[str, str]:
-    payload = json.loads(body)
+    payload = json.loads(body, object_pairs_hook=_reject_duplicate_fields)
     if not isinstance(payload, dict) or set(payload) != {"params"}:
         raise ValueError("Expected JSON object containing only params")
     params = payload["params"]
