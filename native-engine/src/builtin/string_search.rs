@@ -21,6 +21,14 @@ fn split_part(args: &[Value]) -> Result<Value> {
     if delimiter.is_empty() {
         return Ok(Value::Text(if index == 1 || index == -1 { text } else { "" }.to_string()));
     }
+    if index == 1 {
+        let result = text.find(delimiter).map_or(text, |position| &text[..position]);
+        return Ok(Value::Text(result.to_owned()));
+    }
+    if index == -1 {
+        let result = text.rfind(delimiter).map_or(text, |position| &text[position + delimiter.len()..]);
+        return Ok(Value::Text(result.to_owned()));
+    }
     let result = if index > 0 {
         usize::try_from(index - 1).ok()
             .and_then(|offset| text.split(delimiter).nth(offset))
@@ -94,5 +102,18 @@ mod instr_borrowed_arguments_perf_tests {
         assert_eq!(instr(&[haystack.clone(), needle.clone()]).unwrap(),
             locate(&[needle, haystack]).unwrap());
         assert_eq!(instr(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod split_part_boundary_perf_tests {
+    use super::*;
+    #[test]
+    fn first_last_unicode_fields_and_no_delimiter() {
+        let value = Value::Text("α🙂β🙂γ".into());
+        let delim = Value::Text("🙂".into());
+        assert_eq!(split_part(&[value.clone(), delim.clone(), Value::Integer(1)]).unwrap(), Value::Text("α".into()));
+        assert_eq!(split_part(&[value, delim, Value::Integer(-1)]).unwrap(), Value::Text("γ".into()));
+        assert_eq!(split_part(&[Value::Text("text".into()), Value::Text("|".into()), Value::Integer(-1)]).unwrap(), Value::Text("text".into()));
     }
 }
