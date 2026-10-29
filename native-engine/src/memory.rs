@@ -136,7 +136,18 @@ mod tests {
 /// Reserve independent operator budgets; partially successful reservations are
 /// released automatically when any later allocation fails.
 pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Reservation>> {
-    requests.iter().map(|bytes| pool.reserve(*bytes)).collect()
+    let total = requests.iter().try_fold(0usize, |sum, &bytes| {
+        sum.checked_add(bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
+    })?;
+    let mut combined = pool.reserve(total)?;
+    let reservations = requests.iter().map(|&bytes| Reservation {
+        pool: Arc::clone(pool),
+        bytes,
+    }).collect();
+    // Transfer the existing atomic charge to the independently dropped guards.
+    combined.bytes = 0;
+    Ok(reservations)
 }
 
 #[cfg(test)]
@@ -155,3 +166,19 @@ mod bulk_memory_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod atomic_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn overlarge_group_never_charges_the_pool() {
+        let pool = MemoryPool::new(usize::MAX);
+        assert!(reserve_many(&pool, &[usize::MAX, 1]).is_err());
+        assert_eq!(pool.used(), 0);
+        let reservations = reserve_many(&pool, &[7, 11]).unwrap();
+        assert_eq!(pool.used(), 18);
+        drop(reservations);
+        assert_eq!(pool.used(), 0);
+    }
+}
