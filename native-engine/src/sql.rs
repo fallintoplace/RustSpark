@@ -270,6 +270,11 @@ impl Parser {
         }
         if self.peek() == Some(&Token::Operator("-".into())) {
             let _ = self.next();
+            if matches!(self.peek(), Some(Token::Number(number))
+                if number == "9223372036854775808") {
+                let _ = self.next();
+                return Ok(Expr::Literal(Value::Integer(i64::MIN)));
+            }
             return Ok(Expr::binary(
                 Expr::Literal(Value::Integer(0)),
                 BinaryOp::Subtract,
@@ -353,7 +358,8 @@ impl Parser {
             }
             Some(Token::Word(word)) => Ok(Expr::Column(word)),
             Some(Token::Text(text)) => Ok(Expr::Literal(Value::Text(text))),
-            Some(Token::Number(number)) if number.contains('.') => {
+            Some(Token::Number(number))
+                if number.contains('.') || number.contains('e') || number.contains('E') => {
                 let parsed = number
                     .parse::<f64>()
                     .map_err(|_| Error::Parse("invalid floating-point literal".into()))?;
@@ -997,5 +1003,22 @@ mod sql_cast_feature_tests {
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(12)], vec![Value::Null]]);
         assert!(parse_sql("SELECT CAST(value AS DATE) FROM t").is_err());
+    }
+}
+
+#[cfg(test)]
+mod consolidated_sql_numeric_regressions {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor, schema::{DataType, Field, Schema}};
+    #[test]
+    fn exponent_leading_dot_and_min_bigint_execute() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap()).unwrap();
+        let query = "SELECT .5 AS a, 2E+2 AS b, -9223372036854775808 AS c FROM t";
+        assert_eq!(executor::execute(&parse_sql(query).unwrap(), &catalog).unwrap().row(0).unwrap(),
+            vec![Value::Float(0.5), Value::Float(200.0), Value::Integer(i64::MIN)]);
+        assert!(parse_sql("SELECT 1e309 FROM t").is_err());
+        assert!(parse_sql("SELECT -9223372036854775809 FROM t").is_err());
     }
 }
