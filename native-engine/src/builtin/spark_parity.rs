@@ -254,6 +254,17 @@ fn elt(args: &[Value]) -> Result<Value> {
     Ok(args.get(zero_based + 1).cloned().unwrap_or(Value::Null))
 }
 
+fn number_float_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 1 && matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(DataType::Float)
+    } else { Err(Error::Type("function requires one numeric argument".into())) }
+}
+fn signum(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
+    let sign = if value > 0.0 { 1.0 } else if value < 0.0 { -1.0 } else { 0.0 };
+    Ok(Value::Float(sign))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -274,6 +285,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "luhn_check", min_args: 1, max_args: 1, result_type: luhn_type, call: luhn_check },
     Function { name: "soundex", min_args: 1, max_args: 1, result_type: text_text_type, call: soundex },
     Function { name: "elt", min_args: 2, max_args: 128, result_type: elt_type, call: elt },
+    Function { name: "signum", min_args: 1, max_args: 1, result_type: number_float_type, call: signum },
     // PARITY_FUNCTIONS
 ];
 
@@ -416,6 +428,14 @@ mod tests {
         assert_eq!(sql_result("elt(2, 'scala', 'java')").unwrap(), Value::Text("java".into()));
         assert_eq!(sql_result("elt(9, 'scala', 'java')").unwrap(), Value::Null);
         assert_eq!(elt(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_signum_returns_float_sign() {
+        assert_eq!(sql_result("signum(-3)").unwrap(), Value::Float(-1.0));
+        assert_eq!(sql_result("signum(0)").unwrap(), Value::Float(0.0));
+        assert_eq!(sql_result("signum(3)").unwrap(), Value::Float(1.0));
+        assert_eq!(signum(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
