@@ -59,6 +59,7 @@ mod char_length;
 mod len;
 mod lcase;
 mod ucase;
+mod space;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -138,6 +139,7 @@ const MODULES: &[&[Function]] = &[
     &len::FUNCTIONS,
     &lcase::FUNCTIONS,
     &ucase::FUNCTIONS,
+    &space::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
