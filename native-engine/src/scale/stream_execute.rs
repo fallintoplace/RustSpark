@@ -285,7 +285,17 @@ fn infer(
                 fields.push(Field::new(alias, source_field.data_type, true));
             }
             for item in aggregates {
-                let kind = match &item.op {
+                let op = match &item.op {
+                    AggregateOp::Filtered { op, predicate } => {
+                        if predicate.output_type(&source)? != DataType::Boolean &&
+                            !matches!(predicate, Expr::Literal(Value::Null)) {
+                            return Err(Error::Type("FILTER WHERE must be boolean".into()));
+                        }
+                        op.as_ref()
+                    },
+                    other => other,
+                };
+                let kind = match op {
                     AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
                         crate::schema::DataType::Integer,
                     AggregateOp::Avg(expr) => match expr.output_type(&source)? {
@@ -299,6 +309,8 @@ fn infer(
                         _ => return Err(Error::Type("SUM requires numeric input".into())),
                     },
                     AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                    AggregateOp::Filtered { .. } =>
+                        return Err(Error::Unsupported("nested aggregate FILTER".into())),
                 };
                 fields.push(Field::new(&item.alias, kind, true));
             }

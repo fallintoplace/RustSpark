@@ -18,6 +18,7 @@ pub enum AggregateOp {
     Avg(Expr),
     Min(Expr),
     Max(Expr),
+    Filtered { op: Box<AggregateOp>, predicate: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +53,13 @@ impl AggregateItem {
                 }
             }
             AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(schema),
+            AggregateOp::Filtered { op, predicate } => {
+                if predicate.output_type(schema)? != DataType::Boolean &&
+                    !matches!(predicate, Expr::Literal(Value::Null)) {
+                    return Err(Error::Type("FILTER WHERE must be boolean".into()));
+                }
+                Self::new((**op).clone(), &self.alias).output_type(schema)
+            },
         }
     }
 }
@@ -75,12 +83,20 @@ impl State {
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
+            AggregateOp::Filtered { op, .. } => Self::new(op),
         }
     }
 
     fn update(&mut self, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
+        if let AggregateOp::Filtered { op, predicate } = op {
+            if predicate.evaluate(batch, row)?.as_boolean()? != Some(true) {
+                return Ok(());
+            }
+            return self.update(op, batch, row);
+        }
         let value = match op {
             AggregateOp::CountAll => Value::Integer(1),
+            AggregateOp::Filtered { .. } => unreachable!("filtered op handled before evaluation"),
             AggregateOp::Count(expr)
             | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr)
@@ -202,7 +218,11 @@ pub fn aggregate_with_max_groups(
         fields.push(Field::new(alias, expr.output_type(batch.schema())?, true));
     }
     for item in items {
-        let nullable = !matches!(&item.op,
+        let base_op = match &item.op {
+            AggregateOp::Filtered { op, .. } => op.as_ref(),
+            other => other,
+        };
+        let nullable = !matches!(base_op,
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
         fields.push(Field::new(&item.alias, item.output_type(batch.schema())?, nullable));
     }

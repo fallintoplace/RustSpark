@@ -383,7 +383,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "SUM", "MIN", "MAX", "AVG"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -406,6 +406,10 @@ impl Parser {
                 match function.as_str() {
                     "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
+                    "COUNT_IF" => AggregateOp::Count(Expr::Case {
+                        branches: vec![(expr, Expr::Literal(Value::Integer(1)))],
+                        else_expr: None,
+                    }),
                     "SUM" => AggregateOp::Sum(expr),
                     "AVG" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
@@ -414,6 +418,13 @@ impl Parser {
                 }
             };
             self.expect_symbol(')')?;
+            let op = if self.take_word("FILTER") {
+                self.expect_symbol('(')?;
+                self.expect_word("WHERE")?;
+                let predicate = self.expression(0)?;
+                self.expect_symbol(')')?;
+                AggregateOp::Filtered { op: Box::new(op), predicate }
+            } else { op };
             let alias = self.select_alias(function.to_ascii_lowercase())?;
             return Ok(SelectItem::Aggregate(AggregateItem::new(op, alias)));
         }

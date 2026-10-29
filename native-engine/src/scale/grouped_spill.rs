@@ -58,12 +58,20 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Max(_) => Ok(State::Max(None)),
         AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
+        AggregateOp::Filtered { op, .. } => new_state(op),
     }
 }
 
 fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
+    if let AggregateOp::Filtered { op, predicate } = op {
+        if predicate.evaluate(batch, row)?.as_boolean()? != Some(true) {
+            return Ok(());
+        }
+        return add_to_state(state, op, batch, row);
+    }
     let value = match op {
         AggregateOp::CountAll => Value::Integer(1),
+        AggregateOp::Filtered { .. } => unreachable!("filtered op handled before evaluation"),
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
@@ -136,7 +144,17 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
         fields.push(Field::new(alias, field.data_type, true));
     }
     for item in items {
-        let ty = match &item.op {
+        let (op, predicate) = match &item.op {
+            AggregateOp::Filtered { op, predicate } => (op.as_ref(), Some(predicate)),
+            other => (other, None),
+        };
+        if let Some(predicate) = predicate {
+            if predicate.output_type(input)? != DataType::Boolean &&
+                !matches!(predicate, Expr::Literal(Value::Null)) {
+                return Err(Error::Type("FILTER WHERE must be boolean".into()));
+            }
+        }
+        let ty = match op {
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) => DataType::Integer,
             AggregateOp::Sum(expr) => match expr.output_type(input)? {
                 DataType::Integer => DataType::Integer,
@@ -148,8 +166,10 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
             },
+            AggregateOp::Filtered { .. } =>
+                return Err(Error::Unsupported("nested aggregate FILTER is unsupported".into())),
         };
-        let nullable = !matches!(&item.op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
+        let nullable = !matches!(op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
         fields.push(Field::new(&item.alias, ty, nullable));
     }
     Schema::new(fields)
