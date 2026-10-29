@@ -44,8 +44,9 @@ class RustSpark:
 
     def query(
         self,
-        sql: str,
+        sql: str | None,
         *,
+        sql_file: str | os.PathLike[str] | None = None,
         input: str | os.PathLike[str] | None = None,
         csv: str | os.PathLike[str] | None = None,
         parquet: str | os.PathLike[str] | None = None,
@@ -63,8 +64,13 @@ class RustSpark:
         Named parameters are typed CLI values, e.g. {"min": "int64:10"}.
         The CLI binds them without substituting text into the SQL statement.
         """
-        if not sql.strip():
-            raise ValueError("SQL cannot be blank")
+        if sql_file is None:
+            if not isinstance(sql, str) or not sql.strip():
+                raise ValueError("SQL cannot be blank")
+        else:
+            if (not os.fspath(sql_file) or
+                    (sql is not None and (not isinstance(sql, str) or sql.strip()))):
+                raise ValueError("Provide exactly one inline SQL statement or sql_file")
         unnamed = {"input": input, "csv": csv, "parquet": parquet, "json": json_input}
         named = {"csv-table": csv_tables, "parquet-table": parquet_tables, "json-table": json_tables}
         if sum(value is not None for value in unnamed.values()) > 1:
@@ -81,7 +87,12 @@ class RustSpark:
         ):
             raise ValueError("process_timeout must be finite and positive")
 
-        command = [os.fspath(self.binary), "--sql", sql, "--stdout-format", "json-array"]
+        command = [os.fspath(self.binary)]
+        if sql_file is None:
+            command.extend(["--sql", sql])
+        else:
+            command.extend(["--sql-file", os.fspath(sql_file)])
+        command.extend(["--stdout-format", "json-array"])
         if self.database_dir is not None:
             command.extend(["--database-dir", os.fspath(self.database_dir)])
         for flag, value in unnamed.items():
