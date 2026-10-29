@@ -33,7 +33,12 @@ impl BloomFilter {
     }
 
     fn probe(&self, first: u64, step: u64, seed: u32) -> usize {
-        (first.wrapping_add(u64::from(seed).wrapping_mul(step)) % self.bits as u64) as usize
+        let hash = first.wrapping_add(u64::from(seed).wrapping_mul(step));
+        if self.bits.is_power_of_two() {
+            (hash as usize) & (self.bits - 1)
+        } else {
+            (hash % self.bits as u64) as usize
+        }
     }
 
     pub fn insert(&mut self, key: &Value) {
@@ -139,5 +144,18 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_power_of_two_probe_tests {
+    use super::*;
+    #[test]
+    fn masked_and_modulo_sizes_retain_inserted_keys() {
+        for bits in [1, 63, 64, 100, 4096] {
+            let mut bloom = BloomFilter::new(bits, 7).unwrap();
+            for n in 0..100 { bloom.insert(&Value::Integer(n)); }
+            for n in 0..100 { assert!(bloom.might_contain(&Value::Integer(n))); }
+        }
     }
 }
