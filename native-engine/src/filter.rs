@@ -2,6 +2,9 @@ use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Re
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
+    if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
+        return Ok(batch.clone());
+    }
     batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
 }
 
