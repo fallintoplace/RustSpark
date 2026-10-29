@@ -24,3 +24,7 @@ adequate temp volume for large intermediate results.
 ```sh
 cd integrations/polars && python3 -m unittest -v test_query_lazy.py
 ```
+
+For multi-file joins, pass `csv_tables={"users": "users.csv"}`
+and `parquet_tables={"orders": "orders.parquet"}` with matching SQL names.
+Named sources cannot be mixed with unnamed input files.
