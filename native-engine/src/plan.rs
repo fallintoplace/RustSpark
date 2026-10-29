@@ -52,7 +52,17 @@ pub enum Plan {
         left: Box<Plan>,
         right: Box<Plan>,
     },
+    /// SQL INTERSECT ALL retains min(left_count, right_count) copies.
+    IntersectAll {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
     Except {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
+    /// SQL EXCEPT ALL subtracts right multiplicities from the left.
+    ExceptAll {
         left: Box<Plan>,
         right: Box<Plan>,
     },
