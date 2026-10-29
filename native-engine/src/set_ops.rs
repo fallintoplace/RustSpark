@@ -120,7 +120,8 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(right)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
