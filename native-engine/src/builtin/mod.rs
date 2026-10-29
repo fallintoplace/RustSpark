@@ -178,6 +178,7 @@ const MODULES: &[&[Function]] = &[
     &cot::FUNCTIONS,
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
+    &schema_of_json::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
