@@ -94,7 +94,11 @@ impl Iterator for LimitedParquetScan {
             Ok(batch) => {
                 let keep = self.remaining.min(batch.num_rows());
                 self.remaining -= keep;
-                Some(batch.slice_rows(0, keep))
+                if keep == batch.num_rows() {
+                    Some(Ok(batch))
+                } else {
+                    Some(batch.slice_rows(0, keep))
+                }
             }
             Err(error) => {
                 self.remaining = 0;
