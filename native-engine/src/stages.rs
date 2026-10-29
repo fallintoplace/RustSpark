@@ -46,6 +46,16 @@ impl StageGraph {
             }
         }
         for stage in &stages {
+            let expected = match stage.kind {
+                StageKind::Scan => 0,
+                StageKind::Filter | StageKind::Project | StageKind::Aggregate
+                | StageKind::Sort | StageKind::Limit | StageKind::Distinct => 1,
+                StageKind::HashJoin | StageKind::UnionAll
+                | StageKind::Intersect | StageKind::Except => 2,
+            };
+            if stage.inputs.len() != expected {
+                return Err(Error::Schema("invalid physical stage input count".into()));
+            }
             if stage.inputs.iter().any(|dependency| !unique.contains(dependency)) {
                 return Err(Error::Schema("stage depends on an unknown stage".into()));
             }
@@ -185,6 +195,21 @@ mod tests {
         assert_eq!(graph.stages()[root].inputs, vec![0, 1]);
         assert_eq!(graph.stages()[root].kind, StageKind::Except);
         assert!(graph.stages()[root].kind.is_blocking());
+    }
+
+    #[test]
+    fn rejects_invalid_operator_input_arity() {
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::HashJoin, inputs: vec![] },
+        ]).is_err());
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![1] },
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] },
+        ]).is_err());
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+        ]).is_ok());
     }
 
     #[test]
