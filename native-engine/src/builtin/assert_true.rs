@@ -50,8 +50,8 @@ mod tests {
 
     #[test]
     fn asserts_conditions_through_native_sql() {
-        assert_eq!(run("SELECT ASSERT_TRUE(n > 0, 'bad number') FROM t LIMIT 1").unwrap(),
-            vec![vec![Value::Null]]);
+        assert_eq!(run("SELECT ASSERT_TRUE(n IS NULL OR n > 0, 'bad number') FROM t").unwrap(),
+            vec![vec![Value::Null], vec![Value::Null]]);
         assert!(run("SELECT ASSERT_TRUE(n > 1, 'bad number') FROM t").unwrap_err()
             .to_string().contains("bad number"));
         assert!(run("SELECT ASSERT_TRUE(n > 0) FROM t").is_err());
