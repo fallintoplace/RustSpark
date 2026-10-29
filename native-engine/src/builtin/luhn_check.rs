@@ -11,11 +11,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return Ok(Value::Boolean(false));
     }
-    let sum: u32 = text.bytes().rev().enumerate().map(|(index, digit)| {
-        let mut n = u32::from(digit - b'0');
+    let sum = text.bytes().rev().enumerate().fold(0_u8, |sum, (index, digit)| {
+        let mut n = digit - b'0';
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        n
-    }).sum();
+        (sum + n) % 10
+    });
     Ok(Value::Boolean(sum % 10 == 0))
 }
 
@@ -32,5 +32,7 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("79927398714".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(evaluate(&[Value::Text("7x".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("0".repeat(1_000_000))]).unwrap(), Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Text(format!("{}1", "0".repeat(1_000_000)))]).unwrap(), Value::Boolean(false));
     }
 }
