@@ -41,7 +41,8 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
         }
         match node {
             Plan::Scan { .. } | Plan::OneRow | Plan::Values { .. } => {}
-            Plan::Filter { input, .. }
+            Plan::Alias { input, .. }
+            | Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::Sort { input, .. }
@@ -88,6 +89,7 @@ fn execute_inner(
     let batch = match plan {
         Plan::OneRow => Batch::new_with_row_count(crate::schema::Schema::new(vec![])?, vec![], 1)?,
         Plan::Values { schema, rows } => Batch::from_rows(schema.clone(), rows.clone())?,
+        Plan::Alias { input, alias } => descend(input)?.qualify(alias)?,
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
         Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,

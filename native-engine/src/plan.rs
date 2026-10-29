@@ -16,6 +16,8 @@ pub enum Plan {
         schema: crate::schema::Schema,
         rows: Vec<Vec<crate::scalar::Value>>,
     },
+    /// Preserve a source alias so qualified column references stay unambiguous.
+    Alias { input: Box<Plan>, alias: String },
     Scan {
         table: String,
     },

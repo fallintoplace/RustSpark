@@ -356,7 +356,12 @@ impl Parser {
                 }
                 Ok(Expr::Call { name: word, args })
             }
-            Some(Token::Word(word)) => Ok(Expr::Column(word)),
+            Some(Token::Word(word)) => {
+                let name = if self.take_symbol('.') {
+                    format!("{word}.{}", self.identifier()?)
+                } else { word };
+                Ok(Expr::Column(name))
+            },
             Some(Token::Text(text)) => Ok(Expr::Literal(Value::Text(text))),
             Some(Token::Number(number))
                 if number.contains('.') || number.contains('e') || number.contains('E') => {
@@ -419,7 +424,7 @@ impl Parser {
         }
         let expr = self.expression(0)?;
         let default_alias = match &expr {
-            Expr::Column(name) => name.clone(),
+            Expr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_owned(),
             _ => format!("expr_{}", index + 1),
         };
         let alias = self.select_alias(default_alias)?;
@@ -487,6 +492,37 @@ impl Parser {
         Ok((rows, types))
     }
 
+
+    fn qualified_identifier(&mut self) -> Result<String> {
+        let first = self.identifier()?;
+        if self.take_symbol('.') {
+            Ok(format!("{first}.{}", self.identifier()?))
+        } else {
+            Ok(first)
+        }
+    }
+
+    fn named_source(&mut self) -> Result<Plan> {
+        let table = self.identifier()?;
+        let alias = if self.take_word("AS") {
+            Some(self.identifier()?)
+        } else if matches!(self.peek(), Some(Token::Word(next)) if
+            !["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS",
+              "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET",
+              "UNION", "INTERSECT", "EXCEPT", "ON", "FETCH"]
+              .iter().any(|reserved| next.eq_ignore_ascii_case(reserved))
+        ) {
+            Some(self.identifier()?)
+        } else {
+            None
+        };
+        let scan = Plan::scan(table);
+        Ok(match alias {
+            Some(alias) => Plan::Alias { input: Box::new(scan), alias },
+            None => scan,
+        })
+    }
+
     fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
@@ -526,7 +562,7 @@ impl Parser {
                     }).collect();
                 Plan::Values { schema: crate::schema::Schema::new(fields)?, rows }
             } else {
-                Plan::scan(self.identifier()?)
+                self.named_source()?
             }
         } else { Plan::OneRow };
         loop {
@@ -559,16 +595,16 @@ impl Parser {
                 None
             };
             let Some(kind) = kind else { break };
-            let right = self.identifier()?;
+            let right = self.named_source()?;
             self.expect_word("ON")?;
-            let left_key = self.identifier()?;
+            let left_key = self.qualified_identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
-            let right_key = self.identifier()?;
+            let right_key = self.qualified_identifier()?;
             plan = Plan::Join {
                 left: Box::new(plan),
-                right: Box::new(Plan::scan(right)),
+                right: Box::new(right),
                 left_key,
                 right_key,
                 kind,
@@ -696,7 +732,7 @@ impl Parser {
                             "ORDER BY position requires an explicit projected column".into()
                         ))?.alias.clone();
                     Expr::Column(alias)
-                } else { Expr::Column(self.identifier()?) };
+                } else { Expr::Column(self.qualified_identifier()?) };
                 let descending = if self.take_word("DESC") {
                     true
                 } else {

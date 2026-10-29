@@ -84,6 +84,18 @@ impl Batch {
             .ok_or_else(|| Error::Execution(format!("row index out of bounds: {row}")))
     }
 
+    /// Qualify all field names without changing data types or row cardinality.
+    pub fn qualify(&self, alias: &str) -> Result<Self> {
+        let schema = Schema::new(self.schema.fields().iter().map(|field| {
+            crate::schema::Field::new(
+                format!("{alias}.{}", field.name),
+                field.data_type,
+                field.nullable,
+            )
+        }).collect())?;
+        Self::new_with_row_count(schema, self.columns.clone(), self.rows)
+    }
+
     pub fn row(&self, index: usize) -> Result<Vec<Value>> {
         if index >= self.rows {
             return Err(Error::Execution(format!("row index out of bounds: {index}")));

@@ -10,6 +10,7 @@ use crate::{
 pub fn optimize(plan: Plan) -> Plan {
     match plan {
         Plan::Scan { .. } | Plan::OneRow | Plan::Values { .. } => plan,
+        Plan::Alias { input, alias } => Plan::Alias { input: Box::new(optimize(*input)), alias },
         Plan::Filter { input, predicate } => {
             let input = optimize(*input);
             if matches!(&predicate, Expr::Literal(Value::Boolean(true))) {

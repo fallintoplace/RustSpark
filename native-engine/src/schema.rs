@@ -72,10 +72,27 @@ impl Schema {
     }
 
     pub fn column(&self, name: &str) -> Result<usize> {
-        self.fields
-            .iter()
-            .position(|field| field.name.eq_ignore_ascii_case(name))
-            .ok_or_else(|| Error::Schema(format!("unknown column: {name}")))
+        if let Some(index) = self.fields.iter().position(
+            |field| field.name.eq_ignore_ascii_case(name)
+        ) {
+            return Ok(index);
+        }
+        // An unqualified column may resolve to a single aliased source.
+        // Reject ambiguity rather than arbitrarily picking a join side.
+        if !name.contains('.') {
+            let mut matches = self.fields.iter().enumerate().filter(
+                |(_, field)| field.name.rsplit_once('.').is_some_and(
+                    |(_, suffix)| suffix.eq_ignore_ascii_case(name)
+                )
+            );
+            if let Some((index, _)) = matches.next() {
+                if matches.next().is_some() {
+                    return Err(Error::Schema(format!("ambiguous column: {name}")));
+                }
+                return Ok(index);
+            }
+        }
+        Err(Error::Schema(format!("unknown column: {name}")))
     }
 
     pub fn field(&self, index: usize) -> Result<&Field> {
