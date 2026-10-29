@@ -45,6 +45,17 @@ fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usi
     })
 }
 
+fn bucket_prebound(columns: &[&[crate::scalar::Value]], row: usize, count: usize) -> usize {
+    let mut hash = crate::hash_partition::PartitionHasher::default();
+    for column in columns { column[row].hash(&mut hash); }
+    let hashed = hash.finish();
+    if count.is_power_of_two() {
+        (hashed as usize) & (count - 1)
+    } else {
+        (hashed % count as u64) as usize
+    }
+}
+
 fn write_shard(
     writers: &mut [Option<SpillWriter<BufWriter<File>>>],
     paths: &[PathBuf], schema: &Schema, index: usize,
@@ -85,6 +96,8 @@ impl PartitionWriter {
         let owned = self.owned.as_ref().ok_or_else(|| Error::Execution("writer finalized".into()))?;
         if batch.schema() != &owned.schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
+        let keys = self.key_columns.iter().map(|&column| batch.column(column))
+            .collect::<Result<Vec<_>>>()?;
         let mut dense: Option<Vec<Vec<usize>>> = None;
         let mut start = 0;
         while start < batch.num_rows() {
@@ -93,7 +106,7 @@ impl PartitionWriter {
             if writers.len() > (end - start).saturating_mul(4) {
                 let mut sparse = std::collections::HashMap::<usize, Vec<usize>>::new();
                 for row in start..end {
-                    let index = bucket(batch, row, &self.key_columns, writers.len())?;
+                    let index = bucket_prebound(&keys, row, writers.len());
                     sparse.entry(index).or_default().push(row);
                 }
                 for (index, rows) in sparse {
@@ -103,7 +116,7 @@ impl PartitionWriter {
                 let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
                 for group in groups.iter_mut() { group.clear(); }
                 for row in start..end {
-                    let index = bucket(batch, row, &self.key_columns, writers.len())?;
+                    let index = bucket_prebound(&keys, row, writers.len());
                     groups[index].push(row);
                 }
                 for (index, rows) in groups.iter().enumerate() {
@@ -309,5 +322,29 @@ mod lazy_partition_writer_tests {
         assert_eq!(observed, batch.rows().unwrap());
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prebound_hash_shard_key_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn matches_legacy_buckets_for_composite_nullable_keys() {
+        let schema = Schema::new(vec![
+            Field::new("k1", DataType::Integer, true),
+            Field::new("k2", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..300).map(|n| vec![
+            if n % 7 == 0 { Value::Null } else { Value::Integer(n % 13) },
+            Value::Text(format!("tag-{}", n % 11)),
+        ]).collect()).unwrap();
+        let columns = vec![batch.column(0).unwrap(), batch.column(1).unwrap()];
+        for buckets in [1, 2, 8, 31, 64] {
+            for row in 0..batch.num_rows() {
+                assert_eq!(bucket_prebound(&columns, row, buckets),
+                    bucket(&batch, row, &[0, 1], buckets).unwrap());
+            }
+        }
     }
 }
