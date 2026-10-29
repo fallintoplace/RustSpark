@@ -45,6 +45,11 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args[0].output_type(schema)? != DataType::Text { return Err(Error::Type("LENGTH requires text".into())); }
             Ok(DataType::Integer)
         },
+        "TRIM" => {
+            if args.len() != 1 { return Err(Error::Parse("TRIM requires one argument".into())); }
+            if args[0].output_type(schema)? != DataType::Text { return Err(Error::Type("TRIM requires text".into())); }
+            Ok(DataType::Text)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -76,6 +81,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Text(value)] => Ok(Value::Integer(i64::try_from(value.chars().count()).map_err(|_| Error::Execution("text length overflow".into()))?)),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("LENGTH requires text".into())),
+        },
+        "TRIM" => match args {
+            [Value::Text(value)] => Ok(Value::Text(value.trim().to_string())),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("TRIM requires text".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
