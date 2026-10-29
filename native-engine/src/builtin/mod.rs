@@ -68,6 +68,10 @@ mod luhn_check;
 mod quote;
 mod regexp_instr;
 mod regexp_substr;
+mod url_encode;
+mod url_decode;
+mod try_url_decode;
+mod bin;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -156,6 +160,10 @@ const MODULES: &[&[Function]] = &[
     &quote::FUNCTIONS,
     &regexp_instr::FUNCTIONS,
     &regexp_substr::FUNCTIONS,
+    &url_encode::FUNCTIONS,
+    &url_decode::FUNCTIONS,
+    &try_url_decode::FUNCTIONS,
+    &bin::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
