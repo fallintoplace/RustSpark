@@ -82,6 +82,29 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaisesRegex(RustSparkError, "process timeout"):
             RustSpark().query("SELECT 1", process_timeout=3)
 
+
+    @patch("rustspark_local.subprocess.run")
+    def test_sql_file_query_does_not_interpolate_text(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        client = RustSpark()
+        self.assertEqual(client.query(None, sql_file="/tmp/queries/report.sql"), [])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--sql-file") + 1], "/tmp/queries/report.sql")
+        self.assertNotIn("--sql", argv)
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            client.query("SELECT 1", sql_file="report.sql")
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            client.query(None, sql_file="")
+
+    def test_sql_identifier_validation_matches_native_cli(self):
+        for name in ("has-dash", "with spaces", "é", "1bad", ""):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                RustSpark().query("SELECT 1", csv_tables={name: "data.csv"})
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                RustSpark().query("SELECT 1", named_params={name: "int64:1"})
+        with self.assertRaises(ValueError):
+            RustSpark().query("SELECT 1", named_params={"valid_name": 12})
+
     @patch("rustspark_local.subprocess.run")
     def test_query_one_bounds_rows_and_rejects_multiple(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, '[{"id":1}]', "")

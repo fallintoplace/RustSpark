@@ -38,3 +38,5 @@ Test without a compiled RustSpark executable:
 ```sh
 PYTHONPATH=integrations/python/src python3 -m unittest discover -s integrations/python/tests
 ```
+
+For reviewed SQL files, pass `query(None, sql_file="queries/report.sql")` instead of SQL text. Table names and typed parameter names follow the CLI ASCII identifier rules and are rejected before subprocess launch if invalid.
