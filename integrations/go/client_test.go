@@ -1,6 +1,8 @@
 package rustsparklocal
 
 import (
+    "bytes"
+    "context"
     "reflect"
     "strings"
     "testing"
@@ -44,4 +46,18 @@ func TestRejectsConflictingAndInvalidInputs(t *testing.T) {
 func contains(values []string, needle string) bool {
     for _, value := range values { if value == needle { return true } }
     return false
+}
+
+func TestNDJSONStreamsProcessOutput(t *testing.T) {
+    var output bytes.Buffer
+    client := Client{Binary: "echo"}
+    if err := client.QueryNDJSON(context.Background(), "SELECT 1", Options{}, &output); err != nil {
+        t.Fatal(err)
+    }
+    if !strings.Contains(output.String(), "--stdout-format json") {
+        t.Fatalf("expected NDJSON output flag, got %q", output.String())
+    }
+    if err := client.QueryNDJSON(context.Background(), "SELECT 1", Options{}, nil); err == nil {
+        t.Fatal("nil writer must be rejected")
+    }
 }
