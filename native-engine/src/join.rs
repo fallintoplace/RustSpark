@@ -348,6 +348,17 @@ impl<'a> PreparedHashJoin<'a> {
     }
 
     pub fn probe(&self, left: &Batch) -> Result<Batch> {
+        self.probe_with_matches(left, None)
+    }
+
+    /// Reuse build-side hash lookup results to mark matched build rows during
+    /// RIGHT/FULL outer joins without retaining a second set of cloned keys.
+    pub fn probe_with_matches(&self, left: &Batch, mut matched: Option<&mut [bool]>) -> Result<Batch> {
+        if let Some(flags) = matched.as_deref() {
+            if flags.len() != self.right.num_rows() {
+                return Err(Error::Execution("prepared join match bitmap size mismatch".into()));
+            }
+        }
         if left.schema() != &self.left_schema {
             return Err(Error::Schema("prepared join probe schema mismatch".into()));
         }
@@ -371,6 +382,9 @@ impl<'a> PreparedHashJoin<'a> {
             let key = left.value(left_row, self.left_column)?;
             let matches = if joinable(key) { self.right_hash.get(key) } else { None };
             if let Some(right_rows) = matches {
+                if let Some(flags) = matched.as_deref_mut() {
+                    for &right_row in right_rows { flags[right_row] = true; }
+                }
                 // Materialize the probe row once, not once per matching build row.
                 let prefix = left.row(left_row)?;
                 for &right_row in right_rows {
@@ -422,5 +436,23 @@ mod prepared_hash_join_tests {
             assert_eq!(actual, expected.rows().unwrap(), "kind: {kind:?}");
             assert!(prepared.probe(&Batch::empty(Schema::new(vec![]).unwrap())).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod bitmap_outer_join_probe_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn tracks_duplicate_and_nan_build_matches_but_not_nulls() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap();
+        let build = Batch::from_rows(schema.clone(), vec![vec![Value::Float(f64::NAN)], vec![Value::Null],
+            vec![Value::Float(1.0)], vec![Value::Float(f64::NAN)]]).unwrap();
+        let probe = Batch::from_rows(schema.clone(), vec![vec![Value::Float(f64::NAN)], vec![Value::Null]]).unwrap();
+        let prepared = PreparedHashJoin::new(schema, &build, "n", "n", JoinKind::Inner).unwrap();
+        let mut flags = vec![false; build.num_rows()];
+        assert_eq!(prepared.probe_with_matches(&probe, Some(&mut flags)).unwrap().num_rows(), 2);
+        assert_eq!(flags, vec![true, false, false, true]);
+        assert!(prepared.probe_with_matches(&probe, Some(&mut [])).is_err());
     }
 }
