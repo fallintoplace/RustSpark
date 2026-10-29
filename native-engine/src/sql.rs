@@ -123,12 +123,19 @@ impl Parser {
                         right: Box::new(self.expression(4)?),
                         negated: negate,
                     };
+                } else if self.peek_word("TRUE") || self.peek_word("FALSE") {
+                    let expected_true = self.take_word("TRUE");
+                    if !expected_true { self.expect_word("FALSE")?; }
+                    let condition = if expected_true { left } else { Expr::Not(Box::new(left)) };
+                    left = Expr::Call {
+                        name: "coalesce".into(),
+                        args: vec![condition, Expr::Literal(Value::Boolean(false))],
+                    };
+                    if negate { left = Expr::Not(Box::new(left)); }
                 } else {
-                    self.expect_word("NULL")?;
+                    if !self.take_word("UNKNOWN") { self.expect_word("NULL")?; }
                     left = Expr::IsNull(Box::new(left));
-                    if negate {
-                        left = Expr::Not(Box::new(left));
-                    }
+                    if negate { left = Expr::Not(Box::new(left)); }
                 }
                 continue;
             }
@@ -712,6 +719,20 @@ mod tests {
         assert_eq!(rows[0], vec![Value::Text("Berlin!".into())]);
         assert_eq!(rows[2], vec![Value::Text("Paris!".into())]);
         assert!(parse_sql("SELECT city | '!' FROM sales").is_err());
+    }
+
+    #[test]
+    fn is_true_false_unknown_handle_sql_nulls() {
+        let rows = execute(&parse_sql(
+            "SELECT (amount > 2) IS NOT TRUE AS not_true FROM sales"
+        ).unwrap(), &sales()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Boolean(true)], vec![Value::Boolean(false)], vec![Value::Boolean(true)]
+        ]);
+        let rows = execute(&parse_sql(
+            "SELECT (amount > 2) IS UNKNOWN AS unknown FROM sales"
+        ).unwrap(), &sales()).unwrap().rows().unwrap();
+        assert_eq!(rows[2], vec![Value::Boolean(true)]);
     }
 
     #[test]
