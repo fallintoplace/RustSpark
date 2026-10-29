@@ -114,14 +114,14 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
-    let header = records.remove(0);
+    let header = std::mem::take(&mut records[0]);
     if header.is_empty() {
         return Err(Error::Schema("CSV input has no columns".into()));
     }
-    if records.len() > MAX_CSV_ROWS {
+    if records.len() - 1 > MAX_CSV_ROWS {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
-    for row in &records {
+    for row in records.iter().skip(1) {
         if row.len() != header.len() {
             return Err(Error::Parse("CSV row width differs from header".into()));
         }
@@ -130,11 +130,12 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
         header
             .iter()
             .enumerate()
-            .map(|(column, name)| Field::new(name, kind(&records, column), true))
+            .map(|(column, name)| Field::new(name, kind(&records[1..], column), true))
             .collect(),
     )?;
     let rows = records
         .into_iter()
+        .skip(1)
         .map(|record| {
             record
                 .into_iter()
