@@ -181,13 +181,22 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         },
         "CONCAT" => {
             if args.len() < 2 { return Err(Error::Parse("CONCAT requires at least two arguments".into())); }
-            let mut text = String::new();
+            // Check arguments and determine the exact capacity once, rather
+            // than growing a string repeatedly for a wide CONCAT expression.
+            let mut bytes = 0usize;
             for value in args {
                 match value {
-                    Value::Text(part) => text.push_str(part),
+                    Value::Text(part) => {
+                        bytes = bytes.checked_add(part.len())
+                            .ok_or_else(|| Error::Execution("CONCAT output length overflow".into()))?;
+                    },
                     Value::Null => return Ok(Value::Null),
                     _ => return Err(Error::Type("CONCAT requires text".into())),
                 }
+            }
+            let mut text = String::with_capacity(bytes);
+            for value in args {
+                if let Value::Text(part) = value { text.push_str(part); }
             }
             Ok(Value::Text(text))
         },
@@ -315,5 +324,17 @@ mod spark_trim_space_tests {
         assert_eq!(evaluate("TRIM", &[Value::Text(" \t abc \n ".into())]).unwrap(),
             Value::Text("\t abc \n".into()));
         assert_eq!(evaluate("TRIM", &[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod concat_exact_capacity_tests {
+    use super::*;
+    #[test]
+    fn concat_handles_unicode_empty_segments_and_nulls() {
+        assert_eq!(evaluate("CONCAT", &[Value::Text("é".into()), Value::Text("".into()), Value::Text("🙂".into())]).unwrap(),
+            Value::Text("é🙂".into()));
+        assert_eq!(evaluate("CONCAT", &[Value::Text("a".into()), Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate("CONCAT", &[Value::Text("a".into()), Value::Integer(1)]).is_err());
     }
 }
