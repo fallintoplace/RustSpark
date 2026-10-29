@@ -30,6 +30,15 @@ fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &
 /// CSV reader for small local datasets. Supports UTF-8, CRLF, escaped quotes,
 /// embedded commas and multiline quoted fields. It intentionally has limits.
 pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
+    // The common streaming case is a single unquoted record. Avoid the
+    // character-by-character CSV state machine when no quoting is possible.
+    if !input.as_bytes().contains(&b'"') && !input.as_bytes().contains(&b'\r') {
+        let body = input.strip_suffix('\n').unwrap_or(input);
+        if !body.contains('\n') {
+            if body.is_empty() { return Ok(Vec::new()); }
+            return Ok(vec![body.split(',').map(str::to_owned).collect()]);
+        }
+    }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Start,
@@ -274,5 +283,22 @@ mod streaming_type_inference_tests {
         assert_eq!(data.schema().field(1).unwrap().data_type, DataType::Boolean);
         assert_eq!(data.schema().field(2).unwrap().data_type, DataType::Float);
         assert_eq!(data.schema().field(3).unwrap().data_type, DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod csv_unquoted_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn simple_record_handles_empty_fields_utf8_and_line_ending() {
+        assert_eq!(parse_records("one,,東京,\\n").unwrap(),
+            vec![vec!["one".to_string(), "".into(), "東京".into(), "\\n".into()]]);
+        assert_eq!(parse_records("a,b,\n").unwrap(),
+            vec![vec!["a".to_string(), "b".into(), "".into()]]);
+        assert!(parse_records("\n").unwrap().is_empty());
+        assert_eq!(parse_records("a,\nb,\n").unwrap().len(), 2);
+        assert_eq!(parse_records("\"a,b\",c\n").unwrap(),
+            vec![vec!["a,b".to_string(), "c".into()]]);
     }
 }
