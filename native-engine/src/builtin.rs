@@ -89,6 +89,11 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if !matches!(args[0].output_type(schema)?, DataType::Integer | DataType::Float) { return Err(Error::Type("SQRT requires numeric input".into())); }
             Ok(DataType::Float)
         },
+        "LN" => {
+            if args.len() != 1 { return Err(Error::Parse("LN requires one argument".into())); }
+            if !matches!(args[0].output_type(schema)?, DataType::Integer | DataType::Float) { return Err(Error::Type("LN requires numeric input".into())); }
+            Ok(DataType::Float)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -195,6 +200,13 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Null] => Ok(Value::Null),
             [Value::Integer(_) | Value::Float(_)] => Err(Error::Execution("SQRT requires nonnegative input".into())),
             _ => Err(Error::Type("SQRT requires numeric input".into())),
+        },
+        "LN" => match args {
+            [Value::Integer(n)] if *n > 0 => Ok(Value::Float((*n as f64).ln())),
+            [Value::Float(n)] if *n > 0.0 => Ok(Value::Float(n.ln())),
+            [Value::Null] => Ok(Value::Null),
+            [Value::Integer(_) | Value::Float(_)] => Err(Error::Execution("LN requires positive input".into())),
+            _ => Err(Error::Type("LN requires numeric input".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
