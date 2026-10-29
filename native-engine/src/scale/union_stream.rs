@@ -50,6 +50,7 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         self.stopped = true;
                         return Some(Err(Error::Schema("UNION ALL input schemas differ".into())));
                     }
+                    if batch.num_rows() == 0 { continue; }
                     let rebased = batch.relabel(self.schema.clone());
                     match rebased {
                         Ok(batch) if batch.num_rows() == 0 => continue,
@@ -310,5 +311,24 @@ mod union_schema_move_perf_tests {
         assert_eq!(batches[0].num_rows(), 2);
         assert_eq!(batches[0].value(0, 0).unwrap(),
             &Value::Text("large-value".repeat(100)));
+    }
+}
+
+#[cfg(test)]
+mod union_empty_alias_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn discards_empty_compatible_alias_without_emitting_or_relabeling() {
+        let target = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let alias = Schema::new(vec![Field::new("alias", DataType::Integer, false)]).unwrap();
+        let empty = Batch::empty(alias.clone());
+        let row = Batch::from_rows(alias, vec![vec![Value::Integer(4)]]).unwrap();
+        let batches = UnionAllStream::new(std::iter::empty(), [Ok(empty), Ok(row)].into_iter(),
+            target.clone(), QueryControl::default())
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].schema(), &target);
+        assert_eq!(batches[0].row(0).unwrap(), vec![Value::Integer(4)]);
     }
 }
