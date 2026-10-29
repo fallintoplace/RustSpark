@@ -96,3 +96,35 @@ mod bloom_union_feature_tests {
     }
 }
 
+
+impl BloomFilter {
+    /// Intersect filters with identical layouts. Keys present in both remain
+    /// possible matches, with no false negatives for the intersection.
+    pub fn intersect_with(&mut self, other: &Self) -> Result<()> {
+        if self.bits != other.bits || self.hashes != other.hashes {
+            return Err(Error::Execution("cannot intersect incompatible Bloom filters".into()));
+        }
+        for (destination, source) in self.words.iter_mut().zip(&other.words) {
+            *destination &= *source;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bloom_intersection_tests {
+    use super::*;
+
+    #[test]
+    fn intersection_keeps_common_keys_and_rejects_layout_mismatch() {
+        let mut a = BloomFilter::new(8192, 5).unwrap();
+        let mut b = BloomFilter::new(8192, 5).unwrap();
+        a.insert(&Value::Integer(1));
+        a.insert(&Value::Integer(5));
+        b.insert(&Value::Integer(5));
+        b.insert(&Value::Integer(9));
+        a.intersect_with(&b).unwrap();
+        assert!(a.might_contain(&Value::Integer(5)));
+        assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
