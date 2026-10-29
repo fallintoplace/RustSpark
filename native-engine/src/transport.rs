@@ -112,7 +112,9 @@ pub fn read_frames(
 ) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut total = 0_usize;
-    while let Some(frame) = read_frame(input, max_frame_bytes)? {
+    while let Some(frame) = read_frame(
+        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
+    )? {
         total = total.checked_add(frame.payload.len())
             .filter(|used| *used <= max_total_bytes)
             .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
@@ -139,3 +141,19 @@ mod exchange_stream_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod exchange_preallocation_engine_tests {
+    use super::*;
+
+    #[test]
+    fn remaining_total_budget_rejects_header_before_payload() {
+        let frame = Frame { stage: 1, task: 1, attempt: 1, payload: vec![3; 16] };
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &frame, 16).unwrap();
+        // Complete header with no payload. The byte-budget error must win over EOF.
+        let truncated = &wire[..32];
+        let err = read_frames(&mut truncated.as_ref(), 16, 8).unwrap_err();
+        assert!(err.to_string().contains("memory budget"));
+    }
+}
