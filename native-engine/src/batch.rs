@@ -94,6 +94,9 @@ impl Batch {
     }
 
     pub fn take(&self, indices: &[usize]) -> Result<Self> {
+        if indices.iter().any(|&row| row >= self.rows) {
+            return Err(Error::Execution("row index out of bounds".into()));
+        }
         let mut columns = Vec::with_capacity(self.columns.len());
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
@@ -105,7 +108,7 @@ impl Batch {
             }
             columns.push(selected);
         }
-        Self::new(self.schema.clone(), columns)
+        Self::new_with_row_count(self.schema.clone(), columns, indices.len())
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
@@ -136,6 +139,14 @@ mod tests {
     fn rejects_ragged_and_nullable_violations() {
         assert!(Batch::new(schema(), vec![]).is_err());
         assert!(Batch::new(schema(), vec![vec![Value::Null]]).is_err());
+    }
+
+    #[test]
+    fn gather_preserves_cardinality_without_columns() {
+        let input = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
+        assert_eq!(input.take(&[3, 0, 3]).unwrap().num_rows(), 3);
+        assert_eq!(input.take(&[]).unwrap().num_rows(), 0);
+        assert!(input.take(&[4]).is_err());
     }
 
     #[test]
