@@ -272,6 +272,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("CONTAINS requires text".into())),
         },
         "REVERSE" => match args {
+            [Value::Text(value)] if value.is_ascii() => {
+                let mut bytes = value.as_bytes().to_vec();
+                bytes.reverse();
+                Ok(Value::Text(String::from_utf8(bytes)
+                    .expect("reversing ASCII bytes preserves UTF-8")))
+            },
             [Value::Text(value)] => Ok(Value::Text(value.chars().rev().collect())),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("REVERSE requires text".into())),
@@ -315,5 +321,16 @@ mod spark_trim_space_tests {
         assert_eq!(evaluate("TRIM", &[Value::Text(" \t abc \n ".into())]).unwrap(),
             Value::Text("\t abc \n".into()));
         assert_eq!(evaluate("TRIM", &[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_reverse_tests {
+    use super::*;
+    #[test]
+    fn reverse_ascii_and_unicode_characters() {
+        assert_eq!(evaluate("REVERSE", &[Value::Text("Hello".into())]).unwrap(), Value::Text("olleH".into()));
+        assert_eq!(evaluate("REVERSE", &[Value::Text("é🙂a".into())]).unwrap(), Value::Text("a🙂é".into()));
+        assert_eq!(evaluate("REVERSE", &[Value::Null]).unwrap(), Value::Null);
     }
 }
