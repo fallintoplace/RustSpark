@@ -51,6 +51,7 @@ mod left_right;
 mod overlay_text;
 mod levenshtein;
 mod char_length;
+mod octet_length;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -122,6 +123,7 @@ const MODULES: &[&[Function]] = &[
     &overlay_text::FUNCTIONS,
     &levenshtein::FUNCTIONS,
     &char_length::FUNCTIONS,
+    &octet_length::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
