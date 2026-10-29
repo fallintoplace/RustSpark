@@ -108,6 +108,12 @@ pub fn can_skip_columns(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
     predicate: &Expr,
 ) -> bool {
+    // Inconsistent metadata is not proof that any row can be skipped.
+    if let Some(first) = stats.values().next() {
+        if stats.values().any(|column| column.rows != first.rows) {
+            return false;
+        }
+    }
     match predicate {
         Expr::Binary { left, op: BinaryOp::And, right } =>
             can_skip_columns(stats, left) || can_skip_columns(stats, right),
@@ -142,3 +148,22 @@ mod compound_pruning_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod inconsistent_column_statistics_tests {
+    use super::*;
+
+    #[test]
+    fn zero_row_metadata_for_another_column_does_not_prune_real_rows() {
+        let stats = std::collections::HashMap::from([
+            ("missing".into(), ColumnStatistics::default()),
+            ("value".into(), ColumnStatistics {
+                rows: 5, nulls: 0, min: Some(Value::Integer(1)),
+                max: Some(Value::Integer(5)),
+            }),
+        ]);
+        let predicate = Expr::binary(Expr::Column("value".into()),
+            BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(2)));
+        assert!(!can_skip_columns(&stats, &predicate));
+    }
+}
