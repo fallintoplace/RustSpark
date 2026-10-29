@@ -585,9 +585,12 @@ impl Parser {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
             loop {
-                let expression = if matches!(self.peek(), Some(Token::Number(_))) {
-                    let position = self.usize_literal()?;
-                    let index = position.checked_sub(1)
+                // Spark orders by arbitrary expressions over the output columns.
+                // Bare 1-based integers remain positional references; expressions
+                // involving arithmetic, functions or literals are evaluated as-is.
+                let raw = self.expression(0)?;
+                let expression = if let Expr::Literal(Value::Integer(position)) = &raw {
+                    let index = usize::try_from(*position).ok().and_then(|n| n.checked_sub(1))
                         .ok_or_else(|| Error::Parse("ORDER BY positions start at one".into()))?;
                     let selected = match &plan {
                         Plan::Project { selections, .. } => Some(selections.as_slice()),
@@ -602,7 +605,7 @@ impl Parser {
                             "ORDER BY position requires an explicit projected column".into()
                         ))?.alias.clone();
                     Expr::Column(alias)
-                } else { Expr::Column(self.identifier()?) };
+                } else { raw };
                 let descending = if self.take_word("DESC") {
                     true
                 } else {
