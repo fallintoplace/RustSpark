@@ -189,10 +189,21 @@ fn update_extreme(current: &mut Option<Value>, value: Value, minimum: bool) -> R
     Ok(())
 }
 
+const MAX_GROUPS: usize = 1_000_000;
+
 pub fn aggregate(
     batch: &Batch,
     group_by: &[(Expr, String)],
     items: &[AggregateItem],
+) -> Result<Batch> {
+    aggregate_with_max_groups(batch, group_by, items, MAX_GROUPS)
+}
+
+fn aggregate_with_max_groups(
+    batch: &Batch,
+    group_by: &[(Expr, String)],
+    items: &[AggregateItem],
+    max_groups: usize,
 ) -> Result<Batch> {
     let mut fields = Vec::with_capacity(group_by.len() + items.len());
     for (expr, alias) in group_by {
@@ -219,6 +230,9 @@ pub fn aggregate(
             *index
         } else {
             let index = groups.len();
+            if index >= max_groups {
+                return Err(Error::Execution("GROUP BY key budget exceeded".into()));
+            }
             let _ = group_indices.insert(key.clone(), index);
             groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
             index
@@ -344,5 +358,26 @@ mod bounded_count_distinct_regression {
         insert_count_distinct(&mut keys, Value::Integer(2), 2).unwrap();
         assert!(insert_count_distinct(&mut keys, Value::Integer(3), 2).is_err());
         assert_eq!(keys.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod group_cardinality_budget_regression {
+    use super::*;
+    #[test]
+    fn group_limit_checks_distinct_keys_not_rows() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+        ]).unwrap();
+        let keys = [(Expr::Column("key".into()), "key".to_string())];
+        let counts = [AggregateItem::new(AggregateOp::CountAll, "n")];
+        assert!(aggregate_with_max_groups(&input, &keys, &counts, 2).is_err());
+        assert_eq!(aggregate_with_max_groups(&input, &keys, &counts, 3)
+            .unwrap().num_rows(), 3);
     }
 }
