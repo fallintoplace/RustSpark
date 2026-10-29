@@ -8,14 +8,31 @@ fn base64(args: &[Value]) -> Result<Value> {
     let bytes = text.as_bytes();
     if bytes.len() > MAX_BYTES { return Err(Error::Execution("BASE64 input exceeds byte limit".into())); }
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = *chunk.get(1).unwrap_or(&0);
-        let c = *chunk.get(2).unwrap_or(&0);
+    let mut triplets = bytes.chunks_exact(3);
+    for chunk in &mut triplets {
+        let (a, b, c) = (chunk[0], chunk[1], chunk[2]);
         output.push(DIGITS[(a >> 2) as usize] as char);
         output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(if chunk.len() >= 2 { DIGITS[(((b & 15) << 2) | (c >> 6)) as usize] as char } else { '=' });
-        output.push(if chunk.len() == 3 { DIGITS[(c & 63) as usize] as char } else { '=' });
+        output.push(DIGITS[(((b & 15) << 2) | (c >> 6)) as usize] as char);
+        output.push(DIGITS[(c & 63) as usize] as char);
+    }
+    match triplets.remainder() {
+        [] => {},
+        [a] => {
+            let a = *a;
+            output.push(DIGITS[(a >> 2) as usize] as char);
+            output.push(DIGITS[((a & 3) << 4) as usize] as char);
+            output.push('=');
+            output.push('=');
+        },
+        [a, b] => {
+            let (a, b) = (*a, *b);
+            output.push(DIGITS[(a >> 2) as usize] as char);
+            output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+            output.push(DIGITS[((b & 15) << 2) as usize] as char);
+            output.push('=');
+        },
+        _ => unreachable!("chunks_exact remainder is shorter than 3"),
     }
     Ok(Value::Text(output))
 }
@@ -96,5 +113,18 @@ mod base64_reverse_table_perf_tests {
             Value::Text("abcXYZ+/".into()));
         assert!(unbase64_utf8(&[Value::Text("!!!!".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("____".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod base64_full_triplet_perf_tests {
+    use super::*;
+    #[test]
+    fn all_padding_lengths_and_unicode() {
+        for text in ["", "a", "ab", "abc", "abcd", "abcde", "é🙂"] {
+            let input = Value::Text(text.into());
+            let output = base64(&[input.clone()]).unwrap();
+            assert_eq!(unbase64_utf8(&[output]).unwrap(), input);
+        }
     }
 }
