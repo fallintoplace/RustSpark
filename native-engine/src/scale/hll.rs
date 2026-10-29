@@ -126,11 +126,9 @@ pub fn approximate_distinct_batches(
             return Err(Error::Type("approximate distinct column types differ".into()));
         }
         expected_type = Some(kind);
-        let mut partial = HyperLogLog::new();
         for value in batch.column(index)? {
-            partial.add(value);
+            combined.add(value);
         }
-        combined.merge(&partial);
     }
     Ok(combined.estimate())
 }
