@@ -131,6 +131,17 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(kind.unwrap_or(DataType::Text))
         },
+        "LEAST" => {
+            if args.len() < 2 { return Err(Error::Parse("LEAST requires at least two arguments".into())); }
+            let mut kind = None;
+            for arg in args {
+                if matches!(arg, Expr::Literal(Value::Null)) { continue; }
+                let next = arg.output_type(schema)?;
+                if kind.is_some_and(|previous| previous != next) { return Err(Error::Type("LEAST arguments must share a type".into())); }
+                kind = Some(next);
+            }
+            Ok(kind.unwrap_or(DataType::Text))
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -271,6 +282,18 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             for value in args.iter().filter(|value| !value.is_null()) {
                 if let Some(current) = &best {
                     if value.sql_compare(current)?.ok_or_else(|| Error::Type("GREATEST cannot compare NaN".into()))?.is_gt() {
+                        best = Some(value.clone());
+                    }
+                } else { best = Some(value.clone()); }
+            }
+            Ok(best.unwrap_or(Value::Null))
+        },
+        "LEAST" => {
+            if args.len() < 2 { return Err(Error::Parse("LEAST requires at least two arguments".into())); }
+            let mut best: Option<Value> = None;
+            for value in args.iter().filter(|value| !value.is_null()) {
+                if let Some(current) = &best {
+                    if value.sql_compare(current)?.ok_or_else(|| Error::Type("LEAST cannot compare NaN".into()))?.is_lt() {
                         best = Some(value.clone());
                     }
                 } else { best = Some(value.clone()); }
