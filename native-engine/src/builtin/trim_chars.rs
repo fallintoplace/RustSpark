@@ -48,7 +48,27 @@ fn btrim(args: &[Value]) -> Result<Value> { trim(args, true, true) }
 fn ltrim(args: &[Value]) -> Result<Value> { trim(args, true, false) }
 fn rtrim(args: &[Value]) -> Result<Value> { trim(args, false, true) }
 
+fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)
+}
+fn normalize_space(args: &[Value]) -> Result<Value> {
+    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let mut output = String::with_capacity(input.len());
+    let mut pending = false;
+    for character in input.chars() {
+        if character.is_whitespace() {
+            pending = !output.is_empty();
+        } else {
+            if pending { output.push(' '); }
+            pending = false;
+            output.push(character);
+        }
+    }
+    Ok(Value::Text(output))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "normalize_space", min_args: 1, max_args: 1, result_type: normalize_space_type, call: normalize_space },
     Function { name: "btrim", min_args: 1, max_args: 2, result_type: output, call: btrim },
     Function { name: "ltrim", min_args: 1, max_args: 2, result_type: output, call: ltrim },
     Function { name: "rtrim", min_args: 1, max_args: 2, result_type: output, call: rtrim },
@@ -96,5 +116,17 @@ mod unicode_trim_hash_set_tests {
         let chars = Value::Text("αβγδεζηθικλμνξοπρστυφχψω🙂".into());
         assert_eq!(btrim(&[Value::Text("ωαhelloβ🙂".into()), chars]).unwrap(),
             Value::Text("hello".into()));
+    }
+}
+
+#[cfg(test)]
+mod normalize_space_extension_tests {
+    use super::*;
+    #[test]
+    fn covers_null_and_boundary_values() {
+        assert!(crate::builtin::supports("normalize_space"));
+        assert_eq!(normalize_space(&[Value::Text(" \t A\u{00A0} B \n".into())]).unwrap(), Value::Text("A B".into()));
+        assert_eq!(normalize_space(&[Value::Text(" \t ".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
     }
 }
