@@ -10,10 +10,14 @@ pub enum Token {
 }
 
 const MAX_TOKENS: usize = 10_000;
+const MAX_SQL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Tokenize a small SQL subset without executing anything or depending on
 /// DataFusion's SQL parser. Quoted strings and comments are handled explicitly.
 pub fn tokenize(input: &str) -> Result<Vec<Token>> {
+    if input.len() > MAX_SQL_BYTES {
+        return Err(Error::Parse("SQL exceeds input byte limit".into()));
+    }
     let mut chars = input.chars().peekable();
     let mut tokens = Vec::new();
 
@@ -137,5 +141,16 @@ mod tests {
     fn unterminated_quotes_and_comments_are_errors() {
         assert!(tokenize("SELECT 'open").is_err());
         assert!(tokenize("/* unclosed").is_err());
+    }
+}
+
+#[cfg(test)]
+mod sql_length_limit_tests {
+    use super::*;
+
+    #[test]
+    fn one_huge_token_is_rejected_before_tokenization() {
+        let query = "x".repeat(MAX_SQL_BYTES + 1);
+        assert!(tokenize(&query).unwrap_err().to_string().contains("byte limit"));
     }
 }
