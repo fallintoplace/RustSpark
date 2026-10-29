@@ -29,6 +29,8 @@ mod nanvl;
 
 mod nullifzero;
 
+mod zeroifnull;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -107,6 +109,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "TRY_MOD" => try_mod::output_type(args, schema),
         "NANVL" => nanvl::output_type(args, schema),
         "NULLIFZERO" => nullifzero::output_type(args, schema),
+        "ZEROIFNULL" => zeroifnull::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -127,6 +130,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "TRY_MOD" => try_mod::eval(args, batch, row),
         "NANVL" => nanvl::eval(args, batch, row),
         "NULLIFZERO" => nullifzero::eval(args, batch, row),
+        "ZEROIFNULL" => zeroifnull::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -243,6 +247,13 @@ mod tests {
             vec![Value::Null], vec![Value::Integer(5)], vec![Value::Integer(-4)],
         ]);
         assert_eq!(run("SELECT NULLIFZERO(0) FROM t").unwrap()[0], vec![Value::Null]);
+    }
+
+    #[test]
+    fn zeroifnull_has_native_sql_semantics() {
+        assert_eq!(run("SELECT ZEROIFNULL(x) FROM t").unwrap(), vec![
+            vec![Value::Integer(0)], vec![Value::Integer(5)], vec![Value::Integer(-4)],
+        ]);
     }
 
     #[test]
