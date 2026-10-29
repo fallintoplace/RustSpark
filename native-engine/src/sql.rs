@@ -404,9 +404,15 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
     let mut plan = parser.select_body()?;
     while parser.take_word("UNION") {
-        parser.expect_word("ALL")?;
+        let all = parser.take_word("ALL");
+        if !all {
+            parser.take_word("DISTINCT");
+        }
         let right = parser.select_body()?;
         plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+        if !all {
+            plan = Plan::Distinct { input: Box::new(plan) };
+        }
     }
     let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');
@@ -479,6 +485,17 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn union_distinct_removes_duplicates_but_union_all_keeps_them() {
+        let distinct = parse_sql("SELECT city FROM sales UNION SELECT city FROM sales ORDER BY city").unwrap();
+        let all = parse_sql("SELECT city FROM sales UNION ALL SELECT city FROM sales").unwrap();
+        assert_eq!(execute(&distinct, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("Berlin".into())],
+            vec![Value::Text("Paris".into())],
+        ]);
+        assert_eq!(execute(&all, &sales()).unwrap().num_rows(), 6);
     }
 
     #[test]
