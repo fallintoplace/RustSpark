@@ -89,3 +89,20 @@ mod zero_column_concat_consolidation_tests {
         assert!(concat(&schema, [a, b], 4).is_err());
     }
 }
+
+#[cfg(test)]
+mod split_contiguous_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn single_row_and_empty_width_chunks_preserve_cardinality() {
+        let schema = Schema::new(vec![]).unwrap();
+        let input = Batch::new_with_row_count(schema, vec![], 5).unwrap();
+        let parts = split(&input, 2).unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 2, 1]);
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let data = Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Integer(1)]]).unwrap();
+        assert_eq!(split(&data, 1).unwrap()[1].rows().unwrap(), vec![vec![Value::Integer(1)]]);
+    }
+}
