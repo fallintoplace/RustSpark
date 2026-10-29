@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+from typing import Mapping
 
 
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | None = None, parquet: str | None = None,
-                  max_rows: int = 100_000, query_timeout: int | None = None) -> list[str]:
+                  max_rows: int = 100_000, query_timeout: int | None = None,
+                  named_params: Mapping[str, str] | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be empty")
     if csv is not None and parquet is not None:
@@ -27,12 +30,20 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
         if query_timeout <= 0:
             raise ValueError("query_timeout must be positive")
         command.extend(["--query-timeout", str(query_timeout)])
+    if len(named_params or {}) > 64:
+        raise ValueError("Too many SQL parameters")
+    for name, value in sorted((named_params or {}).items()):
+        if (not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+                or not isinstance(value, str) or ":" not in value or len(value) > 8192):
+            raise ValueError("Parameters must be typed values with valid SQL names")
+        command.extend(["--named-param", f"{name}={value}"])
     return command
 
 
 def query_dataframe(sql: str, *, binary: str = "rustspark",
                     csv: str | None = None, parquet: str | None = None,
-                    max_rows: int = 100_000, query_timeout: int | None = None):
+                    max_rows: int = 100_000, query_timeout: int | None = None,
+                    named_params: Mapping[str, str] | None = None):
     """Load a bounded SQL result as pandas, preserving Arrow logical types.
 
     A DataFrame resides fully in Python memory. Prefer streaming for large data.
@@ -44,6 +55,7 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
         command = build_command(
             sql, output, binary=binary, csv=csv, parquet=parquet,
             max_rows=max_rows, query_timeout=query_timeout,
+            named_params=named_params,
         )
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode:

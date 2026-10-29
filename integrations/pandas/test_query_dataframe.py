@@ -15,6 +15,17 @@ class DataFrameCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")
 
+    def test_typed_parameters_are_passed_without_sql_interpolation(self):
+        sql = "SELECT * FROM data WHERE total > $minimum"
+        args = build_command(sql, Path("out.arrow"),
+                             named_params={"minimum": "int64:10"})
+        self.assertEqual(args[args.index("--sql") + 1], sql)
+        self.assertIn("minimum=int64:10", args)
+        with self.assertRaises(ValueError):
+            build_command(sql, Path("out.arrow"), named_params={"bad-name": "int64:10"})
+        with self.assertRaises(ValueError):
+            build_command(sql, Path("out.arrow"), named_params={"minimum": "10"})
+
 
 if __name__ == "__main__":
     unittest.main()
