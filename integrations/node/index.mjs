@@ -77,7 +77,14 @@ export class RustSpark {
       throw new RustSparkError((result.stderr ?? "").trim() || `RustSpark exited with ${result.status}`);
     }
     let rows;
-    try { rows = JSON.parse(result.stdout); }
+    try {
+      rows = JSON.parse(result.stdout, (_key, value) => {
+        if (typeof value === "number" && !Number.isFinite(value)) {
+          throw new RangeError("non-finite SQL JSON number");
+        }
+        return value;
+      });
+    }
     catch { throw new RustSparkError("RustSpark returned invalid JSON"); }
     if (!Array.isArray(rows) || rows.some((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
       throw new RustSparkError("RustSpark returned an unexpected JSON result");
