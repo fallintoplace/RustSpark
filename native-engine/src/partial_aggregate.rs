@@ -52,15 +52,17 @@ impl PartialGroupSum {
             return Err(Error::Type("group key schema changed between partitions".into()));
         }
         self.key_type = Some(kind);
-        for row in 0..batch.num_rows() {
-            let key_value = batch.value(row, key)?.clone();
+        let key_values = batch.column(key)?;
+        let amounts = batch.column(amount)?;
+        for (key_value, amount_value) in key_values.iter().zip(amounts) {
+            let key_value = key_value.clone();
             if !self.groups.contains_key(&key_value) && self.groups.len() >= self.max_groups {
                 return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
             }
             let state = self.groups.entry(key_value).or_default();
             state.rows = state.rows.checked_add(1)
                 .ok_or_else(|| Error::Execution("group count overflow".into()))?;
-            match batch.value(row, amount)? {
+            match amount_value {
                 Value::Integer(value) => {
                     state.sum = state.sum.checked_add(i128::from(*value))
                         .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?;
@@ -224,5 +226,26 @@ mod consolidated_partial_merge_preflight_tests {
             let now = &first.groups[&key];
             assert_eq!((now.rows, now.sum, now.has_value), (previous.rows, previous.sum, previous.has_value));
         }
+    }
+}
+
+#[cfg(test)]
+mod partial_sum_bound_columns_perf_tests {
+    use super::*;
+    #[test]
+    fn bound_columns_preserve_nulls_and_multi_batch_sums() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true), Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Integer(7)],
+            vec![Value::Null, Value::Integer(3)],
+            vec![Value::Integer(1), Value::Null],
+        ]).unwrap();
+        let mut partial = PartialGroupSum::new("key", "amount", 3);
+        partial.update(&batch).unwrap();
+        let rows = partial.finish().unwrap().rows().unwrap();
+        assert!(rows.contains(&vec![Value::Integer(1), Value::Integer(2), Value::Integer(7)]));
+        assert!(rows.contains(&vec![Value::Null, Value::Integer(1), Value::Integer(3)]));
     }
 }
