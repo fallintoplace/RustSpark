@@ -142,10 +142,19 @@ mod tests {
 }
 
  
-/// Reserve independent operator budgets; partially successful reservations are
-/// released automatically when any later allocation fails.
+/// Reserve a group of budgets with one atomic pool charge.
 pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Reservation>> {
-    requests.iter().map(|bytes| pool.reserve(*bytes)).collect()
+    let total = requests.iter().try_fold(0usize, |sum, &bytes| {
+        sum.checked_add(bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
+    })?;
+    let mut combined = pool.reserve(total)?;
+    let mut reservations = Vec::with_capacity(requests.len());
+    for &bytes in requests {
+        reservations.push(combined.split_off(bytes)?);
+    }
+    debug_assert_eq!(combined.bytes(), 0);
+    Ok(reservations)
 }
 
 #[cfg(test)]
@@ -175,5 +184,24 @@ mod bulk_memory_feature_tests {
         assert_eq!(pool.used(), 25);
         drop(child);
         assert_eq!(pool.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod atomic_reservation_consolidation_tests {
+    use super::*;
+    #[test]
+    fn group_overflow_and_failure_do_not_charge_pool() {
+        let pool = MemoryPool::new(100);
+        assert!(reserve_many(&pool, &[90, 20]).is_err());
+        assert_eq!(pool.used(), 0);
+        let allocations = reserve_many(&pool, &[10, 20, 30]).unwrap();
+        assert_eq!(pool.used(), 60);
+        assert_eq!(allocations.iter().map(Reservation::bytes).sum::<usize>(), 60);
+        drop(allocations);
+        assert_eq!(pool.used(), 0);
+        let big = MemoryPool::new(usize::MAX);
+        assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
+        assert_eq!(big.used(), 0);
     }
 }
