@@ -131,16 +131,18 @@ mod tests {
 impl StageGraph {
     /// Number of stages in the longest dependency chain (zero for an empty graph).
     pub fn longest_dependency_chain(&self) -> usize {
-        let by_id: HashMap<u64, &Stage> = self.stages.iter().map(|stage| (stage.id, stage)).collect();
-        let mut depth = HashMap::new();
-        for id in &self.order {
-            let stage = by_id[id];
-            let longest_parent = stage.dependencies.iter()
+        let mut depth = HashMap::with_capacity(self.stages.len());
+        let mut longest = 0;
+        for &index in &self.order_indices {
+            let stage = &self.stages[index];
+            let parent_depth = stage.dependencies.iter()
                 .map(|parent| depth.get(parent).copied().unwrap_or(0))
                 .max().unwrap_or(0);
-            depth.insert(*id, longest_parent + 1);
+            let current = parent_depth + 1;
+            depth.insert(stage.id, current);
+            longest = longest.max(current);
         }
-        depth.values().copied().max().unwrap_or(0)
+        longest
     }
 }
 
@@ -176,5 +178,20 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod topology_depth_index_fast_path_tests {
+    use super::*;
+    #[test]
+    fn counts_long_chain_with_nonsequential_stage_ids() {
+        let stages = (0..256).rev().map(|n| Stage {
+            id: 10_000 + n,
+            dependencies: if n == 0 { vec![] } else { vec![10_000 + n - 1] },
+            partitions: 1,
+        }).collect();
+        assert_eq!(StageGraph::new(stages).unwrap().longest_dependency_chain(), 256);
+        assert_eq!(StageGraph::new(vec![]).unwrap().longest_dependency_chain(), 0);
     }
 }
