@@ -94,7 +94,11 @@ impl Iterator for LimitedParquetScan {
             Ok(batch) => {
                 let keep = self.remaining.min(batch.num_rows());
                 self.remaining -= keep;
-                Some(batch.slice_rows(0, keep))
+                if keep == batch.num_rows() {
+                    Some(Ok(batch))
+                } else {
+                    Some(batch.slice_rows(0, keep))
+                }
             }
             Err(error) => {
                 self.remaining = 0;
@@ -128,3 +132,27 @@ mod limited_parquet_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod parquet_limited_batch_reuse_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn full_batches_and_partial_tail_keep_data_and_cardinality() {
+        let path = std::env::temp_dir().join(format!("rustspark-limited-perf-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let batch = Batch::from_rows(Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..7).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap(); writer.close().unwrap();
+        let collected = scan_limited(&path, 3, 5).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(collected.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
+        assert_eq!(collected.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            batch.slice_rows(0, 5).unwrap().rows().unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+}
