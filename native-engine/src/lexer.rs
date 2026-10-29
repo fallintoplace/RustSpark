@@ -28,7 +28,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         if character == '-' && chars.peek() == Some(&'-') {
             let _ = chars.next();
             for next in chars.by_ref() {
-                if next == '\n' {
+                if next == '\n' || next == '\r' {
                     break;
                 }
             }
@@ -36,15 +36,21 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         }
         if character == '/' && chars.peek() == Some(&'*') {
             let _ = chars.next();
-            let mut closed = false;
+            let mut depth = 1usize;
             while let Some(next) = chars.next() {
-                if next == '*' && chars.peek() == Some(&'/') {
+                if next == '/' && chars.peek() == Some(&'*') {
                     let _ = chars.next();
-                    closed = true;
-                    break;
+                    depth += 1;
+                    if depth > 128 {
+                        return Err(Error::Parse("SQL block comment nesting limit exceeded".into()));
+                    }
+                } else if next == '*' && chars.peek() == Some(&'/') {
+                    let _ = chars.next();
+                    depth -= 1;
+                    if depth == 0 { break; }
                 }
             }
-            if !closed {
+            if depth != 0 {
                 return Err(Error::Parse("unterminated block comment".into()));
             }
             continue;
@@ -60,9 +66,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 }
             }
             Token::Word(value)
-        } else if character.is_ascii_digit() {
+        } else if character.is_ascii_digit()
+            || (character == '.' && chars.peek().is_some_and(|next| next.is_ascii_digit())) {
             let mut number = character.to_string();
-            let mut dot = false;
+            let mut dot = character == '.';
             while let Some(next) = chars.peek() {
                 if next.is_ascii_digit() {
                     number.push(chars.next().expect("peeked digit"));
@@ -71,6 +78,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     number.push(chars.next().expect("peeked decimal point"));
                 } else {
                     break;
+                }
+            }
+            if matches!(chars.peek().copied(), Some('e' | 'E')) {
+                number.push(chars.next().expect("peeked exponent marker"));
+                if matches!(chars.peek().copied(), Some('+' | '-')) {
+                    number.push(chars.next().expect("peeked exponent sign"));
+                }
+                if !chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+                    return Err(Error::Parse("invalid numeric exponent".into()));
+                }
+                while chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+                    number.push(chars.next().expect("peeked exponent digit"));
                 }
             }
             Token::Number(number)
@@ -158,5 +177,27 @@ mod sql_length_limit_tests {
     fn one_huge_token_is_rejected_before_tokenization() {
         let query = "x".repeat(MAX_SQL_BYTES + 1);
         assert!(tokenize(&query).unwrap_err().to_string().contains("byte limit"));
+    }
+}
+
+#[cfg(test)]
+mod consolidated_lexer_regressions {
+    use super::*;
+    #[test]
+    fn comments_handle_nested_blocks_and_carriage_returns() {
+        let tokens = tokenize("SELECT 1 /* outer /* inner */ tail */ -- comment\rFROM t").unwrap();
+        assert_eq!(tokens, vec![Token::Word("SELECT".into()), Token::Number("1".into()), Token::Word("FROM".into()), Token::Word("t".into())]);
+        assert!(tokenize("/* a /* b */").is_err());
+        assert!(tokenize(&format!("{}{}", "/*".repeat(129), "*/".repeat(129))).is_err());
+    }
+    #[test]
+    fn numbers_accept_leading_dot_and_exponent_but_reject_invalid_forms() {
+        let tokens = tokenize("SELECT .5, .25e1, 3.5E-4, 1E+2 FROM t").unwrap();
+        for numeric in [".5", ".25e1", "3.5E-4", "1E+2"] {
+            assert!(tokens.contains(&Token::Number(numeric.into())));
+        }
+        for query in ["SELECT . FROM t", "SELECT 1e FROM t", "SELECT 1e+ FROM t"] {
+            assert!(tokenize(query).is_err());
+        }
     }
 }
