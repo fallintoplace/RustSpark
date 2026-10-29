@@ -2,7 +2,13 @@ use super::{float_type, Function};
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
-    float_type(types)?;
+    float_type(&types[..1])?;
+    if types.len() == 2 {
+        if types[1] != DataType::Integer {
+            return Err(Error::Type("CEIL/FLOOR scale must be integer".into()));
+        }
+        return Ok(DataType::Float);
+    }
     Ok(DataType::Integer)
 }
 fn checked_integer(value: f64) -> Result<Value> {
@@ -11,6 +17,22 @@ fn checked_integer(value: f64) -> Result<Value> {
     }
     Ok(Value::Integer(value as i64))
 }
+fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
+    let Some(number) = super::number(&args[0])? else { return Ok(Value::Null) };
+    let Some(scale) = super::integer(&args[1])? else { return Ok(Value::Null) };
+    if !(-15..=15).contains(&scale) {
+        return Err(Error::Execution("CEIL/FLOOR scale outside supported [-15, 15] range".into()));
+    }
+    let factor = 10_f64.powi(scale.unsigned_abs() as i32);
+    let round = |value: f64| if round_up { value.ceil() } else { value.floor() };
+    let result = if scale >= 0 {
+        round(number * factor) / factor
+    } else {
+        round(number / factor) * factor
+    };
+    super::finite(result)
+}
+
 fn floor(args: &[Value]) -> Result<Value> {
     match super::number(&args[0])? {
         Some(v) => checked_integer(v.floor()),
@@ -18,6 +40,7 @@ fn floor(args: &[Value]) -> Result<Value> {
     }
 }
 fn ceil(args: &[Value]) -> Result<Value> {
+    if args.len() == 2 { return scale_round(args, true); }
     match super::number(&args[0])? {
         Some(v) => checked_integer(v.ceil()),
         None => Ok(Value::Null),
@@ -25,8 +48,8 @@ fn ceil(args: &[Value]) -> Result<Value> {
 }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "floor", min_args: 1, max_args: 1, result_type: output, call: floor },
-    Function { name: "ceil", min_args: 1, max_args: 1, result_type: output, call: ceil },
-    Function { name: "ceiling", min_args: 1, max_args: 1, result_type: output, call: ceil },
+    Function { name: "ceil", min_args: 1, max_args: 2, result_type: output, call: ceil },
+    Function { name: "ceiling", min_args: 1, max_args: 2, result_type: output, call: ceil },
 ];
 #[cfg(test)]
 mod tests {
@@ -37,5 +60,10 @@ mod tests {
         assert_eq!(ceil(&[Value::Float(-1.2)]).unwrap(), Value::Integer(-1));
         assert!(ceil(&[Value::Float(f64::MAX)]).is_err());
         assert_eq!(floor(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(ceil(&[Value::Float(3.1411), Value::Integer(3)]).unwrap(), Value::Float(3.142));
+        assert_eq!(ceil(&[Value::Float(3.1411), Value::Integer(-3)]).unwrap(), Value::Float(1000.0));
+        assert_eq!(ceil(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
+        assert!(ceil(&[Value::Float(3.14), Value::Integer(100)]).is_err());
+        assert_eq!(output(&[DataType::Float, DataType::Integer]).unwrap(), DataType::Float);
     }
 }
