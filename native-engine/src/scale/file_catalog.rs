@@ -52,6 +52,12 @@ impl FileCatalog {
         Ok(())
     }
 
+    pub fn unregister(&mut self, name: &str) -> Result<CsvTable> {
+        let key = normalized(name)?;
+        self.tables.remove(&key)
+            .ok_or_else(|| Error::Schema(format!("unknown native file table: {name}")))
+    }
+
     pub fn get(&self, name: &str) -> Result<&CsvTable> {
         let key = normalized(name)?;
         self.tables.get(&key)
@@ -71,6 +77,18 @@ mod tests {
     use crate::{scalar::Value, schema::{DataType, Field}};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn unregister_does_not_touch_source_files() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("Events", "does-not-need-to-exist.csv", schema, 100).unwrap();
+        let removed = catalog.unregister("EVENTS").unwrap();
+        assert_eq!(removed.path(), Path::new("does-not-need-to-exist.csv"));
+        assert!(catalog.get("Events").is_err());
+        assert!(catalog.unregister("Events").is_err());
+        assert!(catalog.list().is_empty());
+    }
 
     #[test]
     fn table_registration_opens_file_only_when_scanned() {
