@@ -21,7 +21,7 @@ impl DictionaryColumn {
         if batch.num_rows() > max_rows {
             return Err(Error::Execution("dictionary row limit exceeded".into()));
         }
-        let mut seen = HashMap::<String, u32>::new();
+        let mut seen = HashMap::<&str, u32>::new();
         let mut dictionary = Vec::new();
         let mut indices = Vec::with_capacity(batch.num_rows());
         let mut bytes = 0usize;
@@ -29,7 +29,7 @@ impl DictionaryColumn {
             match value {
                 Value::Null => indices.push(None),
                 Value::Text(text) => {
-                    let id = if let Some(id) = seen.get(text) {
+                    let id = if let Some(id) = seen.get(text.as_str()) {
                         *id
                     } else {
                         if dictionary.len() >= max_distinct {
@@ -41,7 +41,7 @@ impl DictionaryColumn {
                         let id = u32::try_from(dictionary.len())
                             .map_err(|_| Error::Execution("dictionary ID overflow".into()))?;
                         dictionary.push(text.clone());
-                        seen.insert(text.clone(), id);
+                        seen.insert(text.as_str(), id);
                         id
                     };
                     indices.push(Some(id));
