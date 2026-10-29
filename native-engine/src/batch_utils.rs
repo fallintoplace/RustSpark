@@ -8,7 +8,7 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     let mut start = 0;
     while start < batch.num_rows() {
         let end = start.saturating_add(rows_per_batch).min(batch.num_rows());
-        chunks.push(batch.take(&(start..end).collect::<Vec<_>>())?);
+        chunks.push(batch.slice_rows(start, end)?);
         start = end;
     }
     Ok(chunks)
@@ -87,5 +87,22 @@ mod zero_column_concat_consolidation_tests {
         let b = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
         assert_eq!(concat(&schema, [a.clone(), b.clone()], 5).unwrap().num_rows(), 5);
         assert!(concat(&schema, [a, b], 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod split_contiguous_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn single_row_and_empty_width_chunks_preserve_cardinality() {
+        let schema = Schema::new(vec![]).unwrap();
+        let input = Batch::new_with_row_count(schema, vec![], 5).unwrap();
+        let parts = split(&input, 2).unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 2, 1]);
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let data = Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Integer(1)]]).unwrap();
+        assert_eq!(split(&data, 1).unwrap()[1].rows().unwrap(), vec![vec![Value::Integer(1)]]);
     }
 }
