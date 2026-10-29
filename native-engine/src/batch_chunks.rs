@@ -24,7 +24,7 @@ impl Iterator for BatchChunks<'_> {
         let start = self.position;
         let end = start.saturating_add(self.size).min(self.batch.num_rows());
         self.position = end;
-        Some(self.batch.take(&(start..end).collect::<Vec<_>>()))
+        Some(self.batch.slice_rows(start, end))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -83,5 +83,23 @@ mod tests {
         let other = Batch::empty(Schema::new(vec![Field::new("another", DataType::Text, true)]).unwrap());
         assert!(concatenate(&[first, other]).is_err());
         assert!(concatenate(&[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod chunk_slice_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn preserves_empty_and_last_partial_chunk_bounds() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        assert_eq!(chunks(&empty, 2).unwrap().count(), 0);
+        let input = Batch::from_rows(schema, vec![vec![Value::Integer(1)],
+            vec![Value::Null], vec![Value::Integer(3)]]).unwrap();
+        let result = chunks(&input, 2).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].row(0).unwrap(), vec![Value::Integer(3)]);
     }
 }
