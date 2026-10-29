@@ -83,6 +83,23 @@ impl Batch {
         Ok(self)
     }
 
+    pub(crate) fn relabel(self, schema: Schema) -> Result<Self> {
+        if schema.len() != self.schema.len() {
+            return Err(Error::Schema("column count does not match relabeled schema".into()));
+        }
+        for (index, (source, target)) in self.schema.fields().iter()
+            .zip(schema.fields()).enumerate() {
+            if source.data_type != target.data_type {
+                return Err(Error::Type("cannot relabel column to a different type".into()));
+            }
+            if source.nullable && !target.nullable &&
+                self.columns[index].iter().any(Value::is_null) {
+                return Err(Error::Type(format!("NULL in required column {}", target.name)));
+            }
+        }
+        Ok(Self { schema, ..self })
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
