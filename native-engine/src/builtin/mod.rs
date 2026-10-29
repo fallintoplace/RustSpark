@@ -82,6 +82,7 @@ mod quote;
 mod cot;
 mod csc;
 mod sec;
+mod md5_digest;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
