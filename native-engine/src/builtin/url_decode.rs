@@ -14,6 +14,9 @@ fn hex(byte: u8) -> Option<u8> {
 
 pub(super) fn decode(text: &str) -> Result<String> {
     let bytes = text.as_bytes();
+    if !bytes.iter().any(|byte| *byte == b'%' || *byte == b'+') {
+        return Ok(text.to_owned());
+    }
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
