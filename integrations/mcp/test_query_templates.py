@@ -46,6 +46,12 @@ class TemplatesTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_query_rows(text)
 
+    def test_duplicate_result_keys_are_rejected_at_any_depth(self):
+        for text in ('[{"id":1,"id":2}]', '[{"nested":{"x":1,"x":2}}]'):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Duplicate"):
+                parse_query_rows(text)
+
+
 
 if __name__ == "__main__":
     unittest.main()
