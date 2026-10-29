@@ -27,11 +27,14 @@ pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<
     }
     let indices = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
+    let columns = indices.iter()
+        .map(|&column| batch.column(column))
+        .collect::<Result<Vec<_>>>()?;
     let mut groups = vec![Vec::new(); partitions];
     for row in 0..batch.num_rows() {
         let mut hasher = PartitionHasher::default();
-        for &column in &indices {
-            batch.value(row, column)?.hash(&mut hasher);
+        for column in &columns {
+            column[row].hash(&mut hasher);
         }
         let bucket = (hasher.finish() % partitions as u64) as usize;
         groups[bucket].push(row);
