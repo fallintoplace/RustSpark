@@ -232,7 +232,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "SUM", "MIN", "MAX"]
+                if ["COUNT", "SUM", "MIN", "MAX", "AVG"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -251,6 +251,7 @@ impl Parser {
                 match function.as_str() {
                     "COUNT" => AggregateOp::Count(expr),
                     "SUM" => AggregateOp::Sum(expr),
+                    "AVG" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
                     _ => unreachable!(),
@@ -537,6 +538,15 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn avg_ignores_nulls_and_returns_float() {
+        let plan = parse_sql("SELECT city, AVG(amount) AS average FROM sales GROUP BY city ORDER BY city").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("Berlin".into()), Value::Float(2.5)],
+            vec![Value::Text("Paris".into()), Value::Null],
+        ]);
     }
 
     #[test]
