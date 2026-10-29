@@ -23,7 +23,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
         let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        if text.is_ascii() {
+            offset.min(text.len())
+        } else {
+            text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        }
     } else { 0 };
     let compiled = regex_support::compile(pattern)?;
     let mut result = String::from(&text[..start]);
@@ -78,5 +82,22 @@ mod spark_position_regressions {
             Value::Text("éé11".into()), Value::Text("1".into()),
             Value::Text("x".into()), Value::Integer(3),
         ]).unwrap(), Value::Text("ééxx".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_regexp_replace_position_tests {
+    use super::*;
+    #[test]
+    fn preserves_prefixes_for_ascii_and_unicode_positions() {
+        assert_eq!(evaluate(&[Value::Text("abcabc".into()),
+            Value::Text("a".into()), Value::Text("X".into()),
+            Value::Integer(4)]).unwrap(), Value::Text("abcXbc".into()));
+        assert_eq!(evaluate(&[Value::Text("abcabc".into()),
+            Value::Text("a".into()), Value::Text("X".into()),
+            Value::Integer(9999)]).unwrap(), Value::Text("abcabc".into()));
+        assert_eq!(evaluate(&[Value::Text("éabcabc".into()),
+            Value::Text("a".into()), Value::Text("X".into()),
+            Value::Integer(5)]).unwrap(), Value::Text("éabcXbc".into()));
     }
 }
