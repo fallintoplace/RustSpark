@@ -14,7 +14,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if !digit.is_ascii_digit() { return Ok(Value::Boolean(false)); }
         let mut n = u32::from(digit - b'0');
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        checksum = (checksum + n) % 10;
+        checksum += n;
+        if checksum >= 10 { checksum -= 10; }
     }
     Ok(Value::Boolean(checksum == 0))
 }
@@ -35,5 +36,22 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("0".repeat(100_000))]).unwrap(),
             Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod luhn_running_checksum_tests {
+    use super::*;
+    #[test]
+    fn matches_reference_modulo_for_long_numeric_inputs() {
+        for digits in ["79927398713", "79927398714", "0", "99999999", "9876543210", "12345678901234567890"] {
+            let mut reference = 0u32;
+            for (index, digit) in digits.bytes().rev().enumerate() {
+                let mut n = u32::from(digit - b'0');
+                if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
+                reference = (reference + n) % 10;
+            }
+            assert_eq!(evaluate(&[Value::Text(digits.into())]).unwrap(), Value::Boolean(reference == 0));
+        }
     }
 }
