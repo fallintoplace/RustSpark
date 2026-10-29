@@ -8,6 +8,7 @@ mod abs_sign;
 mod floor_ceil;
 mod round;
 mod roots;
+mod power;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -38,6 +39,7 @@ const MODULES: &[&[Function]] = &[
     &floor_ceil::FUNCTIONS,
     &round::FUNCTIONS,
     &roots::FUNCTIONS,
+    &power::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
