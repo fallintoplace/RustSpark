@@ -388,34 +388,47 @@ impl<'a> PreparedHashJoin<'a> {
             }
             return left.take(&selected);
         }
-        let mut rows = Vec::new();
+        let left_columns = (0..self.left_schema.len())
+            .map(|col| left.column(col)).collect::<Result<Vec<_>>>()?;
+        let right_columns = (0..self.right.schema().len())
+            .map(|col| self.right.column(col)).collect::<Result<Vec<_>>>()?;
+        let mut columns: Vec<Vec<Value>> =
+            (0..self.output_schema.len()).map(|_| Vec::new()).collect();
+        let mut rows = 0usize;
         for left_row in start..end {
-            let key = left.value(left_row, self.left_column)?;
+            let key = &left_columns[self.left_column][left_row];
             let matches = if joinable(key) { self.right_hash.get(key) } else { None };
             if let Some(right_rows) = matches {
                 if let Some(flags) = matched.as_deref_mut() {
                     for &right_row in right_rows { flags[right_row] = true; }
                 }
-                // Materialize the probe row once, not once per matching build row.
-                let prefix = left.row(left_row)?;
                 for &right_row in right_rows {
-                    if rows.len() >= MAX_JOIN_ROWS {
+                    if rows >= MAX_JOIN_ROWS {
                         return Err(Error::Execution("join output exceeds safety limit".into()));
                     }
-                    let mut output = prefix.clone();
-                    output.extend(self.right.row(right_row)?);
-                    rows.push(output);
+                    for (source, dest) in left_columns.iter().zip(&mut columns) {
+                        dest.push(source[left_row].clone());
+                    }
+                    for (source, dest) in right_columns.iter()
+                        .zip(columns[self.left_schema.len()..].iter_mut()) {
+                        dest.push(source[right_row].clone());
+                    }
+                    rows += 1;
                 }
             } else if self.kind == JoinKind::Left {
-                if rows.len() >= MAX_JOIN_ROWS {
+                if rows >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
-                let mut output = left.row(left_row)?;
-                output.extend(std::iter::repeat_n(Value::Null, self.right.schema().len()));
-                rows.push(output);
+                for (source, dest) in left_columns.iter().zip(&mut columns) {
+                    dest.push(source[left_row].clone());
+                }
+                for dest in &mut columns[self.left_schema.len()..] {
+                    dest.push(Value::Null);
+                }
+                rows += 1;
             }
         }
-        Batch::from_rows(self.output_schema.clone(), rows)
+        Batch::new_with_row_count(self.output_schema.clone(), columns, rows)
     }
 }
 
@@ -483,6 +496,33 @@ mod prepared_join_range_tests {
             rows.extend(prepared.probe_range_with_matches(&left, 2, 4, None).unwrap().rows().unwrap());
             assert_eq!(rows, prepared.probe(&left).unwrap().rows().unwrap());
             assert!(prepared.probe_range_with_matches(&left, 2, 5, None).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod prepared_columnar_results_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn output_columns_match_row_materialization_for_wide_duplicate_keys() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false)]).unwrap();
+        let wide = "value".repeat(200);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(5), Value::Text(wide.clone())],
+            vec![Value::Null, Value::Text("missing".into())],
+            vec![Value::Integer(7), Value::Text(wide.clone())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(5), Value::Text("right1".into())],
+            vec![Value::Integer(5), Value::Text("right2".into())],
+        ]).unwrap();
+        for kind in [JoinKind::Inner, JoinKind::Left] {
+            let prepared = PreparedHashJoin::new(left.schema().clone(), &right, "k", "k", kind).unwrap();
+            let actual = prepared.probe(&left).unwrap();
+            let baseline = hash_join(&left, &right, "k", "k", kind).unwrap();
+            assert_eq!(actual, baseline);
         }
     }
 }
