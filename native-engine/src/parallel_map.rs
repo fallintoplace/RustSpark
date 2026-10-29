@@ -14,6 +14,14 @@ where
     }
     let count = input.len();
     if count == 0 { return Ok(Vec::new()); }
+    if max_workers == 1 || count == 1 {
+        let mut results = Vec::with_capacity(count);
+        for batch in input {
+            results.push(catch_unwind(AssertUnwindSafe(|| operator(batch)))
+                .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())))?);
+        }
+        return Ok(results);
+    }
     let tasks = Mutex::new(input.into_iter().enumerate().collect::<VecDeque<_>>());
     let failed = AtomicBool::new(false);
     let output: Mutex<Vec<Option<Result<Batch>>>> =
@@ -128,5 +136,26 @@ mod parallel_fail_fast_engine_tests {
         }).unwrap_err();
         assert!(error.to_string().contains("worker failed"));
         assert_eq!(invoked.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod serial_worker_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn serial_map_retains_input_order_and_stops_on_failure() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batches = (0..4).map(|n| Batch::from_rows(schema.clone(), vec![vec![Value::Integer(n)]]).unwrap()).collect::<Vec<_>>();
+        let calls = AtomicUsize::new(0);
+        let result = map_partitions(batches, 1, |batch| {
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            if call == 2 { return Err(Error::Execution("stop".into())); }
+            Ok(batch)
+        });
+        assert!(result.unwrap_err().to_string().contains("stop"));
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
     }
 }
