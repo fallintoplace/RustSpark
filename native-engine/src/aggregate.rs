@@ -249,27 +249,31 @@ pub fn aggregate_with_max_groups(
     let mut group_indices: HashMap<Vec<Value>, usize> = HashMap::new();
     let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
 
-    if batch.num_rows() == 0 && group_by.is_empty() {
+    if group_by.is_empty() {
         if max_groups == 0 {
             return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
         }
         groups.push((Vec::new(), items.iter().map(|item| State::new(&item.op)).collect()));
     }
     for row in 0..batch.num_rows() {
-        let key = group_by
-            .iter()
-            .map(|(expr, _)| expr.evaluate(batch, row))
-            .collect::<Result<Vec<_>>>()?;
-        let index = if let Some(index) = group_indices.get(&key) {
-            *index
+        let index = if group_by.is_empty() {
+            0
         } else {
-            if groups.len() >= max_groups {
-                return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+            let key = group_by
+                .iter()
+                .map(|(expr, _)| expr.evaluate(batch, row))
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(index) = group_indices.get(&key) {
+                *index
+            } else {
+                if groups.len() >= max_groups {
+                    return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+                }
+                let index = groups.len();
+                let _ = group_indices.insert(key.clone(), index);
+                groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
+                index
             }
-            let index = groups.len();
-            let _ = group_indices.insert(key.clone(), index);
-            groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
-            index
         };
         for (state, item) in groups[index].1.iter_mut().zip(items) {
             state.update(&item.op, batch, row)?;
