@@ -18,12 +18,26 @@ fn fast_integer_predicate<'a>(
     predicate: &'a Expr,
 ) -> Result<Option<(&'a [Value], BinaryOp, i64)>> {
     if let Expr::Binary { left, op, right } = predicate {
-        if let (Expr::Column(column), Expr::Literal(Value::Integer(value))) =
-            (left.as_ref(), right.as_ref()) {
-            if integer_comparison(*op, 0, 0).is_some() {
+        let candidate = match (left.as_ref(), right.as_ref()) {
+            (Expr::Column(column), Expr::Literal(Value::Integer(value))) =>
+                Some((column, *op, *value)),
+            (Expr::Literal(Value::Integer(value)), Expr::Column(column)) => {
+                let reversed = match op {
+                    BinaryOp::Less => BinaryOp::Greater,
+                    BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                    BinaryOp::Greater => BinaryOp::Less,
+                    BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                    other => *other,
+                };
+                Some((column, reversed, *value))
+            }
+            _ => None,
+        };
+        if let Some((column, op, value)) = candidate {
+            if integer_comparison(op, 0, 0).is_some() {
                 let index = batch.schema().column(column)?;
                 if batch.schema().field(index)?.data_type == crate::schema::DataType::Integer {
-                    return Ok(Some((batch.column(index)?, *op, *value)));
+                    return Ok(Some((batch.column(index)?, op, value)));
                 }
             }
         }
@@ -92,5 +106,28 @@ mod tests {
         ).unwrap();
         let predicate = Expr::IsNull(Box::new(Expr::Column("n".into())));
         assert_eq!(select_indices(&batch, &predicate).unwrap(), vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod reverse_integer_comparison_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn left_hand_literals_match_general_sql_comparisons() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(3)], vec![Value::Null]]
+        ).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual, BinaryOp::Less,
+                   BinaryOp::LessEqual, BinaryOp::Greater, BinaryOp::GreaterEqual] {
+            let expr = Expr::binary(Expr::Literal(Value::Integer(2)), op,
+                Expr::Column("x".into()));
+            let expected = (0..batch.num_rows()).filter(|&row|
+                expr.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+            ).collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &expr).unwrap(), expected);
+        }
     }
 }
