@@ -50,7 +50,11 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
                 fields.push(ArrowField::new(&field.name, ArrowType::Float64, field.nullable));
             }
             DataType::Text => {
-                let mut builder = StringBuilder::new();
+                let text_bytes = input.iter().fold(0usize, |total, value| match value {
+                    Value::Text(value) => total.saturating_add(value.len()),
+                    _ => total,
+                });
+                let mut builder = StringBuilder::with_capacity(input.len(), text_bytes);
                 for value in input {
                     match value {
                         Value::Null => builder.append_null(),
