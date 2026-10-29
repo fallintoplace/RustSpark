@@ -770,27 +770,188 @@ impl Parser {
     }
 }
 
+/// Restrict CTE expansion to a finite plan size before cloning each binding.
+/// This prevents exponentially growing logical plans from repeated references.
+fn plan_nodes(plan: &Plan) -> Result<usize> {
+    let mut count = 0usize;
+    let mut pending = vec![plan];
+    while let Some(node) = pending.pop() {
+        count += 1;
+        if count > 4096 {
+            return Err(Error::Execution("CTE plan exceeds 4096 nodes".into()));
+        }
+        match node {
+            Plan::OneRow | Plan::Values { .. } | Plan::Scan { .. } => {}
+            Plan::Filter { input, .. } | Plan::Project { input, .. }
+            | Plan::Aggregate { input, .. } | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. } | Plan::Distinct { input } =>
+                pending.push(input),
+            Plan::Join { left, right, .. } | Plan::UnionAll { left, right }
+            | Plan::Intersect { left, right } | Plan::Except { left, right } => {
+                pending.push(left);
+                pending.push(right);
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Expand nonrecursive Spark CTE scans into owned native subplans. The binding
+/// order is significant: later definitions can reference earlier definitions.
+fn inline_ctes(
+    plan: Plan, bindings: &[(String, Plan)], forbidden: Option<&str>,
+    remaining: &mut usize,
+) -> Result<Plan> {
+    *remaining = remaining.checked_sub(1)
+        .ok_or_else(|| Error::Execution("CTE expansion exceeds 4096 nodes".into()))?;
+    match plan {
+        Plan::Scan { table } => {
+            if forbidden.is_some_and(|name| table.eq_ignore_ascii_case(name)) {
+                return Err(Error::Unsupported("recursive CTEs are not supported".into()));
+            }
+            if let Some((_, binding)) = bindings.iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&table)) {
+                let extra = plan_nodes(binding)?.saturating_sub(1);
+                *remaining = remaining.checked_sub(extra).ok_or_else(||
+                    Error::Execution("CTE expansion exceeds 4096 nodes".into()))?;
+                Ok(binding.clone())
+            } else { Ok(Plan::Scan { table }) }
+        }
+        Plan::Filter { input, predicate } => Ok(Plan::Filter {
+            input: Box::new(inline_ctes(*input, bindings, forbidden, remaining)?), predicate,
+        }),
+        Plan::Project { input, selections } => Ok(Plan::Project {
+            input: Box::new(inline_ctes(*input, bindings, forbidden, remaining)?), selections,
+        }),
+        Plan::Aggregate { input, group_by, aggregates } => Ok(Plan::Aggregate {
+            input: Box::new(inline_ctes(*input, bindings, forbidden, remaining)?),
+            group_by, aggregates,
+        }),
+        Plan::Sort { input, keys } => Ok(Plan::Sort {
+            input: Box::new(inline_ctes(*input, bindings, forbidden, remaining)?), keys,
+        }),
+        Plan::Limit { input, offset, count } => Ok(Plan::Limit {
+            input: Box::new(inline_ctes(*input, bindings, forbidden, remaining)?),
+            offset, count,
+        }),
+        Plan::Distinct { input } => Ok(Plan::Distinct {
+            input: Box::new(inline_ctes(*input, bindings, forbidden, remaining)?),
+        }),
+        Plan::Join { left, right, left_key, right_key, kind } => Ok(Plan::Join {
+            left: Box::new(inline_ctes(*left, bindings, forbidden, remaining)?),
+            right: Box::new(inline_ctes(*right, bindings, forbidden, remaining)?),
+            left_key, right_key, kind,
+        }),
+        Plan::UnionAll { left, right } => Ok(Plan::UnionAll {
+            left: Box::new(inline_ctes(*left, bindings, forbidden, remaining)?),
+            right: Box::new(inline_ctes(*right, bindings, forbidden, remaining)?),
+        }),
+        Plan::Intersect { left, right } => Ok(Plan::Intersect {
+            left: Box::new(inline_ctes(*left, bindings, forbidden, remaining)?),
+            right: Box::new(inline_ctes(*right, bindings, forbidden, remaining)?),
+        }),
+        Plan::Except { left, right } => Ok(Plan::Except {
+            left: Box::new(inline_ctes(*left, bindings, forbidden, remaining)?),
+            right: Box::new(inline_ctes(*right, bindings, forbidden, remaining)?),
+        }),
+        source @ (Plan::OneRow | Plan::Values { .. }) => Ok(source),
+    }
+}
+
+/// The explicit projection is required to infer the output column order at
+/// parse time, because an unknown table scan has no schema until execution.
+fn cte_output_columns(plan: &Plan) -> Result<Vec<String>> {
+    match plan {
+        Plan::Project { selections, .. } =>
+            Ok(selections.iter().map(|item| item.alias.clone()).collect()),
+        Plan::Values { schema, .. } =>
+            Ok(schema.fields().iter().map(|field| field.name.clone()).collect()),
+        Plan::Sort { input, .. } | Plan::Limit { input, .. }
+        | Plan::Distinct { input } => cte_output_columns(input),
+        Plan::UnionAll { left, .. } | Plan::Intersect { left, .. }
+        | Plan::Except { left, .. } => cte_output_columns(left),
+        _ => Err(Error::Unsupported(
+            "CTE column aliases need an explicit output projection".into())),
+    }
+}
+
+impl Parser {
+    /// Parse a full query or parenthesized CTE body. A CTE is a logical
+    /// expansion, not an implicit temporary table registered in the catalog.
+    fn query(&mut self) -> Result<Plan> {
+        let mut bindings = Vec::<(String, Plan)>::new();
+        if self.take_word("WITH") {
+            if self.take_word("RECURSIVE") {
+                return Err(Error::Unsupported("recursive CTEs are not supported".into()));
+            }
+            loop {
+                if bindings.len() == 32 {
+                    return Err(Error::Execution("WITH exceeds 32 definitions".into()));
+                }
+                let name = self.identifier()?;
+                if bindings.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(&name)) {
+                    return Err(Error::Parse("duplicate CTE name".into()));
+                }
+                let aliases = if self.take_symbol('(') {
+                    let mut names = Vec::new();
+                    loop {
+                        names.push(self.identifier()?);
+                        if names.len() > 128 {
+                            return Err(Error::Execution("CTE aliases exceed 128 columns".into()));
+                        }
+                        if !self.take_symbol(',') { break; }
+                    }
+                    self.expect_symbol(')')?;
+                    Some(names)
+                } else { None };
+                self.expect_word("AS")?;
+                self.expect_symbol('(')?;
+                let child = self.query()?;
+                self.expect_symbol(')')?;
+                let mut budget = 4096;
+                let mut child = inline_ctes(child, &bindings, Some(&name), &mut budget)?;
+                if let Some(names) = aliases {
+                    let columns = cte_output_columns(&child)?;
+                    if names.len() != columns.len() {
+                        return Err(Error::Schema("CTE alias column count mismatch".into()));
+                    }
+                    let selections = columns.into_iter().zip(names).map(|(original, alias)|
+                        Selection::new(Expr::Column(original), alias)
+                    ).collect();
+                    child = child.project(selections);
+                }
+                bindings.push((name, child));
+                if !self.take_symbol(',') { break; }
+            }
+        }
+        let mut plan = self.select_with_intersections()?;
+        loop {
+            if self.take_word("UNION") {
+                let all = self.take_word("ALL");
+                if !all { self.take_word("DISTINCT"); }
+                let right = self.select_with_intersections()?;
+                plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+                if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
+            } else if self.take_word("EXCEPT") {
+                self.take_word("DISTINCT");
+                let right = self.select_with_intersections()?;
+                plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
+            } else { break; }
+        }
+        let mut plan = self.finish_query(plan)?;
+        if !bindings.is_empty() {
+            let mut budget = 4096;
+            plan = inline_ctes(plan, &bindings, None, &mut budget)?;
+        }
+        Ok(plan)
+    }
+}
+
 /// Plan one explicitly supported SELECT statement. Any trailing or unsupported
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let mut plan = parser.select_with_intersections()?;
-    loop {
-        if parser.take_word("UNION") {
-            let all = parser.take_word("ALL");
-            if !all { parser.take_word("DISTINCT"); }
-            let right = parser.select_with_intersections()?;
-            plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
-            if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
-        } else if parser.take_word("EXCEPT") {
-            parser.take_word("DISTINCT");
-            let right = parser.select_with_intersections()?;
-            plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
-        } else {
-            break;
-        }
-    }
-    let plan = parser.finish_query(plan)?;
+    let plan = parser.query()?;
     parser.take_symbol(';');
     if parser.peek().is_some() {
         return Err(Error::Unsupported(format!(
