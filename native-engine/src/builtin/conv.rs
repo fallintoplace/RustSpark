@@ -7,28 +7,29 @@ fn output(types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Text)
     } else { Err(Error::Type("CONV requires text/integer and two integer bases".into())) }
 }
+const RADIX_DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 fn encode(mut value: u64, base: u64, negative: bool) -> String {
-    let mut reversed = String::new();
+    // u64 needs at most 64 base-two digits plus one optional sign.
+    let mut buffer = [0_u8; 65];
+    let mut start = buffer.len();
     loop {
-        let digit = char::from_digit((value % base) as u32, base as u32)
-            .expect("base validated in CONV");
-        reversed.push(digit.to_ascii_uppercase());
+        start -= 1;
+        buffer[start] = RADIX_DIGITS[(value % base) as usize];
         value /= base;
         if value == 0 { break; }
     }
-    if negative { reversed.push('-'); }
-    reversed.chars().rev().collect()
+    if negative {
+        start -= 1;
+        buffer[start] = b'-';
+    }
+    String::from_utf8(buffer[start..].to_vec()).expect("radix digits are ASCII")
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
-    let input = match &args[0] {
-        Value::Text(text) => text.as_str(),
-        Value::Integer(_) => "",
+    let source: std::borrow::Cow<'_, str> = match &args[0] {
+        Value::Text(text) => std::borrow::Cow::Borrowed(text.as_str()),
+        Value::Integer(number) => std::borrow::Cow::Owned(number.to_string()),
         Value::Null => return Ok(Value::Null),
         _ => return Err(Error::Type("CONV requires text or integer input".into())),
-    };
-    let source = match &args[0] {
-        Value::Integer(n) => n.to_string(),
-        _ => input.to_string(),
     };
     let Some(from_base) = super::integer(&args[1])? else { return Ok(Value::Null) };
     let Some(to_base) = super::integer(&args[2])? else { return Ok(Value::Null) };
@@ -65,5 +66,19 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("-1".into()), Value::Integer(10), Value::Integer(16)]).unwrap(), Value::Text("FFFFFFFFFFFFFFFF".into()));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod conv_allocation_perf_tests {
+    use super::*;
+    #[test]
+    fn handles_full_width_binary_and_base_36_with_negative_values() {
+        assert_eq!(encode(u64::MAX, 2, false), "1".repeat(64));
+        assert_eq!(encode(0, 36, false), "0");
+        assert_eq!(encode(35, 36, false), "Z");
+        assert_eq!(encode(1, 10, true), "-1");
+        assert_eq!(evaluate(&[Value::Text("ffffffffffffffff".into()),
+            Value::Integer(16), Value::Integer(2)]).unwrap(), Value::Text("1".repeat(64)));
     }
 }
