@@ -39,6 +39,7 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 return None;
             };
             match next {
+                Ok(batch) if batch.schema() == &self.schema && batch.num_rows() == 0 => continue,
                 Ok(batch) if batch.schema() == &self.schema => return Some(Ok(batch)),
                 Ok(batch) => {
                     // SQL UNION ALL uses column positions, not names. The output
@@ -54,6 +55,7 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         .collect::<Result<Vec<_>>>()
                         .and_then(|columns| Batch::new(self.schema.clone(), columns));
                     match rebased {
+                        Ok(batch) if batch.num_rows() == 0 => continue,
                         Ok(batch) => return Some(Ok(batch)),
                         Err(error) => {
                             self.stopped = true;
@@ -239,5 +241,21 @@ mod union_positional_schema_engine_tests {
         assert!(results.iter().all(|part| part.schema() == &output_schema));
         assert_eq!(results[0].row(0).unwrap(), vec![Value::Integer(1)]);
         assert_eq!(results[1].row(0).unwrap(), vec![Value::Null]);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_empty_union_skip_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn union_all_skips_zero_row_batches_but_keeps_values() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        let one = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(5)]]).unwrap();
+        let batches = UnionAllStream::new([Ok(empty)].into_iter(), [Ok(one)].into_iter(),
+            schema, QueryControl::default()).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].row(0).unwrap(), vec![Value::Integer(5)]);
     }
 }
