@@ -28,7 +28,8 @@ def list_queries() -> list[str]:
 
 
 @mcp.tool()
-def run_named_query(name: str, parameters: dict[str, str]) -> str:
+def run_named_query(name: str, parameters: dict[str, str],
+                    max_rows: int = 200, query_timeout: int = 20) -> str:
     """Run an approved SQL file with safely bound typed parameters.
 
     Example: name='event_count', parameters={'type': 'utf8:purchase'}.
@@ -36,7 +37,8 @@ def run_named_query(name: str, parameters: dict[str, str]) -> str:
     """
     query_dir, database_dir, binary = settings()
     path = template_path(query_dir, name)
-    command = make_command(binary, database_dir, path, parameters)
+    command = make_command(binary, database_dir, path, parameters,
+                           max_rows=max_rows, query_timeout=query_timeout)
     try:
         result = subprocess.run(
             command, capture_output=True, text=True,
