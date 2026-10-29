@@ -74,7 +74,9 @@ impl RunMerger {
         paths: &[impl AsRef<Path>], schema: Schema, keys: &[SortKey],
         input_batch_rows: usize, output_batch_rows: usize, control: QueryControl
     ) -> Result<Self> {
-        if paths.len() > MAX_FAN_IN || input_batch_rows == 0 || output_batch_rows == 0 {
+        if paths.len() > MAX_FAN_IN || input_batch_rows == 0 ||
+            output_batch_rows == 0 || input_batch_rows > 65_536 ||
+            output_batch_rows > 65_536 {
             return Err(Error::Execution("invalid external sort fan-in or batch size".into()));
         }
         let mut selected = Vec::new();
@@ -182,5 +184,21 @@ mod tests {
         assert_eq!(values, (0..71).map(Value::Integer).collect::<Vec<_>>());
         drop(runs);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod merge_batch_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn rejects_outsize_batches_before_opening_files() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let paths: [&str; 0] = [];
+        assert!(RunMerger::new(&paths, schema.clone(), &[], 1, 65_537,
+            QueryControl::default()).is_err());
+        assert!(RunMerger::new(&paths, schema, &[], 65_537, 1,
+            QueryControl::default()).is_err());
     }
 }
