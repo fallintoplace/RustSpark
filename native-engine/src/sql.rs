@@ -115,12 +115,80 @@ impl Parser {
         loop {
             if min_precedence <= 3 && self.take_word("IS") {
                 let negate = self.take_word("NOT");
-                self.expect_word("NULL")?;
-                left = Expr::IsNull(Box::new(left));
-                if negate {
-                    left = Expr::Not(Box::new(left));
+                if self.take_word("DISTINCT") {
+                    self.expect_word("FROM")?;
+                    left = Expr::IsDistinctFrom {
+                        left: Box::new(left),
+                        right: Box::new(self.expression(4)?),
+                        negated: negate,
+                    };
+                } else {
+                    self.expect_word("NULL")?;
+                    left = Expr::IsNull(Box::new(left));
+                    if negate {
+                        left = Expr::Not(Box::new(left));
+                    }
                 }
                 continue;
+            }
+            if min_precedence <= 3 {
+                let negate = self.peek_word("NOT")
+                    && matches!(self.tokens.get(self.index + 1),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("BETWEEN"));
+                if self.peek_word("BETWEEN") || negate {
+                    if negate { self.next(); }
+                    self.expect_word("BETWEEN")?;
+                    let lower = self.expression(4)?;
+                    self.expect_word("AND")?;
+                    let upper = self.expression(4)?;
+                    let between = Expr::binary(
+                        Expr::binary(left.clone(), BinaryOp::GreaterEqual, lower),
+                        BinaryOp::And,
+                        Expr::binary(left, BinaryOp::LessEqual, upper),
+                    );
+                    left = if negate { Expr::Not(Box::new(between)) } else { between };
+                    continue;
+                }
+            }
+            if min_precedence <= 3 {
+                let negate = self.peek_word("NOT")
+                    && matches!(self.tokens.get(self.index + 1),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"));
+                if self.peek_word("IN") || negate {
+                    if negate { self.next(); }
+                    self.expect_word("IN")?;
+                    self.expect_symbol('(')?;
+                    let mut choices = Vec::new();
+                    loop {
+                        choices.push(self.expression(0)?);
+                        if !self.take_symbol(',') { break; }
+                    }
+                    self.expect_symbol(')')?;
+                    let mut choices = choices.into_iter();
+                    let first = choices.next().expect("nonempty IN list");
+                    let mut predicate = Expr::binary(left.clone(), BinaryOp::Equal, first);
+                    for choice in choices {
+                        predicate = Expr::binary(predicate, BinaryOp::Or,
+                            Expr::binary(left.clone(), BinaryOp::Equal, choice));
+                    }
+                    left = if negate { Expr::Not(Box::new(predicate)) } else { predicate };
+                    continue;
+                }
+            }
+            if min_precedence <= 3 {
+                let negate = self.peek_word("NOT")
+                    && matches!(self.tokens.get(self.index + 1),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("LIKE"));
+                if self.peek_word("LIKE") || negate {
+                    if negate { self.next(); }
+                    self.expect_word("LIKE")?;
+                    let expr = Expr::Like {
+                        value: Box::new(left),
+                        pattern: Box::new(self.expression(4)?),
+                    };
+                    left = if negate { Expr::Not(Box::new(expr)) } else { expr };
+                    continue;
+                }
             }
             let Some((op, precedence)) = self.binary_operator() else {
                 break;
@@ -153,6 +221,40 @@ impl Parser {
             return Ok(inner);
         }
         match self.next() {
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("CASE") => {
+                let mut branches = Vec::new();
+                while self.take_word("WHEN") {
+                    let condition = self.expression(0)?;
+                    self.expect_word("THEN")?;
+                    let result = self.expression(0)?;
+                    branches.push((condition, result));
+                }
+                if branches.is_empty() {
+                    return Err(Error::Parse("CASE requires WHEN".into()));
+                }
+                let else_expr = if self.take_word("ELSE") {
+                    Some(Box::new(self.expression(0)?))
+                } else {
+                    None
+                };
+                self.expect_word("END")?;
+                Ok(Expr::Case { branches, else_expr })
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("TRY_CAST") => {
+                self.expect_symbol('(')?;
+                let expression = self.expression(0)?;
+                self.expect_word("AS")?;
+                let target = match self.identifier()?.to_ascii_uppercase().as_str() {
+                    "INT" | "INTEGER" | "BIGINT" | "INT64" => crate::schema::DataType::Integer,
+                    "FLOAT" | "FLOAT64" | "DOUBLE" => crate::schema::DataType::Float,
+                    "BOOL" | "BOOLEAN" => crate::schema::DataType::Boolean,
+                    "STRING" | "TEXT" | "VARCHAR" => crate::schema::DataType::Text,
+                    type_name => return Err(Error::Unsupported(
+                        format!("unsupported TRY_CAST type: {type_name}"))),
+                };
+                self.expect_symbol(')')?;
+                Ok(Expr::TryCast { expression: Box::new(expression), target })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 Ok(Expr::Literal(Value::Null))
             }
@@ -161,6 +263,18 @@ impl Parser {
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
+            }
+            Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
+                self.expect_symbol('(')?;
+                let mut args = Vec::new();
+                if !self.take_symbol(')') {
+                    loop {
+                        args.push(self.expression(0)?);
+                        if self.take_symbol(')') { break; }
+                        self.expect_symbol(',')?;
+                    }
+                }
+                Ok(Expr::Call { name: word, args })
             }
             Some(Token::Word(word)) => Ok(Expr::Column(word)),
             Some(Token::Text(text)) => Ok(Expr::Literal(Value::Text(text))),
@@ -188,7 +302,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "SUM", "MIN", "MAX"]
+                if ["COUNT", "SUM", "MIN", "MAX", "AVG"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -200,13 +314,19 @@ impl Parser {
         if let Some(function) = function {
             let _ = self.next();
             self.expect_symbol('(')?;
-            let op = if function == "COUNT" && self.take_symbol('*') {
+            let distinct = self.take_word("DISTINCT");
+            if distinct && function != "COUNT" {
+                return Err(Error::Unsupported("DISTINCT is only supported for COUNT".into()));
+            }
+            let op = if function == "COUNT" && !distinct && self.take_symbol('*') {
                 AggregateOp::CountAll
             } else {
                 let expr = self.expression(0)?;
                 match function.as_str() {
+                    "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
                     "SUM" => AggregateOp::Sum(expr),
+                    "AVG" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
                     _ => unreachable!(),
@@ -255,6 +375,14 @@ impl Parser {
                 self.take_word("OUTER");
                 self.expect_word("JOIN")?;
                 Some(JoinKind::Left)
+            } else if self.take_word("RIGHT") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Right)
+            } else if self.take_word("FULL") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Full)
             } else {
                 None
             };
@@ -404,9 +532,15 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
     let mut plan = parser.select_body()?;
     while parser.take_word("UNION") {
-        parser.expect_word("ALL")?;
+        let all = parser.take_word("ALL");
+        if !all {
+            parser.take_word("DISTINCT");
+        }
         let right = parser.select_body()?;
         plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+        if !all {
+            plan = Plan::Distinct { input: Box::new(plan) };
+        }
     }
     let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');
@@ -479,6 +613,111 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn is_distinct_from_compares_nulls_without_unknown_results() {
+        let distinct = parse_sql("SELECT amount FROM sales WHERE amount IS DISTINCT FROM 2").unwrap();
+        assert_eq!(execute(&distinct, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Null],
+        ]);
+        let not_distinct = parse_sql("SELECT amount FROM sales WHERE amount IS NOT DISTINCT FROM NULL").unwrap();
+        assert_eq!(execute(&not_distinct, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Null]]);
+        let nulls = parse_sql("SELECT NULL IS DISTINCT FROM NULL AS n FROM sales").unwrap();
+        assert_eq!(execute(&nulls, &sales()).unwrap().row(0).unwrap(),
+            vec![Value::Boolean(false)]);
+    }
+
+    #[test]
+    fn try_cast_converts_valid_values_and_nulls_invalid_values() {
+        let converted = parse_sql("SELECT TRY_CAST(amount AS STRING) AS value FROM sales").unwrap();
+        assert_eq!(execute(&converted, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("2".into())],
+            vec![Value::Text("3".into())],
+            vec![Value::Null],
+        ]);
+        let invalid = parse_sql("SELECT TRY_CAST(city AS INT) AS value FROM sales").unwrap();
+        assert_eq!(execute(&invalid, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Null], vec![Value::Null]]);
+    }
+
+    #[test]
+    fn case_when_handles_multiple_branches_and_else() {
+        let plan = parse_sql("SELECT CASE WHEN amount IS NULL THEN 0 WHEN amount >= 3 THEN 10 ELSE 1 END AS bucket FROM sales").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(10)],
+            vec![Value::Integer(0)],
+        ]);
+    }
+
+    #[test]
+    fn like_and_not_like_support_unicode_and_nulls() {
+        let plan = parse_sql("SELECT city FROM sales WHERE city LIKE 'Ber%' AND city NOT LIKE '%s'").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().num_rows(), 2);
+        let null_pattern = parse_sql("SELECT amount FROM sales WHERE amount LIKE NULL").unwrap();
+        assert_eq!(execute(&null_pattern, &sales()).unwrap().num_rows(), 0);
+    }
+
+    #[test]
+    fn count_distinct_skips_nulls_and_counts_unique_values() {
+        let plan = parse_sql("SELECT COUNT(DISTINCT amount) AS unique_amounts FROM sales").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn avg_ignores_nulls_and_returns_float() {
+        let plan = parse_sql("SELECT city, AVG(amount) AS average FROM sales GROUP BY city ORDER BY city").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("Berlin".into()), Value::Float(2.5)],
+            vec![Value::Text("Paris".into()), Value::Null],
+        ]);
+    }
+
+    #[test]
+    fn in_and_not_in_keep_sql_null_semantics() {
+        let included = parse_sql("SELECT amount FROM sales WHERE amount IN (2, 3)").unwrap();
+        let excluded = parse_sql("SELECT amount FROM sales WHERE amount NOT IN (2)").unwrap();
+        let with_null = parse_sql("SELECT amount FROM sales WHERE amount NOT IN (2, NULL)").unwrap();
+        assert_eq!(execute(&included, &sales()).unwrap().num_rows(), 2);
+        assert_eq!(execute(&excluded, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(3)]]);
+        assert_eq!(execute(&with_null, &sales()).unwrap().num_rows(), 0);
+    }
+
+    #[test]
+    fn between_and_not_between_handle_nulls_and_boundaries() {
+        let inside = parse_sql("SELECT amount FROM sales WHERE amount BETWEEN 2 AND 2").unwrap();
+        let outside = parse_sql("SELECT amount FROM sales WHERE amount NOT BETWEEN 2 AND 2").unwrap();
+        assert_eq!(execute(&inside, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)]]);
+        assert_eq!(execute(&outside, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(3)]]);
+    }
+
+    #[test]
+    fn union_distinct_removes_duplicates_but_union_all_keeps_them() {
+        let distinct = parse_sql("SELECT city FROM sales UNION SELECT city FROM sales ORDER BY city").unwrap();
+        let all = parse_sql("SELECT city FROM sales UNION ALL SELECT city FROM sales").unwrap();
+        assert_eq!(execute(&distinct, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("Berlin".into())],
+            vec![Value::Text("Paris".into())],
+        ]);
+        assert_eq!(execute(&all, &sales()).unwrap().num_rows(), 6);
+    }
+
+    #[test]
+    fn full_outer_join_lowers_to_native_join() {
+        let plan = parse_sql("SELECT * FROM a FULL OUTER JOIN b ON id = id").unwrap();
+        assert!(matches!(plan, Plan::Join { kind: JoinKind::Full, .. }));
+    }
+
+    #[test]
+    fn right_outer_join_lowers_to_native_join() {
+        let plan = parse_sql("SELECT * FROM a RIGHT OUTER JOIN b ON id = id").unwrap();
+        assert!(matches!(plan, Plan::Join { kind: JoinKind::Right, .. }));
     }
 
     #[test]

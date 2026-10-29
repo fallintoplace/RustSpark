@@ -35,6 +35,11 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
+    Like { value: Box<Expr>, pattern: Box<Expr> },
+    Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
+    Call { name: String, args: Vec<Expr> },
+    TryCast { expression: Box<Expr>, target: DataType },
+    IsDistinctFrom { left: Box<Expr>, right: Box<Expr>, negated: bool },
 }
 
 impl Expr {
@@ -55,7 +60,24 @@ impl Expr {
                 Value::Integer(_) => DataType::Integer,
                 Value::Float(_) => DataType::Float,
             }),
-            Self::Not(_) | Self::IsNull(_) => Ok(DataType::Boolean),
+            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
+            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::TryCast { target, .. } => Ok(*target),
+            Self::Call { name, args } => crate::functions::output_type(name, args, schema),
+            Self::Case { branches, else_expr } => {
+                let mut output = None;
+                for expr in branches.iter().map(|(_, value)| value)
+                    .chain(else_expr.iter().map(Box::as_ref))
+                {
+                    if matches!(expr, Expr::Literal(Value::Null)) { continue; }
+                    let kind = expr.output_type(schema)?;
+                    if output.is_some_and(|existing| existing != kind) {
+                        return Err(Error::Type("CASE result branches must share a type".into()));
+                    }
+                    output = Some(kind);
+                }
+                Ok(output.unwrap_or(DataType::Text))
+            },
             Self::Binary { left, op, right } => match op {
                 BinaryOp::Equal
                 | BinaryOp::NotEqual
@@ -90,6 +112,40 @@ impl Expr {
                 None => Value::Null,
             }),
             Self::IsNull(expr) => Ok(Value::Boolean(expr.evaluate(batch, row)?.is_null())),
+            Self::IsDistinctFrom { left, right, negated } => {
+                let left = left.evaluate(batch, row)?;
+                let right = right.evaluate(batch, row)?;
+                let distinct = match (left.is_null(), right.is_null()) {
+                    (true, true) => false,
+                    (true, false) | (false, true) => true,
+                    (false, false) => left.sql_equal(&right)?.map(|equal| !equal)
+                        .unwrap_or_else(|| left != right),
+                };
+                Ok(Value::Boolean(if *negated { !distinct } else { distinct }))
+            },
+            Self::Like { value, pattern } => match (
+                value.evaluate(batch, row)?, pattern.evaluate(batch, row)?
+            ) {
+                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                (Value::Text(value), Value::Text(pattern)) =>
+                    Ok(Value::Boolean(sql_like(&value, &pattern)?)),
+                _ => Err(Error::Type("LIKE requires text values".into())),
+            },
+            Self::TryCast { expression, target } =>
+                Ok(crate::try_cast::convert(expression.evaluate(batch, row)?, *target)),
+            Self::Call { name, args } =>
+                crate::functions::evaluate(name, args, batch, row),
+            Self::Case { branches, else_expr } => {
+                for (condition, value) in branches {
+                    if condition.evaluate(batch, row)?.as_boolean()? == Some(true) {
+                        return value.evaluate(batch, row);
+                    }
+                }
+                match else_expr {
+                    Some(value) => value.evaluate(batch, row),
+                    None => Ok(Value::Null),
+                }
+            },
             Self::Binary { left, op, right } => {
                 let left = left.evaluate(batch, row)?;
                 let right = right.evaluate(batch, row)?;
@@ -97,6 +153,33 @@ impl Expr {
             }
         }
     }
+}
+
+/// SQL LIKE wildcard matching with bounded working memory and work.
+fn sql_like(input: &str, pattern: &str) -> Result<bool> {
+    let text: Vec<char> = input.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    if (text.len() + 1).checked_mul(pattern.len() + 1).is_none_or(|cells| cells > 8_000_000) {
+        return Err(Error::Execution("LIKE pattern exceeds work budget".into()));
+    }
+    let mut prev = vec![false; text.len() + 1];
+    prev[0] = true;
+    for symbol in pattern {
+        let mut next = vec![false; text.len() + 1];
+        if symbol == '%' {
+            next[0] = prev[0];
+            for index in 1..=text.len() {
+                next[index] = prev[index] || next[index - 1];
+            }
+        } else {
+            for index in 1..=text.len() {
+                next[index] = prev[index - 1]
+                    && (symbol == '_' || symbol == text[index - 1]);
+            }
+        }
+        prev = next;
+    }
+    Ok(prev[text.len()])
 }
 
 fn bool_to_value(value: Option<bool>) -> Value {
@@ -191,6 +274,14 @@ mod tests {
             vec![vec![Value::Null], vec![Value::Integer(4)]],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn like_wildcards_and_unicode_are_character_aware() {
+        assert!(sql_like("café", "caf_").unwrap());
+        assert!(sql_like("abc", "a%c").unwrap());
+        assert!(!sql_like("abc", "a_d").unwrap());
+        assert!(sql_like("", "%").unwrap());
     }
 
     #[test]

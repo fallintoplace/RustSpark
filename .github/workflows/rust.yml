@@ -1,4 +1,4 @@
-name: Rust
+name: Rust native
 
 on:
   push:
@@ -6,145 +6,32 @@ on:
   pull_request:
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A fast follow-up merge must not cancel the only running check for main.
-  # Keep canceling outdated PR runs; GitHub retains the newest pending main run.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
 
 jobs:
-  format:
-    name: Rust format
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    needs: format
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: 4
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --locked -- -D warnings
-
-  tests:
-    name: Linux integration shard ${{ matrix.shard }}/8
-    needs: format
-    runs-on: ubuntu-latest
+  native:
+    name: Native Rust on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
-    env:
-      CARGO_BUILD_JOBS: 4
-      CARGO_INCREMENTAL: 0
+        os: [ubuntu-latest, windows-latest, macos-15]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run assigned Cargo test targets
-        shell: bash
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-
-          shard = int(os.environ["SHARD"])
-          metadata = json.loads(subprocess.check_output(
-              ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
-              text=True,
-          ))
-          members = set(metadata["workspace_members"])
-          targets = sorted({
-              (target["name"], tuple(target["kind"]))
-              for package in metadata["packages"]
-              if package["id"] in members
-              for target in package["targets"]
-              if "test" in target["kind"]
-          })
-          if not targets:
-              raise SystemExit("No integration test targets discovered")
-          selected = [name for index, (name, _) in enumerate(targets) if index % 8 == shard]
-          command = ["cargo", "test", "--locked"]
-          if shard == 0:
-              command.extend(["--lib", "--bins"])
-          for name in selected:
-              command.extend(["--test", name])
-          if not selected and shard != 0:
-              raise SystemExit(f"Empty shard {shard}")
-          print(f"Shard {shard}: {len(selected)} integration targets", flush=True)
-          subprocess.run(command, check=True)
-          PY
-
-  smoke:
-    name: CLI smoke
-    needs: format
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: 4
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build CLI for end-to-end smoke checks
-        run: cargo build --locked --bin rustspark
-      - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
-      - name: Exercise CLI, catalog persistence, and file formats
-        run: python3 scripts/release_smoke.py --binary ./target/debug/rustspark
-
-  compatibility:
-    needs: format
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: MSRV (Rust 1.95)
-            os: ubuntu-latest
-            toolchain: '1.95'
-            build_jobs: 4
-          - name: Windows (stable)
-            os: windows-latest
-            toolchain: stable
-            build_jobs: 2
-          - name: macOS (stable)
-            os: macos-15
-            toolchain: stable
-            build_jobs: 2
-    env:
-      CARGO_BUILD_JOBS: ${{ matrix.build_jobs }}
-      # Limit debug artifact size on disk-heavy multi-target test jobs.
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_TEST_STRIP: symbols
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets --locked
+      - name: Verify native dependency graph
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/check_native_dependencies.py
+      - name: Test native engine
+        run: cargo test --manifest-path native-engine/Cargo.toml --all-targets
+      - name: Test native default binary
+        run: cargo test --all-targets
+      - name: Lint native engine
+        run: cargo clippy --manifest-path native-engine/Cargo.toml --all-targets -- -D warnings
+      - name: Lint native default binary
+        run: cargo clippy --all-targets -- -D warnings

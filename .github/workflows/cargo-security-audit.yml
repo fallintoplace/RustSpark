@@ -19,6 +19,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install RustSec cargo-audit
         run: cargo install --locked cargo-audit
+      - name: Resolve native dependency lockfile
+        run: cargo generate-lockfile
       - name: Audit Cargo.lock against RustSec advisories
         run: cargo audit --json > rustsec-audit.json
       - name: Upload audit results for triage

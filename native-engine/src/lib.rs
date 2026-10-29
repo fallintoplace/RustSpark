@@ -1,7 +1,7 @@
 //! RustSpark's independent native query engine.
 //!
-//! The native engine does not depend on DataFusion. It is developed beside the
-//! existing RustSpark CLI until correctness and performance gates permit migration.
+//! This crate provides the default RustSpark query engine. It never depends on
+//! DataFusion or invokes a fallback executor for unsupported queries.
 #![forbid(unsafe_code)]
 
 pub mod error;
@@ -10,6 +10,8 @@ pub use error::{Error, Result};
 
 pub mod scalar;
 
+pub mod try_cast;
+
 pub mod schema;
 
 pub mod batch;
@@ -17,6 +19,8 @@ pub mod batch;
 pub mod catalog;
 
 pub mod expr;
+
+mod functions;
 
 pub mod filter;
 
