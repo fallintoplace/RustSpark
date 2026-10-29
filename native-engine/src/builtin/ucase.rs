@@ -1,5 +1,5 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
@@ -8,11 +8,18 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    Ok(Value::Text(if text.is_ascii() {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("UCASE input exceeds 16 MiB".into()));
+    }
+    let converted = if text.is_ascii() {
         text.to_ascii_uppercase()
     } else {
         text.to_uppercase()
-    }))
+    };
+    if converted.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("UCASE output exceeds 16 MiB".into()));
+    }
+    Ok(Value::Text(converted))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -32,5 +39,17 @@ mod tests {
             Value::Text("STRASSE".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_unicode_ucase_tests {
+    use super::*;
+    #[test]
+    fn preserves_uppercase_expansion_and_rejects_oversize_input() {
+        assert_eq!(evaluate(&[Value::Text("straße".into())]).unwrap(),
+            Value::Text("STRASSE".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }
