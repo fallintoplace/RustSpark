@@ -220,15 +220,15 @@ pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
-    let header = records.remove(0);
+    let header = std::mem::take(&mut records[0]);
     if header.len() != schema.len() || header.iter()
         .zip(schema.fields()).any(|(name, field)| !name.eq_ignore_ascii_case(&field.name)) {
         return Err(Error::Schema("CSV header differs from declared schema".into()));
     }
-    if records.len() > MAX_CSV_ROWS {
+    if records.len() - 1 > MAX_CSV_ROWS {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
-    let rows = records.into_iter().map(|record| {
+    let rows = records.into_iter().skip(1).map(|record| {
         if record.len() != schema.len() {
             return Err(Error::Parse("CSV row width differs from header".into()));
         }
