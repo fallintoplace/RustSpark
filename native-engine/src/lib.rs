@@ -18,6 +18,8 @@ pub mod catalog;
 
 pub mod expr;
 
+mod functions;
+
 pub mod filter;
 
 pub mod project;

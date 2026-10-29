@@ -240,6 +240,18 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
             }
+            Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
+                self.expect_symbol('(')?;
+                let mut args = Vec::new();
+                if !self.take_symbol(')') {
+                    loop {
+                        args.push(self.expression(0)?);
+                        if self.take_symbol(')') { break; }
+                        self.expect_symbol(',')?;
+                    }
+                }
+                Ok(Expr::Call { name: word, args })
+            }
             Some(Token::Word(word)) => Ok(Expr::Column(word)),
             Some(Token::Text(text)) => Ok(Expr::Literal(Value::Text(text))),
             Some(Token::Number(number)) if number.contains('.') => {

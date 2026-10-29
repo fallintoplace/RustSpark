@@ -37,6 +37,7 @@ pub enum Expr {
     IsNull(Box<Expr>),
     Like { value: Box<Expr>, pattern: Box<Expr> },
     Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
+    Call { name: String, args: Vec<Expr> },
 }
 
 impl Expr {
@@ -58,6 +59,7 @@ impl Expr {
                 Value::Float(_) => DataType::Float,
             }),
             Self::Not(_) | Self::IsNull(_) | Self::Like { .. } => Ok(DataType::Boolean),
+            Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
                 let mut output = None;
                 for expr in branches.iter().map(|(_, value)| value)
@@ -114,6 +116,8 @@ impl Expr {
                     Ok(Value::Boolean(sql_like(&value, &pattern)?)),
                 _ => Err(Error::Type("LIKE requires text values".into())),
             },
+            Self::Call { name, args } =>
+                crate::functions::evaluate(name, args, batch, row),
             Self::Case { branches, else_expr } => {
                 for (condition, value) in branches {
                     if condition.evaluate(batch, row)?.as_boolean()? == Some(true) {
