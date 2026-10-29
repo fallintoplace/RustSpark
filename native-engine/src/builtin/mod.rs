@@ -42,6 +42,7 @@ mod json_exists;
 mod json_extract;
 mod regex_support;
 mod regexp_extract;
+mod regexp_count;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -104,6 +105,7 @@ const MODULES: &[&[Function]] = &[
     &json_exists::FUNCTIONS,
     &json_extract::FUNCTIONS,
     &regexp_extract::FUNCTIONS,
+    &regexp_count::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
