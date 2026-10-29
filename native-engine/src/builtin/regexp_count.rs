@@ -12,7 +12,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     regex_support::check_input(text)?;
     // An empty Rust regex matches at each UTF-8 character boundary.
     if pattern.is_empty() {
-        let count = text.chars().count().checked_add(1)
+        let characters = if text.is_ascii() { text.len() } else { text.chars().count() };
+        let count = characters.checked_add(1)
             .and_then(|n| i64::try_from(n).ok())
             .ok_or_else(|| Error::Execution("REGEXP_COUNT overflow".into()))?;
         return Ok(Value::Integer(count));
@@ -42,5 +43,18 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("".into()),
             Value::Text("".into())]).unwrap(), Value::Integer(1));
         assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod regexp_count_ascii_empty_fast_path_tests {
+    use super::*;
+    #[test]
+    fn empty_regex_counts_ascii_and_unicode_boundaries() {
+        let ascii = "x".repeat(50_000);
+        assert_eq!(evaluate(&[Value::Text(ascii), Value::Text("".into())]).unwrap(),
+            Value::Integer(50_001));
+        assert_eq!(evaluate(&[Value::Text("東京🙂".into()), Value::Text("".into())]).unwrap(),
+            Value::Integer(4));
     }
 }
