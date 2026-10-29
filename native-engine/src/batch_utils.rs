@@ -19,9 +19,23 @@ pub fn concat(
     batches: impl IntoIterator<Item = Batch>,
     max_rows: usize,
 ) -> Result<Batch> {
+    let mut inputs = batches.into_iter();
+    // Ownership can pass through unchanged when the iterator has exactly one
+    // batch. Avoid cloning every cell into new column vectors.
+    if inputs.size_hint() == (1, Some(1)) {
+        if let Some(batch) = inputs.next() {
+            if batch.schema() != schema {
+                return Err(Error::Schema("cannot concatenate different batch schemas".into()));
+            }
+            if batch.num_rows() > max_rows {
+                return Err(Error::Execution("batch collection row limit exceeded".into()));
+            }
+            return Ok(batch);
+        }
+    }
     let mut total = 0usize;
     let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
-    for batch in batches {
+    for batch in inputs {
         if batch.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
@@ -87,5 +101,23 @@ mod zero_column_concat_consolidation_tests {
         let b = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
         assert_eq!(concat(&schema, [a.clone(), b.clone()], 5).unwrap().num_rows(), 5);
         assert!(concat(&schema, [a, b], 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod single_owned_batch_concat_tests {
+    use super::*;
+    #[test]
+    fn one_batch_keeps_values_schema_and_budget_checks() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "text", crate::schema::DataType::Text, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("café".into())], vec![Value::Null]
+        ]).unwrap();
+        assert_eq!(concat(&schema, [first.clone()], 2).unwrap(), first);
+        assert!(concat(&schema, [first.clone()], 1).is_err());
+        let other_schema = Schema::new(vec![crate::schema::Field::new(
+            "different", crate::schema::DataType::Text, true)]).unwrap();
+        assert!(concat(&other_schema, [first], 5).is_err());
     }
 }
