@@ -21,7 +21,7 @@ pub enum JoinKind {
 const MAX_JOIN_ROWS: usize = 1_000_000;
 
 fn joinable(key: &Value) -> bool {
-    !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
+    !key.is_null()
 }
 
 pub fn hash_join(
@@ -192,7 +192,7 @@ mod nan_join_key_tests {
     use crate::schema::{DataType, Field};
 
     #[test]
-    fn nan_keys_do_not_match_in_inner_semi_or_left_joins() {
+    fn nan_keys_match_in_inner_semi_and_left_joins_like_spark() {
         let schema = Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap();
         let left = Batch::from_rows(schema.clone(), vec![
             vec![Value::Float(f64::NAN)], vec![Value::Float(1.0)],
@@ -200,9 +200,9 @@ mod nan_join_key_tests {
         let right = Batch::from_rows(schema, vec![
             vec![Value::Float(f64::NAN)], vec![Value::Float(1.0)],
         ]).unwrap();
-        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Inner).unwrap().num_rows(), 1);
-        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Semi).unwrap().num_rows(), 1);
-        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Anti).unwrap().num_rows(), 1);
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Inner).unwrap().num_rows(), 2);
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Semi).unwrap().num_rows(), 2);
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Anti).unwrap().num_rows(), 0);
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Left).unwrap().num_rows(), 2);
     }
 }
