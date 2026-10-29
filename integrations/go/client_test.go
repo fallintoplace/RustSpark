@@ -45,3 +45,15 @@ func contains(values []string, needle string) bool {
     for _, value := range values { if value == needle { return true } }
     return false
 }
+
+func TestQueryFromSQLFile(t *testing.T) {
+    c := Client{}
+    args, err := c.arguments("", Options{SQLFile: "/tmp/query files/report.sql"})
+    if err != nil { t.Fatal(err) }
+    if !reflect.DeepEqual(args[:4], []string{"--sql-file", "/tmp/query files/report.sql", "--stdout-format", "json-array"}) {
+        t.Fatalf("unexpected SQL file command: %v", args)
+    }
+    if _, err := c.arguments("SELECT 1", Options{SQLFile: "query.sql"}); err == nil {
+        t.Fatal("inline SQL and SQL file cannot be combined")
+    }
+}

@@ -26,6 +26,7 @@ type Client struct {
 
 type Options struct {
     Input, CSV, Parquet, JSON string
+    SQLFile string
     CSVTables, ParquetTables, JSONTables map[string]string
     NamedParams map[string]string
     MaxRows int
@@ -48,11 +49,17 @@ func addNamed(args []string, flag string, tables map[string]string) ([]string, e
 }
 
 func (c Client) arguments(sql string, opts Options) ([]string, error) {
-    if strings.TrimSpace(sql) == "" {
-        return nil, errors.New("SQL cannot be empty")
+    if (strings.TrimSpace(sql) == "") == (opts.SQLFile == "") {
+        return nil, errors.New("provide exactly one SQL text or SQLFile")
     }
     count := 0
-    args := []string{"--sql", sql, "--stdout-format", "json-array"}
+    args := make([]string, 0, 8)
+    if opts.SQLFile != "" {
+        args = append(args, "--sql-file", opts.SQLFile)
+    } else {
+        args = append(args, "--sql", sql)
+    }
+    args = append(args, "--stdout-format", "json-array")
     if c.DatabaseDir != "" {
         args = append(args, "--database-dir", c.DatabaseDir)
     }
