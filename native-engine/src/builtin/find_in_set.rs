@@ -9,9 +9,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(haystack) = super::string(&args[1])? else { return Ok(Value::Null) };
     if needle.contains(',') { return Ok(Value::Integer(0)); }
-    if !haystack.contains(',') {
-        return Ok(Value::Integer(i64::from(haystack == needle)));
-    }
+    // A single split scan handles one item and comma-separated sets alike.
+    // Avoid checking for a comma and then scanning the input a second time.
     let position = haystack.split(',').position(|item| item == needle);
     let position = position.map_or(0, |index| index + 1);
     Ok(Value::Integer(i64::try_from(position)
@@ -33,5 +32,25 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("x".into()), Value::Text("y".into())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Text("".into()), Value::Text("".into())]).unwrap(), Value::Integer(1));
         assert_eq!(evaluate(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod single_scan_find_in_set_tests {
+    use super::*;
+
+    #[test]
+    fn handles_single_empty_duplicate_and_long_sets() {
+        let find = |needle: &str, set: &str| evaluate(&[
+            Value::Text(needle.into()), Value::Text(set.into()),
+        ]).unwrap();
+        assert_eq!(find("x", "x"), Value::Integer(1));
+        assert_eq!(find("x", "y"), Value::Integer(0));
+        assert_eq!(find("", ""), Value::Integer(1));
+        assert_eq!(find("", ",a,"), Value::Integer(1));
+        assert_eq!(find("x", "a,x,x"), Value::Integer(2));
+        assert_eq!(find("a,b", "a,b"), Value::Integer(0));
+        let long = format!("{},last", "x,".repeat(1000));
+        assert_eq!(find("last", &long), Value::Integer(1001));
     }
 }
