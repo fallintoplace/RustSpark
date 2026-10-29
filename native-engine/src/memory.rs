@@ -144,6 +144,7 @@ mod tests {
  
 /// Reserve a group of budgets with one atomic pool charge.
 pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Reservation>> {
+    if requests.is_empty() { return Ok(Vec::new()); }
     let total = requests.iter().try_fold(0usize, |sum, &bytes| {
         sum.checked_add(bytes)
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
@@ -203,5 +204,20 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod empty_grouped_pool_reservations_tests {
+    use super::*;
+    #[test]
+    fn empty_request_uses_no_capacity_even_when_pool_is_full() {
+        let pool = MemoryPool::new(1);
+        let held = pool.reserve(1).unwrap();
+        let empty = reserve_many(&pool, &[]).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(pool.used(), 1);
+        drop(held);
+        assert_eq!(pool.used(), 0);
     }
 }
