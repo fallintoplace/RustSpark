@@ -7,6 +7,8 @@ mod nullif;
 
 mod if_expr;
 
+mod nvl2;
+
 mod abs;
 
 mod round;
@@ -110,6 +112,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         },
         "NULLIF" => nullif::output_type(args, schema),
         "IF" => if_expr::output_type(args, schema),
+        "NVL2" => nvl2::output_type(args, schema),
         "ABS" => abs::output_type(args, schema),
         "ROUND" => round::output_type(args, schema),
         "PMOD" => pmod::output_type(args, schema),
@@ -142,6 +145,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "NVL" | "IFNULL" => coalesce::eval(args, batch, row),
         "NULLIF" => nullif::eval(args, batch, row),
         "IF" => if_expr::eval(args, batch, row),
+        "NVL2" => nvl2::eval(args, batch, row),
         "ABS" => abs::eval(args, batch, row),
         "ROUND" => round::eval(args, batch, row),
         "PMOD" => pmod::eval(args, batch, row),
