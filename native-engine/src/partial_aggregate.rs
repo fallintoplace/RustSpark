@@ -14,6 +14,21 @@ struct State {
     has_value: bool,
 }
 
+fn update_group_state(state: &mut State, amount: &Value) -> Result<()> {
+    state.rows = state.rows.checked_add(1)
+        .ok_or_else(|| Error::Execution("group count overflow".into()))?;
+    match amount {
+        Value::Integer(value) => {
+            state.sum = state.sum.checked_add(i128::from(*value))
+                .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?;
+            state.has_value = true;
+        }
+        Value::Null => {}
+        _ => return Err(Error::Type("partial SUM requires integer values".into())),
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct PartialGroupSum {
     key_column: String,
@@ -53,21 +68,17 @@ impl PartialGroupSum {
         }
         self.key_type = Some(kind);
         for row in 0..batch.num_rows() {
-            let key_value = batch.value(row, key)?.clone();
-            if !self.groups.contains_key(&key_value) && self.groups.len() >= self.max_groups {
-                return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
-            }
-            let state = self.groups.entry(key_value).or_default();
-            state.rows = state.rows.checked_add(1)
-                .ok_or_else(|| Error::Execution("group count overflow".into()))?;
-            match batch.value(row, amount)? {
-                Value::Integer(value) => {
-                    state.sum = state.sum.checked_add(i128::from(*value))
-                        .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?;
-                    state.has_value = true;
+            let key_value = batch.value(row, key)?;
+            let amount_value = batch.value(row, amount)?;
+            if let Some(state) = self.groups.get_mut(key_value) {
+                update_group_state(state, amount_value)?;
+            } else {
+                if self.groups.len() >= self.max_groups {
+                    return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
                 }
-                Value::Null => {}
-                _ => return Err(Error::Type("partial SUM requires integer values".into())),
+                let mut state = State::default();
+                update_group_state(&mut state, amount_value)?;
+                self.groups.insert(key_value.clone(), state);
             }
         }
         Ok(())
@@ -224,5 +235,28 @@ mod consolidated_partial_merge_preflight_tests {
             let now = &first.groups[&key];
             assert_eq!((now.rows, now.sum, now.has_value), (previous.rows, previous.sum, previous.has_value));
         }
+    }
+}
+
+#[cfg(test)]
+mod partial_group_key_perf_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_text_keys_and_nulls_work_across_batches() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, true), Field::new("v", DataType::Integer, true)
+        ]).unwrap();
+        let mut aggregate = PartialGroupSum::new("k", "v", 2);
+        for _ in 0..3 {
+            let input = Batch::from_rows(schema.clone(), vec![
+                vec![Value::Text("same long key".into()), Value::Integer(2)],
+                vec![Value::Null, Value::Null],
+            ]).unwrap();
+            aggregate.update(&input).unwrap();
+        }
+        let result = aggregate.finish().unwrap().rows().unwrap();
+        assert!(result.contains(&vec![Value::Text("same long key".into()), Value::Integer(3), Value::Integer(6)]));
+        assert!(result.contains(&vec![Value::Null, Value::Integer(3), Value::Null]));
     }
 }
