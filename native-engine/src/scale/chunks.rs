@@ -98,7 +98,16 @@ impl Iterator for BatchChunks<'_> {
         self.position = end;
         Some(self.input.slice_rows(start, end))
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.input.num_rows().saturating_sub(self.position);
+        let count = remaining / self.batch_rows + usize::from(remaining % self.batch_rows != 0);
+        (count, Some(count))
+    }
 }
+
+impl ExactSizeIterator for BatchChunks<'_> {}
+impl std::iter::FusedIterator for BatchChunks<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -198,5 +207,22 @@ mod bounded_remaining_rows_capacity_tests {
         assert_eq!(batches[0].rows().unwrap(), vec![
             vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Integer(2)]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod scale_chunk_exact_count_tests {
+    use super::*;
+    #[test]
+    fn exact_hint_tracks_mixed_final_chunk() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 9).unwrap();
+        let mut chunks = BatchChunks::new(&batch, 4).unwrap();
+        assert_eq!(chunks.size_hint(), (3, Some(3)));
+        assert_eq!(chunks.next().unwrap().unwrap().num_rows(), 4);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.next().unwrap().unwrap().num_rows(), 4);
+        assert_eq!(chunks.next().unwrap().unwrap().num_rows(), 1);
+        assert_eq!(chunks.len(), 0);
+        assert!(chunks.next().is_none());
     }
 }
