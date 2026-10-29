@@ -18,23 +18,31 @@ impl BloomFilter {
         Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes })
     }
 
-    fn bit(&self, key: &Value, seed: u32) -> usize {
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        seed.hash(&mut hash);
-        key.hash(&mut hash);
-        (hash.finish() % self.bits as u64) as usize
+    fn hash_pair(key: &Value) -> (u64, u64) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let first = hasher.finish();
+        // Make the second step odd to avoid degenerate probe sequences.
+        let second = (first.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15).wrapping_mul(0xbf58_476d_1ce4_e5b9) | 1;
+        (first, second)
+    }
+
+    fn bit(&self, first: u64, second: u64, probe: u32) -> usize {
+        (first.wrapping_add(second.wrapping_mul(u64::from(probe))) % self.bits as u64) as usize
     }
 
     pub fn insert(&mut self, key: &Value) {
-        for seed in 0..self.hashes {
-            let bit = self.bit(key, seed);
+        let (first, second) = Self::hash_pair(key);
+        for probe in 0..self.hashes {
+            let bit = self.bit(first, second, probe);
             self.words[bit / 64] |= 1_u64 << (bit % 64);
         }
     }
 
     pub fn might_contain(&self, key: &Value) -> bool {
-        (0..self.hashes).all(|seed| {
-            let bit = self.bit(key, seed);
+        let (first, second) = Self::hash_pair(key);
+        (0..self.hashes).all(|probe| {
+            let bit = self.bit(first, second, probe);
             (self.words[bit / 64] & (1_u64 << (bit % 64))) != 0
         })
     }
@@ -126,5 +134,20 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod double_hash_probe_tests {
+    use super::*;
+    #[test]
+    fn all_inserted_keys_survive_different_probe_counts() {
+        for hashes in [1, 2, 5, 12, 16] {
+            let mut filter = BloomFilter::new(65_537, hashes).unwrap();
+            for n in 0..5_000 { filter.insert(&Value::Integer(n)); }
+            for n in 0..5_000 { assert!(filter.might_contain(&Value::Integer(n))); }
+            filter.insert(&Value::Float(-0.0));
+            assert!(filter.might_contain(&Value::Float(0.0)));
+        }
     }
 }
