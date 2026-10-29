@@ -12,7 +12,12 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
     }
     if let Some(compiled) = CACHE.with(|cache| {
-        cache.borrow().iter().find(|(key, _)| key == pattern).map(|(_, regex)| regex.clone())
+        let mut cache = cache.borrow_mut();
+        let index = cache.iter().position(|(key, _)| key == pattern)?;
+        let entry = cache.remove(index);
+        let compiled = entry.1.clone();
+        cache.push(entry);
+        Some(compiled)
     }) {
         return Ok(compiled);
     }
@@ -49,5 +54,26 @@ mod tests {
             assert!(compile(pattern).unwrap().is_match(pattern));
         }
         CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
+    }
+}
+
+#[cfg(test)]
+mod lru_cache_regression_tests {
+    use super::*;
+
+    #[test]
+    fn hot_regex_survives_eviction_of_less_recent_entries() {
+        CACHE.with(|cache| cache.borrow_mut().clear());
+        for pattern in ["^alpha$", "^beta$", "^gamma$", "^delta$"] {
+            compile(pattern).unwrap();
+        }
+        compile("^alpha$").unwrap();
+        compile("^epsilon$").unwrap();
+        CACHE.with(|cache| {
+            let entries = cache.borrow();
+            assert_eq!(entries.len(), CACHE_ENTRIES);
+            assert!(entries.iter().any(|(pattern, _)| pattern == "^alpha$"));
+            assert!(!entries.iter().any(|(pattern, _)| pattern == "^beta$"));
+        });
     }
 }
