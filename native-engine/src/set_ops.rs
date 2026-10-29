@@ -91,13 +91,25 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     Batch::from_rows(schema, rows)
 }
 
-fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
+fn right_counts(
+    right: &Batch, max_distinct_keys: usize,
+) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
     let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
     for index in 0..right.num_rows() {
         let row = right.row(index)?;
-        let entry = counts.entry(row).or_insert(0);
-        *entry = entry.checked_add(1)
-            .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+        let at_limit = counts.len() >= max_distinct_keys;
+        match counts.entry(row) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                *entry.get_mut() = entry.get().checked_add(1)
+                    .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if at_limit {
+                    return Err(Error::Execution("multiset distinct-key budget exceeded".into()));
+                }
+                entry.insert(1);
+            }
+        }
     }
     Ok(counts)
 }
@@ -105,7 +117,7 @@ fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usiz
 /// Keep each left row up to its multiplicity in the right input.
 pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
-    let mut counts = right_counts(&right)?;
+    let mut counts = right_counts(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut rows = Vec::new();
     for index in 0..left.num_rows() {
         let row = left.row(index)?;
@@ -122,7 +134,7 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
 /// Keep left occurrences after subtracting right row multiplicities.
 pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
-    let mut counts = right_counts(right)?;
+    let mut counts = right_counts(right, MAX_DISTINCT_SET_KEYS)?;
     let mut rows = Vec::new();
     for index in 0..left.num_rows() {
         let row = left.row(index)?;
@@ -218,5 +230,30 @@ mod streaming_set_row_perf_tests {
             &[Value::Integer(2), Value::Integer(3)]);
         assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 100);
         assert_eq!(except_all(&left, &right).unwrap().num_rows(), 100);
+    }
+}
+
+#[cfg(test)]
+mod bounded_multiset_state_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn duplicates_do_not_consume_additional_distinct_key_budget() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Null], vec![Value::Null],
+            vec![Value::Integer(2)],
+        ]).unwrap();
+        assert!(right_counts(&right, 2).is_err());
+        let counts = right_counts(&right, 3).unwrap();
+        assert_eq!(counts.len(), 3);
+        assert_eq!(counts[&vec![Value::Null]], 2);
+        let left = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Integer(1)], vec![Value::Integer(1)],
+        ]).unwrap();
+        assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 3);
+        assert_eq!(except_all(&left, &right).unwrap().num_rows(), 0);
     }
 }
