@@ -28,6 +28,18 @@ fn octet_length(args: &[Value]) -> Result<Value> {
     }
 }
 
+fn bit_length(args: &[Value]) -> Result<Value> {
+    match super::string(&args[0])? {
+        Some(value) => {
+            let bits = value.len().checked_mul(8)
+                .and_then(|size| i64::try_from(size).ok())
+                .ok_or_else(|| Error::Execution("string is too long".into()))?;
+            Ok(Value::Integer(bits))
+        }
+        None => Ok(Value::Null),
+    }
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -35,6 +47,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "character_length", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
     Function { name: "len", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
     Function { name: "octet_length", min_args: 1, max_args: 1, result_type: char_length_type, call: octet_length },
+    Function { name: "bit_length", min_args: 1, max_args: 1, result_type: char_length_type, call: bit_length },
     // PARITY_FUNCTIONS
 ];
 
@@ -81,6 +94,12 @@ mod tests {
     fn spark_octet_length_counts_utf8_bytes() {
         assert_eq!(sql_result("octet_length(s)").unwrap(), Value::Integer(5));
         assert_eq!(octet_length(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_bit_length_counts_utf8_bits() {
+        assert_eq!(sql_result("bit_length(s)").unwrap(), Value::Integer(40));
+        assert_eq!(bit_length(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
