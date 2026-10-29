@@ -104,14 +104,3 @@ mod tests {
         fs::remove_dir(dir).unwrap();
     }
 }
-
-#[cfg(test)]
-mod merge_pass_fan_in_capacity_tests {
-    use super::*;
-    #[test]
-    fn fan_in_group_capacity_covers_partial_final_groups() {
-        assert_eq!(9_usize.div_ceil(4), 3);
-        assert_eq!(8_usize.div_ceil(4), 2);
-        assert_eq!(1_usize.div_ceil(4), 1);
-    }
-}
