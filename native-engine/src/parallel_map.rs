@@ -64,3 +64,36 @@ mod tests {
         assert!(map_partitions(vec![batch(1)], 1, |_| -> Result<Batch> { panic!("boom") }).is_err());
     }
 }
+
+ 
+/// Apply an independent SQL predicate to every partition in parallel.
+pub fn filter_partitions(
+    input: Vec<Batch>,
+    max_workers: usize,
+    predicate: crate::expr::Expr,
+) -> Result<Vec<Batch>> {
+    map_partitions(input, max_workers, |batch| crate::filter::filter(&batch, &predicate))
+}
+
+#[cfg(test)]
+mod parallel_filter_feature_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn keeps_partition_order_and_sql_true_rows_only() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let parts: Vec<_> = (0..12).map(|n| {
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(n)], vec![Value::Null],
+            ]).unwrap()
+        }).collect();
+        let predicate = Expr::binary(Expr::Column("n".into()),
+            BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(8)));
+        let filtered = filter_partitions(parts, 3, predicate).unwrap();
+        assert_eq!(filtered.iter().map(Batch::num_rows).sum::<usize>(), 4);
+        assert_eq!(filtered[8].row(0).unwrap(), vec![Value::Integer(8)]);
+        assert_eq!(filtered[0].num_rows(), 0);
+    }
+}
+
