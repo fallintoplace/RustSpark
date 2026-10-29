@@ -219,6 +219,13 @@ impl Parser {
                     let insensitive = self.take_word("ILIKE");
                     if !insensitive { self.expect_word("LIKE")?; }
                     let pattern = self.expression(4)?;
+                    let escape = if self.take_word("ESCAPE") {
+                        match self.next() {
+                            Some(Token::Text(text)) if text.chars().count() == 1 =>
+                                text.chars().next().expect("single character"),
+                            _ => return Err(Error::Parse("LIKE ESCAPE must be one quoted character".into())),
+                        }
+                    } else { '\\' };
                     let (value, pattern) = if insensitive {
                         (
                             Expr::Call { name: "lower".into(), args: vec![left] },
@@ -228,6 +235,7 @@ impl Parser {
                     let expr = Expr::Like {
                         value: Box::new(value),
                         pattern: Box::new(pattern),
+                        escape,
                     };
                     left = if negate { Expr::Not(Box::new(expr)) } else { expr };
                     continue;

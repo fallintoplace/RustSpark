@@ -35,7 +35,7 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
-    Like { value: Box<Expr>, pattern: Box<Expr> },
+    Like { value: Box<Expr>, pattern: Box<Expr>, escape: char },
     Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
     Call { name: String, args: Vec<Expr> },
     TryCast { expression: Box<Expr>, target: DataType },
@@ -133,12 +133,12 @@ impl Expr {
                 };
                 Ok(Value::Boolean(if *negated { !distinct } else { distinct }))
             },
-            Self::Like { value, pattern } => match (
+            Self::Like { value, pattern, escape } => match (
                 value.evaluate(batch, row)?, pattern.evaluate(batch, row)?
             ) {
                 (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                 (Value::Text(value), Value::Text(pattern)) =>
-                    Ok(Value::Boolean(sql_like(&value, &pattern)?)),
+                    Ok(Value::Boolean(sql_like(&value, &pattern, *escape)?)),
                 _ => Err(Error::Type("LIKE requires text values".into())),
             },
             Self::TryCast { expression, target } =>
@@ -171,13 +171,36 @@ impl Expr {
     }
 }
 
-/// SQL LIKE wildcard matching with bounded working memory and work.
-fn sql_like(input: &str, pattern: &str) -> Result<bool> {
-    if !pattern.contains('%') && !pattern.contains('_') {
-        return Ok(input == pattern);
+/// Parse Spark LIKE wildcards and escapes before applying bounded DP.
+/// Only %, _, and the escape character may be escaped.
+fn sql_like(input: &str, pattern: &str, escape: char) -> Result<bool> {
+    #[derive(Clone, Copy)]
+    enum Pattern { Literal(char), One, Many }
+    let mut source = pattern.chars();
+    let mut pattern = Vec::new();
+    while let Some(ch) = source.next() {
+        if ch == escape {
+            let escaped = source.next().ok_or_else(||
+                Error::Execution("LIKE pattern ends with an escape character".into()))?;
+            if escaped != '%' && escaped != '_' && escaped != escape {
+                return Err(Error::Execution("LIKE escape must precede %, _, or itself".into()));
+            }
+            pattern.push(Pattern::Literal(escaped));
+        } else {
+            pattern.push(match ch {
+                '%' => Pattern::Many,
+                '_' => Pattern::One,
+                value => Pattern::Literal(value),
+            });
+        }
+    }
+    if pattern.iter().all(|part| matches!(part, Pattern::Literal(_))) {
+        let literal: String = pattern.iter().filter_map(|part|
+            if let Pattern::Literal(ch) = part { Some(*ch) } else { None }
+        ).collect();
+        return Ok(input == literal);
     }
     let text: Vec<char> = input.chars().collect();
-    let pattern: Vec<char> = pattern.chars().collect();
     if (text.len() + 1).checked_mul(pattern.len() + 1).is_none_or(|cells| cells > 8_000_000) {
         return Err(Error::Execution("LIKE pattern exceeds work budget".into()));
     }
@@ -185,15 +208,20 @@ fn sql_like(input: &str, pattern: &str) -> Result<bool> {
     prev[0] = true;
     for symbol in pattern {
         let mut next = vec![false; text.len() + 1];
-        if symbol == '%' {
-            next[0] = prev[0];
-            for index in 1..=text.len() {
-                next[index] = prev[index] || next[index - 1];
+        match symbol {
+            Pattern::Many => {
+                next[0] = prev[0];
+                for index in 1..=text.len() {
+                    next[index] = prev[index] || next[index - 1];
+                }
             }
-        } else {
-            for index in 1..=text.len() {
-                next[index] = prev[index - 1]
-                    && (symbol == '_' || symbol == text[index - 1]);
+            Pattern::One => {
+                for index in 1..=text.len() { next[index] = prev[index - 1]; }
+            }
+            Pattern::Literal(value) => {
+                for index in 1..=text.len() {
+                    next[index] = prev[index - 1] && value == text[index - 1];
+                }
             }
         }
         prev = next;
