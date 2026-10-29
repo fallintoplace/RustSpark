@@ -39,6 +39,7 @@ impl Ord for Candidate {
 
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     if k == 0 { return batch.take(&[]); }
+    if k >= batch.num_rows() { return crate::sort::sort(batch, keys); }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
@@ -118,5 +119,16 @@ mod topk_offset_feature_tests {
         assert_eq!(top_k_offset(&input, &keys, 10, 2).unwrap().num_rows(), 0);
         assert!(top_k_offset(&input, &keys, usize::MAX, 2).is_err());
     }
+    #[test]
+    fn full_topk_matches_sort_including_duplicate_keys() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("score", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Null],
+                 vec![Value::Integer(1)], vec![Value::Integer(0)]],
+        ).unwrap();
+        let keys = vec![SortKey::ascending(Expr::Column("score".into()))];
+        let expected = crate::sort::sort(&input, &keys).unwrap();
+        assert_eq!(top_k(&input, &keys, input.num_rows()).unwrap(), expected);
+        assert_eq!(top_k(&input, &keys, usize::MAX).unwrap(), expected);
+    }
 }
-
