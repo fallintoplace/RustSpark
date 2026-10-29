@@ -21,7 +21,15 @@ fn right(args: &[Value]) -> Result<Value> {
 fn unsigned_right(args: &[Value]) -> Result<Value> {
     Ok(parts(args)?.map_or(Value::Null, |(n, shift)| Value::Integer(((n as u64) >> shift) as i64)))
 }
+
+fn rotate_left(args: &[Value]) -> Result<Value> {
+    let Some(number) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let Some(count) = super::integer(&args[1])? else { return Ok(Value::Null); };
+    Ok(Value::Integer(number.rotate_left(count.rem_euclid(64) as u32)))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "rotate_left", min_args: 2, max_args: 2, result_type: output, call: rotate_left },
     Function { name: "shiftleft", min_args: 2, max_args: 2, result_type: output, call: left },
     Function { name: "shiftright", min_args: 2, max_args: 2, result_type: output, call: right },
     Function { name: "shiftrightunsigned", min_args: 2, max_args: 2, result_type: output, call: unsigned_right },
@@ -35,5 +43,19 @@ mod tests {
         assert_eq!(right(&[Value::Integer(-2), Value::Integer(1)]).unwrap(), Value::Integer(-1));
         assert_eq!(unsigned_right(&[Value::Integer(-2), Value::Integer(1)]).unwrap(), Value::Integer(i64::MAX));
         assert!(left(&[Value::Integer(1), Value::Integer(64)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rotate_left_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_integer_boundaries_and_nulls() {
+        assert!(crate::builtin::supports("rotate_left"));
+        assert_eq!(rotate_left(&[Value::Integer(1), Value::Integer(1)]).unwrap(), Value::Integer(2));
+        assert_eq!(rotate_left(&[Value::Integer(1), Value::Integer(65)]).unwrap(), Value::Integer(2));
+        assert_eq!(rotate_left(&[Value::Integer(1), Value::Integer(-1)]).unwrap(), Value::Integer(i64::MIN));
+        assert_eq!(rotate_left(&[Value::Integer(-1), Value::Integer(7)]).unwrap(), Value::Integer(-1));
+        assert_eq!(rotate_left(&[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
     }
 }
