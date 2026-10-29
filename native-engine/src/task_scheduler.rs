@@ -27,6 +27,14 @@ pub struct TaskScheduler {
     max_attempts: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaskCounts {
+    pub queued: usize,
+    pub leased: usize,
+    pub done: usize,
+    pub failed: usize,
+}
+
 impl TaskScheduler {
     pub fn new(tasks: impl IntoIterator<Item = u64>, max_attempts: u32) -> Result<Self> {
         if max_attempts == 0 {
@@ -108,6 +116,19 @@ impl TaskScheduler {
         false
     }
 
+    pub fn counts(&self) -> TaskCounts {
+        let mut counts = TaskCounts::default();
+        for task in self.tasks.values() {
+            match &task.status {
+                TaskStatus::Queued => counts.queued += 1,
+                TaskStatus::Leased { .. } => counts.leased += 1,
+                TaskStatus::Done => counts.done += 1,
+                TaskStatus::Failed => counts.failed += 1,
+            }
+        }
+        counts
+    }
+
     pub fn status(&self, task: u64) -> Option<&TaskStatus> {
         self.tasks.get(&task).map(|entry| &entry.status)
     }
@@ -129,6 +150,18 @@ mod tests {
         assert!(!scheduler.finish(&original, true));
         assert!(scheduler.finish(&replacement, true));
         assert_eq!(scheduler.status(1), Some(&TaskStatus::Done));
+    }
+
+    #[test]
+    fn task_counts_track_queue_and_terminal_states() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3], 2).unwrap();
+        assert_eq!(scheduler.counts(), TaskCounts { queued: 3, ..TaskCounts::default() });
+        let first = scheduler.lease(7, now, Duration::from_secs(3)).unwrap().unwrap();
+        assert_eq!(scheduler.counts(), TaskCounts { queued: 2, leased: 1, ..TaskCounts::default() });
+        assert!(scheduler.finish(&first, true));
+        assert!(scheduler.cancel_task(2));
+        assert_eq!(scheduler.counts(), TaskCounts { queued: 1, done: 1, failed: 1, ..TaskCounts::default() });
     }
 
     #[test]
