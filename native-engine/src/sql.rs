@@ -141,6 +141,31 @@ impl Parser {
                     continue;
                 }
             }
+            if min_precedence <= 3 {
+                let negate = self.peek_word("NOT")
+                    && matches!(self.tokens.get(self.index + 1),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"));
+                if self.peek_word("IN") || negate {
+                    if negate { self.next(); }
+                    self.expect_word("IN")?;
+                    self.expect_symbol('(')?;
+                    let mut choices = Vec::new();
+                    loop {
+                        choices.push(self.expression(0)?);
+                        if !self.take_symbol(',') { break; }
+                    }
+                    self.expect_symbol(')')?;
+                    let mut choices = choices.into_iter();
+                    let first = choices.next().expect("nonempty IN list");
+                    let mut predicate = Expr::binary(left.clone(), BinaryOp::Equal, first);
+                    for choice in choices {
+                        predicate = Expr::binary(predicate, BinaryOp::Or,
+                            Expr::binary(left.clone(), BinaryOp::Equal, choice));
+                    }
+                    left = if negate { Expr::Not(Box::new(predicate)) } else { predicate };
+                    continue;
+                }
+            }
             let Some((op, precedence)) = self.binary_operator() else {
                 break;
             };
@@ -512,6 +537,17 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn in_and_not_in_keep_sql_null_semantics() {
+        let included = parse_sql("SELECT amount FROM sales WHERE amount IN (2, 3)").unwrap();
+        let excluded = parse_sql("SELECT amount FROM sales WHERE amount NOT IN (2)").unwrap();
+        let with_null = parse_sql("SELECT amount FROM sales WHERE amount NOT IN (2, NULL)").unwrap();
+        assert_eq!(execute(&included, &sales()).unwrap().num_rows(), 2);
+        assert_eq!(execute(&excluded, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(3)]]);
+        assert_eq!(execute(&with_null, &sales()).unwrap().num_rows(), 0);
     }
 
     #[test]
