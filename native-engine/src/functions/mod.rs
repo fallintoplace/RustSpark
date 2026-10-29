@@ -11,6 +11,8 @@ mod abs;
 
 mod round;
 
+mod pmod;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -53,6 +55,26 @@ pub(crate) fn text_arg(expr: &Expr, schema: &Schema) -> Result<()> {
     }
 }
 
+pub(crate) fn numeric_result_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
+    let mut float = false;
+    for arg in args {
+        numeric_arg(arg, schema)?;
+        if !matches!(arg, Expr::Literal(Value::Null))
+            && arg.output_type(schema)? == DataType::Float {
+            float = true;
+        }
+    }
+    Ok(if float { DataType::Float } else { DataType::Integer })
+}
+
+pub(crate) fn as_f64(value: &Value) -> Result<f64> {
+    match value {
+        Value::Integer(n) => Ok(*n as f64),
+        Value::Float(n) => Ok(*n),
+        _ => Err(Error::Type("function requires numeric values".into())),
+    }
+}
+
 pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match name.to_ascii_uppercase().as_str() {
         "COALESCE" => coalesce::output_type(args, schema),
@@ -60,6 +82,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "IF" => if_expr::output_type(args, schema),
         "ABS" => abs::output_type(args, schema),
         "ROUND" => round::output_type(args, schema),
+        "PMOD" => pmod::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -71,6 +94,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "IF" => if_expr::eval(args, batch, row),
         "ABS" => abs::eval(args, batch, row),
         "ROUND" => round::eval(args, batch, row),
+        "PMOD" => pmod::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -121,6 +145,13 @@ mod tests {
     fn round_works_in_native_sql() {
         assert_eq!(run("SELECT ROUND(3.14159, 2) AS n FROM t").unwrap()[0],
             vec![Value::Float(3.14)]);
+    }
+
+    #[test]
+    fn pmod_works_in_native_sql() {
+        assert_eq!(run("SELECT PMOD(x, 3) FROM t").unwrap(), vec![
+            vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(2)],
+        ]);
     }
 
     #[test]
