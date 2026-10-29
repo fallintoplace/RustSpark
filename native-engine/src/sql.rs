@@ -188,7 +188,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "SUM", "MIN", "MAX"]
+                if ["COUNT", "SUM", "MIN", "MAX", "AVG"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -207,6 +207,7 @@ impl Parser {
                 match function.as_str() {
                     "COUNT" => AggregateOp::Count(expr),
                     "SUM" => AggregateOp::Sum(expr),
+                    "AVG" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
                     _ => unreachable!(),
@@ -486,5 +487,24 @@ mod tests {
         assert!(parse_sql("SELECT * FROM sales; DROP TABLE sales").is_err());
         assert!(parse_sql("SELECT * FROM sales JOIN customers ON id > id").is_err());
         assert!(parse_sql("SELECT city, SUM(amount) FROM sales").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod avg_sql_feature_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn sql_average_runs_on_native_aggregation() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        catalog.register("sales", Batch::from_rows(schema, vec![
+            vec![Value::Integer(2)], vec![Value::Integer(5)], vec![Value::Null]
+        ]).unwrap()).unwrap();
+        let plan = parse_sql("SELECT AVG(n) AS mean FROM sales").unwrap();
+        assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Float(3.5)]]);
     }
 }
