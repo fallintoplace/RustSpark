@@ -429,6 +429,10 @@ impl Parser {
     fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
+        if self.peek_word("FROM") || self.peek_word("WHERE") || self.peek_word("ORDER")
+            || self.peek_word("LIMIT") || self.peek().is_none() {
+            return Err(Error::Parse("SELECT requires an expression".into()));
+        }
         let mut select = Vec::new();
         loop {
             select.push(self.select_item(select.len())?);
