@@ -231,6 +231,21 @@ impl Parser {
                 self.expect_word("END")?;
                 Ok(Expr::Case { branches, else_expr })
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("TRY_CAST") => {
+                self.expect_symbol('(')?;
+                let expression = self.expression(0)?;
+                self.expect_word("AS")?;
+                let target = match self.identifier()?.to_ascii_uppercase().as_str() {
+                    "INT" | "INTEGER" | "BIGINT" | "INT64" => crate::schema::DataType::Integer,
+                    "FLOAT" | "FLOAT64" | "DOUBLE" => crate::schema::DataType::Float,
+                    "BOOL" | "BOOLEAN" => crate::schema::DataType::Boolean,
+                    "STRING" | "TEXT" | "VARCHAR" => crate::schema::DataType::Text,
+                    type_name => return Err(Error::Unsupported(
+                        format!("unsupported TRY_CAST type: {type_name}"))),
+                };
+                self.expect_symbol(')')?;
+                Ok(Expr::TryCast { expression: Box::new(expression), target })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 Ok(Expr::Literal(Value::Null))
             }
@@ -589,6 +604,19 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn try_cast_converts_valid_values_and_nulls_invalid_values() {
+        let converted = parse_sql("SELECT TRY_CAST(amount AS STRING) AS value FROM sales").unwrap();
+        assert_eq!(execute(&converted, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("2".into())],
+            vec![Value::Text("3".into())],
+            vec![Value::Null],
+        ]);
+        let invalid = parse_sql("SELECT TRY_CAST(city AS INT) AS value FROM sales").unwrap();
+        assert_eq!(execute(&invalid, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Null], vec![Value::Null]]);
     }
 
     #[test]

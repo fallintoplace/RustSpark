@@ -38,6 +38,7 @@ pub enum Expr {
     Like { value: Box<Expr>, pattern: Box<Expr> },
     Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
     Call { name: String, args: Vec<Expr> },
+    TryCast { expression: Box<Expr>, target: DataType },
 }
 
 impl Expr {
@@ -59,6 +60,7 @@ impl Expr {
                 Value::Float(_) => DataType::Float,
             }),
             Self::Not(_) | Self::IsNull(_) | Self::Like { .. } => Ok(DataType::Boolean),
+            Self::TryCast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
                 let mut output = None;
@@ -116,6 +118,8 @@ impl Expr {
                     Ok(Value::Boolean(sql_like(&value, &pattern)?)),
                 _ => Err(Error::Type("LIKE requires text values".into())),
             },
+            Self::TryCast { expression, target } =>
+                Ok(crate::try_cast::convert(expression.evaluate(batch, row)?, *target)),
             Self::Call { name, args } =>
                 crate::functions::evaluate(name, args, batch, row),
             Self::Case { branches, else_expr } => {

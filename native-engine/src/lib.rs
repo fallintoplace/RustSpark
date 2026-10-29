@@ -10,6 +10,8 @@ pub use error::{Error, Result};
 
 pub mod scalar;
 
+pub mod try_cast;
+
 pub mod schema;
 
 pub mod batch;
