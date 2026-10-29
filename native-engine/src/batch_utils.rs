@@ -19,19 +19,22 @@ pub fn concat(
     batches: impl IntoIterator<Item = Batch>,
     max_rows: usize,
 ) -> Result<Batch> {
-    let mut rows = Vec::new();
+    let mut total = 0usize;
+    let mut columns = vec![Vec::new(); schema.len()];
     for batch in batches {
         if batch.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
-        let total = rows.len().checked_add(batch.num_rows())
+        total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
         if total > max_rows {
             return Err(Error::Execution("batch collection row limit exceeded".into()));
         }
-        rows.extend(batch.rows()?);
+        for (index, column) in columns.iter_mut().enumerate() {
+            column.extend_from_slice(batch.column(index)?);
+        }
     }
-    Batch::from_rows(schema.clone(), rows)
+    Batch::new(schema.clone(), columns)
 }
 
 #[cfg(test)]
@@ -56,5 +59,25 @@ mod tests {
         let a = Schema::new(vec![Field::new("a", DataType::Text, true)]).unwrap();
         let b = Schema::new(vec![Field::new("b", DataType::Text, true)]).unwrap();
         assert!(concat(&a, [Batch::empty(b)], 10).is_err());
+    }
+}
+
+#[cfg(test)]
+mod columnar_concatenation_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field}, scalar::Value};
+
+    #[test]
+    fn empty_batches_keep_schema_and_nullable_values() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        let row = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Null, Value::Text("ok".into())]]).unwrap();
+        let merged = concat(&schema, [empty, row], 1).unwrap();
+        assert_eq!(merged.row(0).unwrap(), vec![Value::Null, Value::Text("ok".into())]);
+        assert_eq!(concat(&schema, Vec::<Batch>::new(), 0).unwrap().num_rows(), 0);
     }
 }
