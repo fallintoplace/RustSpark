@@ -73,6 +73,16 @@ class DataFrameCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "process timeout"):
                 query_dataframe("SELECT 1", process_timeout=3)
 
+    def test_named_json_tables_are_supported(self):
+        command = build_command("SELECT * FROM events", Path("out.arrow"),
+                                json_tables={"events": "events.json"})
+        self.assertEqual(command[command.index("--json-table") + 1], "events=events.json")
+        with self.assertRaisesRegex(ValueError, "Named and unnamed"):
+            build_command("SELECT 1", Path("out.arrow"), csv="file.csv", json_tables={"e": "e.json"})
+        with self.assertRaises(ValueError):
+            build_command("SELECT 1", Path("out.arrow"), json_tables={"bad-name": "e.json"})
+
+
 
 if __name__ == "__main__":
     unittest.main()
