@@ -28,7 +28,7 @@ impl MemoryPool {
     }
 
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation> {
-        self.charge(bytes)?;
+        if bytes != 0 { self.charge(bytes)?; }
         Ok(Reservation {
             pool: Arc::clone(self),
             bytes,
@@ -203,5 +203,22 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod empty_reservation_tests {
+    use super::*;
+    #[test]
+    fn zero_byte_reservations_do_not_touch_a_full_pool() {
+        let pool = MemoryPool::new(1);
+        let full = pool.reserve(1).unwrap();
+        let empty = pool.reserve(0).unwrap();
+        assert_eq!(empty.bytes(), 0);
+        assert_eq!(pool.used(), 1);
+        drop(empty);
+        assert_eq!(pool.used(), 1);
+        drop(full);
+        assert_eq!(pool.used(), 0);
     }
 }
