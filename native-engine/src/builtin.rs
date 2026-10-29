@@ -77,6 +77,13 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args.len() == 2 && args[1].output_type(schema)? != DataType::Integer { return Err(Error::Type("ROUND precision must be integer".into())); }
             Ok(DataType::Float)
         },
+        "POWER" => {
+            if args.len() != 2 { return Err(Error::Parse("POWER requires two arguments".into())); }
+            for arg in args {
+                if !matches!(arg.output_type(schema)?, DataType::Integer | DataType::Float) { return Err(Error::Type("POWER requires numeric inputs".into())); }
+            }
+            Ok(DataType::Float)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -163,6 +170,18 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             let scale = 10_f64.powi(digits);
             let value = (number * scale).round() / scale;
             if !value.is_finite() { return Err(Error::Execution("ROUND produced a non-finite value".into())); }
+            Ok(Value::Float(value))
+        },
+        "POWER" => {
+            if args.len() != 2 { return Err(Error::Parse("POWER requires two arguments".into())); }
+            if args.iter().any(Value::is_null) { return Ok(Value::Null); }
+            let numeric = |v: &Value| match v {
+                Value::Integer(n) => Ok(*n as f64),
+                Value::Float(n) => Ok(*n),
+                _ => Err(Error::Type("POWER requires numeric inputs".into())),
+            };
+            let value = numeric(&args[0])?.powf(numeric(&args[1])?);
+            if !value.is_finite() { return Err(Error::Execution("POWER produced a non-finite value".into())); }
             Ok(Value::Float(value))
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
