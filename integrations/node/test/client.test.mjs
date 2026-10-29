@@ -42,3 +42,36 @@ test("rejects non-finite numbers inside nested SQL JSON results", () => {
   const ok = new RustSpark({ runner: () => ({ status: 0, stdout: '[{"n":1.5}]' }) });
   assert.deepEqual(ok.query("SELECT 1"), [{ n: 1.5 }]);
 });
+
+test("queryOne caps cardinality and rejects multiple rows", () => {
+  let command;
+  const client = new RustSpark({ runner: (_bin, argv) => {
+    command = argv;
+    return { status: 0, stdout: '[{"id":1}]' };
+  } });
+  assert.deepEqual(client.queryOne("SELECT id FROM data"), { id: 1 });
+  assert.equal(command[command.indexOf("--max-rows") + 1], "2");
+  const empty = new RustSpark({ runner: () => ({ status: 0, stdout: "[]" }) });
+  assert.equal(empty.queryOne("SELECT 1"), null);
+  const duplicated = new RustSpark({ runner: () => ({ status: 0, stdout: "[{},{}]" }) });
+  assert.throws(() => duplicated.queryOne("SELECT 1"), RustSparkError);
+  assert.throws(() => client.queryOne("SELECT 1", { maxRows: 1 }), TypeError);
+});
+
+test("SQL file and deterministic table and parameter ordering", () => {
+  let command;
+  const client = new RustSpark({ runner: (_bin, argv) => {
+    command = argv;
+    return { status: 0, stdout: "[]" };
+  } });
+  client.query("", {
+    sqlFile: "queries/report.sql",
+    csvTables: { zeta: "/z.csv", alpha: "/a.csv" },
+    namedParams: { zeta: "int64:2", alpha: "int64:1" },
+  });
+  assert.deepEqual(command.slice(0, 4), ["--sql-file", "queries/report.sql", "--stdout-format", "json-array"]);
+  assert.ok(command.indexOf("alpha=/a.csv") < command.indexOf("zeta=/z.csv"));
+  assert.ok(command.indexOf("alpha=int64:1") < command.indexOf("zeta=int64:2"));
+  assert.throws(() => client.query("SELECT 1", { sqlFile: "x.sql" }), TypeError);
+  assert.throws(() => client.query("", { sqlFile: "" }), TypeError);
+});
