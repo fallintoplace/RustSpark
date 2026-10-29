@@ -2,10 +2,10 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, StringArray, UInt64Array,
-    builder::StringBuilder,
+    builder::StringBuilder, types::Int32Type,
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
 
@@ -83,6 +83,9 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
+            ArrowType::Dictionary(key, value)
+                if **key == ArrowType::Int32 && **value == ArrowType::Utf8 =>
+                DataType::Text,
             other => return Err(Error::Unsupported(format!("unsupported Arrow type: {other}"))),
         };
         fields.push(Field::new(field.name(), data_type, field.is_nullable()));
@@ -126,6 +129,20 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                 Some((0..values.len()).map(|row| {
                     if values.is_null(row) { Value::Null }
                     else { Value::Text(values.value(row).into()) }
+                }).collect())
+            }
+            ArrowType::Dictionary(key, value)
+                if **key == ArrowType::Int32 && **value == ArrowType::Utf8 => {
+                let dictionary = array.as_any().downcast_ref::<DictionaryArray<Int32Type>>()
+                    .ok_or_else(|| Error::Type("invalid dictionary Arrow array".into()))?;
+                let values = dictionary.values().as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| Error::Type("dictionary values are not UTF-8".into()))?;
+                Some((0..dictionary.len()).map(|row| {
+                    if dictionary.is_null(row) { Value::Null }
+                    else {
+                        let code = dictionary.keys().value(row) as usize;
+                        Value::Text(values.value(code).into())
+                    }
                 }).collect())
             }
             _ => None,
@@ -247,5 +264,30 @@ mod arrow_column_dispatch_perf_tests {
         assert_eq!(decoded.value(0, 2).unwrap(), &Value::Float(-0.0));
         assert!(matches!(decoded.value(2, 2).unwrap(), Value::Float(x) if x.is_nan()));
         assert_eq!(decoded.value(0, 3).unwrap(), &Value::Text("é🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod arrow_dictionary_utf8_decode_tests {
+    use super::*;
+    use arrow_array::builder::StringDictionaryBuilder;
+
+    #[test]
+    fn decodes_nullable_dictionary_text_to_native_columns() {
+        let mut dictionary = StringDictionaryBuilder::<Int32Type>::new();
+        dictionary.append("Berlin").unwrap();
+        dictionary.append_null();
+        dictionary.append("Berlin").unwrap();
+        dictionary.append("東京").unwrap();
+        let record = RecordBatch::try_from_iter(vec![
+            ("city", Arc::new(dictionary.finish()) as ArrayRef),
+        ]).unwrap();
+        let native = from_arrow(&record).unwrap();
+        assert_eq!(native.schema().fields()[0].data_type, DataType::Text);
+        assert_eq!(native.column(0).unwrap(), &[
+            Value::Text("Berlin".into()), Value::Null,
+            Value::Text("Berlin".into()), Value::Text("東京".into()),
+        ]);
+        assert_eq!(from_arrow(&to_arrow(&native).unwrap()).unwrap(), native);
     }
 }
