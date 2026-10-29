@@ -12,6 +12,27 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("TRANSLATE input exceeds memory budget".into()));
     }
     if from.is_empty() { return Ok(Value::Text(text.to_owned())); }
+    if text.is_ascii() && from.is_ascii() && to.is_ascii() {
+        const UNMAPPED: i16 = -1;
+        const REMOVE: i16 = -2;
+        let mut mapping = [UNMAPPED; 128];
+        for (index, &byte) in from.as_bytes().iter().enumerate() {
+            if mapping[usize::from(byte)] == UNMAPPED {
+                mapping[usize::from(byte)] = to.as_bytes().get(index)
+                    .map_or(REMOVE, |replacement| i16::from(*replacement));
+            }
+        }
+        let mut output = Vec::with_capacity(text.len());
+        for &byte in text.as_bytes() {
+            match mapping[usize::from(byte)] {
+                UNMAPPED => output.push(byte),
+                REMOVE => {},
+                replacement => output.push(replacement as u8),
+            }
+        }
+        return Ok(Value::Text(String::from_utf8(output)
+            .expect("ASCII translations remain UTF-8")));
+    }
     let mut mapping: HashMap<char, Option<char>> = HashMap::new();
     let mut replacement = to.chars();
     for character in from.chars() {
@@ -75,5 +96,20 @@ mod empty_translation_perf_tests {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text("".into()), Value::Text("".into())
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_translate_fast_path_tests {
+    use super::*;
+    #[test]
+    fn preserves_first_mapping_and_deletions() {
+        let translated = |text: &str, from: &str, to: &str| evaluate(&[
+            Value::Text(text.into()), Value::Text(from.into()), Value::Text(to.into())
+        ]).unwrap();
+        assert_eq!(translated("abca", "aac", "XY"), Value::Text("XbYX".into()));
+        assert_eq!(translated("cab", "ab", "Z"), Value::Text("cZ".into()));
+        assert_eq!(translated("café", "é", "e"), Value::Text("cafe".into()));
+        assert_eq!(translated("abc", "", "x"), Value::Text("abc".into()));
     }
 }
