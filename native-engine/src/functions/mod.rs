@@ -31,6 +31,8 @@ mod nullifzero;
 
 mod zeroifnull;
 
+mod least;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -110,6 +112,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "NANVL" => nanvl::output_type(args, schema),
         "NULLIFZERO" => nullifzero::output_type(args, schema),
         "ZEROIFNULL" => zeroifnull::output_type(args, schema),
+        "LEAST" => least::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -131,6 +134,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "NANVL" => nanvl::eval(args, batch, row),
         "NULLIFZERO" => nullifzero::eval(args, batch, row),
         "ZEROIFNULL" => zeroifnull::eval(args, batch, row),
+        "LEAST" => least::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -253,6 +257,13 @@ mod tests {
     fn zeroifnull_has_native_sql_semantics() {
         assert_eq!(run("SELECT ZEROIFNULL(x) FROM t").unwrap(), vec![
             vec![Value::Integer(0)], vec![Value::Integer(5)], vec![Value::Integer(-4)],
+        ]);
+    }
+
+    #[test]
+    fn least_native_sql_regression() {
+        assert_eq!(run("SELECT LEAST(x, 0) FROM t").unwrap(), vec![
+            vec![Value::Integer(0)], vec![Value::Integer(0)], vec![Value::Integer(-4)],
         ]);
     }
 
