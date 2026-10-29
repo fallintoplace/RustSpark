@@ -32,3 +32,16 @@ test("reports process exit and invalid output", () => {
   assert.throws(() => new RustSpark({ runner: () => ({ status: 0, stdout: "{}" }) }).query("x"), RustSparkError);
   assert.throws(() => new RustSpark({ runner: () => ({ error: Error("ENOENT") }) }).query("x"), /ENOENT/);
 });
+
+test("executes named SQL files without inline query text", () => {
+  let args;
+  const client = new RustSpark({ runner: (_bin, argv) => {
+    args = argv;
+    return { status: 0, stdout: "[]" };
+  } });
+  assert.deepEqual(client.query(null, { sqlFile: "/tmp/query files/report.sql" }), []);
+  assert.ok(args.includes("--sql-file"));
+  assert.ok(args.includes("/tmp/query files/report.sql"));
+  assert.equal(args.includes("--sql"), false);
+  assert.throws(() => client.query("SELECT 1", { sqlFile: "report.sql" }), TypeError);
+});

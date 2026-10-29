@@ -24,13 +24,19 @@ export class RustSpark {
   }
 
   query(sql, {
+    sqlFile,
     input, csv, parquet, json,
     csvTables, parquetTables, jsonTables,
     namedParams, maxRows, queryTimeout, processTimeoutMs,
     maxOutputBytes = 64 * 1024 * 1024,
   } = {}) {
-    if (typeof sql !== "string" || !sql.trim()) {
-      throw new TypeError("SQL must be a nonempty string");
+    if (sqlFile === undefined) {
+      if (typeof sql !== "string" || !sql.trim()) {
+        throw new TypeError("SQL must be a nonempty string");
+      }
+    } else if (typeof sqlFile !== "string" || !sqlFile.trim() ||
+               (sql != null && (typeof sql !== "string" || sql.trim()))) {
+      throw new TypeError("Provide exactly one inline SQL statement or sqlFile");
     }
     const unnamed = { input, csv, parquet, json };
     const selected = Object.values(unnamed).filter((value) => value != null);
@@ -52,7 +58,9 @@ export class RustSpark {
       throw new RangeError("maxOutputBytes must be positive");
     }
 
-    const args = ["--sql", sql, "--stdout-format", "json-array"];
+    const args = sqlFile === undefined
+      ? ["--sql", sql, "--stdout-format", "json-array"]
+      : ["--sql-file", sqlFile, "--stdout-format", "json-array"];
     if (this.databaseDir !== null) args.push("--database-dir", String(this.databaseDir));
     for (const [key, value] of Object.entries(unnamed)) {
       if (value !== undefined && value !== null) args.push(`--${key}`, String(value));
