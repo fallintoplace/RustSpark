@@ -69,11 +69,16 @@ impl TaskScheduler {
     }
 
     pub fn finish(&mut self, lease: &Lease, success: bool) -> bool {
+        self.finish_at(lease, success, Instant::now())
+    }
+
+    /// Reject stale worker results even before another worker re-leases the task.
+    pub fn finish_at(&mut self, lease: &Lease, success: bool, now: Instant) -> bool {
         let Some(task) = self.tasks.get_mut(&lease.task) else {
             return false;
         };
-        if !matches!(&task.status, TaskStatus::Leased { worker, attempt, .. }
-            if *worker == lease.worker && *attempt == lease.attempt) {
+        if !matches!(&task.status, TaskStatus::Leased { worker, attempt, until }
+            if *worker == lease.worker && *attempt == lease.attempt && *until > now) {
             return false;
         }
         task.status = if success {
@@ -150,3 +155,20 @@ mod task_cancel_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod lease_expiration_regression_tests {
+    use super::*;
+
+    #[test]
+    fn expired_result_is_rejected_before_new_worker_leases() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([5], 2).unwrap();
+        let lease = scheduler.lease(3, now, Duration::from_secs(1)).unwrap().unwrap();
+        assert!(!scheduler.finish_at(&lease, true, now + Duration::from_secs(1)));
+        assert!(matches!(scheduler.status(5), Some(TaskStatus::Leased { .. })));
+        let retry = scheduler.lease(4, now + Duration::from_secs(2),
+            Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(retry.attempt, 2);
+    }
+}
