@@ -2,15 +2,26 @@ use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
-    super::text_type(types)?;
+    super::text_type(&types[..2])?;
+    if types.len() == 3 && types[2] != DataType::Integer {
+        return Err(Error::Type("LEVENSHTEIN threshold must be an integer".into()));
+    }
     Ok(DataType::Integer)
 }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(first) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(second) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let threshold = if args.len() == 3 {
+        let Some(max_distance) = super::integer(&args[2])? else { return Ok(Value::Null) };
+        if max_distance < 0 { return Ok(Value::Integer(-1)); }
+        Some(usize::try_from(max_distance).unwrap_or(usize::MAX))
+    } else { None };
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
+    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
+        return Ok(Value::Integer(-1));
+    }
     if a.len().checked_mul(b.len()).is_none_or(|cells| cells > 2_000_000) {
         return Err(Error::Execution("LEVENSHTEIN exceeds native edit-distance work budget".into()));
     }
@@ -27,12 +38,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         }
         std::mem::swap(&mut previous, &mut current);
     }
-    Ok(Value::Integer(i64::try_from(previous[shorter.len()])
+    let distance = previous[shorter.len()];
+    if threshold.is_some_and(|limit| distance > limit) {
+        return Ok(Value::Integer(-1));
+    }
+    Ok(Value::Integer(i64::try_from(distance)
         .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()))?))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "levenshtein", min_args: 2, max_args: 2,
+    name: "levenshtein", min_args: 2, max_args: 3,
     result_type: output, call: evaluate,
 }];
 
@@ -58,5 +73,14 @@ mod tests {
             .unwrap(), Value::Integer(1));
         assert!(evaluate(&[Value::Text("a".repeat(2000)), Value::Text("b".repeat(2000))])
             .is_err());
+        assert_eq!(evaluate(&[Value::Text("kitten".into()), Value::Text("sitting".into()), Value::Integer(2)])
+            .unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[Value::Text("kitten".into()), Value::Text("sitting".into()), Value::Integer(3)])
+            .unwrap(), Value::Integer(3));
+        assert_eq!(evaluate(&[Value::Text("a".into()), Value::Text("12345".into()), Value::Integer(2)])
+            .unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[Value::Text("a".into()), Value::Text("b".into()), Value::Null])
+            .unwrap(), Value::Null);
+        assert!(output(&[DataType::Text, DataType::Text, DataType::Text]).is_err());
     }
 }
