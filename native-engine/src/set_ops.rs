@@ -15,9 +15,23 @@ pub fn compatible_schema(left: &Batch, right: &Batch) -> Result<Schema> {
     Schema::new(fields)
 }
 
+const MAX_DISTINCT_SET_KEYS: usize = 1_000_000;
+
+fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crate::scalar::Value>>> {
+    let mut keys = HashSet::new();
+    for row in 0..right.num_rows() {
+        let value = right.row(row)?;
+        if keys.len() >= max_keys && !keys.contains(&value) {
+            return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+        }
+        keys.insert(value);
+    }
+    Ok(keys)
+}
+
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let schema = compatible_schema(left, right)?;
-    let right_rows: HashSet<_> = right.rows()?.into_iter().collect();
+    let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
     for row in left.rows()? {
@@ -107,5 +121,24 @@ mod multiset_operator_tests {
         assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(), vec![
             vec![Value::Integer(2)], vec![Value::Null], vec![Value::Integer(3)]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_right_set_key_regression {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn distinct_right_key_budget_checks_new_keys_only() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]).unwrap();
+        assert!(bounded_right_keys(&right, 1).is_err());
+        assert_eq!(bounded_right_keys(&right, 2).unwrap().len(), 2);
+        let left = Batch::from_rows(schema, vec![vec![Value::Integer(2)]]).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().row(0).unwrap(),
+            vec![Value::Integer(2)]);
     }
 }
