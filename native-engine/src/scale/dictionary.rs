@@ -134,8 +134,8 @@ impl DictionaryColumn {
             return Err(Error::Execution("left dictionary exceeds merge budget".into()));
         }
         let mut dictionary = left.dictionary.clone();
-        let mut seen: HashMap<String, u32> = dictionary.iter().enumerate()
-            .map(|(index, text)| (text.clone(), index as u32)).collect();
+        let mut seen: HashMap<&str, u32> = left.dictionary.iter().enumerate()
+            .map(|(index, text)| (text.as_str(), index as u32)).collect();
         let mut bytes = left.encoded_string_bytes;
         let mut mapping = Vec::with_capacity(right.dictionary.len());
         for text in &right.dictionary {
@@ -150,7 +150,7 @@ impl DictionaryColumn {
                 let next = u32::try_from(dictionary.len())
                     .map_err(|_| Error::Execution("dictionary combined ID overflow".into()))?;
                 dictionary.push(text.clone());
-                seen.insert(text.clone(), next);
+                seen.insert(text.as_str(), next);
                 next
             };
             mapping.push(code);
