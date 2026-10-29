@@ -99,14 +99,12 @@ impl Batch {
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
             for &row in indices {
-                let value = column.get(row).ok_or_else(|| {
-                    Error::Execution(format!("row index out of bounds: {row}"))
-                })?;
-                selected.push(value.clone());
+                selected.push(column[row].clone());
             }
             columns.push(selected);
         }
-        Self::new_with_row_count(self.schema.clone(), columns, indices.len())
+        // Values come from a validated batch; gathering cannot change their types.
+        Ok(Self { schema: self.schema.clone(), columns, rows: indices.len() })
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
@@ -219,5 +217,21 @@ mod zero_column_cardinality_consolidation_tests {
         assert!(input.take(&[3]).is_err());
         assert!(input.slice_rows(0, 4).is_err());
         assert!(Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gather_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn gather_keeps_duplicate_null_and_text_cells() {
+        let schema = Schema::new(vec![Field::new("name", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![vec![Value::Null], vec![Value::Text("x".into())]]).unwrap();
+        assert_eq!(batch.take(&[1, 0, 1]).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("x".into())], vec![Value::Null], vec![Value::Text("x".into())]]);
+        assert!(batch.take(&[0, 2]).is_err());
+        let empty = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        assert_eq!(empty.take(&[2, 2, 0]).unwrap().num_rows(), 3);
     }
 }
