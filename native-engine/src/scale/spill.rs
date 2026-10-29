@@ -87,17 +87,24 @@ impl<W: Write> SpillWriter<W> {
     }
 
     pub fn write_batch(&mut self, batch: &Batch) -> Result<()> {
+        self.write_batch_range(batch, 0, batch.num_rows())
+    }
+
+    pub fn write_batch_range(&mut self, batch: &Batch, start: usize, end: usize) -> Result<()> {
+        if start > end || end > batch.num_rows() {
+            return Err(Error::Execution("invalid spill batch row range".into()));
+        }
         if batch.schema() != &self.schema {
             return Err(Error::Schema("spill batch schema mismatch".into()));
         }
-        if batch.num_rows().checked_mul(self.schema.len()).is_none_or(|cells| cells > MAX_CELLS) {
+        if (end - start).checked_mul(self.schema.len()).is_none_or(|cells| cells > MAX_CELLS) {
             return Err(Error::Execution("spill batch exceeds cell limit".into()));
         }
         // Validate the complete payload before emitting the batch length.
         // A failed write must not leave an incomplete batch in the spill stream.
         let mut text_bytes = 0usize;
         for column in 0..self.schema.len() {
-            for value in batch.column(column)? {
+            for value in &batch.column(column)?[start..end] {
                 if let Value::Text(text) = value {
                     if text.len() > MAX_TEXT_BYTES {
                         return Err(Error::Execution("spill text value too long".into()));
@@ -111,8 +118,8 @@ impl<W: Write> SpillWriter<W> {
         let columns = (0..self.schema.len())
             .map(|index| batch.column(index))
             .collect::<Result<Vec<_>>>()?;
-        write_u32(&mut self.output, batch.num_rows())?;
-        for row in 0..batch.num_rows() {
+        write_u32(&mut self.output, end - start)?;
+        for row in start..end {
             for column in &columns {
                 match &column[row] {
                     Value::Null => self.output.write_all(&[0])?,
@@ -344,5 +351,28 @@ mod direct_spill_column_decode_perf_tests {
         writer.write_batch(&batch).unwrap();
         let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
         assert_eq!(reader.next_batch().unwrap().unwrap(), batch);
+    }
+}
+
+#[cfg(test)]
+mod spill_window_write_tests {
+    use super::*;
+    #[test]
+    fn range_writes_roundtrip_without_extra_rows_or_schema_changes() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false), Field::new("name", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..15).map(|n| vec![Value::Integer(n),
+            if n % 4 == 0 { Value::Null } else { Value::Text(format!("item-{n}")) }]).collect()).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        writer.write_batch_range(&batch, 2, 5).unwrap();
+        writer.write_batch_range(&batch, 7, 11).unwrap();
+        assert!(writer.write_batch_range(&batch, 10, 16).is_err());
+        assert!(writer.write_batch_range(&batch, 4, 3).is_err());
+        let bytes = writer.finish().unwrap();
+        let mut reader = SpillReader::new(bytes.as_slice(), 8).unwrap();
+        let left = reader.next_batch().unwrap().unwrap();
+        let right = reader.next_batch().unwrap().unwrap();
+        assert_eq!(left, batch.slice_rows(2, 5).unwrap());
+        assert_eq!(right, batch.slice_rows(7, 11).unwrap());
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }

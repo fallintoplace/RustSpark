@@ -130,17 +130,16 @@ where L: IntoIterator<Item = Result<Batch>>,
                     &batch, start, end, matched_right.as_deref_mut(),
                 )?;
                 start = end;
-                for output_chunk in BatchChunks::new(&joined, io_batch_rows)? {
-                    let output_chunk = output_chunk?;
-                    if output_chunk.num_rows() != 0 {
-                        if outer_build {
-                            // The FULL/RIGHT output schema marks padded fields nullable.
-                            let aligned = output_chunk.into_widened_schema(result_schema.clone())?;
-                            writer.write_batch(&aligned)?;
-                        } else {
-                            writer.write_batch(&output_chunk)?;
-                        }
-                    }
+                // Align only metadata once, then encode row windows from
+                // the same column buffers without allocating temporary chunks.
+                let joined = if outer_build {
+                    joined.into_widened_schema(result_schema.clone())?
+                } else { joined };
+                let mut out_start = 0;
+                while out_start < joined.num_rows() {
+                    let out_end = out_start.saturating_add(io_batch_rows).min(joined.num_rows());
+                    writer.write_batch_range(&joined, out_start, out_end)?;
+                    out_start = out_end;
                 }
             }
         }
