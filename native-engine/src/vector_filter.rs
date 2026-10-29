@@ -47,13 +47,25 @@ fn fast_float_predicate<'a>(
     predicate: &'a Expr,
 ) -> Result<Option<(&'a [Value], BinaryOp, f64)>> {
     if let Expr::Binary { left, op, right } = predicate {
-        if let (Expr::Column(column), Expr::Literal(Value::Float(value))) =
-            (left.as_ref(), right.as_ref()) {
-            if integer_comparison(*op, 0, 0).is_some() {
-                let index = batch.schema().column(column)?;
-                if batch.schema().field(index)?.data_type == DataType::Float {
-                    return Ok(Some((batch.column(index)?, *op, *value)));
-                }
+        let (column, op, value) = match (left.as_ref(), right.as_ref()) {
+            (Expr::Column(name), Expr::Literal(Value::Float(value))) =>
+                (name, *op, *value),
+            (Expr::Literal(Value::Float(value)), Expr::Column(name)) => {
+                let reversed = match op {
+                    BinaryOp::Less => BinaryOp::Greater,
+                    BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                    BinaryOp::Greater => BinaryOp::Less,
+                    BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                    other => *other,
+                };
+                (name, reversed, *value)
+            }
+            _ => return Ok(None),
+        };
+        if integer_comparison(op, 0, 0).is_some() {
+            let index = batch.schema().column(column)?;
+            if batch.schema().field(index)?.data_type == DataType::Float {
+                return Ok(Some((batch.column(index)?, op, value)));
             }
         }
     }
@@ -115,18 +127,23 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     } else if let Some((column, op, rhs)) = fast_float_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Float(lhs) = value {
-                if let Some(order) = lhs.partial_cmp(&rhs) {
-                    let keep = match op {
-                        BinaryOp::Equal => order.is_eq(),
-                        BinaryOp::NotEqual => !order.is_eq(),
-                        BinaryOp::Less => order.is_lt(),
-                        BinaryOp::LessEqual => !order.is_gt(),
-                        BinaryOp::Greater => order.is_gt(),
-                        BinaryOp::GreaterEqual => !order.is_lt(),
-                        _ => false,
-                    };
-                    if keep { selected.push(row); }
-                }
+                let order = if lhs.is_nan() {
+                    if rhs.is_nan() { std::cmp::Ordering::Equal } else { std::cmp::Ordering::Greater }
+                } else if rhs.is_nan() {
+                    std::cmp::Ordering::Less
+                } else {
+                    lhs.partial_cmp(&rhs).expect("non-NaN floats are ordered")
+                };
+                let keep = match op {
+                    BinaryOp::Equal => order.is_eq(),
+                    BinaryOp::NotEqual => !order.is_eq(),
+                    BinaryOp::Less => order.is_lt(),
+                    BinaryOp::LessEqual => !order.is_gt(),
+                    BinaryOp::Greater => order.is_gt(),
+                    BinaryOp::GreaterEqual => !order.is_lt(),
+                    _ => false,
+                };
+                if keep { selected.push(row); }
             }
         }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
@@ -296,6 +313,29 @@ mod reversed_text_comparison_perf_tests {
                 predicate.evaluate(&input, row).unwrap().as_boolean().unwrap() == Some(true)
             }).collect::<Vec<_>>();
             assert_eq!(select_indices(&input, &predicate).unwrap(), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reversed_float_fast_path_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn constant_left_float_comparisons_match_scalar_nan_semantics() {
+        let batch = Batch::from_rows(Schema::new(vec![Field::new("x", DataType::Float, true)]).unwrap(), vec![
+            vec![Value::Null], vec![Value::Float(-0.0)],
+            vec![Value::Float(2.5)], vec![Value::Float(f64::NAN)],
+        ]).unwrap();
+        for rhs in [Value::Float(1.5), Value::Float(f64::NAN)] {
+            for op in [BinaryOp::Equal, BinaryOp::NotEqual, BinaryOp::Less, BinaryOp::LessEqual,
+                       BinaryOp::Greater, BinaryOp::GreaterEqual] {
+                let expr = Expr::binary(Expr::Literal(rhs.clone()), op, Expr::Column("x".into()));
+                let expected = (0..batch.num_rows()).filter(|&row|
+                    expr.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+                ).collect::<Vec<_>>();
+                assert_eq!(select_indices(&batch, &expr).unwrap(), expected);
+            }
         }
     }
 }
