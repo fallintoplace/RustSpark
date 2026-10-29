@@ -19,6 +19,18 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { None };
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
+    // Removing identical edges does not change the edit distance.
+    let mut prefix = 0;
+    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let (mut a_end, mut b_end) = (a.len(), b.len());
+    while a_end > prefix && b_end > prefix && a[a_end - 1] == b[b_end - 1] {
+        a_end -= 1;
+        b_end -= 1;
+    }
+    let a = &a[prefix..a_end];
+    let b = &b[prefix..b_end];
     if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
@@ -71,6 +83,13 @@ mod tests {
         assert_eq!(rows[2], vec![Value::Null]);
         assert_eq!(evaluate(&[Value::Text("café".into()), Value::Text("cafe".into())])
             .unwrap(), Value::Integer(1));
+        let shared = "é".repeat(3000);
+        assert_eq!(evaluate(&[
+            Value::Text(format!("{shared}x{shared}")),
+            Value::Text(format!("{shared}y{shared}")),
+        ]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[Value::Text(shared.clone()), Value::Text(shared)])
+            .unwrap(), Value::Integer(0));
         assert!(evaluate(&[Value::Text("a".repeat(2000)), Value::Text("b".repeat(2000))])
             .is_err());
         assert_eq!(evaluate(&[Value::Text("kitten".into()), Value::Text("sitting".into()), Value::Integer(2)])
