@@ -14,11 +14,10 @@ pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
         let key = batch.row(row)?;
-        if !seen.contains(&key) {
-            if seen.len() >= max_keys {
-                return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
-            }
-            seen.insert(key);
+        if seen.len() >= max_keys && !seen.contains(&key) {
+            return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
+        }
+        if seen.insert(key) {
             indices.push(row);
         }
     }
@@ -105,5 +104,22 @@ mod distinct_on_feature_tests {
         assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
             "execution: DISTINCT key limit exceeded");
         assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod distinct_full_budget_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn repeated_keys_are_allowed_after_budget_is_full() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Integer(1)]],
+        ).unwrap();
+        assert_eq!(distinct_with_limit(&batch, 1).unwrap().num_rows(), 1);
+        assert!(distinct_with_limit(&batch, 0).is_err());
+        assert_eq!(distinct_with_limit(&Batch::empty(batch.schema().clone()), 0).unwrap().num_rows(), 0);
     }
 }
