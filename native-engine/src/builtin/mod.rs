@@ -3,6 +3,7 @@
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
 mod nullif;
+mod conditional;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -28,6 +29,7 @@ const CORE: &[Function] = &[
 
 const MODULES: &[&[Function]] = &[
     &nullif::FUNCTIONS,
+    &conditional::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
@@ -116,6 +118,10 @@ pub fn evaluate(name: &str, arguments: &[Expr], batch: &Batch, row: usize) -> Re
     let function = lookup(name)?;
     check_arity(function, arguments.len())?;
     // COALESCE must short-circuit. Evaluating unused arguments could throw.
+    if name.eq_ignore_ascii_case("if") {
+        let condition = arguments[0].evaluate(batch, row)?.as_boolean()?;
+        return arguments[if condition == Some(true) { 1 } else { 2 }].evaluate(batch, row);
+    }
     if name.eq_ignore_ascii_case("coalesce") {
         for argument in arguments {
             let value = argument.evaluate(batch, row)?;
