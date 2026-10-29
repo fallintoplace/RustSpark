@@ -47,6 +47,7 @@ impl HyperLogLog {
     }
 
     pub fn estimate(&self) -> f64 {
+        if self.nonempty == 0 { return 0.0; }
         let m = REGISTERS as f64;
         let mut zeros = 0usize;
         let mut harmonic = 0.0;
@@ -230,5 +231,21 @@ mod cached_nonempty_register_count_tests {
         assert!(a.nonempty_registers() > 4000);
         a.merge(&b);
         assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&rank| rank != 0).count());
+    }
+}
+
+#[cfg(test)]
+mod hll_empty_estimate_fast_path_tests {
+    use super::*;
+    #[test]
+    fn null_only_sketches_remain_empty_after_merges() {
+        let mut first = HyperLogLog::new();
+        let mut second = HyperLogLog::new();
+        first.add(&Value::Null);
+        second.add(&Value::Null);
+        first.merge(&second);
+        assert_eq!(first.estimate(), 0.0);
+        first.add(&Value::Integer(42));
+        assert!(first.estimate() > 0.0);
     }
 }
