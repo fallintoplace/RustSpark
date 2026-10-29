@@ -22,6 +22,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             let keys = map.keys().collect::<Vec<_>>();
             let encoded = serde_json::to_string(&keys)
                 .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
+            if encoded.len() > 16 * 1024 * 1024 {
+                return Err(Error::Execution("JSON_OBJECT_KEYS output exceeds 16 MiB".into()));
+            }
             Ok(Value::Text(encoded))
         }
         _ => Ok(Value::Null),
@@ -87,5 +90,19 @@ mod invalid_json_object_keys_tests {
             assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(), Value::Null);
         }
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod escaped_json_object_key_tests {
+    use super::*;
+    #[test]
+    fn serializes_escaped_and_unicode_keys_without_losing_information() {
+        let document = Value::Text(r#"{"line\\n":1,"東京":2}"#.into());
+        let Value::Text(encoded) = evaluate(&[document]).unwrap() else {
+            panic!("expected JSON key array");
+        };
+        let keys: Vec<String> = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(keys, vec!["line\\n", "東京"]);
     }
 }
