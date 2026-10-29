@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use crate::{batch::Batch, Result};
 
@@ -10,16 +10,20 @@ pub fn distinct(batch: &Batch) -> Result<Batch> {
 
 /// Deduplicate complete rows with an explicit key-cardinality admission limit.
 pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::<Vec<crate::scalar::Value>, ()>::new();
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
         let key = batch.row(row)?;
-        if !seen.contains(&key) {
-            if seen.len() >= max_keys {
-                return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
+        let at_limit = seen.len() >= max_keys;
+        match seen.entry(key) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(entry) => {
+                if at_limit {
+                    return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
+                }
+                entry.insert(());
+                indices.push(row);
             }
-            seen.insert(key);
-            indices.push(row);
         }
     }
     batch.take(&indices)
