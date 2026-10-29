@@ -63,3 +63,36 @@ mod tests {
         assert!(BloomFilter::new(64, 0).is_err());
     }
 }
+
+ 
+impl BloomFilter {
+    /// Union compatible filters without losing any previously inserted keys.
+    pub fn union_with(&mut self, other: &Self) -> Result<()> {
+        if self.bits != other.bits || self.hashes != other.hashes {
+            return Err(Error::Execution("cannot merge incompatible Bloom filters".into()));
+        }
+        for (destination, source) in self.words.iter_mut().zip(&other.words) {
+            *destination |= *source;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bloom_union_feature_tests {
+    use super::*;
+
+    #[test]
+    fn union_preserves_keys_and_rejects_incompatible_layouts() {
+        let mut a = BloomFilter::new(2048, 4).unwrap();
+        let mut b = BloomFilter::new(2048, 4).unwrap();
+        a.insert(&Value::Integer(11));
+        b.insert(&Value::Integer(99));
+        a.union_with(&b).unwrap();
+        assert!(a.might_contain(&Value::Integer(11)));
+        assert!(a.might_contain(&Value::Integer(99)));
+        assert!(a.union_with(&BloomFilter::new(1024, 4).unwrap()).is_err());
+        assert!(a.union_with(&BloomFilter::new(2048, 5).unwrap()).is_err());
+    }
+}
+
