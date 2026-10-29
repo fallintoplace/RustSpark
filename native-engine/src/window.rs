@@ -6,7 +6,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowKind { RowNumber, Rank, DenseRank, Lag, Lead, Ntile }
+pub enum WindowKind { RowNumber, Rank, DenseRank, Lag, Lead, Ntile, PercentRank, CumeDist }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSpec {
@@ -40,7 +40,9 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
         }
         for expr in &spec.partition_by { expr.output_type(input.schema())?; }
         for key in &spec.order_by { key.expression.output_type(input.schema())?; }
-        let result_type = if let Some(argument) = &spec.argument {
+        let result_type = if matches!(spec.kind, WindowKind::PercentRank | WindowKind::CumeDist) {
+            DataType::Float
+        } else if let Some(argument) = &spec.argument {
             let ty = argument.output_type(input.schema())?;
             if let Some(default) = &spec.default {
                 let default_type = default.output_type(input.schema())?;
@@ -61,6 +63,24 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
         let mut result = vec![Value::Null; input.num_rows()];
         for mut partition in partitions.into_values() {
             partition.sort_by(|(_, left), (_, right)| compare_keys(left, right, &spec.order_by));
+            if spec.kind == WindowKind::CumeDist {
+                let total = partition.len();
+                let mut start = 0usize;
+                while start < total {
+                    let mut end = start + 1;
+                    while end < total &&
+                        compare_keys(&partition[start].1, &partition[end].1, &spec.order_by)
+                            == Ordering::Equal {
+                        end += 1;
+                    }
+                    let distribution = Value::Float(end as f64 / total as f64);
+                    for (row, _) in &partition[start..end] {
+                        result[*row] = distribution.clone();
+                    }
+                    start = end;
+                }
+                continue;
+            }
             if spec.kind == WindowKind::Ntile {
                 let buckets = spec.buckets.ok_or_else(||
                     Error::Execution("NTILE requires a positive bucket count".into()))?;
@@ -104,6 +124,7 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
                 }
                 continue;
             }
+            let partition_size = partition.len();
             let mut rank = 1usize;
             let mut dense_rank = 1usize;
             let mut last: Option<Vec<Value>> = None;
@@ -114,15 +135,22 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
                         dense_rank += 1;
                     }
                 }
-                let number = match spec.kind {
-                    WindowKind::RowNumber => position + 1,
-                    WindowKind::Rank => rank,
-                    WindowKind::DenseRank => dense_rank,
-                    WindowKind::Lag | WindowKind::Lead => unreachable!("navigation handled above"),
-                    WindowKind::Ntile => unreachable!("NTILE handled above"),
+                result[row] = match spec.kind {
+                    WindowKind::PercentRank =>
+                        Value::Float(if partition_size <= 1 { 0.0 }
+                            else { (rank - 1) as f64 / (partition_size - 1) as f64 }),
+                    WindowKind::RowNumber | WindowKind::Rank | WindowKind::DenseRank => {
+                        let number = match spec.kind {
+                            WindowKind::RowNumber => position + 1,
+                            WindowKind::Rank => rank,
+                            _ => dense_rank,
+                        };
+                        Value::Integer(i64::try_from(number)
+                            .map_err(|_| Error::Execution("ranking index overflow".into()))?)
+                    },
+                    WindowKind::Lag | WindowKind::Lead | WindowKind::Ntile | WindowKind::CumeDist =>
+                        unreachable!("window kind already handled"),
                 };
-                result[row] = Value::Integer(i64::try_from(number)
-                    .map_err(|_| Error::Execution("ranking index overflow".into()))?);
                 last = Some(key);
             }
         }

@@ -394,6 +394,10 @@ impl Parser {
                 Some(WindowKind::Lead),
             Some(Token::Word(name)) if name.eq_ignore_ascii_case("NTILE") =>
                 Some(WindowKind::Ntile),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("PERCENT_RANK") =>
+                Some(WindowKind::PercentRank),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("CUME_DIST") =>
+                Some(WindowKind::CumeDist),
             _ => None,
         };
         let Some(kind) = kind else { return Ok(None) };
@@ -465,6 +469,8 @@ impl Parser {
             WindowKind::Lag => "lag",
             WindowKind::Lead => "lead",
             WindowKind::Ntile => "ntile",
+            WindowKind::PercentRank => "percent_rank",
+            WindowKind::CumeDist => "cume_dist",
         };
         let alias = self.select_alias(default.into())?;
         Ok(Some(SelectItem::Window(WindowSpec {
