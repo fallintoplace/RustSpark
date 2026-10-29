@@ -48,10 +48,13 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
-    let Some(start) = text.char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()))
-        .nth(offset) else {
+    let start = if offset == 0 { Some(0) } else {
+        text.char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+            .nth(offset)
+    };
+    let Some(start) = start else {
         return Ok(Value::Integer(0));
     };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
@@ -167,5 +170,17 @@ mod strcmp_extension_tests {
         assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
         assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
         assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod locate_default_offset_tests {
+    use super::*;
+    #[test]
+    fn finds_prefixes_and_unicode_after_optional_positions() {
+        let input = Value::Text(format!("{}é", "x".repeat(40_000)));
+        assert_eq!(locate(&[Value::Text("x".into()), input.clone()]).unwrap(), Value::Integer(1));
+        assert_eq!(locate(&[Value::Text("é".into()), input.clone()]).unwrap(), Value::Integer(40_001));
+        assert_eq!(locate(&[Value::Text("é".into()), input, Value::Integer(40_001)]).unwrap(), Value::Integer(40_001));
     }
 }
