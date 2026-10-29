@@ -8,10 +8,16 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("QUOTE input exceeds 16 MiB".into()));
+    }
     let escaped_quotes = text.bytes().filter(|&byte| byte == b'\'').count();
     let capacity = text.len().checked_add(escaped_quotes)
         .and_then(|length| length.checked_add(2))
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
+    if capacity > 16 * 1024 * 1024 {
+        return Err(Error::Execution("QUOTE output exceeds 16 MiB".into()));
+    }
     let mut output = String::with_capacity(capacity);
     output.push('\'');
     for ch in text.chars() {
@@ -74,5 +80,16 @@ mod json_quote_extension_tests {
         assert_eq!(json_quote(&[Value::Text("".into())]).unwrap(), Value::Text("\"\"".into()));
         assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
         assert!(json_quote(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_quote_regression_tests {
+    use super::*;
+    #[test]
+    fn rejects_expansion_beyond_string_budget() {
+        assert_eq!(evaluate(&[Value::Text("a'b".into())]).unwrap(), Value::Text("'a\\'b'".into()));
+        assert!(evaluate(&[Value::Text("'".repeat(8 * 1024 * 1024))]).is_err());
+        assert!(evaluate(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }
