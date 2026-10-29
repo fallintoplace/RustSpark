@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from query_templates import list_templates, make_command, template_path
+from query_templates import list_templates, make_command, parse_query_rows, template_path
 
 
 class TemplatesTests(unittest.TestCase):
@@ -25,6 +25,15 @@ class TemplatesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_command("rustspark", Path("/db"), Path("q.sql"),
                          {"bad-name": "int64:3"})
+
+    def test_query_results_require_json_object_rows(self):
+        self.assertEqual(parse_query_rows('[{"x":1},{"x":null}]'), [{"x": 1}, {"x": None}])
+        self.assertEqual(parse_query_rows("[]"), [])
+        with self.assertRaisesRegex(ValueError, "Nonfinite"):
+            parse_query_rows('[{"x":1e999}]')
+        for text in ("{}", "[null]", "[1]", "[[]]", "[NaN]", "invalid"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_query_rows(text)
 
 
 if __name__ == "__main__":

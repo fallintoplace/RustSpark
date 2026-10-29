@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 
 from mcp.server import MCPServer
-from query_templates import list_templates, make_command, template_path
+from query_templates import list_templates, make_command, parse_query_rows, template_path
 
 mcp = MCPServer("RustSpark SQL templates")
 
@@ -47,11 +47,9 @@ def run_named_query(name: str, parameters: dict[str, str]) -> str:
     if result.returncode:
         raise RuntimeError("RustSpark query did not complete")
     try:
-        rows = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
+        rows = parse_query_rows(result.stdout)
+    except ValueError as error:
         raise RuntimeError("Invalid SQL query result") from error
-    if not isinstance(rows, list):
-        raise RuntimeError("Unexpected SQL query result shape")
     return json.dumps(rows, ensure_ascii=False)
 
 
