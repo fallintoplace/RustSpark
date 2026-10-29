@@ -2,13 +2,7 @@ use crate::{batch::Batch, expr::Expr, Result};
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
-    let mut keep = Vec::new();
-    for row in 0..batch.num_rows() {
-        if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
-            keep.push(row);
-        }
-    }
-    batch.take(&keep)
+    batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
 }
 
 #[cfg(test)]
