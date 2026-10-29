@@ -126,11 +126,9 @@ pub fn approximate_distinct_batches(
             return Err(Error::Type("approximate distinct column types differ".into()));
         }
         expected_type = Some(kind);
-        let mut partial = HyperLogLog::new();
         for value in batch.column(index)? {
-            partial.add(value);
+            combined.add(value);
         }
-        combined.merge(&partial);
     }
     Ok(combined.estimate())
 }
@@ -150,5 +148,24 @@ mod approximate_distinct_batch_tests {
         let estimate = approximate_distinct_batches(&[first, second], "key").unwrap();
         assert!((estimate - 3000.0).abs() / 3000.0 < 0.15);
         assert_eq!(approximate_distinct_batches(&[], "key").unwrap(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod hll_direct_batch_update_perf_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn many_small_batches_match_one_large_sketch() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let mut parts = Vec::new();
+        let mut expected = HyperLogLog::new();
+        for n in 0..350 {
+            let values = vec![Value::Integer(n % 200), Value::Null, Value::Integer(n % 200)];
+            for value in &values { expected.add(value); }
+            parts.push(Batch::from_rows(schema.clone(), values.into_iter().map(|value| vec![value]).collect()).unwrap());
+        }
+        assert_eq!(approximate_distinct_batches(&parts, "key").unwrap(), expected.estimate());
     }
 }
