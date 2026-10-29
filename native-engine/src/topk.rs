@@ -29,6 +29,52 @@ impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering { compare(self, other) }
 }
 
+struct ColumnCandidate<'a> {
+    row: usize,
+    columns: &'a [&'a [Value]],
+    options: &'a [(bool, bool)],
+}
+
+impl PartialEq for ColumnCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal }
+}
+impl Eq for ColumnCandidate<'_> {}
+impl PartialOrd for ColumnCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for ColumnCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for (column, (descending, nulls_first)) in self.columns.iter().zip(self.options.iter()) {
+            let comparison = crate::sort::compare_values(
+                &column[self.row], &column[other.row], *descending, *nulls_first,
+            );
+            if comparison != Ordering::Equal { return comparison; }
+        }
+        self.row.cmp(&other.row)
+    }
+}
+
+fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
+    let columns = keys.iter().map(|key| match &key.expression {
+        crate::expr::Expr::Column(name) => batch.column(batch.schema().column(name)?),
+        _ => unreachable!("column-only Top-K"),
+    }).collect::<Result<Vec<_>>>()?;
+    let options = keys.iter().map(|key| (key.descending, key.nulls_first)).collect::<Vec<_>>();
+    let mut heap = BinaryHeap::with_capacity(k);
+    for row in 0..batch.num_rows() {
+        let candidate = ColumnCandidate { row, columns: &columns, options: &options };
+        if heap.len() < k {
+            heap.push(candidate);
+        } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+            heap.pop();
+            heap.push(candidate);
+        }
+    }
+    let mut retained = heap.into_vec();
+    retained.sort();
+    batch.take(&retained.into_iter().map(|candidate| candidate.row).collect::<Vec<_>>())
+}
+
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
@@ -39,6 +85,9 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
+    }
+    if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
+        return top_k_columns(batch, keys, k);
     }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
@@ -163,5 +212,29 @@ mod consolidated_topk_fastpath_tests {
         assert_eq!(top_k(&batch, &[key.clone()], 4).unwrap(), crate::sort::sort(&batch, &[key.clone()]).unwrap());
         assert!(top_k_offset(&batch, &[SortKey::ascending(Expr::Column("missing".into()))], 0, 0).is_err());
         assert_eq!(top_k_offset(&batch, &[key], 1, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod column_topk_perf_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value, schema::{DataType, Field, Schema}, sort::SortKey};
+
+    #[test]
+    fn borrowed_topk_matches_computed_sort_with_long_text_keys() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let data = (0..30).map(|n| vec![if n % 7 == 0 { Value::Null }
+            else { Value::Text(format!("prefix-{n:04}-{}", "x".repeat(100))) }]).collect();
+        let batch = Batch::from_rows(schema, data).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let ordered = crate::sort::sort(&batch, &keys).unwrap();
+        for k in [1, 3, 15, 29] {
+            assert_eq!(top_k(&batch, &keys, k).unwrap(), ordered.slice_rows(0, k).unwrap());
+        }
+        let numbers = Batch::from_rows(Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(3)], vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        let computed = [SortKey::ascending(Expr::binary(Expr::Column("n".into()), BinaryOp::Add, Expr::Literal(Value::Integer(1))))];
+        assert_eq!(top_k(&numbers, &computed, 2).unwrap(),
+            crate::sort::sort(&numbers, &computed).unwrap().slice_rows(0, 2).unwrap());
     }
 }
