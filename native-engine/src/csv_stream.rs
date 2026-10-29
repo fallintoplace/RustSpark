@@ -185,7 +185,7 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                         if text.is_empty() {
                             return Ok(Value::Null);
                         }
-                        let kind = self.schema.field(index)?.data_type;
+                        let kind = self.schema.fields()[index].data_type;
                         match kind {
                             DataType::Text => Ok(Value::Text(text)),
                             DataType::Boolean => {
