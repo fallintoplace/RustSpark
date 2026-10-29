@@ -165,3 +165,32 @@ mod zero_column_projection_consolidation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod direct_column_projection_perf_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn column_fast_path_preserves_aliases_duplicates_and_computed_values() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(3)]],
+        ).unwrap();
+        let result = project(&input, &[
+            Selection::new(Expr::Column("n".into()), "first"),
+            Selection::new(Expr::Column("n".into()), "again"),
+            Selection::new(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(2)),
+            ), "computed"),
+        ]).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Null, Value::Null, Value::Null],
+            vec![Value::Integer(3), Value::Integer(3), Value::Integer(5)],
+        ]);
+        assert!(project(&input, &[Selection::new(
+            Expr::Column("unknown".into()), "missing"
+        )]).is_err());
+    }
+}
