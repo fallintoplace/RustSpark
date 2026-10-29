@@ -99,6 +99,12 @@ pub fn optimize(plan: Plan) -> Plan {
             keys,
             kind,
         },
+        Plan::UsingJoin { left, right, keys, kind } => Plan::UsingJoin {
+            left: Box::new(optimize(*left)),
+            right: Box::new(optimize(*right)),
+            keys,
+            kind,
+        },
         Plan::UnionAll { left, right } => Plan::UnionAll {
             left: Box::new(optimize(*left)),
             right: Box::new(optimize(*right)),

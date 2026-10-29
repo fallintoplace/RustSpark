@@ -469,6 +469,25 @@ impl Parser {
             };
             let Some(kind) = kind else { break };
             let right = self.identifier()?;
+            if self.take_word("USING") {
+                if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                    return Err(Error::Unsupported("JOIN USING for SEMI/ANTI joins".into()));
+                }
+                self.expect_symbol('(')?;
+                let mut keys = Vec::new();
+                loop {
+                    keys.push(self.identifier()?);
+                    if keys.len() > 64 {
+                        return Err(Error::Parse("JOIN USING exceeds 64 keys".into()));
+                    }
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                plan = Plan::UsingJoin {
+                    left: Box::new(plan), right: Box::new(Plan::scan(right)), keys, kind,
+                };
+                continue;
+            }
             self.expect_word("ON")?;
             let left_key = self.identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {

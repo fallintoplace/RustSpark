@@ -131,7 +131,7 @@ impl StageGraph {
                     (StageKind::Limit, vec![visit(input, stages, depth + 1)?]),
                 Plan::Distinct { input } =>
                     (StageKind::Distinct, vec![visit(input, stages, depth + 1)?]),
-                Plan::Join { left, right, .. } | Plan::MultiJoin { left, right, .. } => (
+                Plan::Join { left, right, .. } | Plan::MultiJoin { left, right, .. } | Plan::UsingJoin { left, right, .. } => (
                     StageKind::HashJoin,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),

@@ -49,6 +49,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             | Plan::Distinct { input } => pending.push((input, depth + 1)),
             Plan::Join { left, right, .. }
             | Plan::MultiJoin { left, right, .. }
+            | Plan::UsingJoin { left, right, .. }
             | Plan::UnionAll { left, right }
             | Plan::Intersect { left, right }
             | Plan::Except { left, right } => {
@@ -126,6 +127,9 @@ fn execute_inner(
             *kind,
         )?,
         Plan::MultiJoin { left, right, keys, kind } => join::hash_join_multi(
+            &descend(left)?, &descend(right)?, keys, *kind
+        )?,
+        Plan::UsingJoin { left, right, keys, kind } => join::using_join(
             &descend(left)?, &descend(right)?, keys, *kind
         )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,

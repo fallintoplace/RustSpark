@@ -161,6 +161,73 @@ pub fn hash_join_multi(
     Batch::from_rows(schema, output)
 }
 
+/**
+ * Spark JOIN USING merges equality keys into one output column, with the
+ * columns listed first in USING order. FULL and RIGHT joins must coalesce
+ * keys from unmatched right rows instead of dropping their values.
+ */
+pub fn using_join(
+    left: &Batch,
+    right: &Batch,
+    keys: &[String],
+    kind: JoinKind,
+) -> Result<Batch> {
+    if keys.is_empty() || keys.len() > 64 {
+        return Err(Error::Parse("JOIN USING expects 1 to 64 columns".into()));
+    }
+    if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        return Err(Error::Unsupported("JOIN USING for SEMI/ANTI joins".into()));
+    }
+    let mut seen = HashSet::new();
+    for key in keys {
+        if !seen.insert(key.to_ascii_lowercase()) {
+            return Err(Error::Parse(format!("duplicate JOIN USING column: {key}")));
+        }
+    }
+    let pairs = keys.iter().map(|key| (key.clone(), key.clone())).collect::<Vec<_>>();
+    let joined = hash_join_multi(left, right, &pairs, kind)?;
+    let left_width = left.schema().len();
+
+    let mut output_fields = Vec::new();
+    let mut positions = Vec::new();
+    for key in keys {
+        let l = left.schema().column(key)?;
+        let r = right.schema().column(key)?;
+        let left_field = left.schema().field(l)?;
+        let right_field = right.schema().field(r)?;
+        output_fields.push(Field::new(&left_field.name, left_field.data_type,
+            left_field.nullable || right_field.nullable));
+        // A coalesced key is required for RIGHT and FULL unmatched rows.
+        positions.push((l, Some(left_width + r)));
+    }
+    for (index, field) in joined.schema().fields().iter().enumerate().take(left_width) {
+        if !seen.contains(&field.name.to_ascii_lowercase()) {
+            output_fields.push(field.clone());
+            positions.push((index, None));
+        }
+    }
+    for (index, field) in joined.schema().fields().iter().enumerate().skip(left_width) {
+        let original = right.schema().field(index - left_width)?;
+        if !seen.contains(&original.name.to_ascii_lowercase()) {
+            output_fields.push(field.clone());
+            positions.push((index, None));
+        }
+    }
+    let schema = Schema::new(output_fields)?;
+    let mut rows = Vec::with_capacity(joined.num_rows());
+    for original in joined.rows()? {
+        rows.push(positions.iter().map(|(left, right)| {
+            let value = original[*left].clone();
+            match right {
+                Some(index) if value.is_null() => original[*index].clone(),
+                _ => value,
+            }
+        }).collect());
+    }
+    Batch::from_rows(schema, rows)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
