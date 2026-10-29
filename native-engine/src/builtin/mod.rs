@@ -23,6 +23,7 @@ mod bit_count;
 mod width_bucket;
 mod factorial;
 mod hypot;
+mod log1p;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -68,6 +69,7 @@ const MODULES: &[&[Function]] = &[
     &width_bucket::FUNCTIONS,
     &factorial::FUNCTIONS,
     &hypot::FUNCTIONS,
+    &log1p::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
