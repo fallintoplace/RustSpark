@@ -31,9 +31,24 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
 fn left(args: &[Value]) -> Result<Value> { slice(args, false) }
 fn right(args: &[Value]) -> Result<Value> { slice(args, true) }
 
+fn reverse_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+
+fn reverse(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("REVERSE input exceeds 16 MiB".into()));
+    }
+    let mut result = String::with_capacity(text.len());
+    for character in text.chars().rev() {
+        result.push(character);
+    }
+    Ok(Value::Text(result))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "left", min_args: 2, max_args: 2, result_type: output, call: left },
     Function { name: "right", min_args: 2, max_args: 2, result_type: output, call: right },
+    Function { name: "reverse", min_args: 1, max_args: 1, result_type: reverse_type, call: reverse },
 ];
 
 #[cfg(test)]
@@ -50,6 +65,12 @@ mod tests {
             Value::Text("".into()));
         assert_eq!(left(&[input.clone(), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
         assert_eq!(right(&[input, Value::Integer(-3)]).unwrap(), Value::Text("".into()));
+        assert_eq!(reverse(&[Value::Text("hé🙂".into())]).unwrap(),
+            Value::Text("🙂éh".into()));
+        assert_eq!(reverse(&[Value::Text("".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
+        assert!(reverse_type(&[DataType::Integer]).is_err());
+        assert!(crate::builtin::supports("REVERSE"));
     }
 }
 
