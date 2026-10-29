@@ -244,11 +244,16 @@ impl Parser {
         if let Some(function) = function {
             let _ = self.next();
             self.expect_symbol('(')?;
-            let op = if function == "COUNT" && self.take_symbol('*') {
+            let distinct = self.take_word("DISTINCT");
+            if distinct && function != "COUNT" {
+                return Err(Error::Unsupported("DISTINCT is only supported for COUNT".into()));
+            }
+            let op = if function == "COUNT" && !distinct && self.take_symbol('*') {
                 AggregateOp::CountAll
             } else {
                 let expr = self.expression(0)?;
                 match function.as_str() {
+                    "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
                     "SUM" => AggregateOp::Sum(expr),
                     "AVG" => AggregateOp::Avg(expr),
@@ -538,6 +543,13 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn count_distinct_skips_nulls_and_counts_unique_values() {
+        let plan = parse_sql("SELECT COUNT(DISTINCT amount) AS unique_amounts FROM sales").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)]]);
     }
 
     #[test]

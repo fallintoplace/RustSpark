@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     batch::Batch,
@@ -13,6 +13,7 @@ use crate::{
 pub enum AggregateOp {
     CountAll,
     Count(Expr),
+    CountDistinct(Expr),
     Sum(Expr),
     Avg(Expr),
     Min(Expr),
@@ -35,7 +36,8 @@ impl AggregateItem {
 
     fn output_type(&self, schema: &Schema) -> Result<DataType> {
         match &self.op {
-            AggregateOp::CountAll | AggregateOp::Count(_) => Ok(DataType::Integer),
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
+                Ok(DataType::Integer),
             AggregateOp::Sum(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
@@ -57,6 +59,7 @@ impl AggregateItem {
 #[derive(Clone)]
 enum State {
     Count(i64),
+    CountDistinct(HashSet<Value>),
     Sum(Option<Value>),
     Avg { sum: f64, count: i64 },
     Min(Option<Value>),
@@ -67,6 +70,7 @@ impl State {
     fn new(op: &AggregateOp) -> Self {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
+            AggregateOp::CountDistinct(_) => Self::CountDistinct(HashSet::new()),
             AggregateOp::Sum(_) => Self::Sum(None),
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
@@ -78,6 +82,7 @@ impl State {
         let value = match op {
             AggregateOp::CountAll => Value::Integer(1),
             AggregateOp::Count(expr)
+            | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr)
             | AggregateOp::Avg(expr)
             | AggregateOp::Min(expr)
@@ -90,6 +95,9 @@ impl State {
                         .checked_add(1)
                         .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
                 }
+            }
+            Self::CountDistinct(values) => {
+                if !value.is_null() { values.insert(value); }
             }
             Self::Sum(total) => {
                 if value.is_null() {
@@ -133,15 +141,19 @@ impl State {
         Ok(())
     }
 
-    fn finish(self) -> Value {
-        match self {
+    fn finish(self) -> Result<Value> {
+        Ok(match self {
             Self::Count(value) => Value::Integer(value),
+            Self::CountDistinct(values) => Value::Integer(
+                i64::try_from(values.len())
+                    .map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
+            ),
             Self::Avg { sum, count } =>
                 if count == 0 { Value::Null } else { Value::Float(sum / count as f64) },
             Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
                 value.unwrap_or(Value::Null)
             }
-        }
+        })
     }
 }
 
@@ -201,10 +213,10 @@ pub fn aggregate(
     let rows = groups
         .into_iter()
         .map(|(mut key, states)| {
-            key.extend(states.into_iter().map(State::finish));
-            key
+            key.extend(states.into_iter().map(State::finish).collect::<Result<Vec<_>>>()?);
+            Ok(key)
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     Batch::from_rows(schema, rows)
 }
 
