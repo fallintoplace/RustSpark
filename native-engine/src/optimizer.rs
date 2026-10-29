@@ -96,6 +96,10 @@ pub fn optimize(plan: Plan) -> Plan {
             left: Box::new(optimize(*left)),
             right: Box::new(optimize(*right)),
         },
+        Plan::Intersect { left, right } => Plan::Intersect {
+            left: Box::new(optimize(*left)),
+            right: Box::new(optimize(*right)),
+        },
     }
 }
 

@@ -99,3 +99,5 @@ pub mod external_sort;
 pub mod parquet_scan;
 
 pub mod builtin;
+
+pub mod set_ops;

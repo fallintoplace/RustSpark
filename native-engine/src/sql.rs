@@ -385,6 +385,16 @@ impl Parser {
         Ok(plan)
     }
 
+    fn select_with_intersections(&mut self) -> Result<Plan> {
+        let mut plan = self.select_body()?;
+        while self.take_word("INTERSECT") {
+            self.take_word("DISTINCT");
+            let right = self.select_body()?;
+            plan = Plan::Intersect { left: Box::new(plan), right: Box::new(right) };
+        }
+        Ok(plan)
+    }
+
     fn finish_query(&mut self, mut plan: Plan) -> Result<Plan> {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
@@ -439,11 +449,11 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let mut plan = parser.select_body()?;
+    let mut plan = parser.select_with_intersections()?;
     while parser.take_word("UNION") {
         let all = parser.take_word("ALL");
         if !all { parser.take_word("DISTINCT"); }
-        let right = parser.select_body()?;
+        let right = parser.select_with_intersections()?;
         plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
         if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
     }

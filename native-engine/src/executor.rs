@@ -1,6 +1,6 @@
 use crate::{
     aggregate, catalog::Catalog, distinct, filter, join, limit,
-    plan::Plan, project, sort, union,
+    plan::Plan, project, sort, union, set_ops,
     cancel::QueryGuard,
     batch::Batch, Error, Result,
 };
@@ -81,6 +81,7 @@ fn execute_inner(
             *kind,
         )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
+        Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
     };
     guard.check()?;
     if batch.num_rows() > options.max_output_rows {

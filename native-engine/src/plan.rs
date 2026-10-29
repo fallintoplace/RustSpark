@@ -48,6 +48,10 @@ pub enum Plan {
         left: Box<Plan>,
         right: Box<Plan>,
     },
+    Intersect {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
 }
 
 impl Plan {
