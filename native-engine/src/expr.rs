@@ -163,8 +163,11 @@ impl Expr {
                     }
                 },
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    let a = left.output_type(schema)?;
-                    let b = right.output_type(schema)?;
+                    let mut a = left.output_type(schema)?;
+                    let mut b = right.output_type(schema)?;
+                    // An untyped NULL adopts the other operand's numeric type.
+                    if matches!(left.as_ref(), Expr::Literal(Value::Null)) { a = b; }
+                    if matches!(right.as_ref(), Expr::Literal(Value::Null)) { b = a; }
                     if a == DataType::Float || b == DataType::Float {
                         Ok(DataType::Float)
                     } else if a == DataType::Integer && b == DataType::Integer {
@@ -585,5 +588,24 @@ mod cast_column_validation_regression {
         let cast = |source| Expr::Cast { expression: Box::new(source), target: DataType::Integer };
         assert!(cast(Expr::Column("unknown".into())).output_type(&schema).is_err());
         assert_eq!(cast(Expr::Column("x".into())).output_type(&schema).unwrap(), DataType::Integer);
+    }
+}
+
+#[cfg(test)]
+mod null_arithmetic_type_regression {
+    use super::*;
+    use crate::schema::Field;
+    #[test]
+    fn typed_arithmetic_with_null_is_valid() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false),
+            Field::new("f", DataType::Float, true)]).unwrap();
+        for op in [BinaryOp::Add, BinaryOp::Subtract, BinaryOp::Multiply] {
+            assert_eq!(Expr::binary(Expr::Column("n".into()), op,
+                Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Integer);
+            assert_eq!(Expr::binary(Expr::Literal(Value::Null), op,
+                Expr::Column("f".into())).output_type(&schema).unwrap(), DataType::Float);
+            assert!(Expr::binary(Expr::Literal(Value::Null), op,
+                Expr::Literal(Value::Text("x".into()))).output_type(&schema).is_err());
+        }
     }
 }
