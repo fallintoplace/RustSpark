@@ -115,6 +115,11 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Boolean)
         },
+        "REVERSE" => {
+            if args.len() != 1 { return Err(Error::Parse("REVERSE requires one argument".into())); }
+            if args[0].output_type(schema)? != DataType::Text { return Err(Error::Type("REVERSE requires text".into())); }
+            Ok(DataType::Text)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -243,6 +248,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Text(value), Value::Text(needle)] => Ok(Value::Boolean(value.contains(needle))),
             [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("CONTAINS requires text".into())),
+        },
+        "REVERSE" => match args {
+            [Value::Text(value)] => Ok(Value::Text(value.chars().rev().collect())),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("REVERSE requires text".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
