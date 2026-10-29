@@ -90,6 +90,9 @@ impl Batch {
     }
 
     pub fn take(&self, indices: &[usize]) -> Result<Self> {
+        if let Some(&invalid) = indices.iter().find(|&&row| row >= self.rows) {
+            return Err(Error::Execution(format!("row index out of bounds: {invalid}")));
+        }
         let mut columns = Vec::with_capacity(self.columns.len());
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
