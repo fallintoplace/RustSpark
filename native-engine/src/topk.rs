@@ -38,6 +38,9 @@ impl Ord for Candidate {
 }
 
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
+    for key in keys {
+        key.expression.output_type(batch.schema())?;
+    }
     if k == 0 { return batch.take(&[]); }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
@@ -63,6 +66,14 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
 mod tests {
     use super::*;
     use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}, sort};
+
+    #[test]
+    fn zero_limit_still_validates_ordering_expressions() {
+        let batch = Batch::empty(Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap());
+        let missing = [SortKey::ascending(Expr::Column("unknown".into()))];
+        assert!(top_k(&batch, &missing, 0).is_err());
+        assert!(top_k(&batch, &missing, 5).is_err());
+    }
 
     #[test]
     fn topk_matches_stable_full_sort_with_nulls_and_ties() {
