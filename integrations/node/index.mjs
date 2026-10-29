@@ -82,8 +82,13 @@ export class RustSpark {
     let rows;
     try {
       rows = JSON.parse(result.stdout, (_key, value) => {
-        if (typeof value === "number" && !Number.isFinite(value)) {
-          throw new RangeError("non-finite SQL JSON number");
+        if (typeof value === "number") {
+          if (!Number.isFinite(value)) {
+            throw new RangeError("non-finite SQL JSON number");
+          }
+          if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+            throw new RangeError("unsafe SQL JSON integer");
+          }
         }
         return value;
       });
