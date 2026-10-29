@@ -76,6 +76,24 @@ impl TaskScheduler {
         Ok(None)
     }
 
+    /// Extend an active attempt without reviving a stale or expired lease.
+    pub fn renew(&mut self, lease: &Lease, now: Instant, ttl: Duration) -> Result<bool> {
+        if ttl.is_zero() {
+            return Err(Error::Execution("task heartbeat TTL must be positive".into()));
+        }
+        let deadline = now.checked_add(ttl)
+            .ok_or_else(|| Error::Execution("task heartbeat deadline overflow".into()))?;
+        let Some(task) = self.tasks.get_mut(&lease.task) else { return Ok(false); };
+        match &task.status {
+            TaskStatus::Leased { worker, attempt, until }
+                if *worker == lease.worker && *attempt == lease.attempt && *until > now => {
+                task.status = TaskStatus::Leased { worker: lease.worker, attempt: lease.attempt, until: deadline.max(*until) };
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     pub fn finish(&mut self, lease: &Lease, success: bool) -> bool {
         self.finish_at(lease, success, Instant::now())
     }
@@ -236,5 +254,32 @@ mod expired_finish_tests {
         let retry = scheduler.lease(12, now + Duration::from_secs(2), Duration::from_secs(1)).unwrap().unwrap();
         assert!(scheduler.finish_at(&retry, true, now + Duration::from_secs(2)));
         assert_eq!(scheduler.status(7), Some(&TaskStatus::Done));
+    }
+}
+
+#[cfg(test)]
+mod consolidated_heartbeat_regressions {
+    use super::*;
+    #[test]
+    fn active_worker_can_extend_but_not_resurrect_expired_lease() {
+        let now = Instant::now();
+        let mut queue = TaskScheduler::new([10], 2).unwrap();
+        let lease = queue.lease(7, now, Duration::from_secs(2)).unwrap().unwrap();
+        assert!(queue.renew(&lease, now + Duration::from_secs(1), Duration::from_secs(4)).unwrap());
+        assert_eq!(queue.lease(8, now + Duration::from_secs(3), Duration::from_secs(1)).unwrap(), None);
+        assert!(!queue.renew(&lease, now + Duration::from_secs(5), Duration::from_secs(1)).unwrap());
+        assert!(queue.renew(&lease, now, Duration::ZERO).is_err());
+    }
+    #[test]
+    fn heartbeat_does_not_allow_mismatched_worker_or_attempt() {
+        let now = Instant::now();
+        let mut queue = TaskScheduler::new([1], 3).unwrap();
+        let lease = queue.lease(5, now, Duration::from_secs(2)).unwrap().unwrap();
+        let mut invalid = lease.clone();
+        invalid.worker = 9;
+        assert!(!queue.renew(&invalid, now, Duration::from_secs(2)).unwrap());
+        invalid = lease.clone();
+        invalid.attempt += 1;
+        assert!(!queue.renew(&invalid, now, Duration::from_secs(2)).unwrap());
     }
 }
