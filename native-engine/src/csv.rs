@@ -30,6 +30,9 @@ fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &
 /// CSV reader for small local datasets. Supports UTF-8, CRLF, escaped quotes,
 /// embedded commas and multiline quoted fields. It intentionally has limits.
 pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
+    if input.len() as u64 > MAX_CSV_BYTES {
+        return Err(Error::Execution("CSV input exceeds 64 MiB limit".into()));
+    }
     // The common streaming case is a single unquoted record. Avoid the
     // character-by-character CSV state machine when no quoting is possible.
     if !input.as_bytes().contains(&b'"') && !input.as_bytes().contains(&b'\r') {
@@ -307,5 +310,15 @@ mod csv_unquoted_fast_path_tests {
         assert_eq!(parse_records("a,\nb,\n").unwrap().len(), 2);
         assert_eq!(parse_records("\"a,b\",c\n").unwrap(),
             vec![vec!["a,b".to_string(), "c".into()]]);
+    }
+}
+
+#[cfg(test)]
+mod in_memory_csv_byte_limit_tests {
+    use super::*;
+    #[test]
+    fn direct_csv_parse_rejects_oversized_input_before_allocating_rows() {
+        let oversized = "a".repeat(MAX_CSV_BYTES as usize + 1);
+        assert!(parse_records(&oversized).is_err());
     }
 }
