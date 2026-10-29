@@ -39,9 +39,8 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
     } else {
-        let pad_chars = pad.chars().collect::<Vec<_>>();
-        for i in 0..(target - size) {
-            result.push(pad_chars[i % pad_chars.len()]);
+        for character in pad.chars().cycle().take(target - size) {
+            result.push(character);
         }
     }
     if left { result.push_str(text); }
@@ -116,5 +115,16 @@ mod single_character_padding_tests {
             Value::Text("x界界界".into()));
         assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("ab".into())]).unwrap(),
             Value::Text("xaba".into()));
+    }
+}
+
+#[cfg(test)]
+mod streaming_padding_character_tests {
+    use super::*;
+    #[test]
+    fn cycles_long_unicode_patterns_without_collecting_all_chars() {
+        let pattern = Value::Text(format!("{}🙂", "x".repeat(10_000)));
+        assert_eq!(rpad(&[Value::Text("z".into()), Value::Integer(4), pattern]).unwrap(), Value::Text("zxxx".into()));
+        assert_eq!(lpad(&[Value::Text("a".into()), Value::Integer(6), Value::Text("🙂é".into())]).unwrap(), Value::Text("🙂é🙂é🙂a".into()));
     }
 }
