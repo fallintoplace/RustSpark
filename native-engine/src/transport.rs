@@ -12,13 +12,27 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < 256 {
+        let mut crc = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb88320 } else { 0 };
+            bit += 1;
+        }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+};
+
 fn checksum(bytes: &[u8]) -> u32 {
     let mut value = !0u32;
-    for byte in bytes {
-        value ^= u32::from(*byte);
-        for _ in 0..8 {
-            value = (value >> 1) ^ if value & 1 != 0 { 0xedb88320 } else { 0 };
-        }
+    for &byte in bytes {
+        let index = ((value ^ u32::from(byte)) & 0xff) as usize;
+        value = (value >> 8) ^ CRC32_TABLE[index];
     }
     !value
 }
@@ -183,5 +197,17 @@ mod consolidated_exchange_budget_tests {
         write_frame(&mut wire, &Frame { stage: 1, task: 2, attempt: 1, payload: vec![2; 8] }, 16).unwrap();
         assert!(read_frames(&mut wire.as_slice(), 16, 10).unwrap_err().to_string().contains("memory budget"));
         assert_eq!(read_frames(&mut wire.as_slice(), 16, 12).unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod transport_crc32_perf_tests {
+    use super::*;
+
+    #[test]
+    fn retains_standard_crc32_wire_checksum() {
+        assert_eq!(checksum(b""), 0);
+        assert_eq!(checksum(b"123456789"), 0xcbf4_3926);
+        assert_eq!(checksum(b"RustSpark"), checksum(b"RustSpark"));
     }
 }
