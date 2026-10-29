@@ -31,6 +31,7 @@ impl MemoryBudget {
     /// Atomically reserve estimated operator memory. The returned guard releases
     /// the reservation even if the operator exits with an error.
     pub fn reserve(&self, bytes: usize) -> Result<Reservation> {
+        if bytes == 0 { return Ok(Reservation { budget: self.clone(), bytes: 0 }); }
         let mut current = self.used.load(Ordering::Acquire);
         loop {
             let next = current.checked_add(bytes)
@@ -134,6 +135,23 @@ mod grouped_scale_memory_tests {
         let allocations = reserve_many(&budget, &[30, 20]).unwrap();
         assert_eq!(budget.used(), 50);
         drop(allocations);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod zero_byte_scale_reservation_tests {
+    use super::*;
+    #[test]
+    fn zero_guards_do_not_change_a_saturated_budget() {
+        let budget = MemoryBudget::new(4).unwrap();
+        let held = budget.reserve(4).unwrap();
+        let empty = budget.reserve(0).unwrap();
+        assert_eq!(budget.used(), 4);
+        assert_eq!(empty.bytes(), 0);
+        drop(empty);
+        assert_eq!(budget.used(), 4);
+        drop(held);
         assert_eq!(budget.used(), 0);
     }
 }
