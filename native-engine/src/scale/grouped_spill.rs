@@ -15,7 +15,7 @@ use crate::{
     Error, Result,
 };
 use super::{
-    cancel::QueryControl, chunks::BatchChunks, partition_spill::PartitionWriter,
+    cancel::QueryControl, partition_spill::PartitionWriter,
     spill::{SpillReader, SpillWriter},
 };
 
@@ -273,8 +273,11 @@ where I: IntoIterator<Item = Result<Batch>>
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         result.paths.push(path);
         let mut output_writer = SpillWriter::new(BufWriter::new(file), output_schema.clone())?;
-        for piece in BatchChunks::new(&batch, io_batch_rows)? {
-            output_writer.write_batch(&piece?)?;
+        let mut start = 0;
+        while start < batch.num_rows() {
+            let end = start.saturating_add(io_batch_rows).min(batch.num_rows());
+            output_writer.write_batch_range(&batch, start, end)?;
+            start = end;
         }
         output_writer.finish()?;
     }
@@ -411,5 +414,34 @@ mod spill_count_schema_tests {
         assert!(!result.field(1).unwrap().nullable);
         assert!(!result.field(2).unwrap().nullable);
         assert!(result.field(3).unwrap().nullable);
+    }
+}
+
+#[cfg(test)]
+mod grouped_spill_window_output_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn grouped_output_can_be_read_in_bounded_windows() {
+        let dir = std::env::temp_dir().join(format!("native-group-windows-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..11).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let output = grouped_aggregate([Ok(input)], schema, &[(String::from("k"), String::from("k"))],
+            &[AggregateItem::new(AggregateOp::CountAll, "cnt")], &dir, 1, 20, 2,
+            &QueryControl::default()).unwrap();
+        let mut reader = SpillReader::new(BufReader::new(File::open(&output.paths()[0]).unwrap()), 2).unwrap();
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() {
+            assert!(batch.num_rows() <= 2);
+            rows.extend(batch.rows().unwrap());
+        }
+        assert_eq!(rows.len(), 11);
+        assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
+        drop(output);
+        fs::remove_dir(dir).unwrap();
     }
 }
