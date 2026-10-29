@@ -48,10 +48,9 @@ impl HyperLogLog {
 
     pub fn estimate(&self) -> f64 {
         let m = REGISTERS as f64;
-        let mut zeros = 0usize;
+        let zeros = REGISTERS - self.nonempty;
         let mut harmonic = 0.0;
         for &rank in &self.registers {
-            zeros += usize::from(rank == 0);
             harmonic += RECIPROCAL_POWERS[usize::from(rank)];
         }
         let alpha = 0.7213 / (1.0 + 1.079 / m);
@@ -230,5 +229,24 @@ mod cached_nonempty_register_count_tests {
         assert!(a.nonempty_registers() > 4000);
         a.merge(&b);
         assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&rank| rank != 0).count());
+    }
+}
+
+#[cfg(test)]
+mod cached_zero_register_estimate_tests {
+    use super::*;
+    #[test]
+    fn estimate_tracks_zero_register_count_after_merges() {
+        let mut a = HyperLogLog::new();
+        let mut b = HyperLogLog::new();
+        assert_eq!(a.nonempty_registers(), 0);
+        assert_eq!(a.estimate(), 0.0);
+        for id in 0..1000 { a.add(&Value::Integer(id)); b.add(&Value::Integer(id + 1000)); }
+        a.merge(&b);
+        assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&n| n != 0).count());
+        assert!(a.estimate().is_finite());
+        let original = a.estimate();
+        a.merge(&b);
+        assert_eq!(a.estimate(), original);
     }
 }
