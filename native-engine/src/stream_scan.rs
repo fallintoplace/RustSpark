@@ -11,6 +11,7 @@ pub struct ScanCursor<'a> {
     output_schema: Schema,
     target_rows: usize,
     next_row: usize,
+    stopped: bool,
 }
 
 pub fn scan<'a>(
@@ -32,7 +33,7 @@ pub fn scan<'a>(
         .map(|&index| Ok(source.schema().field(index)?.clone()))
         .collect::<Result<Vec<_>>>()?)?;
     Ok(ScanCursor {
-        source, predicate, columns, output_schema, target_rows, next_row: 0,
+        source, predicate, columns, output_schema, target_rows, next_row: 0, stopped: false,
     })
 }
 
@@ -40,6 +41,7 @@ impl Iterator for ScanCursor<'_> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
         let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
@@ -48,7 +50,10 @@ impl Iterator for ScanCursor<'_> {
                 Some(predicate) => match predicate.evaluate(self.source, row)
                     .and_then(|value| value.as_boolean()) {
                     Ok(result) => result == Some(true),
-                    Err(error) => return Some(Err(error)),
+                    Err(error) => {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    },
                 },
                 None => true,
             };
@@ -173,5 +178,14 @@ mod scan_window_feature_tests {
         assert_eq!(scan_window(&source, None, &[], 3, 0, 0).unwrap().count(), 0);
         assert!(scan_window(&source, None, &[], 0, 0, 1).is_err());
     }
+    #[test]
+    fn failed_scan_predicates_stop_the_cursor() {
+        let source = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+        ).unwrap();
+        let mut cursor = scan(&source, Some(Expr::Column("n".into())), &[], 1).unwrap();
+        assert!(cursor.next().unwrap().is_err());
+        assert!(cursor.next().is_none());
+    }
 }
-
