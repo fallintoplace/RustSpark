@@ -439,6 +439,15 @@ impl Parser {
         self.expect_word("FROM")?;
         let mut plan = Plan::scan(self.identifier()?);
         loop {
+            if self.take_word("CROSS") {
+                self.expect_word("JOIN")?;
+                let right = self.identifier()?;
+                plan = Plan::CrossJoin {
+                    left: Box::new(plan),
+                    right: Box::new(Plan::scan(right)),
+                };
+                continue;
+            }
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
             } else if self.take_word("INNER") {

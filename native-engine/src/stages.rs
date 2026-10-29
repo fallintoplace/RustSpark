@@ -13,6 +13,7 @@ pub enum StageKind {
     Limit,
     Distinct,
     HashJoin,
+    CrossJoin,
     UnionAll,
     Intersect,
     Except,
@@ -20,7 +21,7 @@ pub enum StageKind {
 
 impl StageKind {
     pub fn is_blocking(self) -> bool {
-        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::Intersect | Self::Except)
+        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::CrossJoin | Self::Intersect | Self::Except)
     }
 }
 
@@ -57,7 +58,7 @@ impl StageGraph {
                 StageKind::Scan => 0,
                 StageKind::Filter | StageKind::Project | StageKind::Aggregate |
                 StageKind::Sort | StageKind::Limit | StageKind::Distinct => 1,
-                StageKind::HashJoin | StageKind::UnionAll | StageKind::Intersect |
+                StageKind::HashJoin | StageKind::CrossJoin | StageKind::UnionAll | StageKind::Intersect |
                 StageKind::Except => 2,
             };
             if stage.inputs.len() != required_inputs {
@@ -133,6 +134,10 @@ impl StageGraph {
                     (StageKind::Distinct, vec![visit(input, stages, depth + 1)?]),
                 Plan::Join { left, right, .. } => (
                     StageKind::HashJoin,
+                    vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
+                ),
+                Plan::CrossJoin { left, right } => (
+                    StageKind::CrossJoin,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
                 Plan::UnionAll { left, right } => (

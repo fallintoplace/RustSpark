@@ -24,6 +24,47 @@ fn joinable(key: &Value) -> bool {
     !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
 }
 
+
+fn joined_schema(left: &Batch, right: &Batch, kind: JoinKind) -> Result<Schema> {
+    let mut used: HashSet<String> = left.schema().fields().iter()
+        .map(|field| field.name.to_ascii_lowercase()).collect();
+    let mut fields = left.schema().fields().iter().map(|field| {
+        Field::new(&field.name, field.data_type,
+            field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
+    }).collect::<Vec<_>>();
+    for field in right.schema().fields() {
+        let mut name = field.name.clone();
+        while used.contains(&name.to_ascii_lowercase()) {
+            name = format!("right_{name}");
+        }
+        used.insert(name.to_ascii_lowercase());
+        fields.push(Field::new(name, field.data_type,
+            field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
+    }
+    Schema::new(fields)
+}
+
+/// Execute a bounded SQL CROSS JOIN without a synthetic equality key.
+/// Preserve original row order and disambiguate duplicate column names
+/// in the same way as native equality joins.
+pub fn cross_join(left: &Batch, right: &Batch) -> Result<Batch> {
+    let output_rows = left.num_rows().checked_mul(right.num_rows())
+        .ok_or_else(|| Error::Execution("CROSS JOIN row count overflow".into()))?;
+    if output_rows > MAX_JOIN_ROWS {
+        return Err(Error::Execution("join output exceeds safety limit".into()));
+    }
+    let schema = joined_schema(left, right, JoinKind::Inner)?;
+    let mut rows = Vec::with_capacity(output_rows);
+    for left_row in 0..left.num_rows() {
+        for right_row in 0..right.num_rows() {
+            let mut row = left.row(left_row)?;
+            row.extend(right.row(right_row)?);
+            rows.push(row);
+        }
+    }
+    Batch::from_rows(schema, rows)
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
@@ -55,26 +96,7 @@ pub fn hash_join(
         }
         return left.take(&indices);
     }
-    let mut used: HashSet<String> = left
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.name.to_ascii_lowercase())
-        .collect();
-    let mut fields = left.schema().fields().iter().map(|field| {
-        Field::new(&field.name, field.data_type,
-            field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
-    }).collect::<Vec<_>>();
-    for field in right.schema().fields() {
-        let mut name = field.name.clone();
-        while used.contains(&name.to_ascii_lowercase()) {
-            name = format!("right_{name}");
-        }
-        used.insert(name.to_ascii_lowercase());
-        fields.push(Field::new(name, field.data_type,
-            field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
-    }
-    let schema = Schema::new(fields)?;
+    let schema = joined_schema(left, right, kind)?;
     if kind == JoinKind::Inner && (left.num_rows() == 0 || right.num_rows() == 0) {
         return Ok(Batch::empty(schema));
     }
