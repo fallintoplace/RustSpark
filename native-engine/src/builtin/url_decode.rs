@@ -17,8 +17,8 @@ pub(super) fn decode(text: &str) -> Result<String> {
         return Err(Error::Execution("URL_DECODE input exceeds native 16 MiB budget".into()));
     }
     let bytes = text.as_bytes();
-    if !bytes.iter().any(|byte| *byte == b'%' || *byte == b'+') {
-        return Ok(text.to_owned());
+    if !bytes.contains(&b'%') {
+        return Ok(if bytes.contains(&b'+') { text.replace('+', " ") } else { text.to_owned() });
     }
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -58,5 +58,17 @@ mod tests {
         assert!(decode("%FF").is_err());
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(decode(&"a".repeat(16 * 1024 * 1024 + 1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod plus_only_decode_regression_tests {
+    use super::*;
+    #[test]
+    fn replaces_plus_only_and_preserves_unicode() {
+        assert_eq!(decode("a++é🙂").unwrap(), "a  é🙂");
+        assert_eq!(decode("plain é🙂").unwrap(), "plain é🙂");
+        assert_eq!(decode("a+%2Bb").unwrap(), "a +b");
+        assert!(decode("%XX").is_err());
     }
 }
