@@ -14,7 +14,12 @@ fn ascii(args: &[Value]) -> Result<Value> {
     let byte = match &args[0] {
         Value::Null => return Ok(Value::Null),
         Value::Text(text) => text.as_bytes().first().copied().unwrap_or(0),
-        Value::Integer(number) => number.to_string().as_bytes()[0],
+        Value::Integer(number) if *number < 0 => b'-',
+        Value::Integer(number) => {
+            let mut leading = *number as u64;
+            while leading >= 10 { leading /= 10; }
+            b'0' + leading as u8
+        },
         Value::Float(number) => number.to_string().as_bytes()[0],
         _ => return Err(Error::Type("ASCII requires text or numeric input".into())),
     };
@@ -40,11 +45,24 @@ mod tests {
         assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("B".into()));
         assert_eq!(chr(&[Value::Integer(321)]).unwrap(), Value::Text("A".into()));
         assert_eq!(chr(&[Value::Integer(-191)]).unwrap(), Value::Text("A".into()));
-        assert_eq!(chr(&[Value::Integer(0xd800)]).unwrap(), Value::Text("\\0".into()));
+        assert_eq!(chr(&[Value::Integer(0xd800)]).unwrap(), Value::Text("\0".into()));
         assert_eq!(chr(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(ascii_type(&[DataType::Integer]).unwrap(), DataType::Integer);
         assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));
         assert_eq!(ascii(&[Value::Integer(-42)]).unwrap(), Value::Integer(45));
         assert_eq!(ascii(&[Value::Float(3.14)]).unwrap(), Value::Integer(51));
+    }
+}
+
+#[cfg(test)]
+mod ascii_integer_first_digit_tests {
+    use super::*;
+    #[test]
+    fn handles_zero_extreme_integers_and_utf8_chr_boundaries() {
+        assert_eq!(ascii(&[Value::Integer(0)]).unwrap(), Value::Integer(48));
+        assert_eq!(ascii(&[Value::Integer(98765)]).unwrap(), Value::Integer(57));
+        assert_eq!(ascii(&[Value::Integer(i64::MAX)]).unwrap(), Value::Integer(57));
+        assert_eq!(ascii(&[Value::Integer(i64::MIN)]).unwrap(), Value::Integer(45));
+        assert_eq!(chr(&[Value::Integer(0)]).unwrap(), Value::Text("\0".into()));
     }
 }
