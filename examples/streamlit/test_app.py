@@ -29,6 +29,14 @@ class StreamlitExampleTests(unittest.TestCase):
         output = list(csv.DictReader(io.StringIO(as_csv(rows))))
         self.assertEqual(output, [{"city": "New York, NY", "sales": "2"}])
 
+    def test_csv_export_keeps_fields_from_later_rows(self):
+        rows = [{"city": "Berlin"}, {"city": "Paris", "extra": 7}]
+        output = list(csv.DictReader(io.StringIO(as_csv(rows))))
+        self.assertEqual(output, [
+            {"city": "Berlin", "extra": ""},
+            {"city": "Paris", "extra": "7"},
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
