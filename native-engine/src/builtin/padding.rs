@@ -29,13 +29,20 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         return Ok(Value::Text(text.chars().take(target).collect()));
     }
     if pad.is_empty() { return Ok(Value::Text(text.to_owned())); }
-    let pad_chars = pad.chars().collect::<Vec<_>>();
+    let mut chars = pad.chars();
+    let first = chars.next();
+    let one_char = first.filter(|_| chars.next().is_none());
     let mut result = String::with_capacity(
         text.len().saturating_add((target - size).saturating_mul(pad.len().min(4))),
     );
     if !left { result.push_str(text); }
-    for i in 0..(target - size) {
-        result.push(pad_chars[i % pad_chars.len()]);
+    if let Some(character) = one_char {
+        for _ in 0..(target - size) { result.push(character); }
+    } else {
+        let pad_chars = pad.chars().collect::<Vec<_>>();
+        for i in 0..(target - size) {
+            result.push(pad_chars[i % pad_chars.len()]);
+        }
     }
     if left { result.push_str(text); }
     Ok(Value::Text(result))
@@ -95,5 +102,19 @@ mod empty_padding_spark_tests {
         assert_eq!(rpad(&[Value::Text("éab".into()), Value::Integer(5), Value::Text("".into())]).unwrap(), Value::Text("éab".into()));
         assert_eq!(lpad(&[Value::Text("éab".into()), Value::Integer(2), Value::Text("".into())]).unwrap(), Value::Text("éa".into()));
         assert_eq!(rpad(&[Value::Null, Value::Integer(5), Value::Text("".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod single_character_padding_tests {
+    use super::*;
+    #[test]
+    fn single_character_patterns_preserve_multibyte_output() {
+        assert_eq!(lpad(&[Value::Text("x".into()), Value::Integer(4)]).unwrap(),
+            Value::Text("   x".into()));
+        assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("界".into())]).unwrap(),
+            Value::Text("x界界界".into()));
+        assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("ab".into())]).unwrap(),
+            Value::Text("xaba".into()));
     }
 }
