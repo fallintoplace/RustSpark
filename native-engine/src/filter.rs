@@ -1,7 +1,17 @@
-use crate::{batch::Batch, expr::Expr, Result};
+use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Result};
+
+fn validate_predicate(batch: &Batch, predicate: &Expr) -> Result<()> {
+    if matches!(predicate, Expr::Literal(Value::Null))
+        || predicate.output_type(batch.schema())? == DataType::Boolean {
+        Ok(())
+    } else {
+        Err(Error::Type("WHERE requires a boolean predicate".into()))
+    }
+}
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
+    validate_predicate(batch, predicate)?;
     let mut keep = Vec::new();
     for row in 0..batch.num_rows() {
         if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
@@ -76,3 +86,18 @@ mod bounded_filter_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod filter_preflight_regression {
+    use super::*;
+    use crate::schema::{Field, Schema};
+    #[test]
+    fn empty_input_checks_where_predicate_type() {
+        let batch = Batch::empty(Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap());
+        assert!(filter(&batch, &Expr::Literal(Value::Integer(1))).is_err());
+        assert!(filter(&batch, &Expr::Column("missing".into())).is_err());
+        assert_eq!(filter(&batch, &Expr::Literal(Value::Null)).unwrap().num_rows(), 0);
+    }
+}
