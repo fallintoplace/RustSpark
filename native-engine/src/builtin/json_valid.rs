@@ -42,7 +42,7 @@ mod tests {
         ]);
         assert_eq!(evaluate(&[Value::Text(r#"{"a":[true,null,{"x":"🙂"}]}"#.into())]).unwrap(), Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Text("[] trailing".into())]).unwrap(), Value::Boolean(false));
-        assert_eq!(evaluate(&[Value::Text(r#"{"unterminated":"".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("{".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(evaluate(&[Value::Text("[]".into())]).unwrap(), Value::Boolean(true));
     }
 }
