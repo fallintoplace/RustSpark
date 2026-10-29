@@ -17,6 +17,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if max_distance < 0 { return Ok(Value::Integer(-1)); }
         Some(usize::try_from(max_distance).unwrap_or(usize::MAX))
     } else { None };
+    if first == second { return Ok(Value::Integer(0)); }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     // Removing identical edges does not change the edit distance.
@@ -161,5 +162,19 @@ mod hamming_distance_extension_tests {
         assert_eq!(hamming_distance(&[Value::Text("é🙂".into()), Value::Text("é界".into())]).unwrap(), Value::Integer(1));
         assert!(hamming_distance(&[Value::Text("ab".into()), Value::Text("a".into())]).is_err());
         assert_eq!(hamming_distance(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod levenshtein_identical_text_fast_path_tests {
+    use super::*;
+    #[test]
+    fn identical_large_text_has_zero_distance_with_and_without_threshold() {
+        let input = Value::Text("é🙂".repeat(20_000));
+        assert_eq!(evaluate(&[input.clone(), input.clone()]).unwrap(), Value::Integer(0));
+        assert_eq!(evaluate(&[input.clone(), input.clone(), Value::Integer(0)]).unwrap(),
+            Value::Integer(0));
+        assert_eq!(evaluate(&[input.clone(), input, Value::Integer(-1)]).unwrap(),
+            Value::Integer(-1));
     }
 }
