@@ -259,6 +259,10 @@ impl Parser {
                 self.take_word("OUTER");
                 self.expect_word("JOIN")?;
                 Some(JoinKind::Right)
+            } else if self.take_word("FULL") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Full)
             } else {
                 None
             };
@@ -500,6 +504,12 @@ mod tests {
             vec![Value::Text("Paris".into())],
         ]);
         assert_eq!(execute(&all, &sales()).unwrap().num_rows(), 6);
+    }
+
+    #[test]
+    fn full_outer_join_lowers_to_native_join() {
+        let plan = parse_sql("SELECT * FROM a FULL OUTER JOIN b ON id = id").unwrap();
+        assert!(matches!(plan, Plan::Join { kind: JoinKind::Full, .. }));
     }
 
     #[test]

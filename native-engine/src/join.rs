@@ -13,6 +13,7 @@ pub enum JoinKind {
     Inner,
     Left,
     Right,
+    Full,
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
@@ -67,7 +68,7 @@ pub fn hash_join(
                 row.extend(right.row(right_row)?);
                 output.push(row);
             }
-        } else if kind == JoinKind::Left {
+        } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
             if output.len() >= MAX_JOIN_ROWS {
                 return Err(Error::Execution("join output exceeds safety limit".into()));
             }
@@ -76,7 +77,7 @@ pub fn hash_join(
             output.push(row);
         }
     }
-    if kind == JoinKind::Right {
+    if matches!(kind, JoinKind::Right | JoinKind::Full) {
         for right_row in 0..right.num_rows() {
             if !matched_right[right_row] {
                 if output.len() >= MAX_JOIN_ROWS {
@@ -102,6 +103,20 @@ mod tests {
             values.iter().cloned().map(|value| vec![value]).collect(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn full_outer_join_preserves_both_unmatched_sides() {
+        let left = table(&[Value::Integer(1), Value::Integer(2), Value::Null], "id");
+        let right = table(&[Value::Integer(2), Value::Integer(3), Value::Null], "id");
+        let result = hash_join(&left, &right, "id", "id", JoinKind::Full).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Integer(2)],
+            vec![Value::Null, Value::Null],
+            vec![Value::Null, Value::Integer(3)],
+            vec![Value::Null, Value::Null],
+        ]);
     }
 
     #[test]
