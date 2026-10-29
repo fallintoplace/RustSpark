@@ -22,7 +22,33 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(label.into()))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn json_depth_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Integer)
+}
+fn json_depth(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let document = json_path::parse(text)?;
+    let mut nodes = vec![(&document, 1_i64)];
+    let mut maximum = 0_i64;
+    while let Some((node, depth)) = nodes.pop() {
+        maximum = maximum.max(depth);
+        match node {
+            serde_json::Value::Array(items) => {
+                for child in items { nodes.push((child, depth + 1)); }
+            }
+            serde_json::Value::Object(fields) => {
+                for child in fields.values() { nodes.push((child, depth + 1)); }
+            }
+            _ => {}
+        }
+    }
+    Ok(Value::Integer(maximum))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "json_depth", min_args: 1, max_args: 1, result_type: json_depth_type, call: json_depth },Function {
     name: "json_type", min_args: 1, max_args: 2,
     result_type: output, call: evaluate,
 }];
@@ -37,5 +63,18 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("null".into())]).unwrap(), Value::Text("NULL".into()));
         assert_eq!(evaluate(&[Value::Text("{}".into()), Value::Text("$.missing".into())])
             .unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod json_depth_extension_tests {
+    use super::*;
+    #[test]
+    fn handles_json_values_and_missing_data() {
+        assert!(crate::builtin::supports("json_depth"));
+        assert_eq!(json_depth(&[Value::Text(r#"{"a":[{"b":1}]}"#.into())]).unwrap(), Value::Integer(4));
+        assert_eq!(json_depth(&[Value::Text("{}".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(json_depth(&[Value::Text("null".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
     }
 }
