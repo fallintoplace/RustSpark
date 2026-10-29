@@ -90,6 +90,11 @@ fn space(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(" ".repeat(length)))
 }
 
+fn quote(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    Ok(Value::Text(format!("'{}'", text.replace('\'', "\\'"))))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -102,6 +107,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "ucase", min_args: 1, max_args: 1, result_type: text_text_type, call: ucase },
     Function { name: "initcap", min_args: 1, max_args: 1, result_type: text_text_type, call: initcap },
     Function { name: "space", min_args: 1, max_args: 1, result_type: space_type, call: space },
+    Function { name: "quote", min_args: 1, max_args: 1, result_type: text_text_type, call: quote },
     // PARITY_FUNCTIONS
 ];
 
@@ -180,6 +186,13 @@ mod tests {
         assert_eq!(space(&[Value::Integer(-2)]).unwrap(), Value::Text(String::new()));
         assert_eq!(space(&[Value::Null]).unwrap(), Value::Null);
         assert!(space(&[Value::Integer(1_000_001)]).is_err());
+    }
+
+    #[test]
+    fn spark_quote_escapes_single_quotes() {
+        assert_eq!(sql_result("quote(s)").unwrap(), Value::Text("'café'".into()));
+        assert_eq!(quote(&[Value::Text("don't".into())]).unwrap(), Value::Text("'don\\'t'".into()));
+        assert_eq!(quote(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
