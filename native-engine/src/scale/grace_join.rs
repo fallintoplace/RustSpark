@@ -1,6 +1,5 @@
 //! Disk-partitioned equijoins. The build side is bounded per partition.
 use std::{
-    collections::HashSet,
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
@@ -112,21 +111,13 @@ where L: IntoIterator<Item = Result<Batch>>,
         // A RIGHT or FULL join must emit build-only rows once per partition,
         // not once for every probe batch.
         let outer_build = matches!(kind, JoinKind::Right | JoinKind::Full);
-        let mut build_keys: HashSet<&Value> = HashSet::new();
-        if outer_build {
-            for key in build.column(right_index)? {
-                if !key.is_null() && !matches!(key, Value::Float(v) if v.is_nan()) {
-                    build_keys.insert(key);
-                }
-            }
-        }
-        let mut matched_keys: HashSet<&Value> = HashSet::new();
+        let mut matched_right = outer_build.then(|| vec![false; build.num_rows()]);
         let probe_kind = match kind {
             JoinKind::Right => JoinKind::Inner,
             JoinKind::Full => JoinKind::Left,
             other => other,
         };
-        // Build the hash index once per shard, not for each probe chunk.
+        // Build once per on-disk shard instead of once for every 256 probe rows.
         let prepared = join::PreparedHashJoin::new(
             left_schema.clone(), &build, left_key, right_key, probe_kind,
         )?;
@@ -134,19 +125,9 @@ where L: IntoIterator<Item = Result<Batch>>,
             control.check()?;
             for piece in BatchChunks::new(&batch, io_batch_rows.min(256))? {
                 let piece = piece?;
-                if outer_build {
-                    for key in piece.column(left_index)? {
-                        if !key.is_null() &&
-                            !matches!(key, Value::Float(v) if v.is_nan()) &&
-                            build_keys.contains(key) {
-                            // Hold the canonical build-side key, not a cloned probe key.
-                            if let Some(&build_key) = build_keys.get(key) {
-                                matched_keys.insert(build_key);
-                            }
-                        }
-                    }
-                }
-                let joined = prepared.probe(&piece)?;
+                let joined = prepared.probe_with_matches(
+                    &piece, matched_right.as_deref_mut(),
+                )?;
                 for output_chunk in BatchChunks::new(&joined, io_batch_rows)? {
                     let output_chunk = output_chunk?;
                     if output_chunk.num_rows() != 0 {
@@ -167,8 +148,7 @@ where L: IntoIterator<Item = Result<Batch>>,
             let mut pending = Vec::with_capacity(io_batch_rows.min(65_536));
             for right_row in 0..build.num_rows() {
                 control.check()?;
-                let key = build.value(right_row, right_index)?;
-                if key.is_null() || !matched_keys.contains(key) {
+                if !matched_right.as_ref().expect("outer-build bitmap")[right_row] {
                     let mut row = vec![Value::Null; left_schema.len()];
                     row.extend(build.row(right_row)?);
                     pending.push(row);
