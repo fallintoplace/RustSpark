@@ -11,6 +11,11 @@ use crate::{
 pub enum Plan {
     /// SQL's implicit single row used by SELECT expressions without FROM.
     OneRow,
+    /// Small, typed literal relation lowered from Spark SQL VALUES.
+    Values {
+        schema: crate::schema::Schema,
+        rows: Vec<Vec<crate::scalar::Value>>,
+    },
     Scan {
         table: String,
     },

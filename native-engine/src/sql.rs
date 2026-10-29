@@ -426,6 +426,67 @@ impl Parser {
         Ok(SelectItem::Scalar(Selection::new(expr, alias)))
     }
 
+
+    /// Parse a bounded constant VALUES relation. Coerce integer/float columns
+    /// to a common type and preserve SQL NULLs as nullable fields.
+    fn values_source(&mut self) -> Result<(Vec<Vec<Value>>, Vec<DataType>)> {
+        self.expect_word("VALUES")?;
+        let context = crate::batch::Batch::from_rows(
+            crate::schema::Schema::new(vec![])?, vec![vec![]],
+        )?;
+        let mut rows = Vec::new();
+        loop {
+            if rows.len() >= 10_000 {
+                return Err(Error::Unsupported("VALUES exceeds 10000 rows".into()));
+            }
+            self.expect_symbol('(')?;
+            let mut values = Vec::new();
+            loop {
+                let expression = self.expression(0)?;
+                values.push(expression.evaluate(&context, 0)?);
+                if !self.take_symbol(',') { break; }
+            }
+            self.expect_symbol(')')?;
+            if let Some(first) = rows.first() {
+                let first: &Vec<Value> = first;
+                if values.len() != first.len() {
+                    return Err(Error::Parse("VALUES rows must have the same width".into()));
+                }
+            }
+            rows.push(values);
+            if !self.take_symbol(',') { break; }
+        }
+        let width = rows.first().map_or(0, Vec::len);
+        let mut types: Vec<Option<DataType>> = vec![None; width];
+        for row in &rows {
+            for (position, value) in row.iter().enumerate() {
+                let kind = match value {
+                    Value::Null => continue,
+                    Value::Boolean(_) => DataType::Boolean,
+                    Value::Integer(_) => DataType::Integer,
+                    Value::Float(_) => DataType::Float,
+                    Value::Text(_) => DataType::Text,
+                };
+                types[position] = Some(match types[position] {
+                    None => kind,
+                    Some(old) if old == kind => kind,
+                    Some(DataType::Integer) if kind == DataType::Float => DataType::Float,
+                    Some(DataType::Float) if kind == DataType::Integer => DataType::Float,
+                    _ => return Err(Error::Type("VALUES contains incompatible column types".into())),
+                });
+            }
+        }
+        let types = types.into_iter().map(|kind| kind.unwrap_or(DataType::Text)).collect::<Vec<_>>();
+        for row in &mut rows {
+            for (value, kind) in row.iter_mut().zip(&types) {
+                if *kind == DataType::Float && matches!(value, Value::Integer(_)) {
+                    *value = value.cast_to(DataType::Float)?;
+                }
+            }
+        }
+        Ok((rows, types))
+    }
+
     fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
@@ -437,7 +498,37 @@ impl Parser {
             }
         }
         let has_from = self.take_word("FROM");
-        let mut plan = if has_from { Plan::scan(self.identifier()?) } else { Plan::OneRow };
+        let mut plan = if has_from {
+            if self.take_symbol('(') {
+                let (rows, types) = self.values_source()?;
+                self.expect_symbol(')')?;
+                // A derived VALUES table needs an alias for its column names.
+                self.take_word("AS");
+                self.identifier()?;
+                let names = if self.take_symbol('(') {
+                    let mut columns = Vec::new();
+                    loop {
+                        columns.push(self.identifier()?);
+                        if !self.take_symbol(',') { break; }
+                    }
+                    self.expect_symbol(')')?;
+                    columns
+                } else {
+                    (1..=types.len()).map(|index| format!("col{index}")).collect()
+                };
+                if names.len() != types.len() {
+                    return Err(Error::Parse("VALUES alias column count mismatch".into()));
+                }
+                let fields = names.into_iter().zip(types).enumerate()
+                    .map(|(column, (name, data_type))| {
+                        let nullable = rows.iter().any(|row| row[column].is_null());
+                        crate::schema::Field::new(name, data_type, nullable)
+                    }).collect();
+                Plan::Values { schema: crate::schema::Schema::new(fields)?, rows }
+            } else {
+                Plan::scan(self.identifier()?)
+            }
+        } else { Plan::OneRow };
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
