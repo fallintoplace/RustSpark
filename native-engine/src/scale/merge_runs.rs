@@ -15,21 +15,22 @@ const MAX_FAN_IN: usize = 64;
 
 struct InputRun {
     reader: SpillReader<BufReader<File>>,
-    rows: Vec<Vec<Value>>,
+    batch: Option<Batch>,
     position: usize,
     exhausted: bool,
 }
 
 impl InputRun {
     fn fill(&mut self) -> Result<()> {
-        while !self.exhausted && self.position == self.rows.len() {
+        while !self.exhausted &&
+            self.batch.as_ref().is_none_or(|batch| self.position >= batch.num_rows()) {
             match self.reader.next_batch()? {
                 Some(batch) => {
-                    self.rows = batch.rows()?;
+                    self.batch = Some(batch);
                     self.position = 0;
                 }
                 None => {
-                    self.rows.clear();
+                    self.batch = None;
                     self.exhausted = true;
                 }
             }
@@ -37,8 +38,9 @@ impl InputRun {
         Ok(())
     }
 
-    fn peek(&self) -> Option<&[Value]> {
-        self.rows.get(self.position).map(Vec::as_slice)
+    fn peek(&self, column: usize) -> Option<&Value> {
+        let batch = self.batch.as_ref()?;
+        batch.column(column).ok()?.get(self.position)
     }
 }
 
@@ -95,7 +97,7 @@ impl RunMerger {
                 return Err(Error::Schema("external sort run schema mismatch".into()));
             }
             runs.push(InputRun {
-                reader, rows: Vec::new(), position: 0, exhausted: false
+                reader, batch: None, position: 0, exhausted: false
             });
         }
         Ok(Self {
@@ -104,22 +106,17 @@ impl RunMerger {
         })
     }
 
-    fn compare_rows(&self, a: &[Value], b: &[Value]) -> Ordering {
-        for key in &self.keys {
-            let ord = compare_value(&a[key.column], &b[key.column], key);
-            if ord != Ordering::Equal { return ord; }
-        }
-        Ordering::Equal
-    }
-
     fn less_run(&self, a: usize, b: usize) -> bool {
-        let left = self.runs[a].peek().expect("active run has a row");
-        let right = self.runs[b].peek().expect("active run has a row");
-        match self.compare_rows(left, right) {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => a < b, // Preserve original run-order tie handling.
+        for key in &self.keys {
+            let left = self.runs[a].peek(key.column).expect("active run has a key");
+            let right = self.runs[b].peek(key.column).expect("active run has a key");
+            match compare_value(left, right, key) {
+                Ordering::Less => return true,
+                Ordering::Greater => return false,
+                Ordering::Equal => {}
+            }
         }
+        a < b // Stable ties retain the input-run order.
     }
 
     fn sift_down(&mut self, mut root: usize) {
@@ -143,7 +140,7 @@ impl RunMerger {
         if !self.heap_ready {
             for run in &mut self.runs { run.fill()?; }
             self.heap = (0..self.runs.len())
-                .filter(|&index| self.runs[index].peek().is_some()).collect();
+                .filter(|&index| self.runs[index].peek(self.keys[0].column).is_some()).collect();
             for parent in (0..self.heap.len() / 2).rev() {
                 self.sift_down(parent);
             }
@@ -151,10 +148,10 @@ impl RunMerger {
         }
         let Some(&index) = self.heap.first() else { return Ok(None); };
         let selected = &mut self.runs[index];
-        let row = std::mem::take(&mut selected.rows[selected.position]);
+        let row = selected.batch.as_ref().expect("active run batch").row(selected.position)?;
         selected.position += 1;
         selected.fill()?;
-        if selected.peek().is_none() {
+        if selected.peek(self.keys[0].column).is_none() {
             self.heap.swap_remove(0);
         }
         if !self.heap.is_empty() { self.sift_down(0); }
@@ -300,6 +297,32 @@ mod heap_merge_many_runs_tests {
         let mut ids = rows.into_iter().map(|r| match r[1] { Value::Integer(n) => n, _ => unreachable!() }).collect::<Vec<_>>();
         ids.sort_unstable();
         assert_eq!(ids, (0..192).collect::<Vec<_>>());
+        drop(runs);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod columnar_spill_cursor_tests {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn nullable_text_keys_merge_without_per_row_buffers() {
+        let dir = std::env::temp_dir().join(format!("native-column-merge-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false), Field::new("tag", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..40).rev().map(|n| vec![Value::Integer(n),
+            if n % 7 == 0 { Value::Null } else { Value::Text(format!("group-{}", n % 5)) }
+        ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("tag".into()))];
+        let expected = crate::sort::sort(&batch, &keys).unwrap();
+        let runs = write_sorted_runs([Ok(batch)], schema.clone(), &keys, &dir, 3, &QueryControl::default()).unwrap();
+        let merged = RunMerger::new(runs.files(), schema, &keys, 2, 4, QueryControl::default()).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(), expected.rows().unwrap());
         drop(runs);
         fs::remove_dir(dir).unwrap();
     }
