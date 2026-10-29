@@ -33,14 +33,17 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
     if input.len() as u64 > MAX_CSV_BYTES {
         return Err(Error::Execution("CSV input exceeds 64 MiB limit".into()));
     }
-    // The common streaming case is a single unquoted record. Avoid the
-    // character-by-character CSV state machine when no quoting is possible.
+    // Without quotes or CR, every nonempty line is a complete record.
+    // Keep the same blank-line and trailing-newline semantics as the parser below.
     if !input.as_bytes().contains(&b'"') && !input.as_bytes().contains(&b'\r') {
-        let body = input.strip_suffix('\n').unwrap_or(input);
-        if !body.contains('\n') {
-            if body.is_empty() { return Ok(Vec::new()); }
-            return Ok(vec![body.split(',').map(str::to_owned).collect()]);
+        let mut records = Vec::new();
+        for line in input.split('\n').filter(|line| !line.is_empty()) {
+            if records.len() >= MAX_CSV_ROWS {
+                return Err(Error::Execution("CSV row count limit exceeded".into()));
+            }
+            records.push(line.split(',').map(str::to_owned).collect());
         }
+        return Ok(records);
     }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
@@ -340,5 +343,21 @@ mod csv_inference_single_pass_perf_tests {
         assert_eq!(from_csv_str("v\n1\n-8\n").unwrap().schema().field(0).unwrap().data_type, DataType::Integer);
         assert_eq!(from_csv_str("v\n1\n2.5\n").unwrap().schema().field(0).unwrap().data_type, DataType::Float);
         assert_eq!(from_csv_str("v\n1\nNaN\n").unwrap().schema().field(0).unwrap().data_type, DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod unquoted_multiline_csv_fast_path_tests {
+    use super::*;
+    #[test]
+    fn parses_large_plain_documents_and_skips_blank_lines() {
+        assert_eq!(parse_records("a,b\n\n1,2\n3,é\n").unwrap(), vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["1".to_string(), "2".to_string()],
+            vec!["3".to_string(), "é".to_string()],
+        ]);
+        let input = format!("n\n{}", "7\n".repeat(10_000));
+        assert_eq!(parse_records(&input).unwrap().len(), 10_001);
+        assert_eq!(parse_records("a,,b\n").unwrap()[0].len(), 3);
     }
 }
