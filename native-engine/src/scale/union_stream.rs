@@ -39,6 +39,7 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 return None;
             };
             match next {
+                Ok(batch) if batch.schema() == &self.schema && batch.num_rows() == 0 => continue,
                 Ok(batch) if batch.schema() == &self.schema => return Some(Ok(batch)),
                 Ok(_) => {
                     self.stopped = true;
@@ -201,3 +202,20 @@ mod union_distinct_stream_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod empty_union_batch_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn union_all_emits_only_nonempty_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let one = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        let mut stream = UnionAllStream::new(
+            vec![Ok(empty.clone()), Ok(one.clone())].into_iter(),
+            vec![Ok(empty)].into_iter(), schema, QueryControl::default());
+        assert_eq!(stream.next().unwrap().unwrap(), one);
+        assert!(stream.next().is_none());
+    }
+}
