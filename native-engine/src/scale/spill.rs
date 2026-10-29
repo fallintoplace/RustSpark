@@ -202,10 +202,10 @@ impl<R: Read> SpillReader<R> {
             return Err(Error::Execution("spill batch exceeds configured limits".into()));
         }
         let mut bytes_seen = 0usize;
-        let mut output = Vec::with_capacity(rows);
+        let mut columns = (0..self.schema.len())
+            .map(|_| Vec::with_capacity(rows)).collect::<Vec<_>>();
         for _ in 0..rows {
-            let mut row = Vec::with_capacity(self.schema.len());
-            for _ in self.schema.fields() {
+            for column in &mut columns {
                 let value = match read_byte(&mut self.input)? {
                     0 => Value::Null,
                     1 => Value::Boolean(false),
@@ -223,11 +223,10 @@ impl<R: Read> SpillReader<R> {
                     5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
                     _ => return Err(Error::Parse("invalid spill value tag".into())),
                 };
-                row.push(value);
+                column.push(value);
             }
-            output.push(row);
         }
-        Ok(Some(Batch::from_rows(self.schema.clone(), output)?))
+        Ok(Some(Batch::new_with_row_count(self.schema.clone(), columns, rows)?))
     }
 }
 
@@ -305,5 +304,42 @@ mod spill_preflight_tests {
         let after = writer.finish().unwrap();
         let empty = SpillWriter::new(Vec::new(), schema).unwrap().finish().unwrap();
         assert_eq!(after, empty);
+    }
+}
+
+#[cfg(test)]
+mod direct_spill_column_decode_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::io::Cursor;
+
+    #[test]
+    fn many_nullable_rows_decode_without_row_transposition() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]).unwrap();
+        let rows = (0..1000).map(|n| vec![
+            Value::Integer(n),
+            if n % 3 == 0 { Value::Null } else { Value::Text(format!("payload-{n}")) },
+            if n % 2 == 0 { Value::Boolean(true) } else { Value::Null },
+        ]).collect();
+        let input = Batch::from_rows(schema.clone(), rows).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&input).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 1000).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), input);
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn zero_width_spills_keep_explicit_row_count() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 5).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), batch);
     }
 }
