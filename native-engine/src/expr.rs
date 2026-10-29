@@ -117,7 +117,19 @@ impl Expr {
                 | BinaryOp::Less
                 | BinaryOp::LessEqual
                 | BinaryOp::Greater
-                | BinaryOp::GreaterEqual => Ok(DataType::Boolean),
+                | BinaryOp::GreaterEqual => {
+                    let a = left.output_type(schema)?;
+                    let b = right.output_type(schema)?;
+                    if matches!(left.as_ref(), Expr::Literal(Value::Null))
+                        || matches!(right.as_ref(), Expr::Literal(Value::Null))
+                        || a == b
+                        || matches!((a, b), (DataType::Integer, DataType::Float)
+                            | (DataType::Float, DataType::Integer)) {
+                        Ok(DataType::Boolean)
+                    } else {
+                        Err(Error::Type("comparison requires compatible operands".into()))
+                    }
+                },
                 BinaryOp::And | BinaryOp::Or => {
                     for operand in [left.as_ref(), right.as_ref()] {
                         if !matches!(operand, Expr::Literal(Value::Null))
@@ -492,5 +504,27 @@ mod logic_type_regression {
             assert_eq!(Expr::binary(Expr::Column("flag".into()), op,
                 Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
         }
+    }
+}
+
+#[cfg(test)]
+mod comparison_type_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn comparisons_validate_both_sides_without_rows() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, true),
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        assert!(Expr::binary(Expr::Column("label".into()), BinaryOp::Equal,
+            Expr::Column("n".into())).output_type(&schema).is_err());
+        assert!(Expr::binary(Expr::Column("missing".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(0))).output_type(&schema).is_err());
+        assert_eq!(Expr::binary(Expr::Column("n".into()), BinaryOp::Equal,
+            Expr::Literal(Value::Float(2.0))).output_type(&schema).unwrap(), DataType::Boolean);
+        assert_eq!(Expr::binary(Expr::Column("n".into()), BinaryOp::Equal,
+            Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
