@@ -17,6 +17,7 @@ fn round(args: &[Value]) -> Result<Value> {
     if !(-15..=15).contains(&digits) {
         return Err(Error::Execution("ROUND precision outside supported [-15,15] range".into()));
     }
+    if digits == 0 { return super::finite(number.round()); }
     let scale = 10_f64.powi(digits.unsigned_abs() as i32);
     let result = if digits >= 0 {
         (number * scale).round() / scale
@@ -47,6 +48,9 @@ mod tests {
     fn round_positive_and_negative_precision() {
         assert_eq!(round(&[Value::Float(1.235), Value::Integer(2)]).unwrap(), Value::Float(1.24));
         assert_eq!(round(&[Value::Float(149.0), Value::Integer(-2)]).unwrap(), Value::Float(100.0));
+        assert_eq!(round(&[Value::Float(2.5)]).unwrap(), Value::Float(3.0));
+        assert_eq!(round(&[Value::Float(-2.5), Value::Integer(0)]).unwrap(),
+            Value::Float(-3.0));
         assert!(round(&[Value::Float(1.0), Value::Integer(100)]).is_err());
     }
 }
