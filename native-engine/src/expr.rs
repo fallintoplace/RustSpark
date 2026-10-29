@@ -69,8 +69,11 @@ impl Expr {
                     Err(Error::Type("NOT requires a boolean operand".into()))
                 }
             },
-            Self::IsNull(_) | Self::Like { .. } | Self::IsDistinctFrom { .. } =>
-                Ok(DataType::Boolean),
+            Self::IsNull(inner) => {
+                inner.output_type(schema)?;
+                Ok(DataType::Boolean)
+            },
+            Self::Like { .. } | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -377,6 +380,23 @@ mod not_type_preflight_regression {
         assert_eq!(Expr::Not(Box::new(Expr::Column("flag".into())))
             .output_type(&schema).unwrap(), DataType::Boolean);
         assert_eq!(Expr::Not(Box::new(Expr::Literal(Value::Null)))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod is_null_type_preflight_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn is_null_resolves_columns_with_no_input_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        assert!(Expr::IsNull(Box::new(Expr::Column("missing".into())))
+            .output_type(&schema).is_err());
+        assert_eq!(Expr::IsNull(Box::new(Expr::Column("n".into())))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert_eq!(Expr::IsNull(Box::new(Expr::Literal(Value::Null)))
             .output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
