@@ -53,6 +53,20 @@ fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
 }
 fn normalize_space(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.is_ascii() {
+        let mut output = String::with_capacity(input.len());
+        let mut pending = false;
+        for byte in input.bytes() {
+            if byte.is_ascii_whitespace() {
+                pending = !output.is_empty();
+            } else {
+                if pending { output.push(' '); }
+                pending = false;
+                output.push(char::from(byte));
+            }
+        }
+        return Ok(Value::Text(output));
+    }
     let mut output = String::with_capacity(input.len());
     let mut pending = false;
     for character in input.chars() {
@@ -128,5 +142,16 @@ mod normalize_space_extension_tests {
         assert_eq!(normalize_space(&[Value::Text(" \t A\u{00A0} B \n".into())]).unwrap(), Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Text(" \t ".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod normalize_space_ascii_fast_path_tests {
+    use super::*;
+    #[test]
+    fn collapses_ascii_and_preserves_multibyte_whitespace_semantics() {
+        assert_eq!(normalize_space(&[Value::Text("\t A  B \r\n C  ".into())]).unwrap(), Value::Text("A B C".into()));
+        assert_eq!(normalize_space(&[Value::Text(" A\u{00A0}B ".into())]).unwrap(), Value::Text("A B".into()));
+        assert_eq!(normalize_space(&[Value::Text("   ".into())]).unwrap(), Value::Text(String::new()));
     }
 }
