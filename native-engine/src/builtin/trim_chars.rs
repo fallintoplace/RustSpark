@@ -16,9 +16,9 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
             text.trim_start_matches(|ch| chars.contains(ch)),
         Some(chars) if right =>
             text.trim_end_matches(|ch| chars.contains(ch)),
-        None if left && right => text.trim(),
-        None if left => text.trim_start(),
-        None if right => text.trim_end(),
+        None if left && right => text.trim_matches(' '),
+        None if left => text.trim_start_matches(' '),
+        None if right => text.trim_end_matches(' '),
         _ => text,
     };
     Ok(Value::Text(value.into()))
@@ -43,5 +43,8 @@ mod tests {
             Value::Text("é".into())]).unwrap(), Value::Text("hello".into()));
         assert_eq!(ltrim(&[Value::Text("  x ".into())]).unwrap(), Value::Text("x ".into()));
         assert_eq!(rtrim(&[Value::Text("  x ".into())]).unwrap(), Value::Text("  x".into()));
+        assert_eq!(btrim(&[Value::Text(" \t x\n ".into())]).unwrap(), Value::Text("\t x\n".into()));
+        assert_eq!(ltrim(&[Value::Text("\t  x".into())]).unwrap(), Value::Text("\t  x".into()));
+        assert_eq!(rtrim(&[Value::Text("x  \n".into())]).unwrap(), Value::Text("x  \n".into()));
     }
 }
