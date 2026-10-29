@@ -39,18 +39,21 @@ pub struct StageGraph {
 
 impl StageGraph {
     pub fn new(stages: Vec<Stage>) -> Result<Self> {
-        let mut unique = HashSet::new();
+        let mut present = vec![false; stages.len()];
         for stage in &stages {
-            if stage.id >= stages.len() || !unique.insert(stage.id) {
+            if stage.id >= stages.len() || std::mem::replace(&mut present[stage.id], true) {
                 return Err(Error::Schema("duplicate or invalid stage identifier".into()));
             }
         }
         for stage in &stages {
-            let mut seen = HashSet::new();
-            if stage.inputs.iter().any(|dependency| !seen.insert(*dependency)) {
+            if stage.inputs.len() >= 2
+                && stage.inputs.windows(2).any(|edges| edges[0] == edges[1]) {
+                // Valid operators have at most two inputs.
                 return Err(Error::Schema("stage has duplicate dependencies".into()));
             }
-            if stage.inputs.iter().any(|dependency| !unique.contains(dependency)) {
+            if stage.inputs.iter().any(|&dependency| {
+                dependency >= present.len() || !present[dependency]
+            }) {
                 return Err(Error::Schema("stage depends on an unknown stage".into()));
             }
             let required_inputs = match stage.kind {
@@ -269,6 +272,26 @@ mod stage_graph_invariant_consolidation_tests {
         assert!(StageGraph::new(vec![
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
             Stage { id: 1, kind: StageKind::HashJoin, inputs: vec![0] },
+        ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bitmap_stage_validation_tests {
+    use super::*;
+    #[test]
+    fn accepts_nonsequential_stage_order_but_rejects_duplicate_ids() {
+        let valid = vec![
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ];
+        assert!(StageGraph::new(valid.clone()).is_ok());
+        let mut invalid = valid;
+        invalid[0].id = 0;
+        assert!(StageGraph::new(invalid).is_err());
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::HashJoin, inputs: vec![0, 0] },
         ]).is_err());
     }
 }
