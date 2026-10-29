@@ -24,7 +24,7 @@ impl Iterator for BatchChunks<'_> {
         let start = self.position;
         let end = start.saturating_add(self.size).min(self.batch.num_rows());
         self.position = end;
-        Some(self.batch.take(&(start..end).collect::<Vec<_>>()))
+        Some(self.batch.slice_rows(start, end))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
