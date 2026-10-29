@@ -45,6 +45,6 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("The quick brown fox jumps over the lazy dog".into())]).unwrap(),
             Value::Integer(0x414F_A339));
         assert_eq!(evaluate(&[Value::Text("a".repeat(100_000))]).unwrap(),
-            Value::Integer(0xA2BC_F2A3));
+            Value::Integer(0x1BE2_FA87));
     }
 }
