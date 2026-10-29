@@ -15,6 +15,7 @@ pub enum JoinKind {
     Right,
     Full,
     Semi,
+    Anti,
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
@@ -31,7 +32,7 @@ pub fn hash_join(
     if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
         return Err(Error::Type("join key types must match".into()));
     }
-    if kind == JoinKind::Semi {
+    if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
         let mut keys = HashSet::new();
         for row in 0..right.num_rows() {
             let key = right.value(row, right_column)?;
@@ -40,7 +41,8 @@ pub fn hash_join(
         let mut indices = Vec::new();
         for row in 0..left.num_rows() {
             let key = left.value(row, left_column)?;
-            if !key.is_null() && keys.contains(key) {
+            let found = !key.is_null() && keys.contains(key);
+            if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
                 if indices.len() >= MAX_JOIN_ROWS { return Err(Error::Execution("join output exceeds safety limit".into())); }
                 indices.push(row);
             }

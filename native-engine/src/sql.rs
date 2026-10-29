@@ -276,6 +276,9 @@ impl Parser {
                 if self.take_word("SEMI") {
                     self.expect_word("JOIN")?;
                     Some(JoinKind::Semi)
+                } else if self.take_word("ANTI") {
+                    self.expect_word("JOIN")?;
+                    Some(JoinKind::Anti)
                 } else {
                     self.take_word("OUTER");
                     self.expect_word("JOIN")?;
