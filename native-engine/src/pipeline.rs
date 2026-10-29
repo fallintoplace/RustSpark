@@ -10,10 +10,11 @@ use crate::{
 
 pub struct Pipeline<I> {
     source: I,
-    predicate: Option<Expr>,
+    predicates: Vec<Expr>,
     projections: Vec<Vec<Selection>>,
     skip: usize,
     remaining: Option<usize>,
+    invalid_limit: bool,
     guard: QueryGuard,
     metrics: Option<QueryMetrics>,
 }
@@ -22,17 +23,18 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     pub fn new(source: I) -> Self {
         Self {
             source,
-            predicate: None,
+            predicates: Vec::new(),
             projections: Vec::new(),
             skip: 0,
             remaining: None,
+            invalid_limit: false,
             guard: QueryGuard::default(),
             metrics: None,
         }
     }
 
     pub fn with_filter(mut self, predicate: Expr) -> Self {
-        self.predicate = Some(predicate);
+        self.predicates.push(predicate);
         self
     }
 
@@ -42,8 +44,15 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     }
 
     pub fn with_limit(mut self, offset: usize, count: Option<usize>) -> Self {
-        self.skip = offset;
-        self.remaining = count;
+        self.invalid_limit |= count.is_some_and(|rows| offset.checked_add(rows).is_none());
+        let previous = self.remaining;
+        let advance = offset.min(previous.unwrap_or(usize::MAX));
+        self.skip = self.skip.saturating_add(advance);
+        self.remaining = match (previous, count) {
+            (Some(existing), Some(current)) => Some(existing.saturating_sub(offset).min(current)),
+            (Some(existing), None) => Some(existing.saturating_sub(offset)),
+            (None, requested) => requested,
+        };
         self
     }
 
@@ -62,6 +71,11 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.invalid_limit {
+            self.invalid_limit = false;
+            self.remaining = Some(0);
+            return Some(Err(crate::Error::Execution("LIMIT + OFFSET overflow".into())));
+        }
         if self.remaining == Some(0) {
             return None;
         }
@@ -76,7 +90,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 if let Some(metrics) = &self.metrics {
                     metrics.record_input(batch.num_rows() as u64)?;
                 }
-                if let Some(predicate) = &self.predicate {
+                for predicate in &self.predicates {
                     batch = filter::filter(&batch, predicate)?;
                 }
                 for selections in &self.projections {
@@ -175,5 +189,42 @@ mod chained_projection_pipeline_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(result[0].schema().fields()[0].name, "last");
         assert_eq!(result[0].row(0).unwrap(), vec![Value::Integer(7)]);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_pipeline_regression_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+    fn sample() -> Batch {
+        Batch::from_rows(Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..10).map(|n| vec![Value::Integer(n)]).collect()).unwrap()
+    }
+    #[test]
+    fn chained_filters_are_intersected() {
+        let greater = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(1)));
+        let smaller = Expr::binary(Expr::Column("n".into()), BinaryOp::Less,
+            Expr::Literal(Value::Integer(4)));
+        let batches = Pipeline::new([Ok(sample())].into_iter())
+            .with_filter(greater).with_filter(smaller).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches[0].rows().unwrap(), vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
+    }
+    #[test]
+    fn successive_limits_compose_in_order() {
+        let results = Pipeline::new([Ok(sample())].into_iter())
+            .with_limit(2, Some(5)).with_limit(1, Some(2))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(results[0].rows().unwrap(), vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
+        let none = Pipeline::new([Ok(sample())].into_iter())
+            .with_limit(1, Some(2)).with_limit(9, Some(1))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(none.iter().map(Batch::num_rows).sum::<usize>(), 0);
+    }
+    #[test]
+    fn limit_overflow_errors_before_polling_input() {
+        let result = Pipeline::new([Ok(sample())].into_iter())
+            .with_limit(usize::MAX, Some(2)).next().unwrap();
+        assert!(result.is_err());
     }
 }

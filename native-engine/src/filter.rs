@@ -1,4 +1,4 @@
-use crate::{batch::Batch, expr::Expr, Result};
+use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Result};
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
@@ -38,6 +38,10 @@ mod tests {
  
 /// Return at most max_rows matching rows, retaining their source order.
 pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<Batch> {
+    let kind = predicate.output_type(batch.schema())?;
+    if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
+        return Err(Error::Type("WHERE predicate must be boolean".into()));
+    }
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
         if keep.len() == max_rows { break; }
@@ -86,5 +90,20 @@ mod vectorized_filter_integration_tests {
             crate::expr::BinaryOp::Greater, Expr::Literal(Value::Integer(3)));
         assert_eq!(filter(&input, &expr).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(9)]]);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_filter_predicate_preflight_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn invalid_predicates_fail_on_empty_inputs_and_zero_limits() {
+        let batch = Batch::empty(Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap());
+        for bad in [Expr::Column("n".into()), Expr::Column("unknown".into())] {
+            assert!(filter(&batch, &bad).is_err());
+            assert!(filter_first(&batch, &bad, 0).is_err());
+        }
+        assert_eq!(filter_first(&batch, &Expr::Literal(Value::Null), 0).unwrap().num_rows(), 0);
     }
 }
