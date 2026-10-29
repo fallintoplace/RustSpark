@@ -242,6 +242,7 @@ fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
     Ok(prev[text.len()])
 }
 
+#[cfg(test)]
 fn sql_like(input: &str, pattern: &str) -> Result<bool> {
     sql_like_escape(input, pattern, '\\')
 }
