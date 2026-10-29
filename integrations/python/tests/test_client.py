@@ -82,6 +82,21 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaisesRegex(RustSparkError, "process timeout"):
             RustSpark().query("SELECT 1", process_timeout=3)
 
+    @patch("rustspark_local.subprocess.run")
+    def test_query_one_bounds_rows_and_rejects_multiple(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, '[{"id":1}]', "")
+        client = RustSpark()
+        self.assertEqual(client.query_one("SELECT id FROM t"), {"id": 1})
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--max-rows") + 1], "2")
+        run.return_value = subprocess.CompletedProcess([], 0, '[]', "")
+        self.assertIsNone(client.query_one("SELECT id FROM t"))
+        run.return_value = subprocess.CompletedProcess([], 0, '[{"id":1},{"id":2}]', "")
+        with self.assertRaisesRegex(RustSparkError, "at most one"):
+            client.query_one("SELECT id FROM t")
+        with self.assertRaises(ValueError):
+            client.query_one("SELECT id FROM t", max_rows=1)
+
 
 if __name__ == "__main__":
     unittest.main()
