@@ -1,7 +1,7 @@
 //! Streaming physical execution of the supported native logical-plan subset.
-use std::{path::PathBuf};
+use std::{collections::HashSet, path::PathBuf};
 use crate::{
-    batch::Batch, plan::Plan, project::Selection,
+    batch::Batch, plan::Plan, project::Selection, scalar::Value,
     schema::{Field, Schema}, Error, Result,
 };
 use super::{
@@ -25,6 +25,80 @@ struct SortedOutput {
 impl Iterator for SortedOutput {
     type Item = Result<Batch>;
     fn next(&mut self) -> Option<Self::Item> { self.reader.next() }
+}
+
+const MAX_STREAM_DISTINCT_KEYS: usize = 200_000;
+const MAX_STREAM_DISTINCT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Keep first occurrences across batch boundaries within an explicit memory budget.
+struct DistinctOutput {
+    source: BatchStream,
+    control: QueryControl,
+    seen: HashSet<Vec<Value>>,
+    retained_bytes: usize,
+    max_keys: usize,
+    max_bytes: usize,
+    stopped: bool,
+}
+
+impl DistinctOutput {
+    fn new(source: BatchStream, control: QueryControl, max_keys: usize, max_bytes: usize) -> Self {
+        Self {
+            source, control, seen: HashSet::new(), retained_bytes: 0,
+            max_keys, max_bytes, stopped: false,
+        }
+    }
+}
+
+impl Iterator for DistinctOutput {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                return Some(Err(error));
+            }
+            let batch = match self.source.next()? {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            };
+            let mut selected = Vec::new();
+            for row in 0..batch.num_rows() {
+                let key = match batch.row(row) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                };
+                if self.seen.contains(&key) { continue; }
+                let footprint = key.iter().fold(
+                    64usize.saturating_add(key.len().saturating_mul(std::mem::size_of::<Value>())),
+                    |total, value| match value {
+                        Value::Text(text) => total.saturating_add(text.len()),
+                        _ => total,
+                    },
+                );
+                let next_total = self.retained_bytes.checked_add(footprint);
+                if self.seen.len() >= self.max_keys ||
+                    next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.stopped = true;
+                    return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
+                }
+                self.retained_bytes = next_total.expect("validated DISTINCT memory");
+                self.seen.insert(key);
+                selected.push(row);
+            }
+            if !selected.is_empty() {
+                return Some(batch.take(&selected));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +180,9 @@ fn lower(
         }
         Plan::Filter { input, predicate } =>
             Ok(Box::new(FilterStream::new(child(input)?, predicate.clone(), control.clone()))),
+        Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
+            child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
+        ))),
         Plan::Project { input, selections } =>
             Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
         Plan::Limit { input, offset, count } =>
@@ -219,6 +296,64 @@ mod tests {
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         let rows = output.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Value::Integer(3)]]);
+        fs::remove_file(path).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod distinct_stream_feature_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn distinct_deduplicates_across_batch_boundaries() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null]
+        ]).unwrap();
+        let second = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)]
+        ]).unwrap();
+        let source: BatchStream = Box::new(vec![Ok(first), Ok(second)].into_iter());
+        let result = DistinctOutput::new(source, QueryControl::default(), 10, 10000)
+            .collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)]
+        ]);
+    }
+
+    #[test]
+    fn fails_closed_on_distinct_key_memory_exhaustion() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("abc".into())]
+        ]).unwrap();
+        let source: BatchStream = Box::new(vec![Ok(input)].into_iter());
+        let mut distinct = DistinctOutput::new(source, QueryControl::default(), 10, 1);
+        assert!(distinct.next().unwrap().is_err());
+        assert!(distinct.next().is_none());
+    }
+
+    #[test]
+    fn executor_runs_native_sql_select_distinct() {
+        use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("native-stream-distinct-{}-{}.csv",
+            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, "n\n1\n2\n1\n3\n2\n").unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &path, schema, 1024).unwrap();
+        let plan = crate::sql::parse_sql("SELECT DISTINCT n FROM t").unwrap();
+        let options = StreamOptions { batch_rows: 2, ..StreamOptions::default() };
+        let rows = execute(&plan, &catalog, &options, QueryControl::default()).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap().iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]
+        ]);
         fs::remove_file(path).unwrap();
     }
 }
