@@ -109,3 +109,56 @@ mod tests {
         assert!(Value::Text("1".into()).sql_equal(&Value::Integer(1)).is_err());
     }
 }
+
+
+impl Value {
+    /// Convert native scalar values to an explicit SQL column type.
+    /// Invalid text, nonfinite floats and out-of-range numeric casts are errors.
+    pub fn cast_to(&self, target: crate::schema::DataType) -> Result<Self> {
+        use crate::schema::DataType;
+        match (self, target) {
+            (Self::Null, _) => Ok(Self::Null),
+            (Self::Boolean(value), DataType::Boolean) => Ok(Self::Boolean(*value)),
+            (Self::Integer(value), DataType::Integer) => Ok(Self::Integer(*value)),
+            (Self::Float(value), DataType::Float) => Ok(Self::Float(*value)),
+            (Self::Text(value), DataType::Text) => Ok(Self::Text(value.clone())),
+            (Self::Boolean(value), DataType::Text) => Ok(Self::Text(value.to_string())),
+            (Self::Integer(value), DataType::Text) => Ok(Self::Text(value.to_string())),
+            (Self::Float(value), DataType::Text) => Ok(Self::Text(value.to_string())),
+            (Self::Integer(value), DataType::Float) => Ok(Self::Float(*value as f64)),
+            (Self::Float(value), DataType::Integer) => {
+                if !value.is_finite() || *value < i64::MIN as f64 ||
+                    *value >= -(i64::MIN as f64) {
+                    return Err(Error::Type("float is outside BIGINT range".into()));
+                }
+                Ok(Self::Integer(value.trunc() as i64))
+            }
+            (Self::Text(value), DataType::Integer) => value.parse::<i64>()
+                .map(Self::Integer).map_err(|_| Error::Type("invalid BIGINT cast".into())),
+            (Self::Text(value), DataType::Float) => value.parse::<f64>().ok()
+                .filter(|n| n.is_finite()).map(Self::Float)
+                .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
+            (Self::Text(value), DataType::Boolean) if value.eq_ignore_ascii_case("true") =>
+                Ok(Self::Boolean(true)),
+            (Self::Text(value), DataType::Boolean) if value.eq_ignore_ascii_case("false") =>
+                Ok(Self::Boolean(false)),
+            _ => Err(Error::Type("unsupported native CAST conversion".into())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_cast_feature_tests {
+    use super::*;
+    use crate::schema::DataType;
+
+    #[test]
+    fn converts_types_and_rejects_overflow() {
+        assert_eq!(Value::Text("42".into()).cast_to(DataType::Integer).unwrap(), Value::Integer(42));
+        assert_eq!(Value::Float(-2.9).cast_to(DataType::Integer).unwrap(), Value::Integer(-2));
+        assert_eq!(Value::Null.cast_to(DataType::Boolean).unwrap(), Value::Null);
+        assert!(Value::Float(f64::INFINITY).cast_to(DataType::Integer).is_err());
+        assert!(Value::Float(i64::MAX as f64).cast_to(DataType::Integer).is_err());
+        assert!(Value::Text("x".into()).cast_to(DataType::Integer).is_err());
+    }
+}
