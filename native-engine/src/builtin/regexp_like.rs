@@ -10,6 +10,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
     regex_support::check_input(text)?;
+    // Plain ASCII word patterns have no regex metacharacters.
+    if !pattern.is_empty() && pattern.len() <= 4096 &&
+        pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        return Ok(Value::Boolean(text.contains(pattern)));
+    }
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
 }
 
@@ -63,5 +68,22 @@ mod regexp_escape_extension_tests {
         assert!(!regex_support::compile(&pattern).unwrap().is_match("abbb"));
         assert_eq!(regexp_escape(&[Value::Null]).unwrap(), Value::Null);
         assert!(regexp_escape(&[Value::Text("(".repeat(4097))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod literal_regexp_like_fast_path_tests {
+    use super::*;
+    #[test]
+    fn matches_literal_ascii_in_unicode_inputs() {
+        assert_eq!(evaluate(&[Value::Text("éuser_42🙂".into()),
+            Value::Text("user_42".into())]).unwrap(), Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Text("abc".into()),
+            Value::Text("xyz".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("abc".into()),
+            Value::Text("^ab".into())]).unwrap(), Value::Boolean(true));
+        assert!(evaluate(&[Value::Text("abc".into()), Value::Text("(".into())]).is_err());
+        assert!(evaluate(&[Value::Text("abc".into()),
+            Value::Text("x".repeat(4097))]).is_err());
     }
 }
