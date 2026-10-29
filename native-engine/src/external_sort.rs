@@ -35,8 +35,8 @@ pub fn external_sort(
     run_rows: usize,
     output_rows: usize,
 ) -> Result<ExternalSort> {
-    if run_rows == 0 || output_rows == 0 {
-        return Err(Error::Execution("external sort batch sizes must be positive".into()));
+    if run_rows == 0 || output_rows == 0 || run_rows > 65_536 || output_rows > 65_536 {
+        return Err(Error::Execution("external sort batch sizes must be in 1..=65536".into()));
     }
     let mut runs = Vec::new();
     for input_batch in input {
@@ -151,6 +151,14 @@ mod tests {
         scalar::Value,
         schema::{DataType, Field, Schema},
     };
+
+    #[test]
+    fn rejects_excessive_batch_allocations_before_creating_files() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let dir = std::env::temp_dir();
+        assert!(external_sort(Vec::<Batch>::new(), &schema, &[], &dir, 65_537, 1).is_err());
+        assert!(external_sort(Vec::<Batch>::new(), &schema, &[], &dir, 1, 65_537).is_err());
+    }
 
     #[test]
     fn merge_runs_matches_single_batch_sort() {
