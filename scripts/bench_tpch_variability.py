@@ -27,15 +27,18 @@ def check_samples(entry):
     return samples
 
 
-def variability_row(number, entry, threshold):
+def variability_row(number, entry, threshold, max_relative_mad=None):
     samples = check_samples(entry)
     mean = statistics.fmean(samples)
     cv = statistics.pstdev(samples) / mean if mean else 0.0
     median = statistics.median(samples)
     mad = statistics.median(abs(x - median) for x in samples)
+    relative_mad = mad / median
     return {"id": number, "coefficient_of_variation": round(cv, 4),
                  "median_absolute_deviation_ms": round(mad, 3),
-                 "unstable": cv > threshold, "samples": len(samples)}
+                 "relative_median_absolute_deviation": round(relative_mad, 4),
+                 "unstable": cv > threshold or (max_relative_mad is not None and
+                      relative_mad > max_relative_mad), "samples": len(samples)}
 
 
 def checked_query_id(entry, seen):
@@ -47,9 +50,12 @@ def checked_query_id(entry, seen):
     return number
 
 
-def inspect(report, threshold=0.15):
+def inspect(report, threshold=0.15, max_relative_mad=None):
     if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 0:
         raise ValueError("Variation threshold must be finite and nonnegative")
+    if max_relative_mad is not None and (type(max_relative_mad) not in (int, float)
+            or not math.isfinite(max_relative_mad) or max_relative_mad < 0):
+        raise ValueError("Relative MAD threshold must be finite and nonnegative")
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("TPC-H report has no query results")
@@ -61,10 +67,11 @@ def inspect(report, threshold=0.15):
         number = checked_query_id(entry, seen)
         if entry.get("status") != "ok":
             raise ValueError(f"Query Q{number:02} did not succeed")
-        rows.append(variability_row(number, entry, threshold))
+        rows.append(variability_row(number, entry, threshold, max_relative_mad))
     return {"metric": "sample variability for cold TPC-H query timings",
             "warning": "Noise diagnostics; not statistical proof of a speedup",
-            "max_cv": threshold, "unstable_queries": sorted(x["id"] for x in rows if x["unstable"]),
+            "max_cv": threshold, "max_relative_mad": max_relative_mad,
+            "unstable_queries": sorted(x["id"] for x in rows if x["unstable"]),
             "results": sorted(rows, key=lambda item: item["coefficient_of_variation"], reverse=True)}
 
 
@@ -72,10 +79,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--max-cv", type=float, default=0.15)
+    parser.add_argument("--max-relative-mad", type=float)
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
-        result = inspect(json.loads(args.report.read_text(encoding="utf-8")), args.max_cv)
+        result = inspect(json.loads(args.report.read_text(encoding="utf-8")),
+                         args.max_cv, args.max_relative_mad)
         output = json.dumps(result, indent=2) + "\n"
         if args.json_out:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
