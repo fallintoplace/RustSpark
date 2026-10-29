@@ -50,9 +50,7 @@ impl Batch {
     }
 
     pub fn from_rows(schema: Schema, rows: Vec<Vec<Value>>) -> Result<Self> {
-        if schema.is_empty() && !rows.is_empty() {
-            return Err(Error::Schema("nonempty rows require columns".into()));
-        }
+        let row_count = rows.len();
         let mut columns = vec![Vec::with_capacity(rows.len()); schema.len()];
         for row in rows {
             if row.len() != schema.len() {
@@ -62,7 +60,7 @@ impl Batch {
                 column.push(value);
             }
         }
-        Self::new(schema, columns)
+        Self::new_with_row_count(schema, columns, row_count)
     }
 
     pub fn schema(&self) -> &Schema {
@@ -139,6 +137,15 @@ mod tests {
     fn rejects_ragged_and_nullable_violations() {
         assert!(Batch::new(schema(), vec![]).is_err());
         assert!(Batch::new(schema(), vec![vec![Value::Null]]).is_err());
+    }
+
+    #[test]
+    fn from_rows_preserves_zero_width_row_count() {
+        let schema = Schema::new(vec![]).unwrap();
+        let result = Batch::from_rows(schema.clone(), vec![vec![], vec![]]).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.rows().unwrap(), vec![vec![], vec![]]);
+        assert!(Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).is_err());
     }
 
     #[test]
