@@ -1,4 +1,4 @@
-use super::Function;
+use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
