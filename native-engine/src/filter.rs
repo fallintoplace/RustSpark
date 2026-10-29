@@ -1,7 +1,16 @@
-use crate::{batch::Batch, expr::Expr, Result};
+use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Result};
+
+fn validate_predicate(batch: &Batch, predicate: &Expr) -> Result<()> {
+    let kind = predicate.output_type(batch.schema())?;
+    if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
+        return Err(Error::Type("WHERE predicate must be boolean".into()));
+    }
+    Ok(())
+}
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
+    validate_predicate(batch, predicate)?;
     let mut keep = Vec::new();
     for row in 0..batch.num_rows() {
         if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
@@ -19,6 +28,16 @@ mod tests {
         scalar::Value,
         schema::{DataType, Field, Schema},
     };
+
+    #[test]
+    fn empty_batches_still_reject_invalid_where_types_and_columns() {
+        let batch = Batch::empty(Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap());
+        for predicate in [Expr::Column("n".into()), Expr::Column("missing".into())] {
+            assert!(filter(&batch, &predicate).is_err());
+            assert!(filter_first(&batch, &predicate, 0).is_err());
+        }
+        assert_eq!(filter(&batch, &Expr::Literal(Value::Null)).unwrap().num_rows(), 0);
+    }
 
     #[test]
     fn unknown_predicates_do_not_pass_where() {
@@ -44,6 +63,7 @@ mod tests {
  
 /// Return at most max_rows matching rows, retaining their source order.
 pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<Batch> {
+    validate_predicate(batch, predicate)?;
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
         if keep.len() == max_rows { break; }
