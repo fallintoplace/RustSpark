@@ -17,7 +17,40 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn json_merge_patch_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+
+fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match patch {
+        serde_json::Value::Object(updates) => {
+            if !target.is_object() { *target = serde_json::Value::Object(serde_json::Map::new()); }
+            let Some(fields) = target.as_object_mut() else { return; };
+            for (key, value) in updates {
+                if value.is_null() {
+                    fields.remove(key);
+                } else {
+                    apply_merge_patch(fields.entry(key.clone()).or_insert(serde_json::Value::Null), value);
+                }
+            }
+        }
+        _ => *target = patch.clone(),
+    }
+}
+fn json_merge_patch(args: &[Value]) -> Result<Value> {
+    let Some(document) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(patch) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let mut document = json_path::parse(document)?;
+    let patch = json_path::parse(patch)?;
+    apply_merge_patch(&mut document, &patch);
+    let result = document.to_string();
+    if result.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("JSON_MERGE_PATCH output exceeds 16 MiB".into()));
+    }
+    Ok(Value::Text(result))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "json_merge_patch", min_args: 2, max_args: 2, result_type: json_merge_patch_type, call: json_merge_patch },Function {
     name: "json_value", min_args: 2, max_args: 2,
     result_type: output, call: evaluate,
 }];
@@ -41,5 +74,23 @@ mod tests {
         assert!(evaluate(&[
             Value::Text(r#"{"x":[1]}"#.into()), Value::Text("$.x".into())
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod json_merge_patch_extension_tests {
+    use super::*;
+    #[test]
+    fn handles_special_values_and_nulls() {
+        assert!(crate::builtin::supports("json_merge_patch"));
+        let actual = json_merge_patch(&[
+            Value::Text(r#"{"a":1,"b":{"c":2,"d":3}}"#.into()),
+            Value::Text(r#"{"a":null,"b":{"c":5},"e":9}"#.into()),
+        ]).unwrap();
+        let Value::Text(result) = actual else { panic!("expected text"); };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+            serde_json::json!({"b":{"c":5,"d":3},"e":9}));
+        assert_eq!(json_merge_patch(&[Value::Text("[]".into()), Value::Text(r#"{"x":1}"#.into())]).unwrap(), Value::Text(r#"{"x":1}"#.into()));
+        assert_eq!(json_merge_patch(&[Value::Null, Value::Text("{}".into())]).unwrap(), Value::Null);
     }
 }
