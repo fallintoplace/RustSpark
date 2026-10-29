@@ -8,16 +8,22 @@ fn output(types: &[DataType]) -> Result<DataType> {
     } else { Err(Error::Type("CONV requires text/integer and two integer bases".into())) }
 }
 fn encode(mut value: u64, base: u64, negative: bool) -> String {
-    let mut reversed = String::new();
+    const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    // At most 64 binary digits plus one sign; no heap allocation until output.
+    let mut digits = [0_u8; 65];
+    let mut cursor = digits.len();
     loop {
-        let digit = char::from_digit((value % base) as u32, base as u32)
-            .expect("base validated in CONV");
-        reversed.push(digit.to_ascii_uppercase());
+        cursor -= 1;
+        digits[cursor] = DIGITS[(value % base) as usize];
         value /= base;
         if value == 0 { break; }
     }
-    if negative { reversed.push('-'); }
-    reversed.chars().rev().collect()
+    if negative {
+        cursor -= 1;
+        digits[cursor] = b'-';
+    }
+    std::str::from_utf8(&digits[cursor..])
+        .expect("CONV emits only ASCII digits").to_owned()
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let input = match &args[0] {
@@ -63,6 +69,9 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("FF".into()), Value::Integer(16), Value::Integer(10)]).unwrap(), Value::Text("255".into()));
         assert_eq!(evaluate(&[Value::Integer(-10), Value::Integer(16), Value::Integer(-10)]).unwrap(), Value::Text("-16".into()));
         assert_eq!(evaluate(&[Value::Text("-1".into()), Value::Integer(10), Value::Integer(16)]).unwrap(), Value::Text("FFFFFFFFFFFFFFFF".into()));
+        assert_eq!(evaluate(&[Value::Text("0".into()), Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Text("0".into()));
+        assert_eq!(evaluate(&[Value::Text("18446744073709551615".into()), Value::Integer(10), Value::Integer(2)]).unwrap(),
+            Value::Text("1".repeat(64)));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
     }
