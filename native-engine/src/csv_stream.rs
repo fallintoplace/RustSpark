@@ -133,7 +133,12 @@ impl<R: BufRead> CsvStream<R> {
         let mut records = Records {
             input, max_record_bytes, pending: None, skip_lf: false,
         };
-        let names = records.record()?.ok_or_else(|| Error::Parse("CSV header missing".into()))?;
+        let mut names = records.record()?.ok_or_else(|| Error::Parse("CSV header missing".into()))?;
+        if let Some(first) = names.first_mut() {
+            if let Some(clean) = first.strip_prefix('\u{feff}') {
+                *first = clean.to_owned();
+            }
+        }
         let schema = if let Some(schema) = typed {
             if schema.len() != names.len() ||
                 !schema.fields().iter().zip(&names).all(|(field, name)|
@@ -278,4 +283,27 @@ mod tests {
         assert!(stream.next().unwrap().is_err());
     }
 
+}
+
+#[cfg(test)]
+mod csv_bom_engine_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn typed_and_inferred_streams_drop_bom_from_first_header() {
+        let source = "\u{feff}id,city\n1,Paris\n";
+        let inferred = CsvStream::new(Cursor::new(source), 2, 128).unwrap();
+        assert_eq!(inferred.schema().column("id").unwrap(), 0);
+        let typed_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("city", DataType::Text, false),
+        ]).unwrap();
+        let mut typed = CsvStream::new_typed(
+            Cursor::new(source), 2, 128, typed_schema,
+        ).unwrap();
+        assert_eq!(typed.next().unwrap().unwrap().row(0).unwrap(), vec![
+            Value::Integer(1), Value::Text("Paris".into()),
+        ]);
+    }
 }
