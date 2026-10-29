@@ -487,36 +487,67 @@ impl Parser {
             plan = plan.filter(self.expression(0)?);
         }
 
-        let mut group_columns = Vec::new();
+        let mut groups: Vec<(Expr, String)> = Vec::new();
+        let mut group_exprs = Vec::new();
         if self.take_word("GROUP") {
             self.expect_word("BY")?;
             if self.take_word("ALL") {
-                for item in &select {
-                    if let SelectItem::Scalar(Selection { expression: Expr::Column(name), .. }) = item {
-                        if !group_columns.iter().any(|column: &String| column.eq_ignore_ascii_case(name)) {
-                            group_columns.push(name.clone());
-                        }
-                    } else if matches!(item, SelectItem::Scalar(_)) {
-                        return Err(Error::Unsupported("GROUP BY ALL requires selected grouping columns".into()));
-                    }
-                }
-                if group_columns.is_empty() {
-                    return Err(Error::Unsupported("GROUP BY ALL needs a selected grouping column".into()));
+                group_exprs.extend(select.iter().filter_map(|item| match item {
+                    SelectItem::Scalar(selection) if !matches!(selection.expression, Expr::Literal(_)) =>
+                        Some(selection.expression.clone()),
+                    _ => None,
+                }));
+                if group_exprs.is_empty() {
+                    return Err(Error::Unsupported("GROUP BY ALL needs a selected grouping expression".into()));
                 }
             } else {
                 loop {
-                    group_columns.push(self.identifier()?);
+                    let expression = self.expression(0)?;
+                    let expression = if let Expr::Literal(Value::Integer(position)) = expression {
+                        let index = usize::try_from(position).ok().and_then(|n| n.checked_sub(1))
+                            .ok_or_else(|| Error::Parse("GROUP BY positions start at one".into()))?;
+                        match select.get(index) {
+                            Some(SelectItem::Scalar(item)) => item.expression.clone(),
+                            _ => return Err(Error::Parse("GROUP BY position must refer to a scalar SELECT item".into())),
+                        }
+                    } else {
+                        expression
+                    };
+                    let expression = match &expression {
+                        Expr::Column(name) => select.iter().find_map(|item| match item {
+                            SelectItem::Scalar(item) if item.alias.eq_ignore_ascii_case(name) =>
+                                Some(item.expression.clone()),
+                            _ => None,
+                        }).unwrap_or(expression),
+                        _ => expression,
+                    };
+                    group_exprs.push(expression);
                     if !self.take_symbol(',') { break; }
                 }
             }
+            for expression in group_exprs {
+                if groups.iter().any(|(existing, _)| existing == &expression) {
+                    continue;
+                }
+                let alias = if let Expr::Column(name) = &expression {
+                    name.clone()
+                } else {
+                    select.iter().find_map(|item| match item {
+                        SelectItem::Scalar(selection) if selection.expression == expression =>
+                            Some(selection.alias.clone()),
+                        _ => None,
+                    }).unwrap_or_else(|| format!("_group_{}", groups.len() + 1))
+                };
+                groups.push((expression, alias));
+            }
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
-        let grouped = has_aggregates || !group_columns.is_empty();
+        let grouped = has_aggregates || !groups.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
-        if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
+        if star && (select.len() > 1 || has_aggregates || !groups.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
         }
-        if has_aggregates || !group_columns.is_empty() {
+        if has_aggregates || !groups.is_empty() {
             let mut aggregates = Vec::new();
             let mut selections = Vec::new();
             for item in select {
@@ -525,13 +556,14 @@ impl Parser {
                         selections.push(Selection::new(Expr::Column(item.alias.clone()), item.alias.clone()));
                         aggregates.push(item);
                     }
-                    SelectItem::Scalar(item) => {
-                        if let Expr::Column(ref name) = item.expression {
-                            if !group_columns.iter().any(|group| name.eq_ignore_ascii_case(group)) {
-                                return Err(Error::Parse(format!("column {name} must appear in GROUP BY")));
-                            }
-                        } else if !matches!(item.expression, Expr::Literal(_)) {
-                            return Err(Error::Unsupported("grouped expressions must be columns or literals".into()));
+                    SelectItem::Scalar(mut item) => {
+                        if !matches!(item.expression, Expr::Literal(_)) {
+                            let alias = groups.iter().find_map(|(group, alias)|
+                                if group == &item.expression { Some(alias.clone()) } else { None }
+                            ).ok_or_else(|| Error::Parse(
+                                format!("selected expression {:?} must appear in GROUP BY", item.expression)
+                            ))?;
+                            item.expression = Expr::Column(alias);
                         }
                         selections.push(item);
                     }
@@ -540,10 +572,7 @@ impl Parser {
             }
             plan = Plan::Aggregate {
                 input: Box::new(plan),
-                group_by: group_columns
-                    .into_iter()
-                    .map(|name| (Expr::Column(name.clone()), name))
-                    .collect(),
+                group_by: groups,
                 aggregates,
             };
             plan = plan.project(selections);
