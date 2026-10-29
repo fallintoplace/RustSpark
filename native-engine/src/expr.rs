@@ -73,7 +73,16 @@ impl Expr {
                 inner.output_type(schema)?;
                 Ok(DataType::Boolean)
             },
-            Self::Like { .. } | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::Like { value, pattern } => {
+                for operand in [value.as_ref(), pattern.as_ref()] {
+                    if !matches!(operand, Expr::Literal(Value::Null))
+                        && operand.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE requires text operands".into()));
+                    }
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -397,6 +406,29 @@ mod is_null_type_preflight_regression {
         assert_eq!(Expr::IsNull(Box::new(Expr::Column("n".into())))
             .output_type(&schema).unwrap(), DataType::Boolean);
         assert_eq!(Expr::IsNull(Box::new(Expr::Literal(Value::Null)))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod like_type_preflight_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn like_checks_both_operands_without_evaluating_rows() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let make = |left: Expr, right: Expr| Expr::Like {
+            value: Box::new(left), pattern: Box::new(right),
+        };
+        assert!(make(Expr::Column("n".into()), Expr::Literal(Value::Text("%".into())))
+            .output_type(&schema).is_err());
+        assert!(make(Expr::Column("text".into()), Expr::Column("missing".into()))
+            .output_type(&schema).is_err());
+        assert_eq!(make(Expr::Column("text".into()), Expr::Literal(Value::Null))
             .output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
