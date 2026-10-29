@@ -135,3 +135,35 @@ mod tests {
         assert!(batch.take(&[2]).is_err());
     }
 }
+
+ 
+impl Batch {
+    /// Slice contiguous rows while retaining the original schema.
+    pub fn slice_rows(&self, start: usize, end: usize) -> Result<Self> {
+        if start > end || end > self.num_rows() {
+            return Err(Error::Execution("invalid batch row slice".into()));
+        }
+        self.take(&(start..end).collect::<Vec<_>>())
+    }
+}
+
+#[cfg(test)]
+mod batch_slicing_feature_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn slices_contiguous_rows_and_preserves_schema() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]
+        ]).unwrap();
+        let sliced = input.slice_rows(1, 3).unwrap();
+        assert_eq!(sliced.schema(), &schema);
+        assert_eq!(sliced.rows().unwrap(), vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
+        assert_eq!(input.slice_rows(1, 1).unwrap().num_rows(), 0);
+        assert!(input.slice_rows(3, 4).is_err());
+        assert!(input.slice_rows(2, 1).is_err());
+    }
+}
+
