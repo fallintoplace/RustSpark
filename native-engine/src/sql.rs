@@ -200,6 +200,13 @@ impl Parser {
                     continue;
                 }
             }
+            if self.peek() == Some(&Token::Operator("||".into())) {
+                if min_precedence > 4 { break; }
+                let _ = self.next();
+                let right = self.expression(5)?;
+                left = Expr::Call { name: "concat".into(), args: vec![left, right] };
+                continue;
+            }
             if self.peek() == Some(&Token::Operator("%".into())) {
                 if min_precedence > 5 { break; }
                 let _ = self.next();
@@ -696,6 +703,15 @@ mod tests {
         ).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Null]]);
         assert!(execute(&parse_sql("SELECT amount % 0 FROM sales").unwrap(), &sales()).is_err());
+    }
+
+    #[test]
+    fn text_concatenation_operator_propagates_nulls() {
+        let rows = execute(&parse_sql("SELECT city || '!' AS city_label FROM sales").unwrap(), &sales())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows[0], vec![Value::Text("Berlin!".into())]);
+        assert_eq!(rows[2], vec![Value::Text("Paris!".into())]);
+        assert!(parse_sql("SELECT city | '!' FROM sales").is_err());
     }
 
     #[test]
