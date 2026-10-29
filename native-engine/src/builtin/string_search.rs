@@ -48,6 +48,16 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
+    if text.is_ascii() {
+        if offset > text.len() { return Ok(Value::Integer(0)); }
+        let Some(found) = text[offset..].find(needle) else {
+            return Ok(Value::Integer(0));
+        };
+        let result = offset.checked_add(found).and_then(|index| index.checked_add(1))
+            .and_then(|index| i64::try_from(index).ok())
+            .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
+        return Ok(Value::Integer(result));
+    }
     let Some(start) = text.char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(text.len()))
@@ -167,5 +177,21 @@ mod strcmp_extension_tests {
         assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
         assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
         assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_locate_direct_offset_tests {
+    use super::*;
+    #[test]
+    fn positions_and_empty_needles_follow_character_boundaries() {
+        assert_eq!(locate(&[Value::Text("abc".into()), Value::Text("xxabcabc".into()), Value::Integer(4)]).unwrap(),
+            Value::Integer(6));
+        assert_eq!(locate(&[Value::Text("".into()), Value::Text("abcd".into()), Value::Integer(5)]).unwrap(),
+            Value::Integer(5));
+        assert_eq!(locate(&[Value::Text("".into()), Value::Text("abcd".into()), Value::Integer(6)]).unwrap(),
+            Value::Integer(0));
+        assert_eq!(locate(&[Value::Text("é".into()), Value::Text("abéc".into())]).unwrap(),
+            Value::Integer(3));
     }
 }
