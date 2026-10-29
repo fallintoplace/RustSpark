@@ -85,9 +85,9 @@ impl Parser {
     }
 
     fn next(&mut self) -> Option<Token> {
-        let token = self.peek()?.clone();
+        let token = self.tokens.get_mut(self.index)?;
         self.index += 1;
-        Some(token)
+        Some(std::mem::replace(token, Token::Symbol('\0')))
     }
 
     fn peek_word(&self, word: &str) -> bool {
@@ -1451,5 +1451,22 @@ mod spark_expression_depth_safety_tests {
         let deep = format!("SELECT {}TRUE{} FROM t",
             "NOT (".repeat(350), ")".repeat(350));
         assert!(parse_sql(&deep).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parser_token_move_perf_tests {
+    use super::*;
+    #[test]
+    fn consumes_owned_tokens_without_changing_lookahead() {
+        let tokens = tokenize("SELECT 'café' FROM sales").unwrap();
+        let mut parser = Parser::new(tokens);
+        assert_eq!(parser.next(), Some(Token::Word("SELECT".into())));
+        assert_eq!(parser.peek(), Some(&Token::Text("café".into())));
+        assert_eq!(parser.next(), Some(Token::Text("café".into())));
+        assert_eq!(parser.next(), Some(Token::Word("FROM".into())));
+        assert_eq!(parser.next(), Some(Token::Word("sales".into())));
+        assert_eq!(parser.next(), None);
+        assert!(parse_sql("SELECT city FROM sales").is_ok());
     }
 }

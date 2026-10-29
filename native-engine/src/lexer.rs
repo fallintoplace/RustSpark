@@ -19,7 +19,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         return Err(Error::Parse("SQL exceeds input byte limit".into()));
     }
     let mut chars = input.chars().peekable();
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity((input.len() / 8).min(512));
 
     while let Some(character) = chars.next() {
         if character.is_whitespace() {
@@ -79,7 +79,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             }
             Token::Text(value)
         } else if character.is_ascii_alphabetic() || character == '_' {
-            let mut value = character.to_string();
+            let mut value = String::with_capacity(16);
+            value.push(character);
             while let Some(next) = chars.peek() {
                 if next.is_ascii_alphanumeric() || *next == '_' {
                     value.push(chars.next().expect("peeked character"));
@@ -90,7 +91,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             Token::Word(value)
         } else if character.is_ascii_digit()
             || (character == '.' && chars.peek().is_some_and(|next| next.is_ascii_digit())) {
-            let mut number = character.to_string();
+            let mut number = String::with_capacity(16);
+            number.push(character);
             let mut dot = character == '.';
             while let Some(next) = chars.peek() {
                 if next.is_ascii_digit() {
@@ -252,5 +254,31 @@ mod spark_raw_string_literal_tests {
         let plan = sql::parse_sql("SELECT REGEXP_EXTRACT(txt, r'\\d+') AS digits FROM t").unwrap();
         assert_eq!(executor::execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Text("123".into())]]);
+    }
+}
+
+#[cfg(test)]
+mod short_token_buffer_perf_tests {
+    use super::*;
+    #[test]
+    fn token_buffers_preserve_numbers_keywords_and_long_names() {
+        let tokens = tokenize("SELECT long_identifier_name, .25e-4 FROM measurements").unwrap();
+        assert_eq!(tokens[0], Token::Word("SELECT".into()));
+        assert_eq!(tokens[1], Token::Word("long_identifier_name".into()));
+        assert_eq!(tokens[3], Token::Number(".25e-4".into()));
+        assert_eq!(tokens.last(), Some(&Token::Word("measurements".into())));
+    }
+}
+
+#[cfg(test)]
+mod lexer_capacity_perf_tests {
+    use super::*;
+    #[test]
+    fn large_token_lists_keep_existing_lexical_semantics() {
+        let sql = format!("SELECT {} FROM data", "x, ".repeat(300));
+        let tokens = tokenize(&sql).unwrap();
+        assert_eq!(tokens.first(), Some(&Token::Word("SELECT".into())));
+        assert_eq!(tokens.last(), Some(&Token::Word("data".into())));
+        assert!(tokens.len() > 500);
     }
 }
