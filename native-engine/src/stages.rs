@@ -135,6 +135,10 @@ impl StageGraph {
                     StageKind::HashJoin,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
+                Plan::MultiJoin { left, right, .. } => (
+                    StageKind::HashJoin,
+                    vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
+                ),
                 Plan::UnionAll { left, right } => (
                     StageKind::UnionAll,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
