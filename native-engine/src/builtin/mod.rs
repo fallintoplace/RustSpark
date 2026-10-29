@@ -2,6 +2,7 @@
 //! Functions validate arity and input types before a scan is executed.
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
+mod nullif;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -26,6 +27,7 @@ const CORE: &[Function] = &[
 ];
 
 const MODULES: &[&[Function]] = &[
+    &nullif::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
