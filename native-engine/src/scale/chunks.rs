@@ -33,7 +33,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
         }
 
         let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
-        while rows.len() < self.batch_rows {
+        while rows.len() < self.batch_rows.min(65_536) {
             match self.input.next() {
                 Some(Ok(row)) => {
                     if row.len() != self.schema.len() {
@@ -143,5 +143,19 @@ mod batcher_malformed_width_tests {
             vec![vec![Value::Integer(5)]]);
         assert!(batches.next().unwrap().is_err());
         assert!(batches.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod consolidated_bounded_row_batch_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn huge_requested_batch_stays_bounded() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let rows = (0..65_537).map(|n| Ok(vec![Value::Integer(n)]));
+        let batches = RowBatcher::new(rows, schema, usize::MAX)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![65_536, 1]);
     }
 }
