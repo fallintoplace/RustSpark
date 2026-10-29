@@ -1,26 +1,38 @@
 //! Native SQL set operators with explicit schema compatibility checks.
 use std::collections::{HashMap, HashSet};
-use crate::{batch::Batch, schema::{Field, Schema}, Error, Result};
+use crate::{batch::Batch, schema::{DataType, Field, Schema}, scalar::Value, Error, Result};
 
 pub fn compatible_schema(left: &Batch, right: &Batch) -> Result<Schema> {
     if left.schema().len() != right.schema().len() {
         return Err(Error::Schema("set operation column counts must match".into()));
     }
     let fields = left.schema().fields().iter().zip(right.schema().fields()).map(|(a, b)| {
-        if a.data_type != b.data_type {
-            return Err(Error::Type(format!("set operation type mismatch at {}", a.name)));
-        }
-        Ok(Field::new(&a.name, a.data_type, a.nullable || b.nullable))
+        let target = match (a.data_type, b.data_type) {
+            (DataType::Integer, DataType::Float) | (DataType::Float, DataType::Integer) => DataType::Float,
+            (a, b) if a == b => a,
+            _ => return Err(Error::Type(format!("set operation type mismatch at {}", a.name))),
+        };
+        Ok(Field::new(&a.name, target, a.nullable || b.nullable))
     }).collect::<Result<Vec<_>>>()?;
     Schema::new(fields)
 }
 
+
+fn aligned_row(mut row: Vec<Value>, schema: &Schema) -> Result<Vec<Value>> {
+    for (value, field) in row.iter_mut().zip(schema.fields()) {
+        if field.data_type == DataType::Float && matches!(value, Value::Integer(_)) {
+            *value = value.cast_to(DataType::Float)?;
+        }
+    }
+    Ok(row)
+}
+
 const MAX_DISTINCT_SET_KEYS: usize = 1_000_000;
 
-fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crate::scalar::Value>>> {
+fn bounded_right_keys(right: &Batch, schema: &Schema, max_keys: usize) -> Result<HashSet<Vec<Value>>> {
     let mut keys = HashSet::new();
     for row in 0..right.num_rows() {
-        let value = right.row(row)?;
+        let value = aligned_row(right.row(row)?, schema)?;
         if keys.len() >= max_keys && !keys.contains(&value) {
             return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
         }
@@ -31,10 +43,11 @@ fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crat
 
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let schema = compatible_schema(left, right)?;
-    let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
+    let right_rows = bounded_right_keys(right, &schema, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for raw in left.rows()? {
+        let row = aligned_row(raw, &schema)?;
         if right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
@@ -44,10 +57,11 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let schema = compatible_schema(left, right)?;
-    let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
+    let right_rows = bounded_right_keys(right, &schema, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for raw in left.rows()? {
+        let row = aligned_row(raw, &schema)?;
         if !right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
@@ -55,9 +69,10 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     Batch::from_rows(schema, rows)
 }
 
-fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
+fn right_counts(right: &Batch, schema: &Schema) -> Result<HashMap<Vec<Value>, usize>> {
     let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
-    for row in right.rows()? {
+    for raw in right.rows()? {
+        let row = aligned_row(raw, schema)?;
         let entry = counts.entry(row).or_insert(0);
         *entry = entry.checked_add(1)
             .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
@@ -68,9 +83,10 @@ fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usiz
 /// Keep each left row up to its multiplicity in the right input.
 pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let schema = compatible_schema(left, right)?;
-    let mut counts = right_counts(right)?;
+    let mut counts = right_counts(right, &schema)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for raw in left.rows()? {
+        let row = aligned_row(raw, &schema)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -84,9 +100,10 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
 /// Keep left occurrences after subtracting right row multiplicities.
 pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let schema = compatible_schema(left, right)?;
-    let mut counts = right_counts(right)?;
+    let mut counts = right_counts(right, &schema)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for raw in left.rows()? {
+        let row = aligned_row(raw, &schema)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -135,8 +152,8 @@ mod bounded_right_set_key_regression {
             vec![Value::Integer(1)], vec![Value::Integer(1)],
             vec![Value::Integer(2)],
         ]).unwrap();
-        assert!(bounded_right_keys(&right, 1).is_err());
-        assert_eq!(bounded_right_keys(&right, 2).unwrap().len(), 2);
+        assert!(bounded_right_keys(&right, right.schema(), 1).is_err());
+        assert_eq!(bounded_right_keys(&right, right.schema(), 2).unwrap().len(), 2);
         let left = Batch::from_rows(schema, vec![vec![Value::Integer(2)]]).unwrap();
         assert_eq!(intersect_distinct(&left, &right).unwrap().row(0).unwrap(),
             vec![Value::Integer(2)]);
