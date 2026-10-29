@@ -382,6 +382,11 @@ fn url_decode(args: &[Value]) -> Result<Value> {
     decode_form(text).map(Value::Text)
 }
 
+fn try_url_decode(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    Ok(decode_form(text).map(Value::Text).unwrap_or(Value::Null))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -412,6 +417,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "char", min_args: 1, max_args: 1, result_type: char_type, call: char_code },
     Function { name: "url_encode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_encode },
     Function { name: "url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_decode },
+    Function { name: "try_url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: try_url_decode },
     // PARITY_FUNCTIONS
 ];
 
@@ -627,6 +633,13 @@ mod tests {
             Value::Text("é".into()));
         assert!(url_decode(&[Value::Text("%ZZ".into())]).is_err());
         assert!(url_decode(&[Value::Text("%FF".into())]).is_err());
+    }
+
+    #[test]
+    fn spark_try_url_decode_returns_null_on_bad_input() {
+        assert_eq!(sql_result("try_url_decode('a+b%2Bc')").unwrap(), Value::Text("a b+c".into()));
+        assert_eq!(sql_result("try_url_decode('%ZZ')").unwrap(), Value::Null);
+        assert_eq!(try_url_decode(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
