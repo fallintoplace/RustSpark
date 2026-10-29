@@ -5,7 +5,13 @@ fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(text.len());
+    let escaped = text.as_bytes().iter().filter(|&&byte| {
+        !matches!(byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+            b'-' | b'_' | b'.' | b'*' | b' '
+        )
+    }).count();
+    let mut encoded = String::with_capacity(text.len().saturating_add(escaped.saturating_mul(2)));
     for &byte in text.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' =>
