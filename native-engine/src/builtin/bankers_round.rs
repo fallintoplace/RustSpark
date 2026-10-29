@@ -17,6 +17,7 @@ fn round_even(args: &[Value]) -> Result<Value> {
     if !(-15..=15).contains(&scale) {
         return Err(Error::Execution("BROUND scale must be within [-15,15]".into()));
     }
+    if scale == 0 { return super::finite(x.round_ties_even()); }
     let factor = 10_f64.powi(scale.unsigned_abs() as i32);
     let result = if scale >= 0 { (x * factor).round_ties_even() / factor }
         else { (x / factor).round_ties_even() * factor };
@@ -34,6 +35,10 @@ mod tests {
     fn ties_to_even_differs_from_round_away_from_zero() {
         assert_eq!(rint(&[Value::Float(2.5)]).unwrap(), Value::Float(2.0));
         assert_eq!(rint(&[Value::Float(3.5)]).unwrap(), Value::Float(4.0));
+        assert_eq!(round_even(&[Value::Float(2.5), Value::Integer(0)])
+            .unwrap(), Value::Float(2.0));
+        assert_eq!(round_even(&[Value::Float(-3.5), Value::Integer(0)])
+            .unwrap(), Value::Float(-4.0));
         assert_eq!(round_even(&[Value::Float(125.0), Value::Integer(-1)]).unwrap(), Value::Float(120.0));
         assert_eq!(round_even(&[Value::Null]).unwrap(), Value::Null);
     }
