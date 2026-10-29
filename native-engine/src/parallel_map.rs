@@ -1,5 +1,5 @@
 //! Bounded worker execution for independent native partitions.
-use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind},
+use std::{panic::{AssertUnwindSafe, catch_unwind},
     sync::{Mutex, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
 
@@ -22,7 +22,7 @@ where
         }
         return Ok(results);
     }
-    let tasks = Mutex::new(input.into_iter().enumerate().collect::<VecDeque<_>>());
+    let tasks = Mutex::new(input.into_iter().enumerate());
     let failed = AtomicBool::new(false);
     let output: Mutex<Vec<Option<Result<Batch>>>> =
         Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
@@ -34,7 +34,7 @@ where
             let failed = &failed;
             scope.spawn(move || loop {
                 if failed.load(Ordering::Acquire) { break; }
-                let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).next();
                 let Some((index, batch)) = next else { break; };
                 let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                     .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
