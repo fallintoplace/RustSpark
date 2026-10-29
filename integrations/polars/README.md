@@ -24,3 +24,6 @@ adequate temp volume for large intermediate results.
 ```sh
 cd integrations/polars && python3 -m unittest -v test_query_lazy.py
 ```
+
+Use `database_dir="/path/to/rustspark-database"` to export queries
+against registered tables in persistent RustSpark databases.
