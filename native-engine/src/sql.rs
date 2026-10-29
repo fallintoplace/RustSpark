@@ -392,12 +392,23 @@ impl Parser {
                 Some(WindowKind::Lag),
             Some(Token::Word(name)) if name.eq_ignore_ascii_case("LEAD") =>
                 Some(WindowKind::Lead),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("NTILE") =>
+                Some(WindowKind::Ntile),
             _ => None,
         };
         let Some(kind) = kind else { return Ok(None) };
         self.next();
         self.expect_symbol('(')?;
-        let (argument, offset, default) = if matches!(kind, WindowKind::Lag | WindowKind::Lead) {
+        let mut buckets = None;
+        let (argument, offset, default) = if kind == WindowKind::Ntile {
+            let count = self.usize_literal()?;
+            if count == 0 || count > 1_000_000 {
+                return Err(Error::Parse("NTILE requires 1 to 1000000 buckets".into()));
+            }
+            buckets = Some(count);
+            self.expect_symbol(')')?;
+            (None, 0, None)
+        } else if matches!(kind, WindowKind::Lag | WindowKind::Lead) {
             let argument = Some(self.expression(0)?);
             let offset = if self.take_symbol(',') {
                 let offset = self.usize_literal()?;
@@ -453,10 +464,11 @@ impl Parser {
             WindowKind::DenseRank => "dense_rank",
             WindowKind::Lag => "lag",
             WindowKind::Lead => "lead",
+            WindowKind::Ntile => "ntile",
         };
         let alias = self.select_alias(default.into())?;
         Ok(Some(SelectItem::Window(WindowSpec {
-            kind, partition_by, order_by, alias, argument, offset, default,
+            kind, partition_by, order_by, alias, argument, offset, default, buckets,
         })))
     }
 

@@ -6,7 +6,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowKind { RowNumber, Rank, DenseRank, Lag, Lead }
+pub enum WindowKind { RowNumber, Rank, DenseRank, Lag, Lead, Ntile }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSpec {
@@ -17,6 +17,7 @@ pub struct WindowSpec {
     pub argument: Option<Expr>,
     pub offset: usize,
     pub default: Option<Expr>,
+    pub buckets: Option<usize>,
 }
 
 fn compare_keys(left: &[Value], right: &[Value], keys: &[SortKey]) -> Ordering {
@@ -60,6 +61,28 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
         let mut result = vec![Value::Null; input.num_rows()];
         for mut partition in partitions.into_values() {
             partition.sort_by(|(_, left), (_, right)| compare_keys(left, right, &spec.order_by));
+            if spec.kind == WindowKind::Ntile {
+                let buckets = spec.buckets.ok_or_else(||
+                    Error::Execution("NTILE requires a positive bucket count".into()))?;
+                if buckets == 0 {
+                    return Err(Error::Execution("NTILE bucket count must be positive".into()));
+                }
+                let rows = partition.len();
+                let base = rows / buckets;
+                let extra = rows % buckets;
+                let expanded = (base + 1).checked_mul(extra)
+                    .ok_or_else(|| Error::Execution("NTILE bucket arithmetic overflow".into()))?;
+                for (position, (row, _)) in partition.into_iter().enumerate() {
+                    let bucket = if position < expanded {
+                        position / (base + 1) + 1
+                    } else {
+                        extra + (position - expanded) / base + 1
+                    };
+                    result[row] = Value::Integer(i64::try_from(bucket)
+                        .map_err(|_| Error::Execution("NTILE index overflow".into()))?);
+                }
+                continue;
+            }
             if matches!(spec.kind, WindowKind::Lag | WindowKind::Lead) {
                 let argument = spec.argument.as_ref().ok_or_else(||
                     Error::Execution("LAG/LEAD requires a value expression".into()))?;
@@ -96,6 +119,7 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
                     WindowKind::Rank => rank,
                     WindowKind::DenseRank => dense_rank,
                     WindowKind::Lag | WindowKind::Lead => unreachable!("navigation handled above"),
+                    WindowKind::Ntile => unreachable!("NTILE handled above"),
                 };
                 result[row] = Value::Integer(i64::try_from(number)
                     .map_err(|_| Error::Execution("ranking index overflow".into()))?);
