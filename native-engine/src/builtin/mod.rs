@@ -28,6 +28,7 @@ mod bankers_round;
 mod nan_semantics;
 mod padding;
 mod ascii_chr;
+mod hex_utf8;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -78,6 +79,7 @@ const MODULES: &[&[Function]] = &[
     &nan_semantics::FUNCTIONS,
     &padding::FUNCTIONS,
     &ascii_chr::FUNCTIONS,
+    &hex_utf8::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
