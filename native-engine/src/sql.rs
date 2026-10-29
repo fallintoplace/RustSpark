@@ -19,6 +19,48 @@ enum SelectItem {
     Aggregate(AggregateItem),
 }
 
+
+/** Resolve ORDER BY output aliases against the expressions in SELECT.
+ * Sorting before projection allows Spark queries to order by source columns
+ * that are not part of the final output.
+ */
+fn rewrite_order_aliases(expr: Expr, selections: &[Selection]) -> Expr {
+    let visit = |value: Box<Expr>| Box::new(rewrite_order_aliases(*value, selections));
+    match expr {
+        Expr::Column(name) => selections.iter()
+            .find(|item| item.alias.eq_ignore_ascii_case(&name))
+            .map(|item| item.expression.clone()).unwrap_or(Expr::Column(name)),
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: visit(left), op, right: visit(right),
+        },
+        Expr::Not(value) => Expr::Not(visit(value)),
+        Expr::IsNull(value) => Expr::IsNull(visit(value)),
+        Expr::Like { value, pattern } => Expr::Like {
+            value: visit(value), pattern: visit(pattern),
+        },
+        Expr::Case { branches, else_expr } => Expr::Case {
+            branches: branches.into_iter().map(|(condition, value)| (
+                rewrite_order_aliases(condition, selections),
+                rewrite_order_aliases(value, selections),
+            )).collect(),
+            else_expr: else_expr.map(visit),
+        },
+        Expr::Call { name, args } => Expr::Call {
+            name, args: args.into_iter().map(|arg| rewrite_order_aliases(arg, selections)).collect(),
+        },
+        Expr::TryCast { expression, target } => Expr::TryCast {
+            expression: visit(expression), target,
+        },
+        Expr::Cast { expression, target } => Expr::Cast {
+            expression: visit(expression), target,
+        },
+        Expr::IsDistinctFrom { left, right, negated } => Expr::IsDistinctFrom {
+            left: visit(left), right: visit(right), negated,
+        },
+        other => other,
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -585,7 +627,18 @@ impl Parser {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
             loop {
-                let expression = if matches!(self.peek(), Some(Token::Number(_))) {
+                let is_ordinal = match self.peek() {
+                    Some(Token::Number(number)) if number.chars().all(|ch| ch.is_ascii_digit()) => {
+                        match self.tokens.get(self.index + 1) {
+                            None | Some(Token::Symbol(',' | ';')) => true,
+                            Some(Token::Word(word)) => ["ASC", "DESC", "NULLS", "LIMIT", "OFFSET", "FETCH"]
+                                .iter().any(|keyword| word.eq_ignore_ascii_case(keyword)),
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                let expression = if is_ordinal {
                     let position = self.usize_literal()?;
                     let index = position.checked_sub(1)
                         .ok_or_else(|| Error::Parse("ORDER BY positions start at one".into()))?;
@@ -602,7 +655,7 @@ impl Parser {
                             "ORDER BY position requires an explicit projected column".into()
                         ))?.alias.clone();
                     Expr::Column(alias)
-                } else { Expr::Column(self.identifier()?) };
+                } else { self.expression(0)? };
                 let descending = if self.take_word("DESC") {
                     true
                 } else {
@@ -628,7 +681,19 @@ impl Parser {
                     break;
                 }
             }
-            plan = Plan::Sort { input: Box::new(plan), keys };
+            plan = match plan {
+                Plan::Project { input, selections } => {
+                    let resolved = keys.into_iter().map(|mut key| {
+                        key.expression = rewrite_order_aliases(key.expression, &selections);
+                        key
+                    }).collect();
+                    Plan::Project {
+                        input: Box::new(Plan::Sort { input, keys: resolved }),
+                        selections,
+                    }
+                }
+                other => Plan::Sort { input: Box::new(other), keys },
+            };
         }
         let count = if self.take_word("LIMIT") {
             Some(self.usize_literal()?)
