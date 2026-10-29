@@ -89,10 +89,14 @@ impl Expr {
                 {
                     if matches!(expr, Expr::Literal(Value::Null)) { continue; }
                     let kind = expr.output_type(schema)?;
-                    if output.is_some_and(|existing| existing != kind) {
-                        return Err(Error::Type("CASE result branches must share a type".into()));
-                    }
-                    output = Some(kind);
+                    output = Some(match (output, kind) {
+                        (None, kind) => kind,
+                        (Some(existing), kind) if existing == kind => existing,
+                        (Some(DataType::Integer), DataType::Float)
+                        | (Some(DataType::Float), DataType::Integer) => DataType::Float,
+                        _ => return Err(Error::Type(
+                            "CASE result branches must share compatible types".into())),
+                    });
                 }
                 Ok(output.unwrap_or(DataType::Text))
             },
@@ -194,14 +198,22 @@ impl Expr {
             Self::Call { name, args } =>
                 crate::functions::evaluate(name, args, batch, row),
             Self::Case { branches, else_expr } => {
+                let mut chosen = None;
                 for (condition, value) in branches {
                     if condition.evaluate(batch, row)?.as_boolean()? == Some(true) {
-                        return value.evaluate(batch, row);
+                        chosen = Some(value);
+                        break;
                     }
                 }
-                match else_expr {
-                    Some(value) => value.evaluate(batch, row),
-                    None => Ok(Value::Null),
+                let result = match chosen.or(else_expr.as_deref()) {
+                    Some(value) => value.evaluate(batch, row)?,
+                    None => Value::Null,
+                };
+                if matches!(result, Value::Integer(_))
+                    && self.output_type(batch.schema())? == DataType::Float {
+                    result.cast_to(DataType::Float)
+                } else {
+                    Ok(result)
                 }
             },
             Self::Binary { left, op, right } => {
@@ -443,5 +455,23 @@ mod consolidated_literal_like_fastpath_tests {
         assert!(sql_like(&text, &text).unwrap());
         assert!(!sql_like(&text, "x").unwrap());
         assert!(sql_like("abc", "a%c").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod spark_case_numeric_type_promotion {
+    use super::*;
+    use crate::{catalog::Catalog, executor, schema::Field, sql};
+
+    #[test]
+    fn case_result_widens_integer_rows_to_double() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
+        let rows = vec![vec![Value::Integer(2)], vec![Value::Integer(-1)]];
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", batch).unwrap();
+        let plan = sql::parse_sql("SELECT CASE WHEN x > 0 THEN x ELSE 2.5 END AS v FROM t").unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Float(2.0)], vec![Value::Float(2.5)]]);
     }
 }
