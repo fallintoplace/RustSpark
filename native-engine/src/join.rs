@@ -14,6 +14,8 @@ pub enum JoinKind {
     Left,
     Right,
     Full,
+    Semi,
+    Anti,
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
@@ -30,20 +32,43 @@ pub fn hash_join(
     if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
         return Err(Error::Type("join key types must match".into()));
     }
+    if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        let mut keys = HashSet::new();
+        for row in 0..right.num_rows() {
+            let key = right.value(row, right_column)?;
+            if !key.is_null() { keys.insert(key.clone()); }
+        }
+        let mut indices = Vec::new();
+        for row in 0..left.num_rows() {
+            let key = left.value(row, left_column)?;
+            let found = !key.is_null() && keys.contains(key);
+            if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
+                if indices.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("join output exceeds safety limit".into()));
+                }
+                indices.push(row);
+            }
+        }
+        return left.take(&indices);
+    }
     let mut used: HashSet<String> = left
         .schema()
         .fields()
         .iter()
         .map(|field| field.name.to_ascii_lowercase())
         .collect();
-    let mut fields = left.schema().fields().to_vec();
+    let mut fields = left.schema().fields().iter().map(|field| {
+        Field::new(&field.name, field.data_type,
+            field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
+    }).collect::<Vec<_>>();
     for field in right.schema().fields() {
         let mut name = field.name.clone();
         while used.contains(&name.to_ascii_lowercase()) {
             name = format!("right_{name}");
         }
         used.insert(name.to_ascii_lowercase());
-        fields.push(Field::new(name, field.data_type, true));
+        fields.push(Field::new(name, field.data_type,
+            field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
     }
     let schema = Schema::new(fields)?;
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();

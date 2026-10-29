@@ -372,9 +372,17 @@ impl Parser {
                 self.expect_word("JOIN")?;
                 Some(JoinKind::Inner)
             } else if self.take_word("LEFT") {
-                self.take_word("OUTER");
-                self.expect_word("JOIN")?;
-                Some(JoinKind::Left)
+                if self.take_word("SEMI") {
+                    self.expect_word("JOIN")?;
+                    Some(JoinKind::Semi)
+                } else if self.take_word("ANTI") {
+                    self.expect_word("JOIN")?;
+                    Some(JoinKind::Anti)
+                } else {
+                    self.take_word("OUTER");
+                    self.expect_word("JOIN")?;
+                    Some(JoinKind::Left)
+                }
             } else if self.take_word("RIGHT") {
                 self.take_word("OUTER");
                 self.expect_word("JOIN")?;
@@ -476,6 +484,16 @@ impl Parser {
         Ok(plan)
     }
 
+    fn select_with_intersections(&mut self) -> Result<Plan> {
+        let mut plan = self.select_body()?;
+        while self.take_word("INTERSECT") {
+            self.take_word("DISTINCT");
+            let right = self.select_body()?;
+            plan = Plan::Intersect { left: Box::new(plan), right: Box::new(right) };
+        }
+        Ok(plan)
+    }
+
     fn finish_query(&mut self, mut plan: Plan) -> Result<Plan> {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
@@ -530,16 +548,20 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let mut plan = parser.select_body()?;
-    while parser.take_word("UNION") {
-        let all = parser.take_word("ALL");
-        if !all {
+    let mut plan = parser.select_with_intersections()?;
+    loop {
+        if parser.take_word("UNION") {
+            let all = parser.take_word("ALL");
+            if !all { parser.take_word("DISTINCT"); }
+            let right = parser.select_with_intersections()?;
+            plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+            if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
+        } else if parser.take_word("EXCEPT") {
             parser.take_word("DISTINCT");
-        }
-        let right = parser.select_body()?;
-        plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
-        if !all {
-            plan = Plan::Distinct { input: Box::new(plan) };
+            let right = parser.select_with_intersections()?;
+            plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
+        } else {
+            break;
         }
     }
     let plan = parser.finish_query(plan)?;

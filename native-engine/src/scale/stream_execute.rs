@@ -76,8 +76,9 @@ fn infer(
             }
             Ok(left_schema)
         }
-        Plan::Aggregate { .. } | Plan::Join { .. } =>
-            Err(Error::Unsupported("streaming schema inference is unavailable for this operator".into())),
+        _ => Err(Error::Unsupported(
+            "streaming schema inference is unavailable for this operator".into(),
+        )),
     }
 }
 

@@ -14,11 +14,13 @@ pub enum StageKind {
     Distinct,
     HashJoin,
     UnionAll,
+    Intersect,
+    Except,
 }
 
 impl StageKind {
     pub fn is_blocking(self) -> bool {
-        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin)
+        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::Intersect | Self::Except)
     }
 }
 
@@ -116,6 +118,14 @@ impl StageGraph {
                     StageKind::UnionAll,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
+                Plan::Intersect { left, right } => (
+                    StageKind::Intersect,
+                    vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
+                ),
+                Plan::Except { left, right } => (
+                    StageKind::Except,
+                    vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
+                ),
             };
             let id = stages.len();
             if id >= 4096 {
@@ -149,6 +159,32 @@ mod tests {
         assert_eq!(graph.root(), Some(2));
         assert_eq!(graph.stages()[2].inputs, vec![0, 1]);
         assert!(graph.stages()[2].kind.is_blocking());
+    }
+
+    #[test]
+    fn intersect_stage_has_two_inputs_and_blocks() {
+        let plan = Plan::Intersect {
+            left: Box::new(Plan::scan("a")),
+            right: Box::new(Plan::scan("b")),
+        };
+        let graph = StageGraph::from_plan(&plan).unwrap();
+        let root = graph.root().unwrap();
+        assert_eq!(graph.stages()[root].inputs, vec![0, 1]);
+        assert_eq!(graph.stages()[root].kind, StageKind::Intersect);
+        assert!(graph.stages()[root].kind.is_blocking());
+    }
+
+    #[test]
+    fn except_stage_has_two_inputs_and_blocks() {
+        let plan = Plan::Except {
+            left: Box::new(Plan::scan("a")),
+            right: Box::new(Plan::scan("b")),
+        };
+        let graph = StageGraph::from_plan(&plan).unwrap();
+        let root = graph.root().unwrap();
+        assert_eq!(graph.stages()[root].inputs, vec![0, 1]);
+        assert_eq!(graph.stages()[root].kind, StageKind::Except);
+        assert!(graph.stages()[root].kind.is_blocking());
     }
 
     #[test]

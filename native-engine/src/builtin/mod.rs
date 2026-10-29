@@ -93,6 +93,10 @@ fn lookup(name: &str) -> Result<Function> {
         .ok_or_else(|| Error::Unsupported(format!("unsupported native SQL function: {name}")))
 }
 
+pub(crate) fn supports(name: &str) -> bool {
+    lookup(name).is_ok()
+}
+
 fn check_arity(function: Function, count: usize) -> Result<()> {
     if (function.min_args..=function.max_args).contains(&count) { Ok(()) }
     else { Err(Error::Parse(format!("{} expects {}..={} arguments, received {count}",
