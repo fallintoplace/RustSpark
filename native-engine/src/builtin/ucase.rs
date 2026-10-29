@@ -8,7 +8,11 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    Ok(Value::Text(text.to_uppercase()))
+    Ok(Value::Text(if text.is_ascii() {
+        text.to_ascii_uppercase()
+    } else {
+        text.to_uppercase()
+    }))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -22,6 +26,10 @@ mod tests {
     #[test]
     fn supports_unicode_and_null() {
         assert_eq!(evaluate(&[Value::Text("café".into())]).unwrap(), Value::Text("CAFÉ".into()));
+        assert_eq!(evaluate(&[Value::Text("hello world 123".into())]).unwrap(),
+            Value::Text("HELLO WORLD 123".into()));
+        assert_eq!(evaluate(&[Value::Text("straße".into())]).unwrap(),
+            Value::Text("STRASSE".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
     }
