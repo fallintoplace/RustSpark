@@ -2,16 +2,24 @@ use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
-    if types[0] == DataType::Text && types[1] == DataType::Integer {
+    if types[0] == DataType::Text && matches!(types[1], DataType::Integer | DataType::Text) {
         Ok(DataType::Text)
     } else {
-        Err(Error::Type("LEFT/RIGHT require text and integer width".into()))
+        Err(Error::Type("LEFT/RIGHT require text and integer or text width".into()))
     }
 }
 
 fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let Some(width) = super::integer(&args[1])? else { return Ok(Value::Null); };
+    let width = match &args[1] {
+        Value::Integer(width) => *width,
+        Value::Text(text) => match text.trim().parse::<i64>() {
+            Ok(width) => width,
+            Err(_) => return Ok(Value::Null),
+        },
+        Value::Null => return Ok(Value::Null),
+        _ => return Err(Error::Type("LEFT/RIGHT width must be integer or numeric text".into())),
+    };
     // Spark returns an empty string when length is zero or negative.
     let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
     let result = if count == 0 {
@@ -88,5 +96,24 @@ mod utf8_left_right_perf_tests {
         assert_eq!(right(&[input.clone(), Value::Integer(9999)]).unwrap(), input);
         assert_eq!(left(&[Value::Text("abc".into()), Value::Integer(0)]).unwrap(),
             Value::Text("".into()));
+    }
+}
+
+#[cfg(test)]
+mod spark_string_width_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_string_widths_work_with_unicode_and_invalid_widths_propagate_null() {
+        let input = Value::Text("café".into());
+        assert_eq!(left(&[input.clone(), Value::Text(" 3 ".into())]).unwrap(),
+            Value::Text("caf".into()));
+        assert_eq!(right(&[input.clone(), Value::Text("2".into())]).unwrap(),
+            Value::Text("fé".into()));
+        assert_eq!(right(&[input.clone(), Value::Text("-2".into())]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(left(&[input.clone(), Value::Text("n/a".into())]).unwrap(), Value::Null);
+        assert_eq!(left(&[input, Value::Null]).unwrap(), Value::Null);
+        assert_eq!(output(&[DataType::Text, DataType::Text]).unwrap(), DataType::Text);
     }
 }
