@@ -102,9 +102,11 @@ class RustSpark:
             if value is not None:
                 command.extend([f"--{flag}", os.fspath(value)])
         for flag, values in named.items():
-            for table, path in sorted((values or {}).items()):
+            values = values or {}
+            for table in values:
                 if not isinstance(table, str) or not IDENTIFIER.fullmatch(table):
                     raise ValueError(f"Invalid table name: {table!r}")
+            for table, path in sorted(values.items()):
                 command.extend([f"--{flag}", f"{table}={os.fspath(path)}"])
         for name, typed_value in (named_params or {}).items():
             if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
