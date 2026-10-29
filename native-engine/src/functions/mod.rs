@@ -17,6 +17,8 @@ mod modulo;
 
 mod try_divide;
 
+mod try_add;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -89,6 +91,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "PMOD" => pmod::output_type(args, schema),
         "MOD" => modulo::output_type(args, schema),
         "TRY_DIVIDE" => try_divide::output_type(args, schema),
+        "TRY_ADD" => try_add::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -103,6 +106,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "PMOD" => pmod::eval(args, batch, row),
         "MOD" => modulo::eval(args, batch, row),
         "TRY_DIVIDE" => try_divide::eval(args, batch, row),
+        "TRY_ADD" => try_add::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -175,6 +179,13 @@ mod tests {
             vec![Value::Null], vec![Value::Float(2.0)], vec![Value::Float(-2.5)],
         ]);
         assert_eq!(run("SELECT TRY_DIVIDE(1, 0) FROM t").unwrap()[0], vec![Value::Null]);
+    }
+
+    #[test]
+    fn try_add_handles_overflow_and_nulls() {
+        assert_eq!(run("SELECT TRY_ADD(x, 2) FROM t").unwrap()[0], vec![Value::Null]);
+        assert_eq!(run("SELECT TRY_ADD(x, 2) FROM t").unwrap()[1], vec![Value::Integer(7)]);
+        assert_eq!(run("SELECT TRY_ADD(9223372036854775807, 1) FROM t").unwrap()[0], vec![Value::Null]);
     }
 
     #[test]
