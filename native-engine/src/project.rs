@@ -78,3 +78,39 @@ mod tests {
         assert_eq!(result.row(0).unwrap(), vec![Value::Integer(6)]);
     }
 }
+
+ 
+/// Select existing column vectors without evaluating scalar expressions.
+/// Unlike computed projection this preserves source field nullability.
+pub fn project_columns(batch: &Batch, names: &[&str]) -> Result<Batch> {
+    let mut fields = Vec::with_capacity(names.len());
+    let mut values = Vec::with_capacity(names.len());
+    for name in names {
+        let position = batch.schema().column(name)?;
+        fields.push(batch.schema().field(position)?.clone());
+        values.push(batch.column(position)?.to_vec());
+    }
+    Batch::new(Schema::new(fields)?, values)
+}
+
+#[cfg(test)]
+mod typed_projection_feature_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field}, scalar::Value};
+
+    #[test]
+    fn keeps_schema_constraints_and_requested_order() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(3), Value::Null],
+        ]).unwrap();
+        let result = project_columns(&input, &["note", "id"]).unwrap();
+        assert_eq!(result.row(0).unwrap(), vec![Value::Null, Value::Integer(3)]);
+        assert!(result.schema().field(1).unwrap().nullable == false);
+        assert!(project_columns(&input, &["id", "ID"]).is_err());
+        assert!(project_columns(&input, &["unknown"]).is_err());
+    }
+}
+
