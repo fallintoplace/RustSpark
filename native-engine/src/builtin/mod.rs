@@ -10,6 +10,7 @@ mod round;
 mod roots;
 mod power;
 mod exponential;
+mod logarithms;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -42,6 +43,7 @@ const MODULES: &[&[Function]] = &[
     &roots::FUNCTIONS,
     &power::FUNCTIONS,
     &exponential::FUNCTIONS,
+    &logarithms::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
