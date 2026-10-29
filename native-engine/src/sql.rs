@@ -475,12 +475,26 @@ impl Parser {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
             let right_key = self.identifier()?;
-            plan = Plan::Join {
-                left: Box::new(plan),
-                right: Box::new(Plan::scan(right)),
-                left_key,
-                right_key,
-                kind,
+            let mut keys = vec![(left_key, right_key)];
+            while self.take_word("AND") {
+                let left_key = self.identifier()?;
+                if self.next() != Some(Token::Operator("=".into())) {
+                    return Err(Error::Unsupported("multi-key JOIN predicates must be equality comparisons".into()));
+                }
+                let right_key = self.identifier()?;
+                keys.push((left_key, right_key));
+                if keys.len() > 64 {
+                    return Err(Error::Parse("JOIN exceeds 64 equality keys".into()));
+                }
+            }
+            let right = Box::new(Plan::scan(right));
+            plan = if keys.len() == 1 {
+                let (left_key, right_key) = keys.pop().expect("one join key");
+                Plan::Join {
+                    left: Box::new(plan), right, left_key, right_key, kind,
+                }
+            } else {
+                Plan::MultiJoin { left: Box::new(plan), right, keys, kind }
             };
         }
         if self.take_word("WHERE") {

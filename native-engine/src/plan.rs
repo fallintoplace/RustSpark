@@ -44,6 +44,13 @@ pub enum Plan {
         right_key: String,
         kind: JoinKind,
     },
+    /// Multiple conjunctive equality keys in a Spark SQL JOIN ON clause.
+    MultiJoin {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        keys: Vec<(String, String)>,
+        kind: JoinKind,
+    },
     UnionAll {
         left: Box<Plan>,
         right: Box<Plan>,

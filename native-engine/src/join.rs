@@ -24,6 +24,38 @@ fn joinable(key: &Value) -> bool {
     !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
 }
 
+
+fn typed_join_columns(
+    left: &Batch, right: &Batch, keys: &[(String, String)]
+) -> Result<(Vec<usize>, Vec<usize>)> {
+    if keys.is_empty() {
+        return Err(Error::Parse("JOIN requires at least one equality key".into()));
+    }
+    let mut left_columns = Vec::with_capacity(keys.len());
+    let mut right_columns = Vec::with_capacity(keys.len());
+    for (left_key, right_key) in keys {
+        let left_column = left.schema().column(left_key)?;
+        let right_column = right.schema().column(right_key)?;
+        if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
+            return Err(Error::Type(format!("join key types must match: {left_key} = {right_key}")));
+        }
+        left_columns.push(left_column);
+        right_columns.push(right_column);
+    }
+    Ok((left_columns, right_columns))
+}
+
+fn join_key(batch: &Batch, row: usize, columns: &[usize]) -> Result<Option<Vec<Value>>> {
+    let mut key = Vec::with_capacity(columns.len());
+    for &column in columns {
+        let value = batch.value(row, column)?;
+        if !joinable(value) { return Ok(None); }
+        key.push(value.clone());
+    }
+    Ok(Some(key))
+}
+
+/// Compatibility wrapper for single-key joins.
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
@@ -31,21 +63,29 @@ pub fn hash_join(
     right_key: &str,
     kind: JoinKind,
 ) -> Result<Batch> {
-    let left_column = left.schema().column(left_key)?;
-    let right_column = right.schema().column(right_key)?;
-    if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
-        return Err(Error::Type("join key types must match".into()));
-    }
+    hash_join_multi(left, right, &[(left_key.to_owned(), right_key.to_owned())], kind)
+}
+
+/// Hash join with a composite equality key. NULL or NaN in any key component
+/// prevents a match, including for LEFT SEMI/ANTI joins.
+pub fn hash_join_multi(
+    left: &Batch,
+    right: &Batch,
+    keys: &[(String, String)],
+    kind: JoinKind,
+) -> Result<Batch> {
+    let (left_columns, right_columns) = typed_join_columns(left, right, keys)?;
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-        let mut keys = HashSet::new();
+        let mut right_keys = HashSet::new();
         for row in 0..right.num_rows() {
-            let key = right.value(row, right_column)?;
-            if joinable(key) { keys.insert(key.clone()); }
+            if let Some(key) = join_key(right, row, &right_columns)? {
+                right_keys.insert(key);
+            }
         }
         let mut indices = Vec::new();
         for row in 0..left.num_rows() {
-            let key = left.value(row, left_column)?;
-            let found = joinable(key) && keys.contains(key);
+            let key = join_key(left, row, &left_columns)?;
+            let found = key.as_ref().is_some_and(|key| right_keys.contains(key));
             if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
                 if indices.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
@@ -55,12 +95,9 @@ pub fn hash_join(
         }
         return left.take(&indices);
     }
-    let mut used: HashSet<String> = left
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.name.to_ascii_lowercase())
-        .collect();
+
+    let mut used: HashSet<String> = left.schema().fields().iter()
+        .map(|field| field.name.to_ascii_lowercase()).collect();
     let mut fields = left.schema().fields().iter().map(|field| {
         Field::new(&field.name, field.data_type,
             field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
@@ -78,19 +115,19 @@ pub fn hash_join(
     if kind == JoinKind::Inner && (left.num_rows() == 0 || right.num_rows() == 0) {
         return Ok(Batch::empty(schema));
     }
-    let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
+
+    let mut right_hash: HashMap<Vec<Value>, Vec<usize>> = HashMap::new();
     for row in 0..right.num_rows() {
-        let key = right.value(row, right_column)?;
-        if joinable(key) {
-            right_hash.entry(key.clone()).or_default().push(row);
+        if let Some(key) = join_key(right, row, &right_columns)? {
+            right_hash.entry(key).or_default().push(row);
         }
     }
     let mut output = Vec::new();
     let mut matched_right = vec![false; right.num_rows()];
     for left_row in 0..left.num_rows() {
-        let key = left.value(left_row, left_column)?;
-        let right_rows = if joinable(key) { right_hash.get(key) } else { None };
-        if let Some(right_rows) = right_rows {
+        let key = join_key(left, left_row, &left_columns)?;
+        let matches = key.as_ref().and_then(|key| right_hash.get(key));
+        if let Some(right_rows) = matches {
             for &right_row in right_rows {
                 matched_right[right_row] = true;
                 if output.len() >= MAX_JOIN_ROWS {
