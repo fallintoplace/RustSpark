@@ -25,6 +25,7 @@ mod factorial;
 mod hypot;
 mod log1p;
 mod bankers_round;
+mod nan_semantics;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -72,6 +73,7 @@ const MODULES: &[&[Function]] = &[
     &hypot::FUNCTIONS,
     &log1p::FUNCTIONS,
     &bankers_round::FUNCTIONS,
+    &nan_semantics::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
