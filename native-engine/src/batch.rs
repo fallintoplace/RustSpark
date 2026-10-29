@@ -110,7 +110,15 @@ impl Batch {
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
-        (0..self.rows).map(|index| self.row(index)).collect()
+        let mut rows = (0..self.rows)
+            .map(|_| Vec::with_capacity(self.columns.len()))
+            .collect::<Vec<_>>();
+        for column in &self.columns {
+            for (row, value) in rows.iter_mut().zip(column) {
+                row.push(value.clone());
+            }
+        }
+        Ok(rows)
     }
 }
 
