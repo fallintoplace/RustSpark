@@ -97,7 +97,11 @@ impl Iterator for LimitedParquetScan {
                 if keep == batch.num_rows() {
                     Some(Ok(batch))
                 } else {
+                    if keep == batch.num_rows() {
+                    Some(Ok(batch))
+                } else {
                     Some(batch.slice_rows(0, keep))
+                }
                 }
             }
             Err(error) => {
