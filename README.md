@@ -22,11 +22,19 @@ cargo run -- --csv tests/fixtures/sales.csv --table sales \
   --sql-file tests/fixtures/count_sales.sql
 ```
 
-The default command reads a single CSV and returns CSV. It supports a limited
-SQL subset, including projections, filters, grouping, aggregates, sorting,
-LIMIT/OFFSET, equality joins and UNION ALL. JOIN and UNION require tables to
-be registered in the native catalog; the one-CSV CLI cannot register multiple
-tables yet.
+The default command returns CSV, or typed JSON Lines with `--jsonl`. To run
+native SQL across multiple CSV or Parquet files, register each table with a
+repeatable `--source TABLE=FILE` argument:
+
+```sh
+cargo run -- --source q1=tests/fixtures/sales.csv \
+  --source q2=tests/fixtures/sales.csv \
+  --sql 'SELECT city FROM q1 UNION ALL SELECT city FROM q2' --jsonl
+```
+
+The in-memory native CLI supports a limited SQL subset, including projections,
+filters, grouping, aggregates, sorting, LIMIT/OFFSET, equality joins and UNION ALL.
+The `--stream` option remains limited to a single CSV source and simple operators.
 
 ## Native streaming
 
@@ -49,8 +57,9 @@ cargo run --manifest-path native-engine/Cargo.toml --bin rustspark-stream -- \
 ```
 
 The native engine also contains Arrow conversion and Parquet batch-scanning
-modules. These are not yet exposed as equivalent replacements for the old
-CLI's full Parquet/JSON/interactive/persistent/distributed feature set.
+modules. Parquet is supported in the in-memory CLI with an explicit row limit;
+the streaming CLI still has narrower input and operator support. Full JSON
+input, interactive, persistent and distributed modes are not yet replaced.
 
 ## Development
 

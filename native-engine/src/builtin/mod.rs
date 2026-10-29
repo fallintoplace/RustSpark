@@ -49,6 +49,7 @@ mod repeat_text;
 mod translate_text;
 mod left_right;
 mod overlay_text;
+mod levenshtein;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -118,6 +119,7 @@ const MODULES: &[&[Function]] = &[
     &translate_text::FUNCTIONS,
     &left_right::FUNCTIONS,
     &overlay_text::FUNCTIONS,
+    &levenshtein::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
