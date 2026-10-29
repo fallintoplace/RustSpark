@@ -107,3 +107,36 @@ mod tests {
         ]).is_err());
     }
 }
+
+impl StageGraph {
+    /// Number of stages in the longest dependency chain (zero for an empty graph).
+    pub fn longest_dependency_chain(&self) -> usize {
+        let by_id: HashMap<u64, &Stage> = self.stages.iter().map(|stage| (stage.id, stage)).collect();
+        let mut depth = HashMap::new();
+        for id in &self.order {
+            let stage = by_id[id];
+            let longest_parent = stage.dependencies.iter()
+                .map(|parent| depth.get(parent).copied().unwrap_or(0))
+                .max().unwrap_or(0);
+            depth.insert(*id, longest_parent + 1);
+        }
+        depth.values().copied().max().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod stage_chain_feature_tests {
+    use super::*;
+
+    #[test]
+    fn chain_length_counts_dependencies_not_parallel_siblings() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 4, dependencies: vec![2, 3], partitions: 8 },
+            Stage { id: 3, dependencies: vec![1], partitions: 2 },
+            Stage { id: 2, dependencies: vec![], partitions: 2 },
+            Stage { id: 1, dependencies: vec![], partitions: 2 },
+        ]).unwrap();
+        assert_eq!(graph.longest_dependency_chain(), 3);
+        assert_eq!(StageGraph::new(vec![]).unwrap().longest_dependency_chain(), 0);
+    }
+}
