@@ -909,3 +909,20 @@ mod scientific_number_sql_regression {
         assert!(parse_sql("SELECT 1e309 FROM t").is_err());
     }
 }
+
+#[cfg(test)]
+mod leading_decimal_sql_regression {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema}};
+    #[test]
+    fn executes_leading_dot_numbers_without_datafusion() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap()).unwrap();
+        let plan = parse_sql("SELECT .5 AS a, .25e1 AS b FROM t").unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap(), vec![
+            Value::Float(0.5), Value::Float(2.5)
+        ]);
+    }
+}
