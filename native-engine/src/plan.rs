@@ -9,6 +9,11 @@ use crate::{
 /// An owned, DataFusion-independent logical query tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plan {
+    /// Bounded inline rows, evaluated using Spark VALUES column coercion.
+    Values {
+        rows: Vec<Vec<Expr>>,
+        columns: Vec<String>,
+    },
     Scan {
         table: String,
     },

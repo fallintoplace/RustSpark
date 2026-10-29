@@ -33,6 +33,58 @@ pub fn execute_with_options(
     execute_with_guard(plan, catalog, options, &QueryGuard::default())
 }
 
+
+fn execute_values(
+    rows: &[Vec<crate::expr::Expr>], columns: &[String]
+) -> Result<Batch> {
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    if rows.len() > 10_000 || columns.len() > 256 || columns.is_empty() {
+        return Err(Error::Execution("VALUES exceeds input shape limits".into()));
+    }
+    let empty = Batch::new_with_row_count(Schema::new(vec![])?, vec![], 1)?;
+    let mut values = Vec::with_capacity(rows.len());
+    let mut types = vec![None; columns.len()];
+    for row in rows {
+        if row.len() != columns.len() {
+            return Err(Error::Schema("VALUES row width mismatch".into()));
+        }
+        let mut evaluated = Vec::with_capacity(columns.len());
+        for (i, expression) in row.iter().enumerate() {
+            let value = expression.evaluate(&empty, 0)?;
+            let kind = match &value {
+                Value::Null => None,
+                Value::Boolean(_) => Some(DataType::Boolean),
+                Value::Integer(_) => Some(DataType::Integer),
+                Value::Float(_) => Some(DataType::Float),
+                Value::Text(_) => Some(DataType::Text),
+            };
+            if let Some(kind) = kind {
+                types[i] = Some(match types[i] {
+                    None => kind,
+                    Some(existing) if existing == kind => kind,
+                    Some(DataType::Integer) if kind == DataType::Float => DataType::Float,
+                    Some(DataType::Float) if kind == DataType::Integer => DataType::Float,
+                    _ => return Err(Error::Type("VALUES column types cannot be reconciled".into())),
+                });
+            }
+            evaluated.push(value);
+        }
+        values.push(evaluated);
+    }
+    let fields = columns.iter().zip(types.iter()).map(|(name, kind)| {
+        Field::new(name, kind.unwrap_or(DataType::Text), true)
+    }).collect();
+    let schema = Schema::new(fields)?;
+    for row in &mut values {
+        for (value, kind) in row.iter_mut().zip(&types) {
+            if *kind == Some(DataType::Float) && matches!(value, Value::Integer(_)) {
+                *value = value.cast_to(DataType::Float)?;
+            }
+        }
+    }
+    Batch::from_rows(schema, values)
+}
+
 fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
     let mut pending = vec![(plan, 0_usize)];
     while let Some((node, depth)) = pending.pop() {
@@ -40,7 +92,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             return Err(Error::Execution("query plan exceeds maximum depth".into()));
         }
         match node {
-            Plan::Scan { .. } => {}
+            Plan::Scan { .. } | Plan::Values { .. } => {}
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
@@ -86,6 +138,7 @@ fn execute_inner(
     guard.check()?;
     let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
+        Plan::Values { rows, columns } => execute_values(rows, columns)?,
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
         Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,

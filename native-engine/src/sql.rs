@@ -19,6 +19,67 @@ enum SelectItem {
     Aggregate(AggregateItem),
 }
 
+
+const MAX_VALUES_ROWS: usize = 10_000;
+const MAX_VALUES_COLUMNS: usize = 256;
+
+/// A Spark VALUES table can be queried directly or used as a FROM source.
+/// All rows must have the same width and explicit aliases must be unique.
+fn parse_values_table(&mut self) -> Result<Plan> {
+    let mut rows = Vec::new();
+    let mut columns = None;
+    loop {
+        self.expect_symbol('(')?;
+        let mut expressions = Vec::new();
+        loop {
+            if expressions.len() >= MAX_VALUES_COLUMNS {
+                return Err(Error::Parse("VALUES exceeds column limit".into()));
+            }
+            expressions.push(self.expression(0)?);
+            if !self.take_symbol(',') { break; }
+        }
+        self.expect_symbol(')')?;
+        if expressions.is_empty() {
+            return Err(Error::Parse("VALUES row requires at least one column".into()));
+        }
+        if let Some(width) = columns {
+            if width != expressions.len() {
+                return Err(Error::Parse("VALUES rows must have equal column counts".into()));
+            }
+        } else {
+            columns = Some(expressions.len());
+        }
+        if rows.len() >= MAX_VALUES_ROWS {
+            return Err(Error::Parse("VALUES exceeds row limit".into()));
+        }
+        rows.push(expressions);
+        if !self.take_symbol(',') { break; }
+    }
+    let width = columns.ok_or_else(|| Error::Parse("VALUES requires rows".into()))?;
+    let mut names = (1..=width).map(|i| format!("col{i}")).collect::<Vec<_>>();
+    if self.take_word("AS") {
+        self.identifier()?;
+        if self.take_symbol('(') {
+            let mut explicit = Vec::new();
+            loop {
+                explicit.push(self.identifier()?);
+                if !self.take_symbol(',') { break; }
+            }
+            self.expect_symbol(')')?;
+            if explicit.len() != width {
+                return Err(Error::Parse("VALUES alias column count mismatch".into()));
+            }
+            names = explicit;
+        }
+    }
+    // Check both explicit and automatically produced names before scanning.
+    let mut seen = std::collections::HashSet::new();
+    if names.iter().any(|name| !seen.insert(name.to_ascii_lowercase())) {
+        return Err(Error::Parse("VALUES aliases must be unique".into()));
+    }
+    Ok(Plan::Values { rows, columns: names })
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -377,6 +438,67 @@ impl Parser {
         }
     }
 
+
+const MAX_VALUES_ROWS: usize = 10_000;
+const MAX_VALUES_COLUMNS: usize = 256;
+
+/// A Spark VALUES table can be queried directly or used as a FROM source.
+/// All rows must have the same width and explicit aliases must be unique.
+fn parse_values_table(&mut self) -> Result<Plan> {
+    let mut rows = Vec::new();
+    let mut columns = None;
+    loop {
+        self.expect_symbol('(')?;
+        let mut expressions = Vec::new();
+        loop {
+            if expressions.len() >= MAX_VALUES_COLUMNS {
+                return Err(Error::Parse("VALUES exceeds column limit".into()));
+            }
+            expressions.push(self.expression(0)?);
+            if !self.take_symbol(',') { break; }
+        }
+        self.expect_symbol(')')?;
+        if expressions.is_empty() {
+            return Err(Error::Parse("VALUES row requires at least one column".into()));
+        }
+        if let Some(width) = columns {
+            if width != expressions.len() {
+                return Err(Error::Parse("VALUES rows must have equal column counts".into()));
+            }
+        } else {
+            columns = Some(expressions.len());
+        }
+        if rows.len() >= MAX_VALUES_ROWS {
+            return Err(Error::Parse("VALUES exceeds row limit".into()));
+        }
+        rows.push(expressions);
+        if !self.take_symbol(',') { break; }
+    }
+    let width = columns.ok_or_else(|| Error::Parse("VALUES requires rows".into()))?;
+    let mut names = (1..=width).map(|i| format!("col{i}")).collect::<Vec<_>>();
+    if self.take_word("AS") {
+        self.identifier()?;
+        if self.take_symbol('(') {
+            let mut explicit = Vec::new();
+            loop {
+                explicit.push(self.identifier()?);
+                if !self.take_symbol(',') { break; }
+            }
+            self.expect_symbol(')')?;
+            if explicit.len() != width {
+                return Err(Error::Parse("VALUES alias column count mismatch".into()));
+            }
+            names = explicit;
+        }
+    }
+    // Check both explicit and automatically produced names before scanning.
+    let mut seen = std::collections::HashSet::new();
+    if names.iter().any(|name| !seen.insert(name.to_ascii_lowercase())) {
+        return Err(Error::Parse("VALUES aliases must be unique".into()));
+    }
+    Ok(Plan::Values { rows, columns: names })
+}
+
     fn select_item(&mut self, index: usize) -> Result<SelectItem> {
         if self.take_symbol('*') {
             return Ok(SelectItem::Star);
@@ -437,7 +559,11 @@ impl Parser {
             }
         }
         self.expect_word("FROM")?;
-        let mut plan = Plan::scan(self.identifier()?);
+        let mut plan = if self.take_word("VALUES") {
+            self.parse_values_table()?
+        } else {
+            Plan::scan(self.identifier()?)
+        };
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
@@ -671,12 +797,18 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let mut plan = parser.select_with_intersections()?;
+    let mut plan = if parser.take_word("VALUES") {
+        parser.parse_values_table()?
+    } else {
+        parser.select_with_intersections()?
+    };
     loop {
         if parser.take_word("UNION") {
             let all = parser.take_word("ALL");
             if !all { parser.take_word("DISTINCT"); }
-            let right = parser.select_with_intersections()?;
+            let right = if parser.take_word("VALUES") {
+                parser.parse_values_table()?
+            } else { parser.select_with_intersections()? };
             plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
             if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
         } else if parser.take_word("EXCEPT") {
