@@ -92,13 +92,18 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
 
     // Keep only row coordinates until all source batches have been partitioned.
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
+        let columns = key_columns.iter().map(|&index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
             let mut hasher = PartitionHasher::default();
-            for &column in &key_columns {
-                batch.value(row, column)?.hash(&mut hasher);
-            }
-            let bucket = (hasher.finish() % partitions as u64) as usize;
+            for column in &columns { column[row].hash(&mut hasher); }
+            let hash = hasher.finish();
+            let bucket = match mask {
+                Some(mask) => (hash as usize) & mask,
+                None => (hash % partitions as u64) as usize,
+            };
             buckets[bucket].push((batch_index, row));
         }
     }
@@ -206,6 +211,25 @@ mod bitmasked_bucket_tests {
             for (part, indices) in actual.iter().zip(expected) {
                 assert_eq!(part, &batch.take(&indices).unwrap());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cached_batch_partition_key_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn batch_hashing_matches_direct_partition_for_all_bucket_shapes() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..100).map(|n| vec![
+            if n % 10 == 0 { Value::Null } else { Value::Integer(n % 7) },
+            Value::Text(n.to_string())
+        ]).collect()).unwrap();
+        for buckets in [1, 8, 15, 32] {
+            assert_eq!(partition_batches(&[batch.clone()], &["key"], buckets).unwrap(),
+                partition(&batch, &["key"], buckets).unwrap());
         }
     }
 }
