@@ -93,6 +93,15 @@ fn execute_inner(
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
+        Plan::Limit { input, offset, count: Some(count) } if *count > 0
+            && matches!(input.as_ref(), Plan::Sort { .. }) => {
+            let Plan::Sort { input: source, keys } = input.as_ref() else {
+                unreachable!("checked sort plan");
+            };
+            let source = execute_inner(source, catalog, options, depth + 2, guard)?;
+            guard.check()?;
+            crate::topk::top_k_offset(&source, keys, *offset, *count)?
+        },
         Plan::Limit { input, offset, count } => {
             // A LIMIT over a scan must not materialize and budget the whole input.
             if let Plan::Scan { table } = input.as_ref() {
@@ -233,5 +242,22 @@ mod plan_depth_preflight_tests {
             ExecutionOptions { max_output_rows: 100, max_plan_depth: 32 },
         );
         assert!(result.unwrap_err().to_string().contains("maximum depth"));
+    }
+}
+
+#[cfg(test)]
+mod consolidated_sort_limit_fastpath_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}, sort::SortKey};
+    #[test]
+    fn order_by_limit_keeps_stable_ties_and_offset() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("t", Batch::from_rows(schema,
+            vec![vec![Value::Integer(3)], vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap()).unwrap();
+        let plan = Plan::Sort { input: Box::new(Plan::scan("t")),
+            keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
+        assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
     }
 }
