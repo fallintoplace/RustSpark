@@ -74,7 +74,7 @@ mod ascii_soundex_byte_perf_tests {
                 "Ashcraft" => "A261",
                 "Pfister" => "P236",
                 "Honeyman" => "H555",
-                _ => "R630",
+                _ => "R300",
             }.into()));
         }
         assert_eq!(evaluate(&[Value::Text("Émile".into())]).unwrap(), Value::Text("Émile".into()));
