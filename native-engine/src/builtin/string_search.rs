@@ -48,14 +48,21 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
-    let Some(start) = text.char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()))
-        .nth(offset) else {
-        return Ok(Value::Integer(0));
+    let ascii = text.is_ascii();
+    let start = if ascii {
+        if offset > text.len() { return Ok(Value::Integer(0)); }
+        offset
+    } else {
+        let Some(start) = text.char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+            .nth(offset) else {
+            return Ok(Value::Integer(0));
+        };
+        start
     };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
-    let characters = text[start..start + found].chars().count();
+    let characters = if ascii { found } else { text[start..start + found].chars().count() };
     let position = offset.checked_add(characters).and_then(|n| n.checked_add(1))
         .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
     let position = i64::try_from(position)
@@ -167,5 +174,24 @@ mod strcmp_extension_tests {
         assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
         assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
         assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod locate_ascii_start_offset_tests {
+    use super::*;
+
+    #[test]
+    fn large_ascii_and_unicode_offsets_match_character_positions() {
+        let haystack = Value::Text(format!("{}END", "x".repeat(60_000)));
+        assert_eq!(locate(&[
+            Value::Text("END".into()), haystack.clone(), Value::Integer(60_001),
+        ]).unwrap(), Value::Integer(60_001));
+        assert_eq!(locate(&[
+            Value::Text("END".into()), haystack, Value::Integer(60_004),
+        ]).unwrap(), Value::Integer(0));
+        assert_eq!(locate(&[
+            Value::Text("é".into()), Value::Text("x🙂é".into()), Value::Integer(2),
+        ]).unwrap(), Value::Integer(3));
     }
 }
