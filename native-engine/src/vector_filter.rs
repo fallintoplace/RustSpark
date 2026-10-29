@@ -13,6 +13,23 @@ fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
     })
 }
 
+fn fast_text_equality<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], bool, &'a str)>> {
+    if let Expr::Binary { left, op, right } = predicate {
+        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+            if let (Expr::Column(name), Expr::Literal(Value::Text(value))) =
+                (left.as_ref(), right.as_ref()) {
+                let index = batch.schema().column(name)?;
+                if batch.schema().field(index)?.data_type == DataType::Text {
+                    return Ok(Some((batch.column(index)?, *op == BinaryOp::Equal, value)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn fast_boolean_column<'a>(batch: &'a Batch, predicate: &Expr) -> Result<Option<&'a [Value]>> {
     let Expr::Column(name) = predicate else { return Ok(None); };
     let index = batch.schema().column(name)?;
@@ -109,6 +126,12 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
         }
+    } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Text(lhs) = value {
+                if (lhs.as_str() == rhs) == equals { selected.push(row); }
+            }
+        }
     } else {
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
@@ -134,6 +157,23 @@ mod tests {
         assert!(select_indices(&batch, &Expr::Column("n".into())).is_err());
         assert!(select_indices(&batch, &Expr::Column("missing".into())).is_err());
         assert!(select_indices(&batch, &Expr::Literal(Value::Null)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_equality_fastpath_preserves_unicode_null_and_duplicate_values() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("city", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("東京".into())], vec![Value::Null],
+                vec![Value::Text("Paris".into())], vec![Value::Text("東京".into())]],
+        ).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual] {
+            let predicate = Expr::binary(Expr::Column("city".into()), op,
+                Expr::Literal(Value::Text("東京".into())));
+            let expected = (0..batch.num_rows()).filter(|&row| {
+                predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+            }).collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+        }
     }
 
     #[test]
