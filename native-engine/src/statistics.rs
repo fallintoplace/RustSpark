@@ -99,3 +99,44 @@ mod tests {
         assert_eq!(stats.max, Some(Value::Integer(9)));
     }
 }
+
+ 
+impl ColumnStatistics {
+    /// Build mergeable min/max statistics for a sequence of compatible batches.
+    pub fn from_batches(batches: &[Batch], name: &str) -> Result<Self> {
+        let mut combined = Self::default();
+        let mut expected_type = None;
+        for batch in batches {
+            let field = batch.schema().field(batch.schema().column(name)?)?;
+            if expected_type.is_some_and(|kind| kind != field.data_type) {
+                return Err(Error::Type("statistics batches disagree on column type".into()));
+            }
+            expected_type = Some(field.data_type);
+            combined.merge(&Self::from_batch(batch, name)?)?;
+        }
+        Ok(combined)
+    }
+}
+
+#[cfg(test)]
+mod multi_batch_statistics_feature_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn merges_stats_and_rejects_mixed_column_types() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(10)], vec![Value::Null]
+        ]).unwrap();
+        let b = Batch::from_rows(schema, vec![
+            vec![Value::Integer(-2)]
+        ]).unwrap();
+        let merged = ColumnStatistics::from_batches(&[a, b], "n").unwrap();
+        assert_eq!((merged.rows, merged.nulls), (3, 1));
+        assert_eq!(merged.min, Some(Value::Integer(-2)));
+        let text = Batch::empty(Schema::new(vec![Field::new("n", DataType::Text, true)]).unwrap());
+        assert!(ColumnStatistics::from_batches(&[text], "missing").is_err());
+    }
+}
+
