@@ -27,6 +27,9 @@ pub fn optimize(plan: Plan) -> Plan {
             group_by,
             aggregates,
         },
+        Plan::Window { input, windows } => Plan::Window {
+            input: Box::new(optimize(*input)), windows,
+        },
         Plan::Sort { input, keys } => {
             let input = optimize(*input);
             if keys.is_empty() ||

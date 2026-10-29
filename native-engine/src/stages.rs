@@ -10,6 +10,7 @@ pub enum StageKind {
     Project,
     Aggregate,
     Sort,
+    Window,
     Limit,
     Distinct,
     HashJoin,
@@ -20,7 +21,7 @@ pub enum StageKind {
 
 impl StageKind {
     pub fn is_blocking(self) -> bool {
-        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::Intersect | Self::Except)
+        matches!(self, Self::Aggregate | Self::Sort | Self::Window | Self::Distinct | Self::HashJoin | Self::Intersect | Self::Except)
     }
 }
 
@@ -56,7 +57,7 @@ impl StageGraph {
             let required_inputs = match stage.kind {
                 StageKind::Scan => 0,
                 StageKind::Filter | StageKind::Project | StageKind::Aggregate |
-                StageKind::Sort | StageKind::Limit | StageKind::Distinct => 1,
+                StageKind::Sort | StageKind::Window | StageKind::Limit | StageKind::Distinct => 1,
                 StageKind::HashJoin | StageKind::UnionAll | StageKind::Intersect |
                 StageKind::Except => 2,
             };
@@ -127,6 +128,8 @@ impl StageGraph {
                     (StageKind::Aggregate, vec![visit(input, stages, depth + 1)?]),
                 Plan::Sort { input, .. } =>
                     (StageKind::Sort, vec![visit(input, stages, depth + 1)?]),
+                Plan::Window { input, .. } =>
+                    (StageKind::Window, vec![visit(input, stages, depth + 1)?]),
                 Plan::Limit { input, .. } =>
                     (StageKind::Limit, vec![visit(input, stages, depth + 1)?]),
                 Plan::Distinct { input } =>

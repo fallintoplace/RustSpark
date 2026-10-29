@@ -29,6 +29,10 @@ pub enum Plan {
         input: Box<Plan>,
         keys: Vec<SortKey>,
     },
+    Window {
+        input: Box<Plan>,
+        windows: Vec<crate::window::WindowSpec>,
+    },
     Limit {
         input: Box<Plan>,
         offset: usize,

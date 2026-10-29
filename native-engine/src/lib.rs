@@ -33,6 +33,8 @@ pub mod limit;
 
 pub mod sort;
 
+pub mod window;
+
 pub mod aggregate;
 
 pub mod distinct;

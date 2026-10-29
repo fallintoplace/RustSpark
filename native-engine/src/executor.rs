@@ -45,6 +45,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::Sort { input, .. }
+            | Plan::Window { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => pending.push((input, depth + 1)),
             Plan::Join { left, right, .. }
@@ -93,6 +94,7 @@ fn execute_inner(
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
+        Plan::Window { input, windows } => crate::window::evaluate(&descend(input)?, windows)?,
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
             && matches!(input.as_ref(), Plan::Sort { .. }) => {
             let Plan::Sort { input: source, keys } = input.as_ref() else {

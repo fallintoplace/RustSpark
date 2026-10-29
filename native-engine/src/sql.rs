@@ -8,6 +8,7 @@ use crate::{
     scalar::Value,
     schema::DataType,
     sort::SortKey,
+    window::{WindowKind, WindowSpec},
     Error,
     Result,
 };
@@ -17,6 +18,7 @@ enum SelectItem {
     Star,
     Scalar(Selection),
     Aggregate(AggregateItem),
+    Window(WindowSpec),
 }
 
 struct Parser {
@@ -377,7 +379,66 @@ impl Parser {
         }
     }
 
+
+    fn window_item(&mut self) -> Result<Option<SelectItem>> {
+        let kind = match self.peek() {
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("ROW_NUMBER") =>
+                Some(WindowKind::RowNumber),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("RANK") =>
+                Some(WindowKind::Rank),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("DENSE_RANK") =>
+                Some(WindowKind::DenseRank),
+            _ => None,
+        };
+        let Some(kind) = kind else { return Ok(None) };
+        self.next();
+        self.expect_symbol('(')?;
+        self.expect_symbol(')')?;
+        self.expect_word("OVER")?;
+        self.expect_symbol('(')?;
+        let mut partition_by = Vec::new();
+        if self.take_word("PARTITION") {
+            self.expect_word("BY")?;
+            loop {
+                partition_by.push(self.expression(0)?);
+                if partition_by.len() > 64 {
+                    return Err(Error::Parse("window exceeds 64 partition keys".into()));
+                }
+                if !self.take_symbol(',') { break; }
+            }
+        }
+        self.expect_word("ORDER")?;
+        self.expect_word("BY")?;
+        let mut order_by = Vec::new();
+        loop {
+            let expression = self.expression(0)?;
+            let descending = if self.take_word("DESC") { true } else {
+                self.take_word("ASC"); false
+            };
+            let nulls_first = if self.take_word("NULLS") {
+                if self.take_word("FIRST") { true }
+                else { self.expect_word("LAST")?; false }
+            } else { !descending };
+            order_by.push(SortKey { expression, descending, nulls_first });
+            if order_by.len() > 64 {
+                return Err(Error::Parse("window exceeds 64 ordering keys".into()));
+            }
+            if !self.take_symbol(',') { break; }
+        }
+        self.expect_symbol(')')?;
+        let default = match kind {
+            WindowKind::RowNumber => "row_number",
+            WindowKind::Rank => "rank",
+            WindowKind::DenseRank => "dense_rank",
+        };
+        let alias = self.select_alias(default.into())?;
+        Ok(Some(SelectItem::Window(WindowSpec {
+            kind, partition_by, order_by, alias,
+        })))
+    }
+
     fn select_item(&mut self, index: usize) -> Result<SelectItem> {
+        if let Some(item) = self.window_item()? { return Ok(item); }
         if self.take_symbol('*') {
             return Ok(SelectItem::Star);
         }
@@ -511,9 +572,13 @@ impl Parser {
             }
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let has_windows = select.iter().any(|entry| matches!(entry, SelectItem::Window(_)));
+        if has_windows && (has_aggregates || !group_columns.is_empty()) {
+            return Err(Error::Unsupported("window functions with GROUP BY are not yet supported".into()));
+        }
         let grouped = has_aggregates || !group_columns.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
-        if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
+        if star && (select.len() > 1 || has_aggregates || has_windows || !group_columns.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
         }
         if has_aggregates || !group_columns.is_empty() {
@@ -536,6 +601,8 @@ impl Parser {
                         selections.push(item);
                     }
                     SelectItem::Star => unreachable!(),
+                    SelectItem::Window(_) =>
+                        return Err(Error::Unsupported("window aggregates are not supported".into())),
                 }
             }
             plan = Plan::Aggregate {
@@ -548,13 +615,20 @@ impl Parser {
             };
             plan = plan.project(selections);
         } else if !star {
-            let selections = select
-                .into_iter()
-                .filter_map(|item| match item {
-                    SelectItem::Scalar(item) => Some(item),
+            if has_windows {
+                let windows = select.iter().filter_map(|item| match item {
+                    SelectItem::Window(window) => Some(window.clone()),
                     _ => None,
-                })
-                .collect();
+                }).collect();
+                plan = Plan::Window { input: Box::new(plan), windows };
+            }
+            let selections = select.into_iter().filter_map(|item| match item {
+                SelectItem::Scalar(item) => Some(item),
+                SelectItem::Window(spec) => Some(Selection::new(
+                    Expr::Column(spec.alias.clone()), spec.alias,
+                )),
+                _ => None,
+            }).collect();
             plan = plan.project(selections);
         }
         if self.take_word("HAVING") {
@@ -617,7 +691,7 @@ impl Parser {
                         false
                     }
                 } else {
-                    descending
+                    !descending
                 };
                 keys.push(SortKey {
                     expression,
