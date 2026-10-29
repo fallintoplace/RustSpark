@@ -26,6 +26,15 @@ class GatewayTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises((ValueError, json.JSONDecodeError)):
                 validate_params(body)
 
+    def test_rejects_duplicate_request_and_parameter_keys(self):
+        bodies = [
+            b'{"params":{"id":"int64:1","id":"int64:2"}}',
+            b'{"params":{},"params":{"id":"int64:2"}}',
+        ]
+        for body in bodies:
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                validate_params(body)
+
 
 if __name__ == "__main__":
     unittest.main()
