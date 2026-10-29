@@ -144,22 +144,34 @@ where L: IntoIterator<Item = Result<Batch>>,
             }
         }
         if outer_build {
-            let mut pending = Vec::with_capacity(io_batch_rows.min(65_536));
+            let mut columns: Vec<Vec<Value>> =
+                (0..result_schema.len()).map(|_| Vec::new()).collect();
+            let build_columns = (0..right_schema.len())
+                .map(|index| build.column(index)).collect::<Result<Vec<_>>>()?;
+            let mut rows = 0usize;
             for right_row in 0..build.num_rows() {
                 control.check()?;
                 if !matched_right.as_ref().expect("outer-build bitmap")[right_row] {
-                    let mut row = vec![Value::Null; left_schema.len()];
-                    row.extend(build.row(right_row)?);
-                    pending.push(row);
-                    if pending.len() >= io_batch_rows {
-                        writer.write_batch(&Batch::from_rows(
-                            result_schema.clone(), std::mem::take(&mut pending)
-                        )?)?;
+                    for output in &mut columns[..left_schema.len()] {
+                        output.push(Value::Null);
+                    }
+                    for (input, output) in build_columns.iter()
+                        .zip(columns[left_schema.len()..].iter_mut()) {
+                        output.push(input[right_row].clone());
+                    }
+                    rows += 1;
+                    if rows >= io_batch_rows {
+                        let batch = Batch::new_with_row_count(
+                            result_schema.clone(), std::mem::take(&mut columns), rows,
+                        )?;
+                        writer.write_batch(&batch)?;
+                        columns = (0..result_schema.len()).map(|_| Vec::new()).collect();
+                        rows = 0;
                     }
                 }
             }
-            if !pending.is_empty() {
-                writer.write_batch(&Batch::from_rows(result_schema.clone(), pending)?)?;
+            if rows != 0 {
+                writer.write_batch(&Batch::new_with_row_count(result_schema.clone(), columns, rows)?)?;
             }
         }
         writer.finish()?;
@@ -335,5 +347,35 @@ mod columnar_build_load_tests {
         assert_eq!(loaded.rows().unwrap(), vec![vec![Value::Text("hello".into())], vec![Value::Null], vec![Value::Text("world".into())]]);
         assert!(load_build(&path, &schema, 2, 3, &QueryControl::default()).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod columnar_outer_unmatched_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn emits_wide_unmatched_right_rows_across_output_windows() {
+        let dir = std::env::temp_dir().join(format!("native-column-outer-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1), Value::Text("probe".into())]]).unwrap();
+        let right = Batch::from_rows(schema.clone(), (0..13).map(|n| vec![
+            Value::Integer(n), Value::Text(format!("value-{n}-{}", "x".repeat(100)))
+        ]).collect()).unwrap();
+        let output = grace_join([Ok(left)], [Ok(right)], schema.clone(), schema, "k", "k", JoinKind::Right,
+            &dir, 1, 20, 2, &QueryControl::default()).unwrap();
+        let mut reader = SpillReader::new(BufReader::new(File::open(&output.paths()[0]).unwrap()), 2).unwrap();
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
+        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.iter().filter(|row| row[0] == Value::Integer(1)).count(), 1);
+        assert_eq!(rows.iter().filter(|row| row[0] == Value::Null).count(), 12);
+        drop(output);
+        fs::remove_dir(dir).unwrap();
     }
 }
