@@ -11,6 +11,8 @@ mod abs;
 
 mod round;
 
+mod lower;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -60,6 +62,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "IF" => if_expr::output_type(args, schema),
         "ABS" => abs::output_type(args, schema),
         "ROUND" => round::output_type(args, schema),
+        "LOWER" => lower::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -71,6 +74,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "IF" => if_expr::eval(args, batch, row),
         "ABS" => abs::eval(args, batch, row),
         "ROUND" => round::eval(args, batch, row),
+        "LOWER" => lower::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -121,6 +125,15 @@ mod tests {
     fn round_works_in_native_sql() {
         assert_eq!(run("SELECT ROUND(3.14159, 2) AS n FROM t").unwrap()[0],
             vec![Value::Float(3.14)]);
+    }
+
+    #[test]
+    fn lower_works_in_native_sql() {
+        assert_eq!(run("SELECT LOWER(name) AS n FROM t").unwrap(), vec![
+            vec![Value::Text("berlin".into())],
+            vec![Value::Text("paris".into())],
+            vec![Value::Null],
+        ]);
     }
 
     #[test]
