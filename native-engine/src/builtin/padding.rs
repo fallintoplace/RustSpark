@@ -13,8 +13,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn pad(args: &[Value], left: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(len) = super::integer(&args[1])? else { return Ok(Value::Null) };
-    let target = usize::try_from(len)
-        .map_err(|_| Error::Execution("LPAD/RPAD length cannot be negative".into()))?;
+    let target = usize::try_from(len.max(0))
+        .map_err(|_| Error::Execution("LPAD/RPAD length overflow".into()))?;
     if target > MAX_CHARS {
         return Err(Error::Execution("LPAD/RPAD length exceeds native output budget".into()));
     }
@@ -47,5 +47,7 @@ mod tests {
         assert_eq!(rpad(&[Value::Text("a".into()), Value::Integer(3), Value::Text("xy".into())]).unwrap(), Value::Text("axy".into()));
         assert_eq!(lpad(&[Value::Text("界面".into()), Value::Integer(1)]).unwrap(), Value::Text("界".into()));
         assert!(rpad(&[Value::Text("a".into()), Value::Integer(2_000_000)]).is_err());
+        assert_eq!(lpad(&[Value::Text("hello".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
+        assert_eq!(rpad(&[Value::Text("hello".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
     }
 }
