@@ -9,6 +9,8 @@ mod if_expr;
 
 mod abs;
 
+mod round;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -57,6 +59,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "NULLIF" => nullif::output_type(args, schema),
         "IF" => if_expr::output_type(args, schema),
         "ABS" => abs::output_type(args, schema),
+        "ROUND" => round::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -67,6 +70,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "NULLIF" => nullif::eval(args, batch, row),
         "IF" => if_expr::eval(args, batch, row),
         "ABS" => abs::eval(args, batch, row),
+        "ROUND" => round::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -111,6 +115,12 @@ mod tests {
         assert_eq!(run("SELECT ABS(x) AS n FROM t").unwrap(), vec![
             vec![Value::Null], vec![Value::Integer(5)], vec![Value::Integer(4)],
         ]);
+    }
+
+    #[test]
+    fn round_works_in_native_sql() {
+        assert_eq!(run("SELECT ROUND(3.14159, 2) AS n FROM t").unwrap()[0],
+            vec![Value::Float(3.14)]);
     }
 
     #[test]
