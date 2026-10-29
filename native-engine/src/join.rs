@@ -12,6 +12,7 @@ use crate::{
 pub enum JoinKind {
     Inner,
     Left,
+    Right,
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
@@ -52,11 +53,13 @@ pub fn hash_join(
         }
     }
     let mut output = Vec::new();
+    let mut matched_right = vec![false; right.num_rows()];
     for left_row in 0..left.num_rows() {
         let key = left.value(left_row, left_column)?;
         let right_rows = if key.is_null() { None } else { right_hash.get(key) };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
+                matched_right[right_row] = true;
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
@@ -73,6 +76,18 @@ pub fn hash_join(
             output.push(row);
         }
     }
+    if kind == JoinKind::Right {
+        for right_row in 0..right.num_rows() {
+            if !matched_right[right_row] {
+                if output.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("join output exceeds safety limit".into()));
+                }
+                let mut row = vec![Value::Null; left.schema().len()];
+                row.extend(right.row(right_row)?);
+                output.push(row);
+            }
+        }
+    }
     Batch::from_rows(schema, output)
 }
 
@@ -87,6 +102,18 @@ mod tests {
             values.iter().cloned().map(|value| vec![value]).collect(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn right_join_includes_unmatched_right_rows_and_null_keys() {
+        let left = table(&[Value::Integer(1)], "id");
+        let right = table(&[Value::Integer(1), Value::Integer(2), Value::Null], "id");
+        let result = hash_join(&left, &right, "id", "id", JoinKind::Right).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Null, Value::Null],
+        ]);
     }
 
     #[test]
