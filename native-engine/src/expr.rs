@@ -39,6 +39,7 @@ pub enum Expr {
     Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
     Call { name: String, args: Vec<Expr> },
     TryCast { expression: Box<Expr>, target: DataType },
+    Cast { expression: Box<Expr>, target: DataType },
     IsDistinctFrom { left: Box<Expr>, right: Box<Expr>, negated: bool },
 }
 
@@ -62,7 +63,7 @@ impl Expr {
             }),
             Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
             | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
-            Self::TryCast { target, .. } => Ok(*target),
+            Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
                 let mut output = None;
@@ -133,6 +134,8 @@ impl Expr {
             },
             Self::TryCast { expression, target } =>
                 Ok(crate::try_cast::convert(expression.evaluate(batch, row)?, *target)),
+            Self::Cast { expression, target } =>
+                expression.evaluate(batch, row)?.cast_to(*target),
             Self::Call { name, args } =>
                 crate::functions::evaluate(name, args, batch, row),
             Self::Case { branches, else_expr } => {
