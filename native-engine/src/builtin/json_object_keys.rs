@@ -1,3 +1,4 @@
+use serde::ser::{SerializeSeq, Serializer as _};
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
@@ -19,10 +20,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     match json_path::lookup(Some(&doc), path)? {
         None | Some(serde_json::Value::Null) => Ok(Value::Null),
         Some(serde_json::Value::Object(map)) => {
-            let keys = map.keys().collect::<Vec<_>>();
-            let encoded = serde_json::to_string(&keys)
-                .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
-            Ok(Value::Text(encoded))
+            let mut bytes = Vec::new();
+            {
+                let mut serializer = serde_json::Serializer::new(&mut bytes);
+                let mut sequence = serializer.serialize_seq(Some(map.len()))
+                    .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
+                for key in map.keys() {
+                    sequence.serialize_element(key)
+                        .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
+                }
+                sequence.end()
+                    .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
+            }
+            Ok(Value::Text(String::from_utf8(bytes)
+                .expect("JSON serializer writes valid UTF-8")))
         }
         _ => Ok(Value::Null),
     }
@@ -86,6 +97,21 @@ mod invalid_json_object_keys_tests {
         for text in ["[]", "7", "{bad", ""] {
             assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(), Value::Null);
         }
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streamed_object_key_serialization_tests {
+    use super::*;
+    #[test]
+    fn escaped_and_unicode_keys_match_standard_json_encoding() {
+        let document = r#"{"alpha":1,"a.b":2,"quote\\\"key":3,"é🙂":4}"#;
+        let output = evaluate(&[Value::Text(document.into())]).unwrap();
+        let Value::Text(encoded) = output else { panic!("expected JSON text"); };
+        let input: serde_json::Value = serde_json::from_str(document).unwrap();
+        let expected = input.as_object().unwrap().keys().collect::<Vec<_>>();
+        assert_eq!(encoded, serde_json::to_string(&expected).unwrap());
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
