@@ -66,6 +66,17 @@ pub fn distinct_on(batch: &Batch, keys: &[&str]) -> Result<Batch> {
     }
     let columns = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
+    if columns.len() == 1 {
+        let column = batch.column(columns[0])?;
+        let mut seen = HashSet::new();
+        let mut indices = Vec::new();
+        for (row, value) in column.iter().enumerate() {
+            if seen.insert(value) {
+                indices.push(row);
+            }
+        }
+        return batch.take(&indices);
+    }
     let mut seen = HashSet::new();
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
