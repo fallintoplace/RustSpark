@@ -119,3 +119,34 @@ mod tests {
         assert_eq!(scheduler.lease(1, now, Duration::from_secs(1)).unwrap(), None);
     }
 }
+
+ 
+impl TaskScheduler {
+    /// Fail queued and leased tasks, preventing any late attempt from committing.
+    pub fn cancel_pending(&mut self) -> usize {
+        let mut cancelled = 0;
+        for task in self.tasks.values_mut() {
+            if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
+                task.status = TaskStatus::Failed;
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+}
+
+#[cfg(test)]
+mod task_cancel_feature_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_invalidates_inflight_leases() {
+        let mut scheduler = TaskScheduler::new([1, 2], 3).unwrap();
+        let lease = scheduler.lease(9, Instant::now(), Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(scheduler.cancel_pending(), 2);
+        assert!(!scheduler.finish(&lease, true));
+        assert_eq!(scheduler.lease(9, Instant::now(), Duration::from_secs(30)).unwrap(), None);
+        assert_eq!(scheduler.cancel_pending(), 0);
+    }
+}
+
