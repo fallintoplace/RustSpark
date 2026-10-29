@@ -224,21 +224,28 @@ impl Parser {
                     let regex = self.take_word("RLIKE") || self.take_word("REGEXP");
                     if !insensitive && !regex { self.expect_word("LIKE")?; }
                     let pattern = self.expression(4)?;
+                    let escape = if !regex && self.take_word("ESCAPE") {
+                        Some(Box::new(self.expression(4)?))
+                    } else { None };
                     let expression = if regex {
                         Expr::Call {
                             name: "regexp_like".into(),
                             args: vec![left, pattern],
                         }
                     } else {
-                        let (value, pattern) = if insensitive {
+                        let (value, pattern, escape) = if insensitive {
                             (
                                 Expr::Call { name: "lower".into(), args: vec![left] },
                                 Expr::Call { name: "lower".into(), args: vec![pattern] },
+                                escape.map(|value| Box::new(Expr::Call {
+                                    name: "lower".into(), args: vec![*value],
+                                })),
                             )
-                        } else { (left, pattern) };
+                        } else { (left, pattern, escape) };
                         Expr::Like {
                             value: Box::new(value),
                             pattern: Box::new(pattern),
+                            escape,
                         }
                     };
                     left = if negate { Expr::Not(Box::new(expression)) } else { expression };
