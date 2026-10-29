@@ -27,26 +27,36 @@ impl ColumnStatistics {
     }
 
     pub fn observe(&mut self, value: &Value) -> Result<()> {
-        self.rows = self.rows.checked_add(1)
+        let rows = self.rows.checked_add(1)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
-        if value.is_null() {
-            self.nulls += 1;
-            return Ok(());
-        }
-        if let Some(current) = &self.min {
-            if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
-                self.min = Some(value.clone());
-            }
+        let nulls = if value.is_null() {
+            self.nulls.checked_add(1)
+                .ok_or_else(|| Error::Execution("statistics NULL count overflow".into()))?
         } else {
-            self.min = Some(value.clone());
-        }
-        if let Some(current) = &self.max {
-            if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
-                self.max = Some(value.clone());
+            self.nulls
+        };
+        let mut min = self.min.clone();
+        let mut max = self.max.clone();
+        if !value.is_null() {
+            if let Some(current) = &min {
+                if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
+                    min = Some(value.clone());
+                }
+            } else {
+                min = Some(value.clone());
             }
-        } else {
-            self.max = Some(value.clone());
+            if let Some(current) = &max {
+                if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
+                    max = Some(value.clone());
+                }
+            } else {
+                max = Some(value.clone());
+            }
         }
+        self.rows = rows;
+        self.nulls = nulls;
+        self.min = min;
+        self.max = max;
         Ok(())
     }
 
@@ -140,3 +150,29 @@ mod multi_batch_statistics_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod observation_atomicity_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_comparison_preserves_all_statistics() {
+        let mut stats = ColumnStatistics {
+            rows: 3, nulls: 1,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(4)),
+        };
+        let before = stats.clone();
+        assert!(stats.observe(&Value::Text("bad".into())).is_err());
+        assert_eq!(stats, before);
+    }
+
+    #[test]
+    fn null_observation_overflow_preserves_state() {
+        let mut stats = ColumnStatistics {
+            rows: u64::MAX, nulls: 2, min: None, max: None,
+        };
+        let before = stats.clone();
+        assert!(stats.observe(&Value::Null).is_err());
+        assert_eq!(stats, before);
+    }
+}
