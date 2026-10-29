@@ -26,10 +26,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
-    let begin = text.char_indices().nth(index)
-        .map_or(text.len(), |(byte, _)| byte);
-    let end = text[begin..].char_indices().nth(count)
-        .map_or(text.len(), |(byte, _)| begin + byte);
+    let begin = if text.is_ascii() { index.min(text.len()) } else {
+        text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
+    };
+    let end = if text.is_ascii() { begin.saturating_add(count).min(text.len()) } else {
+        text[begin..].char_indices().nth(count)
+            .map_or(text.len(), |(byte, _)| begin + byte)
+    };
     let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
     result.push_str(&text[..begin]);
     result.push_str(replacement);
@@ -116,5 +119,19 @@ mod common_suffix_extension_tests {
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_overlay_offset_tests {
+    use super::*;
+    #[test]
+    fn fast_path_preserves_insert_replace_and_append() {
+        let input = Value::Text("a".repeat(100_000));
+        let result = evaluate(&[input.clone(), Value::Text("XY".into()), Value::Integer(50_001), Value::Integer(2)]).unwrap();
+        let Value::Text(text) = result else { panic!("expected text"); };
+        assert_eq!(&text[49_999..50_003], "aXYa");
+        assert_eq!(text.len(), 100_000);
+        assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Text("!".into()), Value::Integer(10)]).unwrap(), Value::Text("abc!".into()));
     }
 }
