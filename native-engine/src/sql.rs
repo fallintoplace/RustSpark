@@ -288,12 +288,26 @@ impl Parser {
         }
         match self.next() {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("CASE") => {
+                // Spark supports both CASE WHEN predicate THEN result
+                // and CASE expression WHEN value THEN result.
+                let operand = if self.peek_word("WHEN") {
+                    None
+                } else {
+                    Some(self.expression(0)?)
+                };
                 let mut branches = Vec::new();
                 while self.take_word("WHEN") {
-                    let condition = self.expression(0)?;
+                    let matching = self.expression(0)?;
+                    let condition = match &operand {
+                        None => matching,
+                        Some(base) => Expr::binary(base.clone(), BinaryOp::Equal, matching),
+                    };
                     self.expect_word("THEN")?;
                     let result = self.expression(0)?;
                     branches.push((condition, result));
+                    if branches.len() > 256 {
+                        return Err(Error::Parse("CASE exceeds 256 WHEN branches".into()));
+                    }
                 }
                 if branches.is_empty() {
                     return Err(Error::Parse("CASE requires WHEN".into()));
