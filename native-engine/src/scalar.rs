@@ -54,7 +54,7 @@ impl Hash for Value {
 
 fn compare_integer_float(integer: i64, float: f64) -> Option<Ordering> {
     if float.is_nan() {
-        return None;
+        return Some(Ordering::Less);
     }
     if float < i64::MIN as f64 {
         return Some(Ordering::Greater);
@@ -92,7 +92,12 @@ impl Value {
         match (self, other) {
             (Self::Null, _) | (_, Self::Null) => Ok(None),
             (Self::Integer(a), Self::Integer(b)) => Ok(Some(a.cmp(b))),
-            (Self::Float(a), Self::Float(b)) => Ok(a.partial_cmp(b)),
+            (Self::Float(a), Self::Float(b)) => Ok(Some(match (a.is_nan(), b.is_nan()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => a.partial_cmp(b).expect("finite float ordering"),
+            })),
             (Self::Text(a), Self::Text(b)) => Ok(Some(a.cmp(b))),
             (Self::Boolean(a), Self::Boolean(b)) => Ok(Some(a.cmp(b))),
             (Self::Integer(a), Self::Float(b)) => Ok(compare_integer_float(*a, *b)),
