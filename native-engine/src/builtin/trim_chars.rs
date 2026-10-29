@@ -57,7 +57,7 @@ fn normalize_space(args: &[Value]) -> Result<Value> {
         let mut output = String::with_capacity(input.len());
         let mut pending = false;
         for byte in input.bytes() {
-            if byte.is_ascii_whitespace() {
+            if byte.is_ascii_whitespace() || byte == 0x0b {
                 pending = !output.is_empty();
             } else {
                 if pending { output.push(' '); }
@@ -153,5 +153,6 @@ mod normalize_space_ascii_fast_path_tests {
         assert_eq!(normalize_space(&[Value::Text("\t A  B \r\n C  ".into())]).unwrap(), Value::Text("A B C".into()));
         assert_eq!(normalize_space(&[Value::Text(" A\u{00A0}B ".into())]).unwrap(), Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Text("   ".into())]).unwrap(), Value::Text(String::new()));
+        assert_eq!(normalize_space(&[Value::Text("A\u{000B}B".into())]).unwrap(), Value::Text("A B".into()));
     }
 }
