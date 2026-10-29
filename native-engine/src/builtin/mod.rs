@@ -31,6 +31,8 @@ mod ascii_chr;
 mod hex_utf8;
 mod base64_utf8;
 mod string_search;
+mod json_path;
+mod json_valid;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -84,6 +86,7 @@ const MODULES: &[&[Function]] = &[
     &hex_utf8::FUNCTIONS,
     &base64_utf8::FUNCTIONS,
     &string_search::FUNCTIONS,
+    &json_valid::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
