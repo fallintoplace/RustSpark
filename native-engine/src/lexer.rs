@@ -236,8 +236,8 @@ mod spark_backtick_identifier_tests {
         assert_eq!(tokens[1], Token::Word("a b".into()));
         assert_eq!(tokens[3], Token::Word("group".into()));
         assert_eq!(tokens[5], Token::Word("a`b".into()));
-        assert_eq!(tokens[7], Token::Word("FROM".into()));
-        assert_eq!(tokens[8], Token::Word("with-dash".into()));
+        assert_eq!(tokens[6], Token::Word("FROM".into()));
+        assert_eq!(tokens[7], Token::Word("with-dash".into()));
         assert!(tokenize("SELECT `unterminated").is_err());
         assert!(tokenize("SELECT ``").is_err());
     }
