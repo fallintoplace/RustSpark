@@ -14,6 +14,26 @@ struct State {
     has_value: bool,
 }
 
+impl State {
+    fn add(&mut self, amount: &Value) -> Result<()> {
+        let rows = self.rows.checked_add(1)
+            .ok_or_else(|| Error::Execution("group count overflow".into()))?;
+        let (sum, has_value) = match amount {
+            Value::Integer(value) => (
+                self.sum.checked_add(i128::from(*value))
+                    .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?,
+                true,
+            ),
+            Value::Null => (self.sum, self.has_value),
+            _ => return Err(Error::Type("partial SUM requires integer values".into())),
+        };
+        self.rows = rows;
+        self.sum = sum;
+        self.has_value = has_value;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PartialGroupSum {
     key_column: String,
@@ -52,22 +72,18 @@ impl PartialGroupSum {
             return Err(Error::Type("group key schema changed between partitions".into()));
         }
         self.key_type = Some(kind);
-        for row in 0..batch.num_rows() {
-            let key_value = batch.value(row, key)?.clone();
-            if !self.groups.contains_key(&key_value) && self.groups.len() >= self.max_groups {
-                return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
-            }
-            let state = self.groups.entry(key_value).or_default();
-            state.rows = state.rows.checked_add(1)
-                .ok_or_else(|| Error::Execution("group count overflow".into()))?;
-            match batch.value(row, amount)? {
-                Value::Integer(value) => {
-                    state.sum = state.sum.checked_add(i128::from(*value))
-                        .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?;
-                    state.has_value = true;
+        let key_values = batch.column(key)?;
+        let amounts = batch.column(amount)?;
+        for (key_value, value) in key_values.iter().zip(amounts) {
+            if let Some(state) = self.groups.get_mut(key_value) {
+                state.add(value)?;
+            } else {
+                if self.groups.len() >= self.max_groups {
+                    return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
                 }
-                Value::Null => {}
-                _ => return Err(Error::Type("partial SUM requires integer values".into())),
+                let mut state = State::default();
+                state.add(value)?;
+                self.groups.insert(key_value.clone(), state);
             }
         }
         Ok(())
