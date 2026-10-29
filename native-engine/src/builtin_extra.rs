@@ -65,7 +65,7 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             Ok(DataType::Text)
         },
         "REPLACE" => {
-            if args.len() != 3 { return Err(Error::Parse("REPLACE requires three arguments".into())); }
+            if !(2..=3).contains(&args.len()) { return Err(Error::Parse("REPLACE requires two or three arguments".into())); }
             for arg in args {
                 if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("REPLACE requires text arguments".into())); }
             }
@@ -207,9 +207,13 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
         },
         "REPLACE" => match args {
-            [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] => Ok(Value::Text(text.replace(pattern.as_str(), replacement))),
+            [Value::Text(text), Value::Text(pattern)] =>
+                Ok(Value::Text(text.replace(pattern.as_str(), ""))),
+            [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] =>
+                Ok(Value::Text(text.replace(pattern.as_str(), replacement))),
+            [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
-            _ => Err(Error::Type("REPLACE requires three text arguments".into())),
+            _ => Err(Error::Type("REPLACE requires two or three text arguments".into())),
         },
         "ROUND" => {
             if args.is_empty() || args.len() > 2 { return Err(Error::Parse("ROUND requires one or two arguments".into())); }
@@ -315,5 +319,23 @@ mod spark_trim_space_tests {
         assert_eq!(evaluate("TRIM", &[Value::Text(" \t abc \n ".into())]).unwrap(),
             Value::Text("\t abc \n".into()));
         assert_eq!(evaluate("TRIM", &[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod spark_replace_optional_tests {
+    use super::*;
+
+    #[test]
+    fn two_arg_replace_removes_occurrences_and_retains_nulls() {
+        assert_eq!(evaluate("REPLACE", &[Value::Text("banana".into()), Value::Text("na".into())]).unwrap(),
+            Value::Text("ba".into()));
+        assert_eq!(evaluate("REPLACE", &[Value::Text("banana".into()), Value::Text("z".into())]).unwrap(),
+            Value::Text("banana".into()));
+        assert_eq!(evaluate("REPLACE", &[
+            Value::Text("banana".into()), Value::Text("na".into()), Value::Text("XYZ".into()),
+        ]).unwrap(), Value::Text("baXYZXYZ".into()));
+        assert_eq!(evaluate("REPLACE", &[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+        assert!(evaluate("REPLACE", &[Value::Text("x".into())]).is_err());
     }
 }
