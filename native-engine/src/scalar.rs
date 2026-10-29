@@ -220,7 +220,9 @@ mod mixed_numeric_precision_tests {
         assert_eq!(Value::Integer(-1).sql_compare(&Value::Float(-1.25)).unwrap(), Some(Ordering::Greater));
         assert_eq!(Value::Integer(1).sql_compare(&Value::Float(1.25)).unwrap(), Some(Ordering::Less));
         assert_eq!(Value::Integer(0).sql_compare(&Value::Float(f64::INFINITY)).unwrap(), Some(Ordering::Less));
-        assert_eq!(Value::Integer(0).sql_compare(&Value::Float(f64::NAN)).unwrap(), None);
+        assert_eq!(Value::Integer(0).sql_compare(&Value::Float(f64::NAN)).unwrap(), Some(Ordering::Less));
+        assert_eq!(Value::Float(f64::NAN).sql_compare(&Value::Integer(0)).unwrap(), Some(Ordering::Greater));
+        assert_eq!(Value::Integer(0).sql_equal(&Value::Float(f64::NAN)).unwrap(), Some(false));
     }
 }
 
