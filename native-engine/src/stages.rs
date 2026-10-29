@@ -49,6 +49,10 @@ impl StageGraph {
             if stage.inputs.iter().any(|dependency| !unique.contains(dependency)) {
                 return Err(Error::Schema("stage depends on an unknown stage".into()));
             }
+            let mut seen = HashSet::new();
+            if stage.inputs.iter().any(|id| !seen.insert(id)) {
+                return Err(Error::Schema("duplicate stage dependency".into()));
+            }
         }
         let graph = Self { stages };
         graph.execution_order()?;
@@ -58,7 +62,14 @@ impl StageGraph {
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
     pub fn root(&self) -> Option<usize> {
-        self.stages.last().map(|stage| stage.id)
+        let inputs = self.stages.iter()
+            .flat_map(|stage| stage.inputs.iter().copied())
+            .collect::<HashSet<_>>();
+        let mut roots = self.stages.iter().filter(|stage| !inputs.contains(&stage.id));
+        match (roots.next(), roots.next()) {
+            (Some(root), None) => Some(root.id),
+            _ => None,
+        }
     }
 
     /// Deterministic topological order. Rejects cycles before any task starts.
@@ -196,6 +207,29 @@ mod tests {
         assert!(StageGraph::new(graph).is_err());
         assert!(StageGraph::new(vec![
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![2] },
+        ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stage_root_regression_tests {
+    use super::*;
+
+    #[test]
+    fn root_is_the_only_sink_even_when_input_is_out_of_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 2, kind: StageKind::Project, inputs: vec![1] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+        ]).unwrap();
+        assert_eq!(graph.root(), Some(2));
+        assert_eq!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] }
+        ]).unwrap().root(), None);
+        assert!(StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::UnionAll, inputs: vec![0, 0] }
         ]).is_err());
     }
 }
