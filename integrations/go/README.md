@@ -37,3 +37,5 @@ cd integrations/go && go test ./...
 For large results, `QueryNDJSON(ctx, sql, opts, writer)` streams newline-delimited
 JSON objects to an `io.Writer` without materializing every row. Choose an
 output writer with an appropriate byte budget for untrusted data.
+
+Use `Options{SQLFile: "report.sql"}` instead of inline SQL for checked-in queries. `QueryOne(ctx, sql, opts)` returns one row, `nil` for no rows, or an error when the query contains multiple rows. `Query` limits buffered JSON stdout to 64 MiB by default; set `Options.MaxOutputBytes` to customize the cap. For larger datasets, prefer `QueryNDJSON` with a bounded writer.
