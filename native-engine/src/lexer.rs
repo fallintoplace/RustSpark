@@ -19,7 +19,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         return Err(Error::Parse("SQL exceeds input byte limit".into()));
     }
     let mut chars = input.chars().peekable();
-    let mut tokens = Vec::new();
+    // Reserve a small bounded estimate for ordinary SQL statements.
+    // Avoid a large allocation for SQL dominated by one long string literal.
+    let mut tokens = Vec::with_capacity((input.len() / 8).min(512));
 
     while let Some(character) = chars.next() {
         if character.is_whitespace() {
@@ -203,5 +205,18 @@ mod consolidated_lexer_regressions {
         for query in ["SELECT . FROM t", "SELECT 1e FROM t", "SELECT 1e+ FROM t"] {
             assert!(tokenize(query).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod lexer_capacity_perf_tests {
+    use super::*;
+    #[test]
+    fn large_token_lists_keep_existing_lexical_semantics() {
+        let sql = format!("SELECT {} FROM data", "x, ".repeat(300));
+        let tokens = tokenize(&sql).unwrap();
+        assert_eq!(tokens.first(), Some(&Token::Word("SELECT".into())));
+        assert_eq!(tokens.last(), Some(&Token::Word("data".into())));
+        assert!(tokens.len() > 500);
     }
 }
