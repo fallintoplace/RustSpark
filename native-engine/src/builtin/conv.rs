@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
@@ -26,15 +27,13 @@ fn encode(mut value: u64, base: u64, negative: bool) -> String {
         .expect("CONV emits only ASCII digits").to_owned()
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
-    let input = match &args[0] {
-        Value::Text(text) => text.as_str(),
-        Value::Integer(_) => "",
+    // Text is already borrowed from the input row. Only numeric inputs
+    // need an owned decimal representation for radix conversion.
+    let source: Cow<'_, str> = match &args[0] {
+        Value::Text(text) => Cow::Borrowed(text),
+        Value::Integer(number) => Cow::Owned(number.to_string()),
         Value::Null => return Ok(Value::Null),
         _ => return Err(Error::Type("CONV requires text or integer input".into())),
-    };
-    let source = match &args[0] {
-        Value::Integer(n) => n.to_string(),
-        _ => input.to_string(),
     };
     let Some(from_base) = super::integer(&args[1])? else { return Ok(Value::Null) };
     let Some(to_base) = super::integer(&args[2])? else { return Ok(Value::Null) };
@@ -74,5 +73,24 @@ mod tests {
             Value::Text("1".repeat(64)));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_conv_input_tests {
+    use super::*;
+
+    #[test]
+    fn string_and_integer_radix_inputs_keep_conversion_semantics() {
+        assert_eq!(evaluate(&[
+            Value::Text("  +7FFFFFFFFFFFFFFF  ".into()),
+            Value::Integer(16), Value::Integer(-10),
+        ]).unwrap(), Value::Text(i64::MAX.to_string()));
+        assert_eq!(evaluate(&[
+            Value::Integer(-255), Value::Integer(10), Value::Integer(-16),
+        ]).unwrap(), Value::Text("-FF".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("".into()), Value::Integer(10), Value::Integer(2),
+        ]).unwrap(), Value::Null);
     }
 }
