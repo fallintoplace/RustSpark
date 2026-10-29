@@ -26,7 +26,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let mut output = String::with_capacity(length);
     let mut first = true;
     for arg in &args[1..] {
-        if let Some(text) = super::string(arg)? {
+        if let Value::Text(text) = arg {
             if !first { output.push_str(separator); }
             output.push_str(text);
             first = false;
@@ -74,5 +74,21 @@ mod separator_only_concat_ws_tests {
         assert_eq!(evaluate(&[Value::Text(",".into())]).unwrap(), Value::Text(String::new()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(output(&[DataType::Text]).unwrap(), DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod concat_ws_validated_output_tests {
+    use super::*;
+    #[test]
+    fn preserves_null_skips_and_empty_element_separators() {
+        let args = [
+            Value::Text("🙂".into()), Value::Text("é".into()), Value::Null,
+            Value::Text("".into()), Value::Text("東京".into()),
+        ];
+        assert_eq!(evaluate(&args).unwrap(), Value::Text("é🙂🙂東京".into()));
+        assert_eq!(evaluate(&[Value::Text(",".into()), Value::Null]).unwrap(),
+            Value::Text("".into()));
+        assert!(evaluate(&[Value::Text(",".into()), Value::Integer(1)]).is_err());
     }
 }
