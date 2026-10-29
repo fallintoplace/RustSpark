@@ -10,6 +10,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
     let Some(count) = super::integer(&args[2])? else { return Ok(Value::Null) };
     if count == 0 || delimiter.is_empty() { return Ok(Value::Text(String::new())); }
+    if count == 1 {
+        return Ok(Value::Text(text.find(delimiter).map_or(text, |position| &text[..position]).to_string()));
+    }
+    if count == -1 {
+        return Ok(Value::Text(text.rfind(delimiter).map_or(text, |position| &text[position + delimiter.len()..]).to_string()));
+    }
     let index = usize::try_from(count.unsigned_abs() - 1).ok();
     let result = match index {
         None => text,
@@ -37,5 +43,17 @@ mod tests {
         assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(0)]).unwrap(), Value::Text("".into()));
         assert_eq!(evaluate(&[text, delim, Value::Integer(i64::MIN)]).unwrap(), Value::Text("a.é.c".into()));
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into()), Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod substring_index_single_delimiter_tests {
+    use super::*;
+    #[test]
+    fn single_occurrence_and_absent_delimiters() {
+        for (count, expected) in [(1, "a"), (-1, "c")] {
+            assert_eq!(evaluate(&[Value::Text("a🙂b🙂c".into()), Value::Text("🙂".into()), Value::Integer(count)]).unwrap(), Value::Text(expected.into()));
+        }
+        assert_eq!(evaluate(&[Value::Text("xyz".into()), Value::Text(":".into()), Value::Integer(1)]).unwrap(), Value::Text("xyz".into()));
     }
 }
