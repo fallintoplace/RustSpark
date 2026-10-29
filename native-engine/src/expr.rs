@@ -78,8 +78,21 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
-            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::Like { value, pattern, escape } => {
+                for expression in [value.as_ref(), pattern.as_ref()] {
+                    if expression.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE requires text operands".into()));
+                    }
+                }
+                if let Some(escape) = escape {
+                    if escape.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE ESCAPE requires text".into()));
+                    }
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::Not(_) | Self::IsNull(_) | Self::IsDistinctFrom { .. } =>
+                Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -458,5 +471,33 @@ mod like_rolling_buffer_perf_tests {
         assert!(sql_like_escape("a%b", "a\\%b", '\\').unwrap());
         assert!(sql_like_escape("", "%%", '\\').unwrap());
         assert!(!sql_like_escape("", "_%", '\\').unwrap());
+    }
+}
+
+#[cfg(test)]
+mod like_expression_type_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn rejects_invalid_pattern_and_escape_types_before_execution() {
+        let schema = Schema::new(vec![
+            Field::new("s", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let like = |value, pattern, escape| Expr::Like {
+            value: Box::new(value), pattern: Box::new(pattern),
+            escape: escape.map(Box::new),
+        };
+        assert!(like(Expr::Column("n".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
+        assert!(like(Expr::Column("s".into()), Expr::Column("n".into()), None)
+            .output_type(&schema).is_err());
+        assert!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
+            Some(Expr::Literal(Value::Integer(1)))).output_type(&schema).is_err());
+        assert_eq!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
+            None).output_type(&schema).unwrap(), DataType::Boolean);
+        assert!(like(Expr::Column("missing".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
     }
 }
