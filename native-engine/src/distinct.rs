@@ -66,6 +66,10 @@ pub fn distinct_on(batch: &Batch, keys: &[&str]) -> Result<Batch> {
     }
     let columns = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
+    let mut unique = HashSet::with_capacity(columns.len());
+    if columns.iter().any(|&column| !unique.insert(column)) {
+        return Err(crate::Error::Schema("DISTINCT ON key columns must be unique".into()));
+    }
     if columns.len() == 1 {
         let column = batch.column(columns[0])?;
         let mut seen = HashSet::new();
@@ -120,5 +124,18 @@ mod distinct_on_feature_tests {
         assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
             "execution: DISTINCT key limit exceeded");
         assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod distinct_on_duplicate_columns_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn rejects_repeated_keys_even_with_different_case() {
+        let schema = Schema::new(vec![Field::new("Id", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![crate::scalar::Value::Integer(1)]]).unwrap();
+        assert!(distinct_on(&batch, &["Id", "id"]).is_err());
+        assert_eq!(distinct_on(&batch, &["id"]).unwrap().num_rows(), 1);
     }
 }
