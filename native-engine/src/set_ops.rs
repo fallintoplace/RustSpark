@@ -91,7 +91,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
     let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
-    for row in right.rows()? {
+    for index in 0..right.num_rows() {
+        let row = right.row(index)?;
         let entry = counts.entry(row).or_insert(0);
         *entry = entry.checked_add(1)
             .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
@@ -104,7 +105,8 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(&right)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -120,7 +122,8 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(right)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -194,5 +197,25 @@ mod except_bounded_right_set_regression {
         assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(), vec![
             vec![Value::Integer(3)], vec![Value::Integer(1)],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod lazy_multiset_rows_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn multiset_rows_keep_order_with_null_and_duplicate_keys() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2)], vec![Value::Null], vec![Value::Integer(2)],
+        ]).unwrap();
+        let b = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2)], vec![Value::Null],
+        ]).unwrap();
+        assert_eq!(intersect_all(&a, &b).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)], vec![Value::Null]]);
+        assert_eq!(except_all(&a, &b).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)]]);
     }
 }
