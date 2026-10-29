@@ -99,6 +99,15 @@ impl TaskScheduler {
         true
     }
 
+    pub fn cancel_task(&mut self, id: u64) -> bool {
+        let Some(task) = self.tasks.get_mut(&id) else { return false; };
+        if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
+            task.status = TaskStatus::Failed;
+            return true;
+        }
+        false
+    }
+
     pub fn status(&self, task: u64) -> Option<&TaskStatus> {
         self.tasks.get(&task).map(|entry| &entry.status)
     }
@@ -120,6 +129,22 @@ mod tests {
         assert!(!scheduler.finish(&original, true));
         assert!(scheduler.finish(&replacement, true));
         assert_eq!(scheduler.status(1), Some(&TaskStatus::Done));
+    }
+
+    #[test]
+    fn targeted_cancellation_invalidates_only_the_selected_lease() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3], 3).unwrap();
+        let first = scheduler.lease(7, now, Duration::from_secs(5)).unwrap().unwrap();
+        assert!(scheduler.cancel_task(first.task));
+        assert!(!scheduler.finish(&first, true));
+        assert!(!scheduler.cancel_task(first.task));
+        assert!(!scheduler.cancel_task(99));
+        let second = scheduler.lease(9, now, Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(second.task, 2);
+        assert!(scheduler.finish(&second, true));
+        assert!(scheduler.cancel_task(3));
+        assert_eq!(scheduler.status(2), Some(&TaskStatus::Done));
     }
 
     #[test]
