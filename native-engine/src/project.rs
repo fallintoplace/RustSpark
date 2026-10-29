@@ -102,13 +102,25 @@ pub fn project_columns(batch: &Batch, names: &[&str]) -> Result<Batch> {
         fields.push(batch.schema().field(position)?.clone());
         values.push(batch.column(position)?.to_vec());
     }
-    Batch::new(Schema::new(fields)?, values)
+    Batch::new_with_row_count(Schema::new(fields)?, values, batch.num_rows())
 }
 
 #[cfg(test)]
 mod typed_projection_feature_tests {
     use super::*;
     use crate::{schema::{DataType, Field}, scalar::Value};
+
+    #[test]
+    fn empty_named_projection_keeps_input_cardinality() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(3)], vec![Value::Integer(4)]],
+        ).unwrap();
+        let result = project_columns(&input, &[]).unwrap();
+        assert!(result.schema().is_empty());
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.rows().unwrap(), vec![vec![], vec![]]);
+    }
 
     #[test]
     fn keeps_schema_constraints_and_requested_order() {
