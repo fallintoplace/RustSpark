@@ -148,6 +148,10 @@ impl Expr {
             },
             Self::Binary { left, op, right } => {
                 let left = left.evaluate(batch, row)?;
+                if (*op == BinaryOp::And && left.as_boolean()? == Some(false))
+                    || (*op == BinaryOp::Or && left.as_boolean()? == Some(true)) {
+                    return Ok(left);
+                }
                 let right = right.evaluate(batch, row)?;
                 evaluate_binary(&left, *op, &right)
             }
@@ -296,5 +300,23 @@ mod tests {
     fn overflow_and_division_by_zero_are_reported() {
         assert!(evaluate_binary(&Value::Integer(i64::MAX), BinaryOp::Add, &Value::Integer(1)).is_err());
         assert!(evaluate_binary(&Value::Integer(1), BinaryOp::Divide, &Value::Integer(0)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod short_circuit_feature_tests {
+    use super::*;
+
+    #[test]
+    fn decisive_boolean_skips_invalid_right_operand() {
+        let bad = Expr::binary(
+            Expr::binary(Expr::Literal(Value::Integer(1)), BinaryOp::Divide,
+                Expr::Literal(Value::Integer(0))),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(0)),
+        );
+        let no = Expr::binary(Expr::Literal(Value::Boolean(false)), BinaryOp::And, bad.clone());
+        let yes = Expr::binary(Expr::Literal(Value::Boolean(true)), BinaryOp::Or, bad);
+        assert_eq!(no.evaluate(&batch(), 0).unwrap(), Value::Boolean(false));
+        assert_eq!(yes.evaluate(&batch(), 0).unwrap(), Value::Boolean(true));
     }
 }
