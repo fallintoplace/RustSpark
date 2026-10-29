@@ -157,6 +157,7 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
             *sum = next;
             *count = next_count;
         }
+        State::Distinct { .. } => unreachable!("DISTINCT handled before normal state update"),
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
                 let order = value.sql_compare(existing)?
@@ -168,6 +169,20 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         }
     }
     Ok(())
+}
+
+
+fn finish_state(state: State) -> Result<Value> {
+    Ok(match state {
+        State::Count(value) => Value::Integer(value),
+        State::CountDistinct { keys, .. } => Value::Integer(
+            i64::try_from(keys.len()).map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
+        ),
+        State::Distinct { inner, .. } => finish_state(*inner)?,
+        State::Avg { sum, count } =>
+            if count == 0 { Value::Null } else { Value::Float(sum / count as f64) },
+        State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
+    })
 }
 
 fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[AggregateItem]) -> Result<Schema> {
@@ -238,22 +253,12 @@ fn aggregate_shard(
             }
         }
     }
-    let rows = groups.into_iter().map(|(mut key, states)| {
+    let rows = groups.into_iter().map(|(mut key, states)| -> Result<Vec<Value>> {
         for state in states {
-            key.push(match state {
-                State::Count(value) => Value::Integer(value),
-                State::Distinct { inner, .. } => finish_state(*inner)?,
-            State::CountDistinct { keys, .. } => Value::Integer(keys.len() as i64),
-                State::Avg { sum, count } => if count == 0 {
-                    Value::Null
-                } else {
-                    Value::Float(sum / count as f64)
-                },
-                State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
-            });
+            key.push(finish_state(state)?);
         }
-        key
-    }).collect();
+        Ok(key)
+    }).collect::<Result<Vec<_>>>()?;
     Batch::from_rows(output.clone(), rows)
 }
 
