@@ -26,7 +26,16 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
                 return Some(Err(error));
             }
             let next = self.input.next()?;
-            let result = next.and_then(|batch| filter::filter(&batch, &self.predicate));
+            let result = next.and_then(|batch| {
+                if matches!(&self.predicate,
+                    Expr::Literal(crate::scalar::Value::Boolean(true))) {
+                    // The stream already owns the batch. Do not deep-clone all
+                    // columns for a constant-true filter.
+                    Ok(batch)
+                } else {
+                    filter::filter(&batch, &self.predicate)
+                }
+            });
             match result {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
@@ -185,5 +194,22 @@ mod scale_limit_contiguous_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(output.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
             vec![vec![Value::Integer(4)], vec![Value::Integer(5)], vec![Value::Integer(6)]]);
+    }
+}
+
+#[cfg(test)]
+mod owned_true_filter_batch_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn literal_true_keeps_complete_streamed_batches_and_null_rows() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("name", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("Berlin".into())], vec![Value::Null]]
+        ).unwrap();
+        let output = FilterStream::new(std::iter::once(Ok(input.clone())),
+            Expr::Literal(Value::Boolean(true)), QueryControl::default())
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output, vec![input]);
     }
 }
