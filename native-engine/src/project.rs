@@ -29,7 +29,11 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
                 Ok(Field::new(
                     &selection.alias,
                     selection.expression.output_type(batch.schema())?,
-                    true,
+                    match &selection.expression {
+                        Expr::Column(name) =>
+                            batch.schema().field(batch.schema().column(name)?)?.nullable,
+                        _ => true,
+                    },
                 ))
             })
             .collect::<Result<Vec<_>>>()?,
@@ -112,5 +116,17 @@ mod typed_projection_feature_tests {
         assert!(project_columns(&input, &["id", "ID"]).is_err());
         assert!(project_columns(&input, &["unknown"]).is_err());
     }
+    #[test]
+    fn direct_projection_retains_required_columns() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap(), vec![vec![Value::Integer(3), Value::Null]]).unwrap();
+        let selected = project(&source, &[
+            Selection::new(Expr::Column("id".into()), "alias"),
+            Selection::new(Expr::Column("note".into()), "optional"),
+        ]).unwrap();
+        assert!(!selected.schema().field(0).unwrap().nullable);
+        assert!(selected.schema().field(1).unwrap().nullable);
+    }
 }
-
