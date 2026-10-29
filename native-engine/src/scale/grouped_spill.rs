@@ -1,6 +1,6 @@
 //! Hash-partitioned grouped aggregation with bounded per-shard states.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
@@ -38,8 +38,12 @@ impl Drop for GroupFiles {
     }
 }
 
+const MAX_DISTINCT_KEYS_PER_GROUP: usize = 65_536;
+const MAX_DISTINCT_BYTES_PER_GROUP: usize = 16 * 1024 * 1024;
+
 enum State {
     Count(i64),
+    CountDistinct { keys: HashSet<Value>, bytes: usize },
     Sum(Option<Value>),
     Avg { sum: f64, count: i64 },
     Min(Option<Value>),
@@ -53,17 +57,16 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
         AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
-        AggregateOp::CountDistinct(_) => Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
+        AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
     }
 }
 
 fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
     let value = match op {
         AggregateOp::CountAll => Value::Integer(1),
-        AggregateOp::Count(expr) | AggregateOp::Sum(expr) |
+        AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
-        AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -71,6 +74,19 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         State::Count(count) => {
             *count = count.checked_add(1)
                 .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
+        }
+        State::CountDistinct { keys, bytes } => {
+            if keys.contains(&value) { return Ok(()); }
+            if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
+                return Err(Error::Execution("spill COUNT DISTINCT key limit exceeded".into()));
+            }
+            let footprint = std::mem::size_of::<Value>().saturating_add(64)
+                .saturating_add(match &value { Value::Text(text) => text.len(), _ => 0 });
+            let next = bytes.checked_add(footprint)
+                .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
+                .ok_or_else(|| Error::Execution("spill COUNT DISTINCT byte limit exceeded".into()))?;
+            keys.insert(value);
+            *bytes = next;
         }
         State::Sum(total) => {
             let next = match (total.as_ref(), &value) {
@@ -121,7 +137,7 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
     }
     for item in items {
         let ty = match &item.op {
-            AggregateOp::CountAll | AggregateOp::Count(_) => DataType::Integer,
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) => DataType::Integer,
             AggregateOp::Sum(expr) => match expr.output_type(input)? {
                 DataType::Integer => DataType::Integer,
                 DataType::Float => DataType::Float,
@@ -132,9 +148,8 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
             },
-            AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
         };
-        let nullable = !matches!(&item.op, AggregateOp::CountAll | AggregateOp::Count(_));
+        let nullable = !matches!(&item.op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
         fields.push(Field::new(&item.alias, ty, nullable));
     }
     Schema::new(fields)
@@ -174,6 +189,7 @@ fn aggregate_shard(
         for state in states {
             key.push(match state {
                 State::Count(value) => Value::Integer(value),
+                State::CountDistinct { keys, .. } => Value::Integer(keys.len() as i64),
                 State::Avg { sum, count } => if count == 0 {
                     Value::Null
                 } else {
@@ -274,18 +290,37 @@ mod tests {
     }
 
     #[test]
-    fn native_spill_rejects_unsupported_count_distinct() {
+    fn grouped_spill_count_distinct_ignores_nulls_and_duplicates() {
+        let dir = std::env::temp_dir().join(format!("native-count-distinct-{}-{}",
+            std::process::id(), TEST_ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
         let schema = Schema::new(vec![
             Field::new("g", DataType::Integer, false),
             Field::new("n", DataType::Integer, true),
         ]).unwrap();
-        let error = grouped_aggregate(
-            Vec::<Result<Batch>>::new(), schema,
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let result = grouped_aggregate([Ok(input)], schema,
             &[("g".into(), "g".into())],
             &[AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("n".into())), "unique")],
-            Path::new("."), 2, 10, 2, &QueryControl::default(),
-        ).unwrap_err();
-        assert!(error.to_string().contains("spill COUNT DISTINCT is not implemented"));
+            &dir, 4, 10, 2, &QueryControl::default()).unwrap();
+        let mut rows = Vec::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                assert!(!batch.schema().field(1).unwrap().nullable);
+                rows.extend(batch.rows().unwrap());
+            }
+        }
+        assert!(rows.contains(&vec![Value::Integer(1), Value::Integer(2)]));
+        assert!(rows.contains(&vec![Value::Integer(2), Value::Integer(0)]));
+        drop(result);
+        fs::remove_dir(dir).unwrap();
     }
 
     #[test]
