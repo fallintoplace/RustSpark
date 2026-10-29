@@ -23,6 +23,13 @@ pub fn scan<'a>(
     if target_rows == 0 {
         return Err(Error::Execution("scan batch size must be positive".into()));
     }
+    if let Some(predicate) = &predicate {
+        let kind = predicate.output_type(source.schema())?;
+        if kind != crate::schema::DataType::Boolean &&
+            !matches!(predicate, Expr::Literal(Value::Null)) {
+            return Err(Error::Type("scan predicate must be boolean".into()));
+        }
+    }
     let columns = if projected_columns.is_empty() {
         (0..source.schema().len()).collect::<Vec<_>>()
     } else {
@@ -77,6 +84,14 @@ impl Iterator for ScanCursor<'_> {
 mod tests {
     use super::*;
     use crate::{expr::BinaryOp, schema::{DataType, Field}};
+
+    #[test]
+    fn rejects_bad_predicates_on_empty_sources() {
+        let source = Batch::empty(Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap());
+        assert!(scan(&source, Some(Expr::Column("missing".into())), &[], 10).is_err());
+        assert!(scan(&source, Some(Expr::Column("id".into())), &[], 10).is_err());
+        assert!(scan(&source, Some(Expr::Literal(Value::Null)), &[], 10).is_ok());
+    }
 
     #[test]
     fn scan_filters_before_materializing_projected_columns() {
