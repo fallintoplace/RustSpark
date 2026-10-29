@@ -108,10 +108,13 @@ impl<W: Write> SpillWriter<W> {
                 }
             }
         }
+        let columns = (0..self.schema.len())
+            .map(|index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
         write_u32(&mut self.output, batch.num_rows())?;
         for row in 0..batch.num_rows() {
-            for column in 0..self.schema.len() {
-                match batch.value(row, column)? {
+            for column in &columns {
+                match &column[row] {
                     Value::Null => self.output.write_all(&[0])?,
                     Value::Boolean(false) => self.output.write_all(&[1])?,
                     Value::Boolean(true) => self.output.write_all(&[2])?,
