@@ -32,3 +32,20 @@ test("reports process exit and invalid output", () => {
   assert.throws(() => new RustSpark({ runner: () => ({ status: 0, stdout: "{}" }) }).query("x"), RustSparkError);
   assert.throws(() => new RustSpark({ runner: () => ({ error: Error("ENOENT") }) }).query("x"), /ENOENT/);
 });
+
+
+test("sorts named tables and parameters independent of property insertion order", () => {
+  const calls = [];
+  const client = new RustSpark({ runner: (bin, args) => {
+    calls.push(args);
+    return { status: 0, stdout: "[]", stderr: "" };
+  }});
+  const sql = "SELECT * FROM a";
+  client.query(sql, { csvTables: { b: "b.csv", a: "a.csv" },
+    namedParams: { z: "int64:2", m: "int64:1" } });
+  client.query(sql, { csvTables: { a: "a.csv", b: "b.csv" },
+    namedParams: { m: "int64:1", z: "int64:2" } });
+  assert.deepEqual(calls[0], calls[1]);
+  assert.ok(calls[0].indexOf("a=a.csv") < calls[0].indexOf("b=b.csv"));
+  assert.ok(calls[0].indexOf("m=int64:1") < calls[0].indexOf("z=int64:2"));
+});
