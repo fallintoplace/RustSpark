@@ -174,7 +174,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("UPPER requires text".into())),
         },
         "LENGTH" => match args {
-            [Value::Text(value)] => Ok(Value::Integer(i64::try_from(value.chars().count()).map_err(|_| Error::Execution("text length overflow".into()))?)),
+            [Value::Text(value)] => {
+                let count = if value.is_ascii() { value.len() } else { value.chars().count() };
+                Ok(Value::Integer(i64::try_from(count)
+                    .map_err(|_| Error::Execution("text length overflow".into()))?))
+            },
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("LENGTH requires text".into())),
         },
@@ -353,5 +357,16 @@ mod ascii_case_conversion_tests {
         assert_eq!(evaluate("UPPER", &[Value::Text("BeRLiN".into())]).unwrap(), Value::Text("BERLIN".into()));
         assert_eq!(evaluate("UPPER", &[Value::Text("straße".into())]).unwrap(), Value::Text("STRASSE".into()));
         assert_eq!(evaluate("LOWER", &[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_length_tests {
+    use super::*;
+    #[test]
+    fn length_counts_ascii_bytes_and_unicode_characters() {
+        assert_eq!(evaluate("LENGTH", &[Value::Text("ABC".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(evaluate("LENGTH", &[Value::Text("é🙂".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(evaluate("LENGTH", &[Value::Null]).unwrap(), Value::Null);
     }
 }
