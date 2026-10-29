@@ -25,6 +25,18 @@ func TestCommandEscapesNothingThroughShell(t *testing.T) {
     }
 }
 
+func TestIdentifiersRejectNewlinesAndNonASCII(t *testing.T) {
+    c := Client{}
+    for _, name := range []string{"bad\n", "bad-name", "é", "1start"} {
+        if _, err := c.arguments("SELECT 1", Options{CSVTables: map[string]string{name: "file.csv"}}); err == nil {
+            t.Fatalf("expected invalid table identifier %q to be rejected", name)
+        }
+        if _, err := c.arguments("SELECT 1", Options{NamedParams: map[string]string{name: "int64:1"}}); err == nil {
+            t.Fatalf("expected invalid parameter identifier %q to be rejected", name)
+        }
+    }
+}
+
 func TestRejectsConflictingAndInvalidInputs(t *testing.T) {
     c := Client{}
     cases := []Options{
