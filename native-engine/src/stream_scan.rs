@@ -31,6 +31,12 @@ pub fn scan<'a>(
             return Err(Error::Type("scan predicate must be boolean".into()));
         }
     }
+    // A constant true predicate cannot reject rows. Treat it as unfiltered
+    // so identity scans can take the contiguous batch slicing path.
+    let predicate = match predicate {
+        Some(Expr::Literal(Value::Boolean(true))) => None,
+        other => other,
+    };
     let columns = if projected_columns.is_empty() {
         (0..source.schema().len()).collect::<Vec<_>>()
     } else {
@@ -242,5 +248,23 @@ mod identity_scan_fast_path_tests {
         let parts = scan(&input, None, &[], 3).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 1]);
         assert_eq!(parts.iter().flat_map(|p| p.rows().unwrap()).collect::<Vec<_>>(), input.rows().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod constant_true_scan_perf_tests {
+    use super::*;
+    #[test]
+    fn true_predicate_uses_the_same_chunks_as_unfiltered_scan() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "id", crate::schema::DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..7)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let unfiltered = scan(&input, None, &[], 3).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let constant = scan(&input, Some(Expr::Literal(Value::Boolean(true))), &[], 3).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(constant, unfiltered);
+        assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
     }
 }
