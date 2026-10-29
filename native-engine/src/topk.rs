@@ -87,3 +87,36 @@ mod tests {
         }
     }
 }
+
+ 
+/// Keep only OFFSET + LIMIT candidates, preserving stable ties.
+pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize) -> Result<Batch> {
+    if count == 0 {
+        return batch.take(&[]);
+    }
+    let required = offset.checked_add(count)
+        .ok_or_else(|| crate::Error::Execution("top-K pagination overflow".into()))?;
+    let best = top_k(batch, keys, required)?;
+    crate::limit::limit(&best, offset, Some(count))
+}
+
+#[cfg(test)]
+mod topk_offset_feature_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn pagination_matches_stable_sorted_rows() {
+        let schema = Schema::new(vec![Field::new("score", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(5)], vec![Value::Integer(2)],
+            vec![Value::Integer(9)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let keys = vec![SortKey::ascending(Expr::Column("score".into()))];
+        assert_eq!(top_k_offset(&input, &keys, 1, 2).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)], vec![Value::Integer(5)]]);
+        assert_eq!(top_k_offset(&input, &keys, 10, 2).unwrap().num_rows(), 0);
+        assert!(top_k_offset(&input, &keys, usize::MAX, 2).is_err());
+    }
+}
+
