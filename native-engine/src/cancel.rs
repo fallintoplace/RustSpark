@@ -35,6 +35,10 @@ impl QueryGuard {
         Self { cancellation, deadline: None }
     }
 
+    pub fn with_deadline(cancellation: Cancellation, deadline: Instant) -> Self {
+        Self { cancellation, deadline: Some(deadline) }
+    }
+
     pub fn with_timeout(cancellation: Cancellation, timeout: Duration) -> Result<Self> {
         let deadline = Instant::now().checked_add(timeout)
             .ok_or_else(|| Error::Execution("query timeout overflow".into()))?;
@@ -75,5 +79,19 @@ mod tests {
     fn deadlines_are_enforced_without_sleeping() {
         let guard = QueryGuard::with_timeout(Cancellation::new(), Duration::ZERO).unwrap();
         assert!(guard.check().unwrap_err().to_string().contains("deadline"));
+    }
+}
+
+#[cfg(test)]
+mod absolute_deadline_engine_tests {
+    use super::*;
+
+    #[test]
+    fn original_cancellation_and_deadline_are_shared() {
+        let token = Cancellation::new();
+        let guard = QueryGuard::with_deadline(token.clone(), Instant::now());
+        assert!(guard.check().unwrap_err().to_string().contains("deadline"));
+        token.cancel();
+        assert!(guard.check().unwrap_err().to_string().contains("cancelled"));
     }
 }
