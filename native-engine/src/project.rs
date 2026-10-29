@@ -43,7 +43,7 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
             column.push(selection.expression.evaluate(batch, row)?);
         }
     }
-    Batch::new(schema, columns)
+    Batch::new_with_row_count(schema, columns, batch.num_rows())
 }
 
 #[cfg(test)]
@@ -54,6 +54,18 @@ mod tests {
         scalar::Value,
         schema::{DataType, Field},
     };
+
+    #[test]
+    fn computed_projection_with_no_columns_keeps_rows() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+        ).unwrap();
+        let result = project(&input, &[]).unwrap();
+        assert_eq!(result.schema().len(), 0);
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.rows().unwrap(), vec![vec![], vec![]]);
+    }
 
     #[test]
     fn computed_columns_are_typed_and_aliased() {
