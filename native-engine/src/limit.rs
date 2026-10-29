@@ -10,6 +10,9 @@ pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch
     let end = count.map_or(batch.num_rows(), |count| {
         start.saturating_add(count).min(batch.num_rows())
     });
+    if start == 0 && end == batch.num_rows() {
+        return Ok(batch.clone());
+    }
     batch.slice_rows(start, end)
 }
 
@@ -46,5 +49,18 @@ mod direct_limit_slice_tests {
         let result = limit(&input, usize::MAX, None).unwrap();
         assert_eq!(result.num_rows(), 0);
         assert_eq!(result.schema(), &schema);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_full_range_limit_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn full_limit_returns_equivalent_batch_and_keeps_empty_schema_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap();
+        assert_eq!(limit(&batch, 0, None).unwrap(), batch);
+        assert_eq!(limit(&batch, 0, Some(9)).unwrap(), batch);
     }
 }

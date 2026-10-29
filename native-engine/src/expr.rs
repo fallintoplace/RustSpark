@@ -173,6 +173,9 @@ impl Expr {
 
 /// SQL LIKE wildcard matching with bounded working memory and work.
 fn sql_like(input: &str, pattern: &str) -> Result<bool> {
+    if !pattern.contains('%') && !pattern.contains('_') {
+        return Ok(input == pattern);
+    }
     let text: Vec<char> = input.chars().collect();
     let pattern: Vec<char> = pattern.chars().collect();
     if (text.len() + 1).checked_mul(pattern.len() + 1).is_none_or(|cells| cells > 8_000_000) {
@@ -350,5 +353,17 @@ mod division_type_preflight_tests {
         let valid = Expr::binary(Expr::Column("price".into()),
             BinaryOp::Divide, Expr::Literal(Value::Integer(2)));
         assert_eq!(valid.output_type(&schema).unwrap(), DataType::Float);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_literal_like_fastpath_tests {
+    use super::*;
+    #[test]
+    fn literal_patterns_do_not_pay_quadratic_work_budget() {
+        let text = "é".repeat(4_000);
+        assert!(sql_like(&text, &text).unwrap());
+        assert!(!sql_like(&text, "x").unwrap());
+        assert!(sql_like("abc", "a%c").unwrap());
     }
 }

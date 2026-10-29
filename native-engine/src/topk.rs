@@ -34,6 +34,9 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take(&[]); }
+    if k >= batch.num_rows() && !keys.is_empty() {
+        return crate::sort::sort(batch, keys);
+    }
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
     }
@@ -98,6 +101,9 @@ mod tests {
 /// Keep only OFFSET + LIMIT candidates, preserving stable ties.
 pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize) -> Result<Batch> {
     if count == 0 {
+        for key in keys {
+            key.expression.output_type(batch.schema())?;
+        }
         return batch.take(&[]);
     }
     let required = offset.checked_add(count)
@@ -142,5 +148,20 @@ mod unordered_topk_tests {
             vec![vec![Value::Integer(0)], vec![Value::Integer(1)]]);
         assert_eq!(top_k(&batch, &[], 100).unwrap(), batch);
         assert_eq!(top_k(&batch, &[], 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_topk_fastpath_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field, Schema}};
+    #[test]
+    fn full_topk_uses_stable_sort_equivalence_and_zero_count_validates() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(2)], vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        let key = SortKey::ascending(Expr::Column("n".into()));
+        assert_eq!(top_k(&batch, &[key.clone()], 4).unwrap(), crate::sort::sort(&batch, &[key.clone()]).unwrap());
+        assert!(top_k_offset(&batch, &[SortKey::ascending(Expr::Column("missing".into()))], 0, 0).is_err());
+        assert_eq!(top_k_offset(&batch, &[key], 1, 0).unwrap().num_rows(), 0);
     }
 }
