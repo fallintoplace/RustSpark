@@ -52,6 +52,30 @@ impl Hash for Value {
     }
 }
 
+// Compare an i64 and an f64 without rounding the integer to 53 bits.
+fn compare_int_float(integer: i64, float: f64) -> Option<Ordering> {
+    if float.is_nan() {
+        return None;
+    }
+    // 2^63 is exactly representable as f64, unlike i64::MAX.
+    if float >= 9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Less);
+    }
+    if float < -9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Greater);
+    }
+    let whole = float.trunc() as i64;
+    Some(integer.cmp(&whole).then_with(|| {
+        if float.fract() > 0.0 {
+            Ordering::Less
+        } else if float.fract() < 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }))
+}
+
 impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
@@ -72,8 +96,8 @@ impl Value {
             (Self::Float(a), Self::Float(b)) => Ok(a.partial_cmp(b)),
             (Self::Text(a), Self::Text(b)) => Ok(Some(a.cmp(b))),
             (Self::Boolean(a), Self::Boolean(b)) => Ok(Some(a.cmp(b))),
-            (Self::Integer(a), Self::Float(b)) => Ok((*a as f64).partial_cmp(b)),
-            (Self::Float(a), Self::Integer(b)) => Ok(a.partial_cmp(&(*b as f64))),
+            (Self::Integer(a), Self::Float(b)) => Ok(compare_int_float(*a, *b)),
+            (Self::Float(a), Self::Integer(b)) => Ok(compare_int_float(*b, *a).map(Ordering::reverse)),
             _ => Err(Error::Type("cannot compare incompatible SQL values".into())),
         }
     }
@@ -160,5 +184,22 @@ mod native_cast_feature_tests {
         assert!(Value::Float(f64::INFINITY).cast_to(DataType::Integer).is_err());
         assert!(Value::Float(i64::MAX as f64).cast_to(DataType::Integer).is_err());
         assert!(Value::Text("x".into()).cast_to(DataType::Integer).is_err());
+    }
+#[cfg(test)]
+mod exact_numeric_comparison_tests {
+    use super::*;
+
+    #[test]
+    fn compares_large_integers_without_floating_point_rounding() {
+        assert_eq!(Value::Integer(9_007_199_254_740_993)
+            .sql_compare(&Value::Float(9_007_199_254_740_992.0)).unwrap(),
+            Some(Ordering::Greater));
+        assert_eq!(Value::Integer(i64::MAX)
+            .sql_compare(&Value::Float(9_223_372_036_854_775_808.0)).unwrap(),
+            Some(Ordering::Less));
+        assert_eq!(Value::Float(-0.5)
+            .sql_compare(&Value::Integer(0)).unwrap(), Some(Ordering::Less));
+        assert_eq!(Value::Float(f64::NAN)
+            .sql_compare(&Value::Integer(0)).unwrap(), None);
     }
 }
