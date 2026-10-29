@@ -75,3 +75,14 @@ test("SQL file and deterministic table and parameter ordering", () => {
   assert.throws(() => client.query("SELECT 1", { sqlFile: "x.sql" }), TypeError);
   assert.throws(() => client.query("", { sqlFile: "" }), TypeError);
 });
+
+test("rejects missing named table paths before running RustSpark", () => {
+  const client = new RustSpark({ runner: () => { throw Error("should not run"); } });
+  for (const source of [
+    { csvTables: { sales: "" } },
+    { parquetTables: { sales: "" } },
+    { jsonTables: { events: "" } },
+  ]) {
+    assert.throws(() => client.query("SELECT 1", source), TypeError);
+  }
+});
