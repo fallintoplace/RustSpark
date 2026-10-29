@@ -70,6 +70,7 @@ fn instr(args: &[Value]) -> Result<Value> {
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "split_part", min_args: 3, max_args: 3, result_type: split_type, call: split_part },
     Function { name: "locate", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
+    Function { name: "position", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
     Function { name: "instr", min_args: 2, max_args: 2, result_type: locate_type, call: instr },
 ];
 #[cfg(test)]
@@ -87,6 +88,9 @@ mod tests {
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(1)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(-1)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(2)]).unwrap(), Value::Text("".into()));
+        assert!(crate::builtin::supports("position"));
+        assert_eq!(locate(&[Value::Text("bar".into()), Value::Text("foobarbar".into()), Value::Integer(5)]).unwrap(), Value::Integer(7));
+        assert_eq!(locate(&[Value::Text("bar".into()), Value::Null]).unwrap(), Value::Null);
     }
 }
 
