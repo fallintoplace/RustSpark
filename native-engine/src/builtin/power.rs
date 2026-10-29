@@ -5,7 +5,12 @@ fn power(args: &[Value]) -> Result<Value> {
     let Some(base) = super::number(&args[0])? else { return Ok(Value::Null) };
     let Some(exponent) = super::number(&args[1])? else { return Ok(Value::Null) };
     let result = match &args[1] {
-        Value::Integer(n) if (-32..=32).contains(n) => base.powi(*n as i32),
+        Value::Integer(n) if base == -1.0 => if n & 1 == 0 { 1.0 } else { -1.0 },
+        Value::Integer(_) if base == 1.0 => 1.0,
+        Value::Integer(n) => match i32::try_from(*n) {
+            Ok(power) => base.powi(power),
+            Err(_) => base.powf(exponent),
+        },
         _ => base.powf(exponent),
     };
     super::finite(result)
@@ -25,5 +30,18 @@ mod tests {
         assert_eq!(power(&[Value::Integer(9), Value::Float(0.5)]).unwrap(), Value::Float(3.0));
         assert!(power(&[Value::Integer(0), Value::Integer(-1)]).is_err());
         assert_eq!(power(&[Value::Null, Value::Integer(9)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod exact_integer_exponent_tests {
+    use super::*;
+    #[test]
+    fn very_large_integer_exponents_keep_negative_one_parity() {
+        assert_eq!(power(&[Value::Integer(-1), Value::Integer(i64::MAX)]).unwrap(), Value::Float(-1.0));
+        assert_eq!(power(&[Value::Integer(-1), Value::Integer(i64::MIN)]).unwrap(), Value::Float(1.0));
+        assert_eq!(power(&[Value::Integer(-1), Value::Integer(9_007_199_254_740_993)]).unwrap(), Value::Float(-1.0));
+        assert_eq!(power(&[Value::Integer(1), Value::Integer(i64::MAX)]).unwrap(), Value::Float(1.0));
+        assert_eq!(power(&[Value::Null, Value::Integer(i64::MAX)]).unwrap(), Value::Null);
     }
 }
