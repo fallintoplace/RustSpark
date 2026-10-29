@@ -63,6 +63,7 @@ mod elt;
 mod regexp_instr;
 mod regexp_substr;
 mod crc32;
+mod url_encode;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -146,6 +147,7 @@ const MODULES: &[&[Function]] = &[
     &regexp_instr::FUNCTIONS,
     &regexp_substr::FUNCTIONS,
     &crc32::FUNCTIONS,
+    &url_encode::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
