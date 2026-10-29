@@ -25,6 +25,12 @@ pub enum Plan {
         group_by: Vec<(Expr, String)>,
         aggregates: Vec<AggregateItem>,
     },
+    GroupingSets {
+        input: Box<Plan>,
+        group_by: Vec<(Expr, String)>,
+        sets: Vec<Vec<usize>>,
+        aggregates: Vec<AggregateItem>,
+    },
     Sort {
         input: Box<Plan>,
         keys: Vec<SortKey>,

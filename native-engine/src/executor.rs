@@ -33,6 +33,49 @@ pub fn execute_with_options(
     execute_with_guard(plan, catalog, options, &QueryGuard::default())
 }
 
+
+fn execute_grouping_sets(
+    input: &Batch,
+    group_by: &[(crate::expr::Expr, String)],
+    sets: &[Vec<usize>],
+    aggregates: &[crate::aggregate::AggregateItem],
+) -> Result<Batch> {
+    use crate::scalar::Value;
+    if group_by.len() > 8 || sets.is_empty() || sets.len() > 256 {
+        return Err(Error::Execution("GROUPING SETS shape exceeds safety limits".into()));
+    }
+    let schema = aggregate::aggregate(
+        &Batch::empty(input.schema().clone()), group_by, aggregates
+    )?.schema().clone();
+    let mut rows = Vec::new();
+    for set in sets {
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = Vec::new();
+        for index in set {
+            if *index >= group_by.len() || !seen.insert(*index) {
+                return Err(Error::Parse("invalid grouping set indices".into()));
+            }
+            keys.push(group_by[*index].clone());
+        }
+        let part = aggregate::aggregate(input, &keys, aggregates)?;
+        let part_rows = part.rows()?;
+        if rows.len().checked_add(part_rows.len()).is_none_or(|n| n > 1_000_000) {
+            return Err(Error::Execution("GROUPING SETS row limit exceeded".into()));
+        }
+        for row in part_rows {
+            let mut output = vec![Value::Null; group_by.len() + aggregates.len()];
+            for (position, index) in set.iter().enumerate() {
+                output[*index] = row[position].clone();
+            }
+            for (i, value) in row.into_iter().skip(set.len()).enumerate() {
+                output[group_by.len() + i] = value;
+            }
+            rows.push(output);
+        }
+    }
+    Batch::from_rows(schema, rows)
+}
+
 fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
     let mut pending = vec![(plan, 0_usize)];
     while let Some((node, depth)) = pending.pop() {
@@ -44,6 +87,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
+            | Plan::GroupingSets { input, .. }
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => pending.push((input, depth + 1)),
@@ -92,6 +136,8 @@ fn execute_inner(
         Plan::Aggregate { input, group_by, aggregates } => {
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
+        Plan::GroupingSets { input, group_by, sets, aggregates } =>
+            execute_grouping_sets(&descend(input)?, group_by, sets, aggregates)?,
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
             && matches!(input.as_ref(), Plan::Sort { .. }) => {
