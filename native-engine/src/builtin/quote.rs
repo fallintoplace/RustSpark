@@ -12,7 +12,26 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(format!("'{escaped}'")))
 }
 
+
+fn json_quote_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)
+}
+fn json_quote(args: &[Value]) -> Result<Value> {
+    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("JSON_QUOTE input exceeds 16 MiB".into()));
+    }
+    let encoded = serde_json::to_string(input)
+        .map_err(|error| Error::Execution(format!("JSON_QUOTE failed: {error}")))?;
+    if encoded.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("JSON_QUOTE output exceeds 16 MiB".into()));
+    }
+    Ok(Value::Text(encoded))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "json_quote", min_args: 1, max_args: 1, result_type: json_quote_type, call: json_quote },
+
     Function { name: "quote", min_args: 1, max_args: 1, result_type: output, call: evaluate },
 ];
 
@@ -24,5 +43,22 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("Don't".into())]).unwrap(), Value::Text("'Don\\'t'".into()));
         assert_eq!(evaluate(&[Value::Text("".into())]).unwrap(), Value::Text("''".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod json_quote_extension_tests {
+    use super::*;
+    #[test]
+    fn escapes_unicode_and_control_characters_as_json() {
+        assert!(crate::builtin::supports("json_quote"));
+        let input = "Hello\n\"café\"";
+        let quoted = json_quote(&[Value::Text(input.into())]).unwrap();
+        let Value::Text(encoded) = quoted else { panic!("expected text"); };
+        assert_eq!(serde_json::from_str::<String>(&encoded).unwrap(), input);
+        assert_eq!(json_quote(&[Value::Text("".into())]).unwrap(), Value::Text("\"\"".into()));
+        assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
+        assert!(json_quote(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }
