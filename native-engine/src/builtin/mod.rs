@@ -1,5 +1,6 @@
 //! Native scalar function registry. Neither planning nor evaluation uses DataFusion.
 //! Functions validate arity and input types before a scan is executed.
+use std::{collections::HashMap, sync::OnceLock};
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
 mod nullif;
@@ -187,8 +188,25 @@ const MODULES: &[&[Function]] = &[
 ];
 
 fn lookup(name: &str) -> Result<Function> {
-    CORE.iter().chain(MODULES.iter().flat_map(|functions| functions.iter()))
-        .copied().find(|function| function.name.eq_ignore_ascii_case(name))
+    // SQL evaluators resolve functions per row. Build the index once rather than
+    // scanning every module on each scalar evaluation.
+    static FUNCTIONS_BY_NAME: OnceLock<HashMap<&'static str, Function>> = OnceLock::new();
+    let functions = FUNCTIONS_BY_NAME.get_or_init(|| {
+        let mut index = HashMap::new();
+        for function in CORE.iter().chain(MODULES.iter().flat_map(|module| module.iter())) {
+            // Preserve the first registration if modules ever define an alias twice.
+            index.entry(function.name).or_insert(*function);
+        }
+        index
+    });
+    let function = functions.get(name).or_else(|| {
+        // Native SQL function names are registered in lowercase. Avoid allocating
+        // a lowercase String for the common already-normalized query.
+        name.bytes().any(|byte| byte.is_ascii_uppercase())
+            .then(|| name.to_ascii_lowercase())
+            .and_then(|lower| functions.get(lower.as_str()))
+    });
+    function.copied()
         .ok_or_else(|| Error::Unsupported(format!("unsupported native SQL function: {name}")))
 }
 
@@ -325,6 +343,8 @@ mod tests {
         let plan = sql::parse_sql("SELECT COALESCE(9, 9223372036854775807 + 1) AS safe FROM t").unwrap();
         assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap()[0], Value::Integer(9));
         assert!(sql::parse_sql("SELECT COALESCE(n,) FROM t").is_err());
+        assert!(supports("LeVeNsHtEiN"));
+        assert!(!supports("no_such_native_function"));
     }
 }
 
