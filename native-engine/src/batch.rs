@@ -56,11 +56,17 @@ impl Batch {
             if row.len() != schema.len() {
                 return Err(Error::Schema("row width does not match schema".into()));
             }
-            for (column, value) in columns.iter_mut().zip(row) {
+            for ((column, value), field) in columns.iter_mut().zip(row).zip(schema.fields()) {
+                if !field.data_type.accepts(&value) {
+                    return Err(Error::Type(format!("invalid value in column {}", field.name)));
+                }
+                if !field.nullable && value.is_null() {
+                    return Err(Error::Type(format!("NULL in required column {}", field.name)));
+                }
                 column.push(value);
             }
         }
-        Self::new_with_row_count(schema, columns, row_count)
+        Ok(Self { schema, columns, rows: row_count })
     }
 
     pub fn schema(&self) -> &Schema {
@@ -264,5 +270,20 @@ mod slice_fast_path_tests {
         assert!(input.slice_rows(1, 3).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
         assert_eq!(zero.slice_rows(1, 3).unwrap().rows().unwrap(), vec![vec![], vec![]]);
+    }
+}
+
+#[cfg(test)]
+mod row_transpose_one_pass_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn validates_cells_during_transposition() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false), Field::new("s", DataType::Text, true)]).unwrap();
+        assert!(Batch::from_rows(schema.clone(), vec![vec![Value::Null, Value::Null]]).is_err());
+        assert!(Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1), Value::Integer(2)]]).is_err());
+        assert!(Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)]]).is_err());
+        let good = Batch::from_rows(schema, vec![vec![Value::Integer(1), Value::Null]]).unwrap();
+        assert_eq!(good.row(0).unwrap(), vec![Value::Integer(1), Value::Null]);
     }
 }
