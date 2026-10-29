@@ -23,8 +23,9 @@ def add_named_inputs(command, flag, tables):
 
 
 def build_command(
-    sql: str, *,
+    sql: str | None, *,
     binary: str = "rustspark",
+    sql_file: str | Path | None = None,
     database_dir: str | Path | None = None,
     csv: str | Path | None = None,
     parquet: str | Path | None = None,
@@ -35,8 +36,11 @@ def build_command(
     parquet_tables: dict[str, str | Path] | None = None,
     json_tables: dict[str, str | Path] | None = None,
 ) -> list[str]:
-    if not sql.strip():
-        raise ValueError("SQL must not be empty")
+    if sql_file is None:
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError("Provide a nonempty SQL string or sql_file")
+    elif (sql is not None and (not isinstance(sql, str) or sql.strip())) or not isinstance(os.fspath(sql_file), str) or not os.fspath(sql_file):
+        raise ValueError("Provide exactly one inline SQL statement or sql_file")
     selected = [("csv", csv), ("parquet", parquet), ("json", json_input)]
     if sum(value is not None for _, value in selected) > 1:
         raise ValueError("Exactly zero or one file input is allowed")
@@ -48,7 +52,12 @@ def build_command(
         raise ValueError("max_rows must be a nonnegative integer")
     if query_timeout is not None and (type(query_timeout) is not int or query_timeout <= 0):
         raise ValueError("query_timeout must be a positive integer")
-    command = [binary, "--sql", sql, "--stdout-format", "arrow"]
+    command = [binary]
+    if sql_file is None:
+        command.extend(["--sql", sql])
+    else:
+        command.extend(["--sql-file", os.fspath(sql_file)])
+    command.extend(["--stdout-format", "arrow"])
     if database_dir is not None:
         command.extend(["--database-dir", os.fspath(database_dir)])
     for format_name, path in selected:
@@ -65,8 +74,9 @@ def build_command(
 
 
 def iter_arrow_batches(
-    sql: str, *,
+    sql: str | None, *,
     binary: str = "rustspark",
+    sql_file: str | Path | None = None,
     database_dir: str | Path | None = None,
     csv: str | Path | None = None,
     parquet: str | Path | None = None,
@@ -85,7 +95,7 @@ def iter_arrow_batches(
     import pyarrow as pa  # Optional dependency, not needed for RustSpark itself.
 
     command = build_command(
-        sql, binary=binary, database_dir=database_dir,
+        sql, binary=binary, sql_file=sql_file, database_dir=database_dir,
         csv=csv, parquet=parquet, json_input=json_input,
         max_rows=max_rows, query_timeout=query_timeout,
         csv_tables=csv_tables, parquet_tables=parquet_tables, json_tables=json_tables,
