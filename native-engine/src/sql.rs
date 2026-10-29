@@ -210,26 +210,38 @@ impl Parser {
                 }
             }
             if min_precedence <= 3 {
+                let is_pattern_operator = |word: &str| {
+                    ["LIKE", "ILIKE", "RLIKE", "REGEXP"].iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                };
                 let negate = self.peek_word("NOT")
                     && matches!(self.tokens.get(self.index + 1),
-                        Some(Token::Word(word)) if
-                            word.eq_ignore_ascii_case("LIKE") || word.eq_ignore_ascii_case("ILIKE"));
-                if self.peek_word("LIKE") || self.peek_word("ILIKE") || negate {
+                        Some(Token::Word(word)) if is_pattern_operator(word));
+                if negate || matches!(self.peek(), Some(Token::Word(word))
+                    if is_pattern_operator(word)) {
                     if negate { self.next(); }
                     let insensitive = self.take_word("ILIKE");
-                    if !insensitive { self.expect_word("LIKE")?; }
+                    let regex = self.take_word("RLIKE") || self.take_word("REGEXP");
+                    if !insensitive && !regex { self.expect_word("LIKE")?; }
                     let pattern = self.expression(4)?;
-                    let (value, pattern) = if insensitive {
-                        (
-                            Expr::Call { name: "lower".into(), args: vec![left] },
-                            Expr::Call { name: "lower".into(), args: vec![pattern] },
-                        )
-                    } else { (left, pattern) };
-                    let expr = Expr::Like {
-                        value: Box::new(value),
-                        pattern: Box::new(pattern),
+                    let expression = if regex {
+                        Expr::Call {
+                            name: "regexp_like".into(),
+                            args: vec![left, pattern],
+                        }
+                    } else {
+                        let (value, pattern) = if insensitive {
+                            (
+                                Expr::Call { name: "lower".into(), args: vec![left] },
+                                Expr::Call { name: "lower".into(), args: vec![pattern] },
+                            )
+                        } else { (left, pattern) };
+                        Expr::Like {
+                            value: Box::new(value),
+                            pattern: Box::new(pattern),
+                        }
                     };
-                    left = if negate { Expr::Not(Box::new(expr)) } else { expr };
+                    left = if negate { Expr::Not(Box::new(expression)) } else { expression };
                     continue;
                 }
             }
