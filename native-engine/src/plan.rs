@@ -44,6 +44,15 @@ pub enum Plan {
         right_key: String,
         kind: JoinKind,
     },
+    UsingJoin {
+        left: Box<Plan>, right: Box<Plan>, columns: Vec<String>, kind: JoinKind,
+    },
+    MultiJoin {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        keys: Vec<(String, String)>,
+        kind: JoinKind,
+    },
     UnionAll {
         left: Box<Plan>,
         right: Box<Plan>,

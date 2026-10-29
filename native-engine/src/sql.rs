@@ -469,18 +469,49 @@ impl Parser {
             };
             let Some(kind) = kind else { break };
             let right = self.identifier()?;
+            if self.take_word("USING") {
+                self.expect_symbol('(')?;
+                let mut columns = Vec::new();
+                loop {
+                    let column = self.identifier()?;
+                    if columns.iter().any(|entry: &String| entry.eq_ignore_ascii_case(&column)) {
+                        return Err(Error::Parse("duplicate column in JOIN USING".into()));
+                    }
+                    if columns.len() >= 16 {
+                        return Err(Error::Unsupported("JOIN USING exceeds 16 columns".into()));
+                    }
+                    columns.push(column);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                plan = Plan::UsingJoin {
+                    left: Box::new(plan), right: Box::new(Plan::scan(right)), columns, kind,
+                };
+                continue;
+            }
             self.expect_word("ON")?;
             let left_key = self.identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
             let right_key = self.identifier()?;
-            plan = Plan::Join {
-                left: Box::new(plan),
-                right: Box::new(Plan::scan(right)),
-                left_key,
-                right_key,
-                kind,
+            let mut keys = vec![(left_key, right_key)];
+            while self.take_word("AND") {
+                let left_key = self.identifier()?;
+                if self.next() != Some(Token::Operator("=".into())) {
+                    return Err(Error::Unsupported("multi-key native JOIN requires equality predicates".into()));
+                }
+                let right_key = self.identifier()?;
+                if keys.len() >= 16 {
+                    return Err(Error::Unsupported("multi-key JOIN has too many equality keys".into()));
+                }
+                keys.push((left_key, right_key));
+            }
+            plan = if keys.len() == 1 {
+                let (left_key, right_key) = keys.pop().expect("validated join key");
+                Plan::Join { left: Box::new(plan), right: Box::new(Plan::scan(right)), left_key, right_key, kind }
+            } else {
+                Plan::MultiJoin { left: Box::new(plan), right: Box::new(Plan::scan(right)), keys, kind }
             };
         }
         if self.take_word("WHERE") {
