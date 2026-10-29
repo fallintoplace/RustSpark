@@ -26,11 +26,15 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if size >= target { return Ok(Value::Text(text.chars().take(target).collect())); }
     if pad.is_empty() { return Err(Error::Execution("LPAD/RPAD cannot extend with empty pattern".into())); }
     let pad_chars = pad.chars().collect::<Vec<_>>();
-    let mut extra = String::new();
+    let mut result = String::with_capacity(
+        text.len().saturating_add((target - size).saturating_mul(pad.len().min(4))),
+    );
+    if !left { result.push_str(text); }
     for i in 0..(target - size) {
-        extra.push(pad_chars[i % pad_chars.len()]);
+        result.push(pad_chars[i % pad_chars.len()]);
     }
-    Ok(Value::Text(if left { format!("{extra}{text}") } else { format!("{text}{extra}") }))
+    if left { result.push_str(text); }
+    Ok(Value::Text(result))
 }
 fn lpad(args: &[Value]) -> Result<Value> { pad(args, true) }
 fn rpad(args: &[Value]) -> Result<Value> { pad(args, false) }
@@ -49,5 +53,20 @@ mod tests {
         assert!(rpad(&[Value::Text("a".into()), Value::Integer(2_000_000)]).is_err());
         assert_eq!(lpad(&[Value::Text("hello".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
         assert_eq!(rpad(&[Value::Text("hello".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
+    }
+}
+
+#[cfg(test)]
+mod single_buffer_pad_perf_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_multi_character_padding_on_both_sides() {
+        assert_eq!(lpad(&[
+            Value::Text("é".into()), Value::Integer(6), Value::Text("ab".into())
+        ]).unwrap(), Value::Text("ababaé".into()));
+        assert_eq!(rpad(&[
+            Value::Text("é".into()), Value::Integer(6), Value::Text("🙂a".into())
+        ]).unwrap(), Value::Text("é🙂a🙂a🙂".into()));
     }
 }
