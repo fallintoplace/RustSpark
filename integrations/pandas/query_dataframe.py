@@ -8,11 +8,12 @@ import tempfile
 
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | None = None, parquet: str | None = None,
+                  json_input: str | None = None,
                   max_rows: int = 100_000, query_timeout: int | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be empty")
-    if csv is not None and parquet is not None:
-        raise ValueError("Specify CSV or Parquet, not both")
+    if sum(source is not None for source in (csv, parquet, json_input)) > 1:
+        raise ValueError("Specify only one CSV, Parquet, or JSON source")
     if max_rows < 1:
         raise ValueError("max_rows must be positive")
     command = [
@@ -23,6 +24,8 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
         command.extend(["--csv", csv])
     if parquet is not None:
         command.extend(["--parquet", parquet])
+    if json_input is not None:
+        command.extend(["--json", json_input])
     if query_timeout is not None:
         if query_timeout <= 0:
             raise ValueError("query_timeout must be positive")
@@ -32,6 +35,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
 def query_dataframe(sql: str, *, binary: str = "rustspark",
                     csv: str | None = None, parquet: str | None = None,
+                    json_input: str | None = None,
                     max_rows: int = 100_000, query_timeout: int | None = None):
     """Load a bounded SQL result as pandas, preserving Arrow logical types.
 
@@ -43,7 +47,7 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
         output = Path(directory) / "result.arrow"
         command = build_command(
             sql, output, binary=binary, csv=csv, parquet=parquet,
-            max_rows=max_rows, query_timeout=query_timeout,
+            max_rows=max_rows, query_timeout=query_timeout, json_input=json_input,
         )
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode:
