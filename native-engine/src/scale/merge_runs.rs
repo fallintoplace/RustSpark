@@ -128,8 +128,9 @@ impl RunMerger {
             }
         }
         let Some(index) = best else { return Ok(None); };
-        let row = self.runs[index].peek().unwrap().to_vec();
-        self.runs[index].position += 1;
+        let selected = &mut self.runs[index];
+        let row = std::mem::take(&mut selected.rows[selected.position]);
+        selected.position += 1;
         self.refill_run = Some(index);
         Ok(Some(row))
     }
