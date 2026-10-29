@@ -71,6 +71,9 @@ pub fn hash_join(
             field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
     }
     let schema = Schema::new(fields)?;
+    if kind == JoinKind::Inner && (left.num_rows() == 0 || right.num_rows() == 0) {
+        return Ok(Batch::empty(schema));
+    }
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
     for row in 0..right.num_rows() {
         let key = right.value(row, right_column)?;
@@ -167,5 +170,14 @@ mod tests {
             vec![Value::Integer(2), Value::Null],
         ]);
         assert_eq!(result.schema().column("right_id").unwrap(), 1);
+    }
+    #[test]
+    fn empty_inner_join_returns_typed_empty_output() {
+        let left = table(&[], "id");
+        let right = table(&[Value::Integer(1), Value::Null], "id");
+        let result = hash_join(&left, &right, "id", "id", JoinKind::Inner).unwrap();
+        assert_eq!(result.num_rows(), 0);
+        assert_eq!(result.schema().len(), 2);
+        assert_eq!(hash_join(&right, &left, "id", "id", JoinKind::Inner).unwrap().num_rows(), 0);
     }
 }
