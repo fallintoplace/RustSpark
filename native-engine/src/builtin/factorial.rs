@@ -1,5 +1,5 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Error, Result};
+use crate::{scalar::Value, schema::DataType, Result};
 
 const FACTORIALS: [i64; 21] = [
     1, 1, 2, 6, 24, 120, 720,
