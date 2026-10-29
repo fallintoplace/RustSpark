@@ -20,12 +20,11 @@ enum SelectItem {
 }
 
 
-const MAX_VALUES_ROWS: usize = 10_000;
-const MAX_VALUES_COLUMNS: usize = 256;
-
 /// A Spark VALUES table can be queried directly or used as a FROM source.
 /// All rows must have the same width and explicit aliases must be unique.
 fn parse_values_table(&mut self) -> Result<Plan> {
+    const MAX_VALUES_ROWS: usize = 10_000;
+    const MAX_VALUES_COLUMNS: usize = 256;
     let mut rows = Vec::new();
     let mut columns = None;
     loop {
