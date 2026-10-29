@@ -70,24 +70,27 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
         });
         return batch.take(&indices);
     }
-    let mut decorated = Vec::with_capacity(batch.num_rows());
-    for row in 0..batch.num_rows() {
-        let values = keys
-            .iter()
-            .map(|key| key.expression.evaluate(batch, row))
-            .collect::<Result<Vec<_>>>()?;
-        decorated.push((row, values));
+    let mut key_columns = Vec::with_capacity(keys.len());
+    for key in keys {
+        let mut values = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            values.push(key.expression.evaluate(batch, row)?);
+        }
+        key_columns.push(values);
     }
-    decorated.sort_by(|(_, left), (_, right)| {
-        for ((a, b), key) in left.iter().zip(right).zip(keys) {
-            let comparison = compare_values(a, b, key.descending, key.nulls_first);
+    let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+    indices.sort_by(|&left, &right| {
+        for (values, key) in key_columns.iter().zip(keys) {
+            let comparison = compare_values(
+                &values[left], &values[right], key.descending, key.nulls_first,
+            );
             if comparison != Ordering::Equal {
                 return comparison;
             }
         }
         Ordering::Equal
     });
-    batch.take(&decorated.into_iter().map(|(row, _)| row).collect::<Vec<_>>())
+    batch.take(&indices)
 }
 
 #[cfg(test)]
@@ -195,5 +198,39 @@ mod direct_column_sort_perf_tests {
         assert_eq!(result.column(1).unwrap(), &[
             Value::Integer(3), Value::Integer(1), Value::Integer(1), Value::Integer(2)]);
         assert!(sort(&input, &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod column_major_sort_perf_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_multi_key_sort_keeps_stable_ties() {
+        let input = Batch::from_rows(
+            Schema::new(vec![
+                Field::new("n", DataType::Integer, false),
+                Field::new("tag", DataType::Text, false),
+            ]).unwrap(),
+            vec![
+                vec![Value::Integer(3), Value::Text("first".into())],
+                vec![Value::Integer(1), Value::Text("low".into())],
+                vec![Value::Integer(3), Value::Text("second".into())],
+            ],
+        ).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)),
+            )),
+            SortKey::ascending(Expr::Literal(Value::Integer(0))),
+        ];
+        let sorted = sort(&input, &keys).unwrap();
+        assert_eq!(sorted.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("low".into())],
+            vec![Value::Integer(3), Value::Text("first".into())],
+            vec![Value::Integer(3), Value::Text("second".into())],
+        ]);
     }
 }
