@@ -41,7 +41,7 @@ def as_csv(rows):
     if not rows:
         return ""
     text = io.StringIO(newline="")
-    columns = list(rows[0])
+    columns = list(dict.fromkeys(key for row in rows for key in row))
     writer = csv.DictWriter(text, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
