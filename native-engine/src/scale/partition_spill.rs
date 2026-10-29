@@ -37,7 +37,12 @@ pub struct PartitionWriter {
 fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usize> {
     let mut hash = crate::hash_partition::PartitionHasher::default();
     for &column in keys { batch.value(row, column)?.hash(&mut hash); }
-    Ok((hash.finish() % count as u64) as usize)
+    let hashed = hash.finish();
+    Ok(if count.is_power_of_two() {
+        (hashed as usize) & (count - 1)
+    } else {
+        (hashed % count as u64) as usize
+    })
 }
 
 impl PartitionWriter {
@@ -225,5 +230,26 @@ mod sparse_partition_writer_tests {
         }
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod masked_spill_buckets_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn bucket_choice_matches_remainder_for_power_of_two_and_odd_counts() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..500).map(|n| vec![
+            if n % 13 == 0 { Value::Null } else { Value::Integer(n % 89) }
+        ]).collect()).unwrap();
+        for partitions in [1, 2, 4, 16, 64, 127, 256, 1024, 4096] {
+            for row in 0..batch.num_rows() {
+                let mut hasher = crate::hash_partition::PartitionHasher::default();
+                batch.value(row, 0).unwrap().hash(&mut hasher);
+                assert_eq!(bucket(&batch, row, &[0], partitions).unwrap(),
+                    (hasher.finish() % partitions as u64) as usize);
+            }
+        }
     }
 }
