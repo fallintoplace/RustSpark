@@ -317,6 +317,16 @@ fn negative(args: &[Value]) -> Result<Value> {
     }
 }
 
+fn char_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Integer] { Ok(DataType::Text) }
+    else { Err(Error::Type("CHAR requires an integer code".into())) }
+}
+fn char_code(args: &[Value]) -> Result<Value> {
+    let Some(code) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let byte = code.rem_euclid(256) as u8;
+    Ok(Value::Text(char::from(byte).to_string()))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -344,6 +354,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "bin", min_args: 1, max_args: 1, result_type: bin_type, call: bin },
     Function { name: "positive", min_args: 1, max_args: 1, result_type: same_numeric_type, call: positive },
     Function { name: "negative", min_args: 1, max_args: 1, result_type: same_numeric_type, call: negative },
+    Function { name: "char", min_args: 1, max_args: 1, result_type: char_type, call: char_code },
     // PARITY_FUNCTIONS
 ];
 
@@ -535,6 +546,13 @@ mod tests {
         assert_eq!(sql_result("negative(5)").unwrap(), Value::Integer(-5));
         assert_eq!(negative(&[Value::Null]).unwrap(), Value::Null);
         assert!(negative(&[Value::Integer(i64::MIN)]).is_err());
+    }
+
+    #[test]
+    fn spark_char_wraps_byte_values() {
+        assert_eq!(sql_result("char(65)").unwrap(), Value::Text("A".into()));
+        assert_eq!(sql_result("char(321)").unwrap(), Value::Text("A".into()));
+        assert_eq!(char_code(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
