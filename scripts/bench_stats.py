@@ -27,4 +27,5 @@ def summarize_samples(samples):
         "samples_ms": [round(value, 3) for value in measured],
         "median_ms": round(statistics.median(measured), 3),
         "p95_ms": round(ordered[math.ceil(len(ordered) * 0.95) - 1], 3),
+        "p99_ms": round(ordered[math.ceil(len(ordered) * 0.99) - 1], 3),
     }
