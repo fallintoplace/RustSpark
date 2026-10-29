@@ -57,7 +57,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         }
 
         let token = if character.is_ascii_alphabetic() || character == '_' {
-            let mut value = character.to_string();
+            // Most SQL identifiers fit within a small buffer. Avoid growing
+            // an initially one-byte String for every keyword and column name.
+            let mut value = String::with_capacity(16);
+            value.push(character);
             while let Some(next) = chars.peek() {
                 if next.is_ascii_alphanumeric() || *next == '_' {
                     value.push(chars.next().expect("peeked character"));
@@ -68,7 +71,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             Token::Word(value)
         } else if character.is_ascii_digit()
             || (character == '.' && chars.peek().is_some_and(|next| next.is_ascii_digit())) {
-            let mut number = character.to_string();
+            let mut number = String::with_capacity(16);
+            number.push(character);
             let mut dot = character == '.';
             while let Some(next) = chars.peek() {
                 if next.is_ascii_digit() {
@@ -203,5 +207,18 @@ mod consolidated_lexer_regressions {
         for query in ["SELECT . FROM t", "SELECT 1e FROM t", "SELECT 1e+ FROM t"] {
             assert!(tokenize(query).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod short_token_buffer_perf_tests {
+    use super::*;
+    #[test]
+    fn token_buffers_preserve_numbers_keywords_and_long_names() {
+        let tokens = tokenize("SELECT long_identifier_name, .25e-4 FROM measurements").unwrap();
+        assert_eq!(tokens[0], Token::Word("SELECT".into()));
+        assert_eq!(tokens[1], Token::Word("long_identifier_name".into()));
+        assert_eq!(tokens[3], Token::Number(".25e-4".into()));
+        assert_eq!(tokens.last(), Some(&Token::Word("measurements".into())));
     }
 }
