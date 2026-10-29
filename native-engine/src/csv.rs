@@ -94,15 +94,15 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
 }
 
 fn kind(values: &[Vec<String>], column: usize) -> DataType {
-    let nonempty = values.iter().map(|row| row[column].as_str()).filter(|v| !v.is_empty());
-    let samples: Vec<_> = nonempty.collect();
-    if samples.is_empty() {
+    let nonempty = || values.iter().map(|row| row[column].as_str())
+        .filter(|value| !value.is_empty());
+    if nonempty().next().is_none() {
         DataType::Text
-    } else if samples.iter().all(|value| value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")) {
+    } else if nonempty().all(|value| value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")) {
         DataType::Boolean
-    } else if samples.iter().all(|value| value.parse::<i64>().is_ok()) {
+    } else if nonempty().all(|value| value.parse::<i64>().is_ok()) {
         DataType::Integer
-    } else if samples.iter().all(|value| value.parse::<f64>().is_ok_and(f64::is_finite)) {
+    } else if nonempty().all(|value| value.parse::<f64>().is_ok_and(f64::is_finite)) {
         DataType::Float
     } else {
         DataType::Text
@@ -262,3 +262,17 @@ mod typed_csv_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod streaming_type_inference_tests {
+    use super::*;
+
+    #[test]
+    fn nullable_inference_uses_all_nonempty_values() {
+        let data = from_csv_str("id,flag,measure,note\n1,true,1.2,hello\n2,false,2.5,world\n3,,,\n").unwrap();
+        assert_eq!(data.schema().field(0).unwrap().data_type, DataType::Integer);
+        assert_eq!(data.schema().field(1).unwrap().data_type, DataType::Boolean);
+        assert_eq!(data.schema().field(2).unwrap().data_type, DataType::Float);
+        assert_eq!(data.schema().field(3).unwrap().data_type, DataType::Text);
+    }
+}
