@@ -84,6 +84,11 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Float)
         },
+        "SQRT" => {
+            if args.len() != 1 { return Err(Error::Parse("SQRT requires one argument".into())); }
+            if !matches!(args[0].output_type(schema)?, DataType::Integer | DataType::Float) { return Err(Error::Type("SQRT requires numeric input".into())); }
+            Ok(DataType::Float)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -183,6 +188,13 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             let value = numeric(&args[0])?.powf(numeric(&args[1])?);
             if !value.is_finite() { return Err(Error::Execution("POWER produced a non-finite value".into())); }
             Ok(Value::Float(value))
+        },
+        "SQRT" => match args {
+            [Value::Integer(n)] if *n >= 0 => Ok(Value::Float((*n as f64).sqrt())),
+            [Value::Float(n)] if *n >= 0.0 => Ok(Value::Float(n.sqrt())),
+            [Value::Null] => Ok(Value::Null),
+            [Value::Integer(_) | Value::Float(_)] => Err(Error::Execution("SQRT requires nonnegative input".into())),
+            _ => Err(Error::Type("SQRT requires numeric input".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
