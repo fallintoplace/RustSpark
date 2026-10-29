@@ -10,11 +10,13 @@ class BenchmarkSummaryTests(unittest.TestCase):
             "samples_ms": [10.0, 1.0, 3.123, 7.0],
             "median_ms": 5.062,
             "p95_ms": 10.0,
+            "p99_ms": 10.0,
         })
 
     def test_single_sample_and_zero_are_valid(self):
         self.assertEqual(bench_stats.summarize_samples([0]), {
             "samples_ms": [0.0], "median_ms": 0.0, "p95_ms": 0.0,
+            "p99_ms": 0.0,
         })
 
     def test_invalid_samples_fail_closed(self):
@@ -30,6 +32,7 @@ class BenchmarkSummaryTests(unittest.TestCase):
         self.assertEqual(result["samples_ms"], [0.0, 0.001])
         self.assertEqual(result["median_ms"], 0.0)
         self.assertEqual(result["p95_ms"], 0.001)
+        self.assertEqual(result["p99_ms"], 0.001)
 
 
 if __name__ == "__main__":
