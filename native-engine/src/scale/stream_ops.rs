@@ -106,7 +106,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
             let count = self.remaining.map_or(available, |left| left.min(available));
             if count == 0 { continue; }
             if let Some(remaining) = self.remaining.as_mut() { *remaining -= count; }
-            return Some(batch.take(&(skipped..skipped + count).collect::<Vec<_>>()));
+            return Some(batch.slice_rows(skipped, skipped + count));
         }
     }
 }
