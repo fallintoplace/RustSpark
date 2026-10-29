@@ -61,7 +61,7 @@ enum State {
     Count(i64),
     CountDistinct(HashSet<Value>),
     Sum(Option<Value>),
-    Avg { sum: f64, count: i64 },
+    Avg { sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
 }
@@ -72,7 +72,7 @@ impl State {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
             AggregateOp::CountDistinct(_) => Self::CountDistinct(HashSet::new()),
             AggregateOp::Sum(_) => Self::Sum(None),
-            AggregateOp::Avg(_) => Self::Avg { sum: 0.0, count: 0 },
+            AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
         }
@@ -119,7 +119,7 @@ impl State {
                 }
                 *total = Some(updated);
             }
-            Self::Avg { sum, count } => {
+            Self::Avg { sum, compensation, count } => {
                 if !value.is_null() {
                     let number = match value {
                         Value::Integer(value) => value as f64,
@@ -127,12 +127,20 @@ impl State {
                         _ => return Err(Error::Type("AVG requires numeric values".into())),
                     };
                     let next = *sum + number;
-                    if !next.is_finite() {
+                    let correction = if sum.abs() >= number.abs() {
+                        (*sum - next) + number
+                    } else {
+                        (number - next) + *sum
+                    };
+                    let next_compensation = *compensation + correction;
+                    if !next.is_finite() || !next_compensation.is_finite()
+                        || !(next + next_compensation).is_finite() {
                         return Err(Error::Execution("AVG overflow".into()));
                     }
                     *count = count.checked_add(1)
                         .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
                     *sum = next;
+                    *compensation = next_compensation;
                 }
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
@@ -148,8 +156,9 @@ impl State {
                 i64::try_from(values.len())
                     .map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
             ),
-            Self::Avg { sum, count } =>
-                if count == 0 { Value::Null } else { Value::Float(sum / count as f64) },
+            Self::Avg { sum, compensation, count } =>
+                if count == 0 { Value::Null }
+                else { Value::Float((sum + compensation) / count as f64) },
             Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
                 value.unwrap_or(Value::Null)
             }
@@ -269,5 +278,24 @@ mod tests {
         assert_eq!(output.row(1).unwrap(), vec![
             Value::Text("a".into()), Value::Integer(1), Value::Integer(3),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod compensated_avg_engine_tests {
+    use super::*;
+
+    #[test]
+    fn avg_retains_small_values_after_large_cancellation() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("amount", DataType::Float, false)]).unwrap(),
+            vec![vec![Value::Float(1.0e16)], vec![Value::Float(1.0)],
+                 vec![Value::Float(-1.0e16)]],
+        ).unwrap();
+        let result = aggregate(&input, &[], &[
+            AggregateItem::new(AggregateOp::Avg(Expr::Column("amount".into())), "mean")
+        ]).unwrap();
+        let Value::Float(mean) = result.value(0, 0).unwrap() else { panic!("expected mean") };
+        assert!((mean - (1.0 / 3.0)).abs() < 1e-12);
     }
 }
