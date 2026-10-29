@@ -21,17 +21,27 @@ pub struct PartialGroupSum {
     key_type: Option<DataType>,
     max_groups: usize,
     groups: HashMap<Value, State>,
+    failed: bool,
 }
 
 impl PartialGroupSum {
     pub fn new(key: impl Into<String>, amount: impl Into<String>, max_groups: usize) -> Self {
         Self {
             key_column: key.into(), amount_column: amount.into(),
-            key_type: None, max_groups, groups: HashMap::new(),
+            key_type: None, max_groups, groups: HashMap::new(), failed: false,
         }
     }
 
     pub fn update(&mut self, batch: &Batch) -> Result<()> {
+        if self.failed {
+            return Err(Error::Execution("partial aggregation is invalid after a previous error".into()));
+        }
+        let result = self.update_inner(batch);
+        if result.is_err() { self.failed = true; }
+        result
+    }
+
+    fn update_inner(&mut self, batch: &Batch) -> Result<()> {
         let key = batch.schema().column(&self.key_column)?;
         let amount = batch.schema().column(&self.amount_column)?;
         if batch.schema().field(amount)?.data_type != DataType::Integer {
@@ -64,6 +74,15 @@ impl PartialGroupSum {
     }
 
     pub fn merge(&mut self, other: Self) -> Result<()> {
+        if self.failed || other.failed {
+            return Err(Error::Execution("cannot merge a failed partial aggregation".into()));
+        }
+        let result = self.merge_inner(other);
+        if result.is_err() { self.failed = true; }
+        result
+    }
+
+    fn merge_inner(&mut self, other: Self) -> Result<()> {
         if self.key_column != other.key_column || self.amount_column != other.amount_column {
             return Err(Error::Schema("cannot merge different grouped aggregations".into()));
         }
@@ -88,6 +107,9 @@ impl PartialGroupSum {
     }
 
     pub fn finish(self) -> Result<Batch> {
+        if self.failed {
+            return Err(Error::Execution("partial aggregation is invalid after a previous error".into()));
+        }
         let kind = self.key_type.ok_or_else(|| Error::Schema("group key type is unknown".into()))?;
         let schema = Schema::new(vec![
             Field::new(self.key_column, kind, true),
@@ -144,5 +166,29 @@ mod tests {
             vec![Value::Text("x".into()), Value::Integer(1)],
             vec![Value::Text("y".into()), Value::Integer(1)],
         ])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod failed_partial_aggregation_tests {
+    use super::*;
+
+    #[test]
+    fn cannot_retry_or_finish_after_partial_cardinality_failure() {
+        let schema = Schema::new(vec![
+            Field::new("g", DataType::Integer, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(2), Value::Integer(4)],
+        ]).unwrap();
+        let mut state = PartialGroupSum::new("g", "n", 1);
+        assert!(state.update(&input).is_err());
+        let valid = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Integer(5)],
+        ]).unwrap();
+        assert!(state.update(&valid).is_err());
+        assert!(state.finish().is_err());
     }
 }
