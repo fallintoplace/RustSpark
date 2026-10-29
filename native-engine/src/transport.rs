@@ -127,12 +127,17 @@ pub fn read_frames_limited(
 ) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut total = 0_usize;
-    while let Some(frame) = read_frame(
-        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
-    )? {
+    loop {
         if frames.len() >= max_frames {
+            // Detect one extra frame using only its first byte. Do not read
+            // and allocate the entire next payload just to reject it.
+            let mut extra = [0u8; 1];
+            if input.read(&mut extra)? == 0 { break; }
             return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
         }
+        let Some(frame) = read_frame(
+            input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
+        )? else { break };
         total = total.checked_add(frame.payload.len())
             .filter(|used| *used <= max_total_bytes)
             .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
@@ -245,5 +250,34 @@ mod exchange_header_read_coalescing_tests {
         assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
         assert_eq!(reader.calls, 3);
         assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod predecode_frame_count_admission_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn rejects_extra_frame_without_consuming_its_payload() {
+        let first = Frame { stage: 1, task: 1, attempt: 0, payload: vec![1; 20] };
+        let second = Frame { stage: 1, task: 2, attempt: 0, payload: vec![2; 40] };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &first, 64).unwrap();
+        write_frame(&mut bytes, &second, 64).unwrap();
+        let mut cursor = Cursor::new(bytes);
+        let error = read_frames_limited(&mut cursor, 64, 128, 1).unwrap_err();
+        assert!(error.to_string().contains("frame count limit"));
+        assert_eq!(cursor.position() as usize, 32 + first.payload.len() + 1);
+    }
+
+    #[test]
+    fn exact_frame_limit_still_succeeds_at_clean_eof() {
+        let frame = Frame { stage: 0, task: 1, attempt: 1, payload: vec![] };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &frame, 0).unwrap();
+        assert_eq!(read_frames_limited(&mut bytes.as_slice(), 0, 0, 1)
+            .unwrap(), vec![frame]);
+        assert!(read_frames_limited(&mut bytes.as_slice(), 0, 0, 0).is_err());
     }
 }
