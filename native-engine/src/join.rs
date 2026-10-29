@@ -69,15 +69,17 @@ pub fn hash_join(
     if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
         return Err(Error::Type("join key types must match".into()));
     }
+    let left_keys = left.column(left_column)?;
+    let right_keys = right.column(right_column)?;
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
         let mut keys = HashSet::new();
         for row in 0..right.num_rows() {
-            let key = right.value(row, right_column)?;
+            let key = &right_keys[row];
             if joinable(key) { keys.insert(key.clone()); }
         }
         let mut indices = Vec::new();
         for row in 0..left.num_rows() {
-            let key = left.value(row, left_column)?;
+            let key = &left_keys[row];
             let found = joinable(key) && keys.contains(key);
             if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
                 if indices.len() >= MAX_JOIN_ROWS {
@@ -113,7 +115,7 @@ pub fn hash_join(
     }
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
     for row in 0..right.num_rows() {
-        let key = right.value(row, right_column)?;
+        let key = &right_keys[row];
         if joinable(key) {
             right_hash.entry(key.clone()).or_default().push(row);
         }
@@ -121,7 +123,7 @@ pub fn hash_join(
     let mut output = Vec::new();
     let mut matched_right = vec![false; right.num_rows()];
     for left_row in 0..left.num_rows() {
-        let key = left.value(left_row, left_column)?;
+        let key = &left_keys[left_row];
         let right_rows = if joinable(key) { right_hash.get(key) } else { None };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
