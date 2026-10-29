@@ -77,14 +77,13 @@ pub fn distinct_on(batch: &Batch, keys: &[&str]) -> Result<Batch> {
         }
         return batch.take(&indices);
     }
+    let columns = columns.iter().map(|&index| batch.column(index))
+        .collect::<Result<Vec<_>>>()?;
     let mut seen = HashSet::new();
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
-        let key = columns.iter().map(|&column| batch.value(row, column).cloned())
-            .collect::<Result<Vec<_>>>()?;
-        if seen.insert(key) {
-            indices.push(row);
-        }
+        let key = columns.iter().map(|column| &column[row]).collect::<Vec<_>>();
+        if seen.insert(key) { indices.push(row); }
     }
     batch.take(&indices)
 }
@@ -120,5 +119,31 @@ mod distinct_on_feature_tests {
         assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
             "execution: DISTINCT key limit exceeded");
         assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_multikey_distinct_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn text_keys_and_nulls_keep_the_first_matching_row() {
+        let schema = Schema::new(vec![
+            Field::new("category", DataType::Text, true),
+            Field::new("id", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let long = "é🙂".repeat(10_000);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(long.clone()), Value::Integer(5), Value::Text("first".into())],
+            vec![Value::Text(long), Value::Integer(5), Value::Text("duplicate".into())],
+            vec![Value::Null, Value::Integer(5), Value::Text("null-first".into())],
+            vec![Value::Null, Value::Integer(5), Value::Text("null-duplicate".into())],
+            vec![Value::Null, Value::Integer(6), Value::Text("new".into())],
+        ]).unwrap();
+        let result = distinct_on(&batch, &["category", "id"]).unwrap();
+        assert_eq!(result.num_rows(), 3);
+        assert_eq!(result.column(2).unwrap(), [
+            Value::Text("first".into()), Value::Text("null-first".into()), Value::Text("new".into())]);
     }
 }
