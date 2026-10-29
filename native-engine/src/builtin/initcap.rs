@@ -1,9 +1,12 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("INITCAP input exceeds 16 MiB".into()));
+    }
     if text.is_ascii() {
         let mut bytes = text.as_bytes().to_vec();
         let mut start_of_word = true;
@@ -35,6 +38,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             }
             start_of_word = false;
         }
+    }
+    if result.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("INITCAP output exceeds 16 MiB".into()));
     }
     Ok(Value::Text(result))
 }
@@ -72,5 +78,17 @@ mod initcap_ascii_bytes_tests {
     fn retains_ascii_whitespace_boundaries() {
         assert_eq!(evaluate(&[Value::Text("aB\\tcD\\neF".into())]).unwrap(), Value::Text("Ab\\tCd\\nEf".into()));
         assert_eq!(evaluate(&[Value::Text("éCOLE".into())]).unwrap(), Value::Text("École".into()));
+    }
+}
+
+#[cfg(test)]
+mod bounded_initcap_tests {
+    use super::*;
+    #[test]
+    fn retains_unicode_expansion_and_rejects_large_inputs() {
+        assert_eq!(evaluate(&[Value::Text("ßET İstanbul".into())]).unwrap(),
+            Value::Text("SSet İstanbul".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }
