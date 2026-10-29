@@ -9,6 +9,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(haystack) = super::string(&args[1])? else { return Ok(Value::Null) };
     if needle.contains(',') { return Ok(Value::Integer(0)); }
+    if !haystack.contains(',') {
+        return Ok(Value::Integer(i64::from(haystack == needle)));
+    }
     let position = haystack.split(',').position(|item| item == needle);
     let position = position.map_or(0, |index| index + 1);
     Ok(Value::Integer(i64::try_from(position)
@@ -26,6 +29,9 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("é".into()), Value::Text("a,é,b".into())]).unwrap(), Value::Integer(2));
         assert_eq!(evaluate(&[Value::Text("a,b".into()), Value::Text("a,b".into())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Text("x".into()), Value::Text("a,b".into())]).unwrap(), Value::Integer(0));
+        assert_eq!(evaluate(&[Value::Text("x".into()), Value::Text("x".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[Value::Text("x".into()), Value::Text("y".into())]).unwrap(), Value::Integer(0));
+        assert_eq!(evaluate(&[Value::Text("".into()), Value::Text("".into())]).unwrap(), Value::Integer(1));
         assert_eq!(evaluate(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }
