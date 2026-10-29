@@ -24,7 +24,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             let mut result = value.to_string();
             if digits > 0 {
                 result.push('.');
-                result.push_str(&"0".repeat(digits));
+                for _ in 0..digits { result.push('0'); }
             }
             result
         }
@@ -90,4 +90,14 @@ mod grouped_number_single_output_perf_tests {
             Value::Text("-9,223,372,036,854,775,808".into()));
     }
 
+}
+
+#[cfg(test)]
+mod format_number_decimal_suffix_tests {
+    use super::*;
+    #[test]
+    fn keeps_exact_bigint_digits_with_long_zero_suffix() {
+        assert_eq!(evaluate(&[Value::Integer(i64::MIN), Value::Integer(4)]).unwrap(), Value::Text("-9,223,372,036,854,775,808.0000".into()));
+        assert_eq!(evaluate(&[Value::Integer(0), Value::Integer(15)]).unwrap(), Value::Text(format!("0.{}", "0".repeat(15))));
+    }
 }
