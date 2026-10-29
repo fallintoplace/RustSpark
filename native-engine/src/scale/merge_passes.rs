@@ -47,6 +47,10 @@ pub fn merge_to_fan_in(
         let mut next_pass = Vec::new();
         for group in result.current.chunks(fan_in) {
             control.check()?;
+            if group.len() == 1 {
+                next_pass.push(group[0].clone());
+                continue;
+            }
             let id = PASS_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("rustspark-merge-{}-{id}.rspill", std::process::id()));
             let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
