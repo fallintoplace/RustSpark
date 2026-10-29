@@ -146,14 +146,23 @@ impl Parser {
                 if self.peek_word("BETWEEN") || negate {
                     if negate { self.next(); }
                     self.expect_word("BETWEEN")?;
+                    let symmetric = self.take_word("SYMMETRIC");
                     let lower = self.expression(4)?;
                     self.expect_word("AND")?;
                     let upper = self.expression(4)?;
-                    let between = Expr::binary(
-                        Expr::binary(left.clone(), BinaryOp::GreaterEqual, lower),
+                    let forward = Expr::binary(
+                        Expr::binary(left.clone(), BinaryOp::GreaterEqual, lower.clone()),
                         BinaryOp::And,
-                        Expr::binary(left, BinaryOp::LessEqual, upper),
+                        Expr::binary(left.clone(), BinaryOp::LessEqual, upper.clone()),
                     );
+                    let between = if symmetric {
+                        let reverse = Expr::binary(
+                            Expr::binary(left.clone(), BinaryOp::GreaterEqual, upper),
+                            BinaryOp::And,
+                            Expr::binary(left, BinaryOp::LessEqual, lower),
+                        );
+                        Expr::binary(forward, BinaryOp::Or, reverse)
+                    } else { forward };
                     left = if negate { Expr::Not(Box::new(between)) } else { between };
                     continue;
                 }
@@ -733,6 +742,16 @@ mod tests {
             "SELECT (amount > 2) IS UNKNOWN AS unknown FROM sales"
         ).unwrap(), &sales()).unwrap().rows().unwrap();
         assert_eq!(rows[2], vec![Value::Boolean(true)]);
+    }
+
+    #[test]
+    fn between_symmetric_accepts_reversed_endpoints() {
+        let rows = execute(&parse_sql(
+            "SELECT amount BETWEEN SYMMETRIC 5 AND 1 AS inside FROM sales"
+        ).unwrap(), &sales()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Boolean(true)], vec![Value::Boolean(true)], vec![Value::Null]
+        ]);
     }
 
     #[test]
