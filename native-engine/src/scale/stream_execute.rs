@@ -189,6 +189,12 @@ fn lower(
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            for key in keys {
+                let crate::expr::Expr::Column(name) = &key.expression else {
+                    return Err(Error::Unsupported("external sort requires column keys".into()));
+                };
+                schema.column(name)?;
+            }
             let runs = write_sorted_runs(
                 child(input)?, schema.clone(), keys, &options.scratch_directory,
                 options.sort_run_rows, control
@@ -355,5 +361,23 @@ mod distinct_stream_feature_tests {
             vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]
         ]);
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sort_prevalidation_tests {
+    use super::*;
+    use crate::{expr::Expr, sort::SortKey, schema::{DataType, Field}};
+    #[test]
+    fn rejects_unsupported_sort_before_opening_csv() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("data", "/nonexistent/rustspark-early-validation.csv", schema, 1024).unwrap();
+        let plan = Plan::Sort {
+            input: Box::new(Plan::scan("data")),
+            keys: vec![SortKey::ascending(Expr::Literal(Value::Integer(1)))],
+        };
+        let result = execute(&plan, &catalog, &StreamOptions::default(), QueryControl::default());
+        assert!(matches!(result, Err(Error::Unsupported(_))));
     }
 }
