@@ -85,6 +85,26 @@ impl PartitionWriter {
         let owned = self.owned.as_ref().ok_or_else(|| Error::Execution("writer finalized".into()))?;
         if batch.schema() != &owned.schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
+        if writers.len() == 1 && batch.num_rows() != 0 {
+            // Every row belongs to the only shard. Avoid per-row hashing,
+            // selection indices, and cloning values through Batch::take.
+            control.check()?;
+            let slot = &mut writers[0];
+            if slot.is_none() {
+                let file = OpenOptions::new().write(true).create_new(true)
+                    .open(&owned.paths[0])?;
+                *slot = Some(SpillWriter::new(BufWriter::new(file), owned.schema.clone())?);
+            }
+            let mut start = 0;
+            while start < batch.num_rows() {
+                control.check()?;
+                let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
+                slot.as_mut().expect("single shard writer initialized")
+                    .write_batch_range(batch, start, end)?;
+                start = end;
+            }
+            return Ok(());
+        }
         let mut dense: Option<Vec<Vec<usize>>> = None;
         let mut start = 0;
         while start < batch.num_rows() {
@@ -309,5 +329,43 @@ mod lazy_partition_writer_tests {
         assert_eq!(observed, batch.rows().unwrap());
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod single_shard_partition_zero_copy_tests {
+    use super::*;
+    use crate::{
+        scalar::Value, schema::{DataType, Field, Schema}, scale::spill::SpillReader,
+    };
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn one_shard_writes_contiguous_text_windows_without_reordering() {
+        let dir = std::env::temp_dir().join(format!("native-single-shard-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema.clone(), (0..30).map(|n| vec![
+            if n % 5 == 0 { Value::Null } else { Value::Integer(n) },
+            Value::Text(format!("row-{n}-{}", "é".repeat(1000))),
+        ]).collect()).unwrap();
+        let mut writer = PartitionWriter::new(&dir, schema, &["key"], 1, 4).unwrap();
+        writer.write_batch(&source, &QueryControl::default()).unwrap();
+        let files = writer.finish().unwrap();
+        let mut reader = SpillReader::new(BufReader::new(
+            File::open(&files.paths()[0]).unwrap()), 4).unwrap();
+        let mut rows = Vec::new();
+        while let Some(part) = reader.next_batch().unwrap() {
+            rows.extend(part.rows().unwrap());
+        }
+        assert_eq!(rows, source.rows().unwrap());
+        drop(reader);
+        drop(files);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
