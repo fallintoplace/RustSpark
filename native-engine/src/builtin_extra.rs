@@ -306,27 +306,27 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         },
         "GREATEST" => {
             if args.len() < 2 { return Err(Error::Parse("GREATEST requires at least two arguments".into())); }
-            let mut best: Option<Value> = None;
+            let mut best: Option<&Value> = None;
             for value in args.iter().filter(|value| !value.is_null()) {
-                if let Some(current) = &best {
+                if let Some(current) = best {
                     if value.sql_compare(current)?.ok_or_else(|| Error::Type("GREATEST cannot compare NaN".into()))?.is_gt() {
-                        best = Some(value.clone());
+                        best = Some(value);
                     }
-                } else { best = Some(value.clone()); }
+                } else { best = Some(value); }
             }
-            Ok(best.unwrap_or(Value::Null))
+            Ok(best.cloned().unwrap_or(Value::Null))
         },
         "LEAST" => {
             if args.len() < 2 { return Err(Error::Parse("LEAST requires at least two arguments".into())); }
-            let mut best: Option<Value> = None;
+            let mut best: Option<&Value> = None;
             for value in args.iter().filter(|value| !value.is_null()) {
-                if let Some(current) = &best {
+                if let Some(current) = best {
                     if value.sql_compare(current)?.ok_or_else(|| Error::Type("LEAST cannot compare NaN".into()))?.is_lt() {
-                        best = Some(value.clone());
+                        best = Some(value);
                     }
-                } else { best = Some(value.clone()); }
+                } else { best = Some(value); }
             }
-            Ok(best.unwrap_or(Value::Null))
+            Ok(best.cloned().unwrap_or(Value::Null))
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
@@ -414,5 +414,18 @@ mod substring_byte_slicing_tests {
         assert_eq!(arg(9, 3), Value::Text("".into()));
         assert_eq!(arg(i64::MIN, 3), Value::Text("aé🙂".into()));
         assert_eq!(arg(2, 0), Value::Text("".into()));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_extrema_tests {
+    use super::*;
+    #[test]
+    fn greatest_and_least_clone_only_final_text() {
+        let args = [Value::Text("a".into()), Value::Null,
+            Value::Text("zz".into()), Value::Text("b".into())];
+        assert_eq!(evaluate("GREATEST", &args).unwrap(), Value::Text("zz".into()));
+        assert_eq!(evaluate("LEAST", &args).unwrap(), Value::Text("a".into()));
+        assert_eq!(evaluate("GREATEST", &[Value::Null, Value::Null]).unwrap(), Value::Null);
     }
 }
