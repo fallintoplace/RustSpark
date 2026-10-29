@@ -12,8 +12,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(width) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    let count = usize::try_from(width)
-        .map_err(|_| Error::Execution("LEFT/RIGHT length must be nonnegative".into()))?;
+    // Spark returns an empty string when length is zero or negative.
+    let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
     let result: String = if from_right {
         let character_count = text.chars().count();
         text.chars().skip(character_count.saturating_sub(count)).collect()
@@ -43,6 +43,7 @@ mod tests {
             Value::Text("fé".into()));
         assert_eq!(right(&[input.clone(), Value::Integer(0)]).unwrap(),
             Value::Text("".into()));
-        assert!(left(&[input, Value::Integer(-1)]).is_err());
+        assert_eq!(left(&[input.clone(), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
+        assert_eq!(right(&[input, Value::Integer(-3)]).unwrap(), Value::Text("".into()));
     }
 }
