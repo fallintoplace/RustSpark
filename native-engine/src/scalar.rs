@@ -155,7 +155,7 @@ impl Value {
             (Self::Integer(value), DataType::Text) => Ok(Self::Text(value.to_string())),
             (Self::Float(value), DataType::Text) => {
                 let mut text = value.to_string();
-                if value.is_finite() && !text.contains(['.', 'e', 'E']) {
+                if value.is_finite() && !text.contains('.') && !text.contains('e') && !text.contains('E') {
                     text.push_str(".0");
                 }
                 Ok(Self::Text(text))
