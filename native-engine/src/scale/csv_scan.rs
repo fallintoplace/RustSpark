@@ -47,10 +47,9 @@ impl<R: BufRead> CsvRows<R> {
             let mut consumed = 0;
             let mut complete = false;
             for &byte in available {
-                if bytes.len() >= self.max_record_bytes {
+                if bytes.len().saturating_add(consumed) >= self.max_record_bytes {
                     return Err(Error::Execution("CSV record exceeds byte limit".into()));
                 }
-                bytes.push(byte);
                 consumed += 1;
                 if byte == b'"' { quoted = !quoted; }
                 if (byte == b'\n' || byte == b'\r') && !quoted {
@@ -58,6 +57,7 @@ impl<R: BufRead> CsvRows<R> {
                     break;
                 }
             }
+            bytes.extend_from_slice(&available[..consumed]);
             self.reader.consume(consumed);
             if complete { break; }
         }
