@@ -19,8 +19,24 @@ TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
 
 
+def _reject_duplicate_json_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON request field")
+        result[key] = value
+    return result
+
+
+def parse_result_rows(text: str) -> list[dict]:
+    rows = json.loads(text)
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("SQL result must be a list of objects")
+    return rows
+
+
 def validate_params(body: bytes) -> dict[str, str]:
-    payload = json.loads(body)
+    payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
     if not isinstance(payload, dict) or set(payload) != {"params"}:
         raise ValueError("Expected JSON object containing only params")
     params = payload["params"]
@@ -116,9 +132,7 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 if result.returncode:
                     self.send_json(422, {"error": "Query failed"})
                     return
-                rows = json.loads(result.stdout)
-                if not isinstance(rows, list):
-                    raise ValueError("Unexpected result")
+                rows = parse_result_rows(result.stdout)
                 self.send_json(200, {"rows": rows})
             except subprocess.TimeoutExpired:
                 self.send_json(504, {"error": "Query timeout"})

@@ -2,7 +2,7 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows
 
 
 class GatewayTests(unittest.TestCase):
@@ -26,6 +26,23 @@ class GatewayTests(unittest.TestCase):
         for body in invalid:
             with self.subTest(body=body), self.assertRaises((ValueError, json.JSONDecodeError)):
                 validate_params(body)
+
+
+    def test_duplicate_json_request_keys_are_not_accepted(self):
+        for body in (
+            b'{"params":{"id":"int64:1","id":"int64:2"}}',
+            b'{"params":{},"params":{"id":"int64:2"}}',
+        ):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                validate_params(body)
+
+    def test_backend_rows_must_be_json_objects(self):
+        self.assertEqual(parse_result_rows('[{"city":"Berlin"},{"amount":3}]'),
+                         [{"city": "Berlin"}, {"amount": 3}])
+        self.assertEqual(parse_result_rows("[]"), [])
+        for invalid in ('{}', '[1]', '[null]', '[{},"text"]', 'invalid'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_result_rows(invalid)
 
     def test_only_safe_regular_templates_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
