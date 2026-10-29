@@ -85,10 +85,11 @@ mod tests {
         assert_eq!(lookup(Some(&doc), "$.a[2].n").unwrap(), None);
         assert!(lookup(Some(&doc), "$.a[-1]").is_err());
         assert!(lookup(Some(&doc), "a").is_err());
-        let objects = parse(r#"{"root":{"a.b":7,"é":8,"quote\\"key":9}}"#).unwrap();
-        assert_eq!(lookup(Some(&objects), "$.root[\'a.b\']").unwrap(), Some(&serde_json::json!(7)));
-        assert_eq!(lookup(Some(&objects), "$.root[\\"é\\"]").unwrap(), Some(&serde_json::json!(8)));
-        assert_eq!(lookup(Some(&objects), "$.root[\'missing\']").unwrap(), None);
-        assert!(lookup(Some(&objects), "$.root[\'missing]").is_err());
+        let objects = parse(r#"{"root":{"a.b":7,"é":8,"quote\"key":9}}"#).unwrap();
+        assert_eq!(lookup(Some(&objects), "$.root['a.b']").unwrap(), Some(&serde_json::json!(7)));
+        assert_eq!(lookup(Some(&objects), r#"$.root["é"]"#).unwrap(), Some(&serde_json::json!(8)));
+        assert_eq!(lookup(Some(&objects), r#"$.root["quote\"key"]"#).unwrap(), Some(&serde_json::json!(9)));
+        assert_eq!(lookup(Some(&objects), "$.root['missing']").unwrap(), None);
+        assert!(lookup(Some(&objects), "$.root['missing]").is_err());
     }
 }
