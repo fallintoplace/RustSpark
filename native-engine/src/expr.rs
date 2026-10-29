@@ -88,7 +88,16 @@ impl Expr {
                 | BinaryOp::GreaterEqual
                 | BinaryOp::And
                 | BinaryOp::Or => Ok(DataType::Boolean),
-                BinaryOp::Divide => Ok(DataType::Float),
+                BinaryOp::Divide => {
+                    let a = left.output_type(schema)?;
+                    let b = right.output_type(schema)?;
+                    if matches!(a, DataType::Integer | DataType::Float)
+                        && matches!(b, DataType::Integer | DataType::Float) {
+                        Ok(DataType::Float)
+                    } else {
+                        Err(Error::Type("division requires numeric operands".into()))
+                    }
+                },
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
@@ -321,5 +330,25 @@ mod short_circuit_feature_tests {
         let yes = Expr::binary(Expr::Literal(Value::Boolean(true)), BinaryOp::Or, bad);
         assert_eq!(no.evaluate(&batch(), 0).unwrap(), Value::Boolean(false));
         assert_eq!(yes.evaluate(&batch(), 0).unwrap(), Value::Boolean(true));
+    }
+}
+
+#[cfg(test)]
+mod division_type_preflight_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn text_division_rejected_even_with_no_rows() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, true),
+            Field::new("price", DataType::Integer, false),
+        ]).unwrap();
+        let invalid = Expr::binary(Expr::Column("label".into()),
+            BinaryOp::Divide, Expr::Column("price".into()));
+        assert!(invalid.output_type(&schema).is_err());
+        let valid = Expr::binary(Expr::Column("price".into()),
+            BinaryOp::Divide, Expr::Literal(Value::Integer(2)));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Float);
     }
 }
