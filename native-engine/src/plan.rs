@@ -52,6 +52,10 @@ pub enum Plan {
         left: Box<Plan>,
         right: Box<Plan>,
     },
+    Except {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
 }
 
 impl Plan {

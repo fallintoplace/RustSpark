@@ -450,12 +450,20 @@ impl Parser {
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
     let mut plan = parser.select_with_intersections()?;
-    while parser.take_word("UNION") {
-        let all = parser.take_word("ALL");
-        if !all { parser.take_word("DISTINCT"); }
-        let right = parser.select_with_intersections()?;
-        plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
-        if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
+    loop {
+        if parser.take_word("UNION") {
+            let all = parser.take_word("ALL");
+            if !all { parser.take_word("DISTINCT"); }
+            let right = parser.select_with_intersections()?;
+            plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+            if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
+        } else if parser.take_word("EXCEPT") {
+            parser.take_word("DISTINCT");
+            let right = parser.select_with_intersections()?;
+            plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
+        } else {
+            break;
+        }
     }
     let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');

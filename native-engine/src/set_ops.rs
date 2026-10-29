@@ -27,3 +27,16 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     }
     Batch::from_rows(schema, rows)
 }
+
+pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    let schema = compatible_schema(left, right)?;
+    let right_rows: HashSet<_> = right.rows()?.into_iter().collect();
+    let mut emitted = HashSet::new();
+    let mut rows = Vec::new();
+    for row in left.rows()? {
+        if !right_rows.contains(&row) && emitted.insert(row.clone()) {
+            rows.push(row);
+        }
+    }
+    Batch::from_rows(schema, rows)
+}

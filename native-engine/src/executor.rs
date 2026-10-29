@@ -82,6 +82,7 @@ fn execute_inner(
         )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
+        Plan::Except { left, right } => set_ops::except_distinct(&descend(left)?, &descend(right)?)?,
     };
     guard.check()?;
     if batch.num_rows() > options.max_output_rows {
