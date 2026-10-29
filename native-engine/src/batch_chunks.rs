@@ -45,6 +45,7 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
         total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
     }
+    if batches.len() == 1 { return Ok((*first).clone()); }
     let mut columns: Vec<Vec<Value>> = (0..schema.len())
         .map(|_| Vec::with_capacity(total))
         .collect();
@@ -95,5 +96,26 @@ mod zero_column_concat_consolidation_tests {
         let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(concatenate(&[a, b]).unwrap().rows().unwrap(), vec![vec![]; 5]);
+    }
+}
+
+#[cfg(test)]
+mod single_batch_direct_concat_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn single_batch_preserves_nulls_and_zero_width_row_counts() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+            Field::new("count", DataType::Integer, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("a".repeat(1024)), Value::Integer(5)],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        assert_eq!(concatenate(&[input.clone()]).unwrap(), input);
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let zero_width = Batch::new_with_row_count(empty_schema, vec![], 3).unwrap();
+        assert_eq!(concatenate(&[zero_width]).unwrap().num_rows(), 3);
     }
 }
