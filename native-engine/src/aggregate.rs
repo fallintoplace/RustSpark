@@ -58,7 +58,7 @@ impl AggregateItem {
                     !matches!(predicate, Expr::Literal(Value::Null)) {
                     return Err(Error::Type("FILTER WHERE must be boolean".into()));
                 }
-                Self::new((**op).clone(), &self.alias).output_type(schema)
+                Self::new((**op).clone(), self.alias.clone()).output_type(schema)
             },
         }
     }
