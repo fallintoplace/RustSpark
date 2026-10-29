@@ -403,7 +403,17 @@ impl Parser {
                 AggregateOp::CountAll
             } else {
                 let expr = self.expression(0)?;
+                let mut expressions = vec![expr];
+                while function == "COUNT" && distinct && self.take_symbol(',') {
+                    if expressions.len() >= 64 {
+                        return Err(Error::Parse("COUNT DISTINCT exceeds 64 columns".into()));
+                    }
+                    expressions.push(self.expression(0)?);
+                }
+                let expr = expressions[0].clone();
                 match function.as_str() {
+                    "COUNT" if distinct && expressions.len() > 1 =>
+                        AggregateOp::CountDistinctTuple(expressions),
                     "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
                     "COUNT_IF" => AggregateOp::Count(Expr::Case {
