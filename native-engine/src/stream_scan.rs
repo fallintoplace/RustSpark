@@ -66,6 +66,19 @@ impl Iterator for ScanCursor<'_> {
             if result.is_err() { self.failed = true; }
             return Some(result);
         }
+        if self.predicate.is_none() {
+            if self.next_row == self.source.num_rows() { return None; }
+            let end = self.next_row.saturating_add(self.target_rows).min(self.source.num_rows());
+            let columns = self.columns.iter().map(|&column| {
+                let values = self.source.column(column)?;
+                Ok(values[self.next_row..end].to_vec())
+            }).collect::<Result<Vec<_>>>();
+            let result = columns.and_then(|columns| Batch::new_with_row_count(
+                self.output_schema.clone(), columns, end - self.next_row));
+            self.next_row = end;
+            if result.is_err() { self.failed = true; }
+            return Some(result);
+        }
         let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
@@ -266,5 +279,31 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod contiguous_projection_perf_tests {
+    use super::*;
+    #[test]
+    fn unfiltered_reordered_projection_preserves_chunk_boundaries() {
+        let schema = Schema::new(vec![
+            crate::schema::Field::new("left", crate::schema::DataType::Integer, false),
+            crate::schema::Field::new("right", crate::schema::DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("x".into())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("z".into())],
+        ]).unwrap();
+        let chunks = scan(&input, None, &["right", "left"], 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].rows().unwrap(), vec![
+            vec![Value::Text("x".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]);
+        assert_eq!(chunks[1].rows().unwrap(),
+            vec![vec![Value::Text("z".into()), Value::Integer(3)]]);
     }
 }
