@@ -296,6 +296,14 @@ pub fn evaluate(name: &str, arguments: &[Expr], batch: &Batch, row: usize) -> Re
             None => Ok(Value::Null),
         };
     }
+    // Use stack storage for common small scalar function calls.
+    if arguments.len() <= 4 {
+        let mut values: [Value; 4] = std::array::from_fn(|_| Value::Null);
+        for (slot, expression) in values.iter_mut().zip(arguments) {
+            *slot = expression.evaluate(batch, row)?;
+        }
+        return (function.call)(&values[..arguments.len()]);
+    }
     let evaluated = arguments.iter().map(|arg| arg.evaluate(batch, row))
         .collect::<Result<Vec<_>>>()?;
     (function.call)(&evaluated)
@@ -340,5 +348,22 @@ mod elt_lazy_evaluation_tests {
         let out_of_bounds = [Expr::Literal(Value::Integer(5)),
             Expr::Literal(Value::Text("ok".into())), failing];
         assert_eq!(evaluate("elt", &out_of_bounds, &batch, 0).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod builtin_stack_storage_regression_tests {
+    use super::*;
+    #[test]
+    fn builtin_scalar_calls_use_small_and_large_arity_paths() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Text("x".into())]]).unwrap();
+        let arg = |s: &str| Expr::Literal(Value::Text(s.into()));
+        assert_eq!(evaluate("ucase", &[arg("café")], &batch, 0).unwrap(),
+            Value::Text("CAFÉ".into()));
+        assert_eq!(evaluate("concat_ws", &[arg("-"), arg("a"), arg("b"), arg("c")], &batch, 0).unwrap(),
+            Value::Text("a-b-c".into()));
+        assert_eq!(evaluate("concat_ws", &[arg("-"), arg("a"), arg("b"), arg("c"), arg("d")], &batch, 0).unwrap(),
+            Value::Text("a-b-c-d".into()));
     }
 }
