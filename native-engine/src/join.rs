@@ -24,6 +24,139 @@ fn joinable(key: &Value) -> bool {
     !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
 }
 
+
+/** Execute Spark USING joins with composite keys and one coalesced key per name. */
+pub fn hash_join_using(left: &Batch, right: &Batch, keys: &[String], kind: JoinKind) -> Result<Batch> {
+    if keys.is_empty() || keys.len() > 128 {
+        return Err(Error::Schema("USING join needs 1..=128 keys".into()));
+    }
+    let mut used_keys = HashSet::new();
+    let mut left_keys = Vec::new();
+    let mut right_keys = Vec::new();
+    for name in keys {
+        if !used_keys.insert(name.to_ascii_lowercase()) {
+            return Err(Error::Schema("duplicate USING key".into()));
+        }
+        let l = left.schema().column(name)?;
+        let r = right.schema().column(name)?;
+        if left.schema().field(l)?.data_type != right.schema().field(r)?.data_type {
+            return Err(Error::Type("USING key types differ".into()));
+        }
+        left_keys.push(l);
+        right_keys.push(r);
+    }
+    let lhs_other = (0..left.schema().len()).filter(|i| !left_keys.contains(i)).collect::<Vec<_>>();
+    let rhs_other = (0..right.schema().len()).filter(|i| !right_keys.contains(i)).collect::<Vec<_>>();
+    let mut used_names = HashSet::new();
+    let mut fields = Vec::new();
+    for (&l, &r) in left_keys.iter().zip(&right_keys) {
+        let lf = left.schema().field(l)?;
+        let rf = right.schema().field(r)?;
+        let nullable = match kind {
+            JoinKind::Inner => false,
+            JoinKind::Left | JoinKind::Semi | JoinKind::Anti => lf.nullable,
+            JoinKind::Right => rf.nullable,
+            JoinKind::Full => lf.nullable || rf.nullable,
+        };
+        fields.push(Field::new(&lf.name, lf.data_type, nullable));
+        used_names.insert(lf.name.to_ascii_lowercase());
+    }
+    for &index in &lhs_other {
+        let f = left.schema().field(index)?;
+        fields.push(Field::new(&f.name, f.data_type,
+            f.nullable || matches!(kind, JoinKind::Right | JoinKind::Full)));
+        used_names.insert(f.name.to_ascii_lowercase());
+    }
+    for &index in &rhs_other {
+        let f = right.schema().field(index)?;
+        let mut name = f.name.clone();
+        while used_names.contains(&name.to_ascii_lowercase()) {
+            name = format!("right_{name}");
+        }
+        used_names.insert(name.to_ascii_lowercase());
+        fields.push(Field::new(name, f.data_type,
+            f.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
+    }
+    let schema = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        left.schema().clone()
+    } else { Schema::new(fields)? };
+
+    let extract = |batch: &Batch, row: usize, indices: &[usize]| -> Result<Option<Vec<Value>>> {
+        let mut values = Vec::with_capacity(indices.len());
+        for &index in indices {
+            let value = batch.value(row, index)?;
+            if !joinable(value) { return Ok(None); }
+            values.push(value.clone());
+        }
+        Ok(Some(values))
+    };
+    let mut lookup = HashMap::<Vec<Value>, Vec<usize>>::new();
+    for row in 0..right.num_rows() {
+        if let Some(key) = extract(right, row, &right_keys)? {
+            lookup.entry(key).or_default().push(row);
+        }
+    }
+    let compose = |lhs: Option<&[Value]>, rhs: Option<&[Value]>| {
+        let mut result = Vec::with_capacity(fields.len());
+        for (&li, &ri) in left_keys.iter().zip(&right_keys) {
+            result.push(lhs.and_then(|row| row.get(li)).filter(|v| !v.is_null())
+                .or_else(|| rhs.and_then(|row| row.get(ri)))
+                .cloned().unwrap_or(Value::Null));
+        }
+        for &index in &lhs_other {
+            result.push(lhs.and_then(|row| row.get(index)).cloned().unwrap_or(Value::Null));
+        }
+        for &index in &rhs_other {
+            result.push(rhs.and_then(|row| row.get(index)).cloned().unwrap_or(Value::Null));
+        }
+        result
+    };
+    let mut output = Vec::new();
+    let mut right_seen = vec![false; right.num_rows()];
+    for row in 0..left.num_rows() {
+        let key = extract(left, row, &left_keys)?;
+        let matches = key.as_ref().and_then(|key| lookup.get(key));
+        let found = matches.is_some();
+        let left_row = left.row(row)?;
+        if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+            if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
+                if output.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("USING join output limit exceeded".into()));
+                }
+                output.push(left_row);
+            }
+            continue;
+        }
+        if let Some(indices) = matches {
+            for &r in indices {
+                if output.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("USING join output limit exceeded".into()));
+                }
+                right_seen[r] = true;
+                let right_row = right.row(r)?;
+                output.push(compose(Some(&left_row), Some(&right_row)));
+            }
+        } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
+            if output.len() >= MAX_JOIN_ROWS {
+                return Err(Error::Execution("USING join output limit exceeded".into()));
+            }
+            output.push(compose(Some(&left_row), None));
+        }
+    }
+    if matches!(kind, JoinKind::Right | JoinKind::Full) {
+        for r in 0..right.num_rows() {
+            if !right_seen[r] {
+                if output.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("USING join output limit exceeded".into()));
+                }
+                let right_row = right.row(r)?;
+                output.push(compose(None, Some(&right_row)));
+            }
+        }
+    }
+    Batch::from_rows(schema, output)
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,

@@ -469,6 +469,26 @@ impl Parser {
             };
             let Some(kind) = kind else { break };
             let right = self.identifier()?;
+            if self.take_word("USING") {
+                self.expect_symbol('(')?;
+                let mut keys = Vec::<String>::new();
+                loop {
+                    let key = self.identifier()?;
+                    if keys.iter().any(|previous| previous.eq_ignore_ascii_case(&key)) {
+                        return Err(Error::Parse("duplicate USING join key".into()));
+                    }
+                    if keys.len() == 128 {
+                        return Err(Error::Execution("USING join exceeds 128 keys".into()));
+                    }
+                    keys.push(key);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                plan = Plan::JoinUsing {
+                    left: Box::new(plan), right: Box::new(Plan::scan(right)), keys, kind,
+                };
+                continue;
+            }
             self.expect_word("ON")?;
             let left_key = self.identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {

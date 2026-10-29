@@ -37,6 +37,13 @@ pub enum Plan {
     Distinct {
         input: Box<Plan>,
     },
+    /// Spark equijoin USING, including composite keys and deduplicated output keys.
+    JoinUsing {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        keys: Vec<String>,
+        kind: crate::join::JoinKind,
+    },
     Join {
         left: Box<Plan>,
         right: Box<Plan>,

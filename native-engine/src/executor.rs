@@ -48,6 +48,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => pending.push((input, depth + 1)),
             Plan::Join { left, right, .. }
+            | Plan::JoinUsing { left, right, .. }
             | Plan::UnionAll { left, right }
             | Plan::Intersect { left, right }
             | Plan::Except { left, right } => {
@@ -111,6 +112,8 @@ fn execute_inner(
             }
         },
         Plan::Distinct { input } => distinct::distinct(&descend(input)?)?,
+        Plan::JoinUsing { left, right, keys, kind } =>
+            join::hash_join_using(&descend(left)?, &descend(right)?, keys, *kind)?,
         Plan::Join {
             left,
             right,

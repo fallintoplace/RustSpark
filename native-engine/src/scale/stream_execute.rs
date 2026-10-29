@@ -263,6 +263,13 @@ fn infer(
         }
         Plan::Limit { input, .. } |
         Plan::Distinct { input } => child(input),
+        Plan::JoinUsing { left, right, keys, kind } => {
+            let lhs = child(left)?;
+            let rhs = child(right)?;
+            Ok(join::hash_join_using(
+                &Batch::empty(lhs), &Batch::empty(rhs), keys, *kind,
+            )?.schema().clone())
+        }
         Plan::Join { left, right, left_key, right_key, kind } => {
             let left_schema = child(left)?;
             let right_schema = child(right)?;
