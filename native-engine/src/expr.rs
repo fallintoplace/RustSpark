@@ -102,9 +102,20 @@ impl Expr {
                 | BinaryOp::Less
                 | BinaryOp::LessEqual
                 | BinaryOp::Greater
-                | BinaryOp::GreaterEqual
-                | BinaryOp::And
-                | BinaryOp::Or => Ok(DataType::Boolean),
+                | BinaryOp::GreaterEqual => {
+                    let left_type = left.output_type(schema)?;
+                    let right_type = right.output_type(schema)?;
+                    if !matches!(left.as_ref(), Expr::Literal(Value::Null))
+                        && !matches!(right.as_ref(), Expr::Literal(Value::Null))
+                        && left_type != right_type
+                        && !matches!((left_type, right_type),
+                            (DataType::Integer, DataType::Float) |
+                            (DataType::Float, DataType::Integer)) {
+                        return Err(Error::Type("comparison requires comparable SQL types".into()));
+                    }
+                    Ok(DataType::Boolean)
+                },
+                BinaryOp::And | BinaryOp::Or => Ok(DataType::Boolean),
                 BinaryOp::Divide => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
@@ -458,5 +469,31 @@ mod like_rolling_buffer_perf_tests {
         assert!(sql_like_escape("a%b", "a\\%b", '\\').unwrap());
         assert!(sql_like_escape("", "%%", '\\').unwrap());
         assert!(!sql_like_escape("", "_%", '\\').unwrap());
+    }
+}
+
+#[cfg(test)]
+mod binary_comparison_planning_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn incompatible_columns_fail_before_rows_are_evaluated() {
+        let schema = Schema::new(vec![
+            Field::new("count", DataType::Integer, true),
+            Field::new("score", DataType::Float, true),
+            Field::new("name", DataType::Text, true),
+        ]).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual, BinaryOp::Less,
+                   BinaryOp::LessEqual, BinaryOp::Greater, BinaryOp::GreaterEqual] {
+            assert!(Expr::binary(Expr::Column("count".into()), op,
+                Expr::Column("name".into())).output_type(&schema).is_err());
+            assert!(Expr::binary(Expr::Column("missing".into()), op,
+                Expr::Column("name".into())).output_type(&schema).is_err());
+            assert_eq!(Expr::binary(Expr::Column("count".into()), op,
+                Expr::Column("score".into())).output_type(&schema).unwrap(), DataType::Boolean);
+            assert_eq!(Expr::binary(Expr::Column("count".into()), op,
+                Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
+        }
     }
 }
