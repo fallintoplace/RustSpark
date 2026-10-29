@@ -11,7 +11,7 @@ use crate::{
 pub struct Pipeline<I> {
     source: I,
     predicate: Option<Expr>,
-    selections: Option<Vec<Selection>>,
+    projections: Vec<Vec<Selection>>,
     skip: usize,
     remaining: Option<usize>,
     guard: QueryGuard,
@@ -23,7 +23,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
         Self {
             source,
             predicate: None,
-            selections: None,
+            projections: Vec::new(),
             skip: 0,
             remaining: None,
             guard: QueryGuard::default(),
@@ -37,7 +37,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     }
 
     pub fn with_projection(mut self, selections: Vec<Selection>) -> Self {
-        self.selections = Some(selections);
+        self.projections.push(selections);
         self
     }
 
@@ -79,7 +79,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 if let Some(predicate) = &self.predicate {
                     batch = filter::filter(&batch, predicate)?;
                 }
-                if let Some(selections) = &self.selections {
+                for selections in &self.projections {
                     batch = project::project(&batch, selections)?;
                 }
                 if self.skip > 0 {
@@ -155,5 +155,25 @@ mod tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(results[0].num_rows(), 2);
         assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod chained_projection_pipeline_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn successive_projections_can_reference_the_previous_alias() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(7)]],
+        ).unwrap();
+        let result = Pipeline::new([Ok(input)].into_iter())
+            .with_projection(vec![Selection::new(Expr::Column("value".into()), "renamed")])
+            .with_projection(vec![Selection::new(Expr::Column("renamed".into()), "last")])
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result[0].schema().fields()[0].name, "last");
+        assert_eq!(result[0].row(0).unwrap(), vec![Value::Integer(7)]);
     }
 }
