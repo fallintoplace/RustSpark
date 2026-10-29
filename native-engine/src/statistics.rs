@@ -68,31 +68,23 @@ impl ColumnStatistics {
         if nulls > rows {
             return Err(Error::Execution("invalid NULL count".into()));
         }
-        // Validate both extrema before committing counters or bounds.
-        let mut min = self.min.clone();
-        let mut max = self.max.clone();
-        if let Some(value) = &other.min {
-            if let Some(current) = &min {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
-                    min = Some(value.clone());
-                }
-            } else {
-                min = Some(value.clone());
-            }
-        }
-        if let Some(value) = &other.max {
-            if let Some(current) = &max {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
-                    max = Some(value.clone());
-                }
-            } else {
-                max = Some(value.clone());
-            }
-        }
+        // Validate both comparisons before changing any state.
+        let replace_min = match (&self.min, &other.min) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(current), Some(value)) =>
+                matches!(value.sql_compare(current)?, Some(Ordering::Less)),
+        };
+        let replace_max = match (&self.max, &other.max) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(current), Some(value)) =>
+                matches!(value.sql_compare(current)?, Some(Ordering::Greater)),
+        };
         self.rows = rows;
         self.nulls = nulls;
-        self.min = min;
-        self.max = max;
+        if replace_min { self.min = other.min.clone(); }
+        if replace_max { self.max = other.max.clone(); }
         Ok(())
     }
 }
@@ -208,5 +200,21 @@ mod merged_statistics_atomicity_consolidation_tests {
         let before = first.clone();
         assert!(first.merge(&other).is_err());
         assert_eq!(first, before);
+    }
+}
+
+#[cfg(test)]
+mod selective_stats_merge_perf_tests {
+    use super::*;
+    #[test]
+    fn merging_inner_range_does_not_change_text_extrema() {
+        let mut base = ColumnStatistics { rows: 10, nulls: 0,
+            min: Some(Value::Text("alpha".into())), max: Some(Value::Text("zulu".into())) };
+        let other = ColumnStatistics { rows: 3, nulls: 1,
+            min: Some(Value::Text("middle".into())), max: Some(Value::Text("tango".into())) };
+        base.merge(&other).unwrap();
+        assert_eq!((base.rows, base.nulls), (13, 1));
+        assert_eq!(base.min, Some(Value::Text("alpha".into())));
+        assert_eq!(base.max, Some(Value::Text("zulu".into())));
     }
 }
