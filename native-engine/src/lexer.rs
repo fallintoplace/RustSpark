@@ -62,9 +62,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 }
             }
             Token::Word(value)
-        } else if character.is_ascii_digit() {
+        } else if character.is_ascii_digit()
+            || (character == '.' && chars.peek().is_some_and(|next| next.is_ascii_digit())) {
             let mut number = character.to_string();
-            let mut dot = false;
+            let mut dot = character == '.';
             while let Some(next) = chars.peek() {
                 if next.is_ascii_digit() {
                     number.push(chars.next().expect("peeked digit"));
@@ -205,5 +206,17 @@ mod scientific_number_tokens_regression {
         assert!(tokens.contains(&Token::Number("2E+6".into())));
         assert!(tokenize("SELECT 1e FROM data").is_err());
         assert!(tokenize("SELECT 1e+ FROM data").is_err());
+    }
+}
+
+#[cfg(test)]
+mod leading_decimal_tokens_regression {
+    use super::*;
+    #[test]
+    fn leading_decimal_point_is_a_numeric_token() {
+        let tokens = tokenize("SELECT .5, .25e1 FROM t").unwrap();
+        assert!(tokens.contains(&Token::Number(".5".into())));
+        assert!(tokens.contains(&Token::Number(".25e1".into())));
+        assert!(tokenize("SELECT . FROM t").is_err());
     }
 }
