@@ -78,6 +78,15 @@ class ArrowStreamCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "FINAL ERROR"):
                 list(iter_arrow_batches("SELECT 1", database_dir="/tmp/my db"))
 
+    def test_sql_file_queries_use_argv_not_text_interpolation(self):
+        argv = build_command(None, sql_file=Path("/tmp/my queries/report.sql"))
+        self.assertEqual(argv[argv.index("--sql-file") + 1], "/tmp/my queries/report.sql")
+        self.assertNotIn("--sql", argv)
+        for sql, name in (("SELECT 1", "report.sql"), (None, ""), (" ", "q.sql")):
+            with self.subTest(sql=sql, name=name), self.assertRaises(ValueError):
+                build_command(sql, sql_file=name)
+
+
 
 if __name__ == "__main__":
     unittest.main()
