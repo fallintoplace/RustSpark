@@ -198,12 +198,13 @@ fn aggregate_shard(
         for row in 0..batch.num_rows() {
             let key = keys.iter().map(|&col| batch.value(row, col).cloned())
                 .collect::<Result<Vec<_>>>()?;
-            if !groups.contains_key(&key) && groups.len() >= max_groups {
-                return Err(Error::Execution("group state count exceeds partition budget".into()));
-            }
+            let at_capacity = groups.len() >= max_groups;
             let states = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
+                    if at_capacity {
+                        return Err(Error::Execution("group state count exceeds partition budget".into()));
+                    }
                     let initial = items.iter()
                         .map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
