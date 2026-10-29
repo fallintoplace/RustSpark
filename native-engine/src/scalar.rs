@@ -137,14 +137,14 @@ impl Value {
                 }
                 Ok(Self::Integer(value.trunc() as i64))
             }
-            (Self::Text(value), DataType::Integer) => value.parse::<i64>()
+            (Self::Text(value), DataType::Integer) => value.trim().parse::<i64>()
                 .map(Self::Integer).map_err(|_| Error::Type("invalid BIGINT cast".into())),
-            (Self::Text(value), DataType::Float) => value.parse::<f64>().ok()
+            (Self::Text(value), DataType::Float) => value.trim().parse::<f64>().ok()
                 .filter(|n| n.is_finite()).map(Self::Float)
                 .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
-            (Self::Text(value), DataType::Boolean) if value.eq_ignore_ascii_case("true") =>
+            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("true") =>
                 Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.eq_ignore_ascii_case("false") =>
+            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
                 Ok(Self::Boolean(false)),
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
@@ -182,5 +182,21 @@ mod boolean_numeric_cast_tests {
         assert_eq!(Value::Float(0.5).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
         assert!(Value::Float(f64::NAN).cast_to(DataType::Boolean).is_err());
         assert!(Value::Float(f64::INFINITY).cast_to(DataType::Boolean).is_err());
+    }
+}
+
+#[cfg(test)]
+mod text_cast_whitespace_regression {
+    use super::*;
+    use crate::schema::DataType;
+    #[test]
+    fn cast_trims_whitespace_like_try_cast() {
+        assert_eq!(Value::Text(" 42\t".into()).cast_to(DataType::Integer).unwrap(),
+            Value::Integer(42));
+        assert_eq!(Value::Text(" .5 ".into()).cast_to(DataType::Float).unwrap(),
+            Value::Float(0.5));
+        assert_eq!(Value::Text(" FALSE ".into()).cast_to(DataType::Boolean).unwrap(),
+            Value::Boolean(false));
+        assert!(Value::Text(" 42x ".into()).cast_to(DataType::Integer).is_err());
     }
 }
