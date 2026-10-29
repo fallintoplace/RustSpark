@@ -30,7 +30,7 @@ mod tests {
     fn counts_unicode_characters_including_trailing_spaces() {
         assert_eq!(evaluate(&[Value::Text("é🙂 ".into())]).unwrap(), Value::Integer(3));
         assert_eq!(evaluate(&[Value::Text("ASCII strings 123".into())]).unwrap(), Value::Integer(17));
-        assert_eq!(evaluate(&[Value::Text("hello é🙂".into())]).unwrap(), Value::Integer(7));
+        assert_eq!(evaluate(&[Value::Text("hello é🙂".into())]).unwrap(), Value::Integer(8));
         assert_eq!(evaluate(&[Value::Text(String::new())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
