@@ -14,7 +14,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if !digit.is_ascii_digit() { return Ok(Value::Boolean(false)); }
         let mut n = u32::from(digit - b'0');
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        checksum = (checksum + n) % 10;
+        // Both terms are below ten, so at most one subtraction is needed.
+        checksum += n;
+        if checksum >= 10 { checksum -= 10; }
     }
     Ok(Value::Boolean(checksum == 0))
 }
@@ -35,5 +37,26 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("0".repeat(100_000))]).unwrap(),
             Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod luhn_bounded_checksum_tests {
+    use super::*;
+    #[test]
+    fn matches_reference_modulo_on_many_digit_sequences() {
+        fn reference(text: &str) -> bool {
+            let mut checksum = 0_u32;
+            for (index, byte) in text.bytes().rev().enumerate() {
+                let mut n = u32::from(byte - b'0');
+                if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
+                checksum = (checksum + n) % 10;
+            }
+            checksum == 0
+        }
+        for length in 1..=150 {
+            let text: String = (0..length).map(|index| char::from(b'0' + ((index * 7 + length) % 10) as u8)).collect();
+            assert_eq!(evaluate(&[Value::Text(text.clone())]).unwrap(), Value::Boolean(reference(&text)));
+        }
     }
 }
