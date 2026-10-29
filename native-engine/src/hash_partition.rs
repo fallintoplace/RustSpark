@@ -91,6 +91,7 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     }
 
     // Keep only row coordinates until all source batches have been partitioned.
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
     for (batch_index, batch) in input.iter().enumerate() {
         for row in 0..batch.num_rows() {
@@ -98,7 +99,11 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
             for &column in &key_columns {
                 batch.value(row, column)?.hash(&mut hasher);
             }
-            let bucket = (hasher.finish() % partitions as u64) as usize;
+            let hashed = hasher.finish();
+            let bucket = match mask {
+                Some(mask) => (hashed as usize) & mask,
+                None => (hashed % partitions as u64) as usize,
+            };
             buckets[bucket].push((batch_index, row));
         }
     }
@@ -205,6 +210,28 @@ mod bitmasked_bucket_tests {
             }
             for (part, indices) in actual.iter().zip(expected) {
                 assert_eq!(part, &batch.take(&indices).unwrap());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod multibatch_power_two_partition_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn power_of_two_fast_path_matches_single_batch_buckets() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let inputs = (0..3).map(|part| Batch::from_rows(schema.clone(),
+            (0..67).map(|n| vec![if n % 17 == 0 { Value::Null } else {
+                Value::Integer(n % 19 + part) }]).collect()).unwrap()).collect::<Vec<_>>();
+        for count in [1, 2, 8, 64, 127] {
+            let actual = partition_batches(&inputs, &["k"], count).unwrap();
+            for bucket in 0..count {
+                let expected = inputs.iter().flat_map(|input|
+                    partition(input, &["k"], count).unwrap()[bucket].rows().unwrap()
+                ).collect::<Vec<_>>();
+                assert_eq!(actual[bucket].rows().unwrap(), expected);
             }
         }
     }
