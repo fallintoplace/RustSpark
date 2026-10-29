@@ -30,21 +30,17 @@ fn json_depth_type(types: &[DataType]) -> Result<DataType> {
 fn json_depth(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let document = json_path::parse(text)?;
-    let mut nodes = vec![(&document, 1_i64)];
-    let mut maximum = 0_i64;
-    while let Some((node, depth)) = nodes.pop() {
-        maximum = maximum.max(depth);
-        match node {
-            serde_json::Value::Array(items) => {
-                for child in items { nodes.push((child, depth + 1)); }
-            }
-            serde_json::Value::Object(fields) => {
-                for child in fields.values() { nodes.push((child, depth + 1)); }
-            }
-            _ => {}
-        }
+    // serde_json bounds nesting depth when parsing. Recurse by nesting level
+    // instead of allocating an entry for every sibling in a wide array.
+    fn depth(value: &serde_json::Value) -> i64 {
+        let children = match value {
+            serde_json::Value::Array(items) => items.iter().map(depth).max(),
+            serde_json::Value::Object(fields) => fields.values().map(depth).max(),
+            _ => None,
+        };
+        children.map_or(1, |maximum| maximum + 1)
     }
-    Ok(Value::Integer(maximum))
+    Ok(Value::Integer(depth(&document)))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -76,5 +72,19 @@ mod json_depth_extension_tests {
         assert_eq!(json_depth(&[Value::Text("{}".into())]).unwrap(), Value::Integer(1));
         assert_eq!(json_depth(&[Value::Text("null".into())]).unwrap(), Value::Integer(1));
         assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod json_depth_wide_collections_tests {
+    use super::*;
+
+    #[test]
+    fn wide_collections_have_small_depth_and_nested_values_count() {
+        let wide = format!("[{}]", vec!["0"; 10_000].join(","));
+        assert_eq!(json_depth(&[Value::Text(wide)]).unwrap(), Value::Integer(2));
+        let nested = format!("{}0{}", "[".repeat(80), "]".repeat(80));
+        assert_eq!(json_depth(&[Value::Text(nested)]).unwrap(), Value::Integer(81));
+        assert_eq!(json_depth(&[Value::Text("{}".into())]).unwrap(), Value::Integer(1));
     }
 }
