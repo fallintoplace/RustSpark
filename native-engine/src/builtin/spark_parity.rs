@@ -193,6 +193,22 @@ fn substr(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(text.chars().skip(start).take(count).collect()))
 }
 
+fn luhn_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text] { Ok(DataType::Boolean) }
+    else { Err(Error::Type("LUHN_CHECK requires text digits".into())) }
+}
+fn luhn_check(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(Value::Boolean(false));
+    }
+    let sum: u64 = text.bytes().rev().enumerate().map(|(index, byte)| {
+        let digit = u64::from(byte - b'0');
+        if index % 2 == 1 { let doubled = digit * 2; doubled / 10 + doubled % 10 } else { digit }
+    }).sum();
+    Ok(Value::Boolean(sum % 10 == 0))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -210,6 +226,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "find_in_set", min_args: 2, max_args: 2, result_type: two_text_integer_type, call: find_in_set },
     Function { name: "position", min_args: 2, max_args: 3, result_type: position_type, call: position },
     Function { name: "substr", min_args: 2, max_args: 3, result_type: substr_type, call: substr },
+    Function { name: "luhn_check", min_args: 1, max_args: 1, result_type: luhn_type, call: luhn_check },
     // PARITY_FUNCTIONS
 ];
 
@@ -330,6 +347,14 @@ mod tests {
         assert_eq!(sql_result("substr(s, 2, 2)").unwrap(), Value::Text("af".into()));
         assert_eq!(sql_result("substr(s, 0, 2)").unwrap(), Value::Text("ca".into()));
         assert!(sql_result("substr(s, 1, -1)").is_err());
+    }
+
+    #[test]
+    fn spark_luhn_check_validates_digits() {
+        assert_eq!(sql_result("luhn_check('79927398713')").unwrap(), Value::Boolean(true));
+        assert_eq!(sql_result("luhn_check('79927398714')").unwrap(), Value::Boolean(false));
+        assert_eq!(sql_result("luhn_check('not digits')").unwrap(), Value::Boolean(false));
+        assert_eq!(luhn_check(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
