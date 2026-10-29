@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import tempfile
 from typing import Iterator
 
 
@@ -24,6 +25,7 @@ def add_named_inputs(command, flag, tables):
 def build_command(
     sql: str, *,
     binary: str = "rustspark",
+    database_dir: str | Path | None = None,
     csv: str | Path | None = None,
     parquet: str | Path | None = None,
     json_input: str | Path | None = None,
@@ -42,11 +44,13 @@ def build_command(
         (csv_tables, parquet_tables, json_tables)
     ):
         raise ValueError("Named and unnamed file sources cannot be combined")
-    if max_rows is not None and max_rows < 0:
-        raise ValueError("max_rows must be nonnegative")
-    if query_timeout is not None and query_timeout <= 0:
-        raise ValueError("query_timeout must be positive")
+    if max_rows is not None and (type(max_rows) is not int or max_rows < 0):
+        raise ValueError("max_rows must be a nonnegative integer")
+    if query_timeout is not None and (type(query_timeout) is not int or query_timeout <= 0):
+        raise ValueError("query_timeout must be a positive integer")
     command = [binary, "--sql", sql, "--stdout-format", "arrow"]
+    if database_dir is not None:
+        command.extend(["--database-dir", os.fspath(database_dir)])
     for format_name, path in selected:
         if path is not None:
             command.extend([f"--{format_name}", os.fspath(path)])
@@ -63,6 +67,7 @@ def build_command(
 def iter_arrow_batches(
     sql: str, *,
     binary: str = "rustspark",
+    database_dir: str | Path | None = None,
     csv: str | Path | None = None,
     parquet: str | Path | None = None,
     json_input: str | Path | None = None,
@@ -80,30 +85,32 @@ def iter_arrow_batches(
     import pyarrow as pa  # Optional dependency, not needed for RustSpark itself.
 
     command = build_command(
-        sql, binary=binary, csv=csv, parquet=parquet, json_input=json_input,
+        sql, binary=binary, database_dir=database_dir,
+        csv=csv, parquet=parquet, json_input=json_input,
         max_rows=max_rows, query_timeout=query_timeout,
         csv_tables=csv_tables, parquet_tables=parquet_tables, json_tables=json_tables,
     )
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        assert process.stdout is not None
-        with pa.ipc.open_stream(process.stdout) as reader:
-            for batch in reader:
-                yield batch
-        status = process.wait()
-        if status:
-            assert process.stderr is not None
-            stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-            raise RuntimeError(stderr or f"RustSpark exited with status {status}")
-    finally:
-        if process.poll() is None:
-            process.terminate()
-        if process.stdout:
-            process.stdout.close()
-        if process.stderr:
-            process.stderr.close()
+    # Spool stderr to disk so verbose diagnostics cannot block the Arrow stream.
+    with tempfile.TemporaryFile() as error_log:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log)
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            assert process.stdout is not None
+            with pa.ipc.open_stream(process.stdout) as reader:
+                for batch in reader:
+                    yield batch
+            status = process.wait()
+            if status:
+                error_log.seek(0, os.SEEK_END)
+                error_log.seek(max(0, error_log.tell() - 8192))
+                stderr = error_log.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(stderr or f"RustSpark exited with status {status}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            if process.stdout:
+                process.stdout.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
