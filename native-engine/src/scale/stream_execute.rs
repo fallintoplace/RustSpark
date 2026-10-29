@@ -2,7 +2,7 @@
 use std::{collections::HashSet, path::PathBuf};
 use crate::{
     batch::Batch, plan::Plan, project::Selection, scalar::Value,
-    schema::{Field, Schema}, Error, Result,
+    schema::{DataType, Field, Schema}, Error, Result,
 };
 use super::{
     cancel::QueryControl,
@@ -130,7 +130,15 @@ fn infer(
     let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth);
     match plan {
         Plan::Scan { table } => Ok(catalog.get(table)?.schema().clone()),
-        Plan::Filter { input, .. } |
+        Plan::Filter { input, predicate } => {
+            let schema = child(input)?;
+            let kind = predicate.output_type(&schema)?;
+            if kind != DataType::Boolean &&
+                !matches!(predicate, crate::expr::Expr::Literal(Value::Null)) {
+                return Err(Error::Type("stream WHERE predicate must be boolean".into()));
+            }
+            Ok(schema)
+        }
         Plan::Sort { input, .. } |
         Plan::Limit { input, .. } |
         Plan::Distinct { input } => child(input),
@@ -235,6 +243,17 @@ mod tests {
     use crate::{scalar::Value, schema::{DataType, Field}, sql};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn rejects_invalid_stream_filters_before_opening_sources() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", "unused.csv", schema, 64).unwrap();
+        let bad = Plan::scan("t").filter(crate::expr::Expr::Column("id".into()));
+        assert!(output_schema(&bad, &catalog, &StreamOptions::default()).is_err());
+        let missing = Plan::scan("t").filter(crate::expr::Expr::Column("missing".into()));
+        assert!(output_schema(&missing, &catalog, &StreamOptions::default()).is_err());
+    }
 
     #[test]
     fn cancelled_streams_fail_before_inference_or_catalog_lookup() {
