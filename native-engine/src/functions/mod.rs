@@ -35,6 +35,8 @@ mod least;
 
 mod width_bucket;
 
+mod bit_count;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -116,6 +118,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "ZEROIFNULL" => zeroifnull::output_type(args, schema),
         "LEAST" => least::output_type(args, schema),
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
+        "BIT_COUNT" => bit_count::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -139,6 +142,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "ZEROIFNULL" => zeroifnull::eval(args, batch, row),
         "LEAST" => least::eval(args, batch, row),
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
+        "BIT_COUNT" => bit_count::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -275,6 +279,13 @@ mod tests {
     fn width_bucket_native_sql_regression() {
         assert_eq!(run("SELECT WIDTH_BUCKET(x, 0, 10, 5) FROM t").unwrap(), vec![
             vec![Value::Null], vec![Value::Integer(3)], vec![Value::Integer(0)],
+        ]);
+    }
+
+    #[test]
+    fn bit_count_native_sql_regression() {
+        assert_eq!(run("SELECT BIT_COUNT(x) FROM t").unwrap(), vec![
+            vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(62)],
         ]);
     }
 
