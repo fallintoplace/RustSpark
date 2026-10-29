@@ -63,6 +63,11 @@ impl Batch {
         Self::new_with_row_count(schema, columns, row_count)
     }
 
+    /// Apply a compatible schema by moving owned column buffers instead of cloning rows.
+    pub fn into_schema(self, schema: Schema) -> Result<Self> {
+        Self::new_with_row_count(schema, self.columns, self.rows)
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
