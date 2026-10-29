@@ -22,6 +22,26 @@ pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
     Ok(ParquetScan { inner: reader })
 }
 
+/// Skip and limit decoded rows in the Parquet reader instead of materializing
+/// and slicing unwanted native batches afterward.
+pub fn scan_window(
+    path: impl AsRef<Path>, batch_size: usize, offset: usize, limit: usize,
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    offset.checked_add(limit)
+        .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
+    let file = File::open(path)?;
+    let inner = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?
+        .with_offset(offset)
+        .with_limit(limit)
+        .with_batch_size(batch_size)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner })
+}
+
 impl Iterator for ParquetScan {
     type Item = Result<Batch>;
 
@@ -154,6 +174,35 @@ mod parquet_limited_batch_reuse_tests {
         assert_eq!(collected.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
         assert_eq!(collected.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
             batch.slice_rows(0, 5).unwrap().rows().unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_native_offset_limit_pushdown_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn reads_only_requested_window_across_batch_boundaries() {
+        let path = std::env::temp_dir().join(format!("rustspark-window-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), (0..12).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let output = scan_window(&path, 2, 3, 5).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), (3..8).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+        assert_eq!(scan_window(&path, 3, 0, 0).unwrap().count(), 0);
+        assert_eq!(scan_window(&path, 3, 100, 5).unwrap().count(), 0);
+        assert!(scan_window(&path, 3, usize::MAX, 1).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
