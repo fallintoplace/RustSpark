@@ -2,7 +2,7 @@ use crate::{
     batch::Batch,
     cancel::QueryGuard,
     expr::Expr,
-    filter, limit,
+    filter,
     project::{self, Selection},
     Result,
     metrics::QueryMetrics,
@@ -96,15 +96,15 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 for selections in &self.projections {
                     batch = project::project(&batch, selections)?;
                 }
-                if self.skip > 0 {
-                    let skipped = self.skip.min(batch.num_rows());
-                    self.skip -= skipped;
-                    batch = limit::limit(&batch, skipped, None)?;
+                let start = self.skip.min(batch.num_rows());
+                self.skip -= start;
+                let available = batch.num_rows() - start;
+                let count = self.remaining.map_or(available, |remaining| remaining.min(available));
+                if let Some(remaining) = self.remaining.as_mut() {
+                    *remaining -= count;
                 }
-                if let Some(remaining) = self.remaining {
-                    let taking = remaining.min(batch.num_rows());
-                    batch = limit::limit(&batch, 0, Some(taking))?;
-                    self.remaining = Some(remaining - taking);
+                if start != 0 || count != batch.num_rows() {
+                    batch = batch.slice_rows(start, start + count)?;
                 }
                 if let Some(metrics) = &self.metrics {
                     metrics.record_output(batch.num_rows() as u64)?;
