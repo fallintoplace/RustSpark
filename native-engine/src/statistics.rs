@@ -59,6 +59,10 @@ impl ColumnStatistics {
     }
 
     pub fn merge(&mut self, other: &Self) -> Result<()> {
+        if other.rows == 0 && other.nulls == 0 &&
+            other.min.is_none() && other.max.is_none() && self.nulls <= self.rows {
+            return Ok(());
+        }
         let rows = self.rows.checked_add(other.rows)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
         let nulls = self.nulls.checked_add(other.nulls)
@@ -221,5 +225,20 @@ mod direct_multibatch_stats_perf_tests {
         let mut merged = ColumnStatistics::default();
         for batch in &batches { merged.merge(&ColumnStatistics::from_batch(batch, "x").unwrap()).unwrap(); }
         assert_eq!(ColumnStatistics::from_batches(&batches, "x").unwrap(), merged);
+    }
+}
+
+#[cfg(test)]
+mod empty_statistics_merge_fast_path_tests {
+    use super::*;
+    #[test]
+    fn merging_empty_stats_is_a_noop_but_bad_counts_still_fail() {
+        let mut stats = ColumnStatistics { rows: 3, nulls: 1,
+            min: Some(Value::Integer(2)), max: Some(Value::Integer(8)) };
+        let before = stats.clone();
+        for _ in 0..100 { stats.merge(&ColumnStatistics::default()).unwrap(); }
+        assert_eq!(stats, before);
+        let mut invalid = ColumnStatistics { rows: 1, nulls: 2, min: None, max: None };
+        assert!(invalid.merge(&ColumnStatistics::default()).is_err());
     }
 }
