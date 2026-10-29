@@ -1,12 +1,20 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
+const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    if text.len() > MAX_OUTPUT_BYTES {
+        return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
+    }
     let mut encoded = String::with_capacity(text.len());
     for &byte in text.as_bytes() {
+        let escaped = !matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ');
+        if encoded.len() > MAX_OUTPUT_BYTES - if escaped { 3 } else { 1 } {
+            return Err(Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()));
+        }
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' =>
                 encoded.push(char::from(byte)),
@@ -33,5 +41,7 @@ mod tests {
             Value::Text("a+b%2F%C3%A9".into()));
         assert_eq!(evaluate(&[Value::Text("A*-._09".into())]).unwrap(), Value::Text("A*-._09".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate(&[Value::Text("🙂".repeat(1_400_000))]).is_err());
+        assert!(evaluate(&[Value::Text("a".repeat(MAX_OUTPUT_BYTES + 1))]).is_err());
     }
 }
