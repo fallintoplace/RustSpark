@@ -198,12 +198,13 @@ fn aggregate_shard(
         for row in 0..batch.num_rows() {
             let key = keys.iter().map(|&col| batch.value(row, col).cloned())
                 .collect::<Result<Vec<_>>>()?;
-            if !groups.contains_key(&key) && groups.len() >= max_groups {
-                return Err(Error::Execution("group state count exceeds partition budget".into()));
-            }
+            let full = groups.len() >= max_groups;
             let states = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
+                    if full {
+                        return Err(Error::Execution("group state count exceeds partition budget".into()));
+                    }
                     let initial = items.iter()
                         .map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
@@ -410,5 +411,36 @@ mod spill_count_schema_tests {
         assert!(!result.field(1).unwrap().nullable);
         assert!(!result.field(2).unwrap().nullable);
         assert!(result.field(3).unwrap().nullable);
+    }
+}
+
+#[cfg(test)]
+mod spilled_group_entry_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn existing_keys_remain_admitted_at_group_cardinality_limit() {
+        let dir = std::env::temp_dir().join(format!("native-group-entry-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)], vec![Value::Integer(2)],
+            vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(1)]]).unwrap();
+        let groups = [(String::from("k"), String::from("k"))];
+        let items = [AggregateItem::new(AggregateOp::CountAll, "count")];
+        let output = grouped_aggregate([Ok(input.clone())], schema.clone(), &groups, &items,
+            &dir, 1, 2, 2, &QueryControl::default()).unwrap();
+        let mut reader = SpillReader::new(BufReader::new(File::open(&output.paths()[0]).unwrap()), 2).unwrap();
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
+        rows.sort_by_key(|row| if let Value::Integer(n) = row[0] { n } else { 0 });
+        assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(3)], vec![Value::Integer(2), Value::Integer(2)]]);
+        drop(output);
+        let limited = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]]).unwrap();
+        assert!(grouped_aggregate([Ok(limited)], schema, &groups, &items,
+            &dir, 1, 2, 2, &QueryControl::default()).is_err());
+        fs::remove_dir(dir).unwrap();
     }
 }
