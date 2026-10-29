@@ -53,13 +53,7 @@ fn spark_having_reuses_aliases_and_computed_grouping_keys() {
 #[test]
 fn having_rejects_ungrouped_columns_and_bad_aggregate_calls() {
     assert!(parse_sql("SELECT city FROM sales HAVING city = 'Berlin'").is_err());
-    let schema = Schema::new(vec![Field::new("revenue", DataType::Integer, true)]).unwrap();
-    let mut catalog = Catalog::new();
-    catalog.register("sales", Batch::empty(schema)).unwrap();
-    assert!(execute(
-        &parse_sql("SELECT COUNT(*) AS n FROM sales HAVING revenue > 5").unwrap(),
-        &catalog,
-    ).is_err());
+    assert!(parse_sql("SELECT COUNT(*) AS n FROM sales HAVING revenue > 5").is_err());
     assert!(parse_sql(
         "SELECT COUNT(*) AS n FROM sales HAVING SUM(revenue, revenue) > 1"
     ).is_err());
