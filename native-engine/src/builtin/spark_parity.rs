@@ -295,6 +295,18 @@ fn bin(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(format!("{number:b}")))
 }
 
+fn same_numeric_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 1 && matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(types[0])
+    } else { Err(Error::Type("numeric unary function requires a number".into())) }
+}
+fn positive(args: &[Value]) -> Result<Value> {
+    match &args[0] {
+        Value::Integer(_) | Value::Float(_) | Value::Null => Ok(args[0].clone()),
+        _ => Err(Error::Type("POSITIVE requires numeric input".into())),
+    }
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -320,6 +332,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "sec", min_args: 1, max_args: 1, result_type: number_float_type, call: sec },
     Function { name: "csc", min_args: 1, max_args: 1, result_type: number_float_type, call: csc },
     Function { name: "bin", min_args: 1, max_args: 1, result_type: bin_type, call: bin },
+    Function { name: "positive", min_args: 1, max_args: 1, result_type: same_numeric_type, call: positive },
     // PARITY_FUNCTIONS
 ];
 
@@ -498,6 +511,12 @@ mod tests {
         assert_eq!(sql_result("bin(-13)").unwrap(),
             Value::Text("1111111111111111111111111111111111111111111111111111111111110011".into()));
         assert_eq!(sql_result("bin(13.3)").unwrap(), Value::Text("1101".into()));
+    }
+
+    #[test]
+    fn spark_positive_preserves_value_and_type() {
+        assert_eq!(sql_result("positive(-5)").unwrap(), Value::Integer(-5));
+        assert_eq!(positive(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
