@@ -327,6 +327,25 @@ fn char_code(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(char::from(byte).to_string()))
 }
 
+fn url_encode(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' =>
+                output.push(char::from(byte)),
+            b' ' => output.push('+'),
+            _ => {
+                output.push('%');
+                output.push(char::from(HEX[usize::from(byte >> 4)]));
+                output.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+        }
+    }
+    Ok(Value::Text(output))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -355,6 +374,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "positive", min_args: 1, max_args: 1, result_type: same_numeric_type, call: positive },
     Function { name: "negative", min_args: 1, max_args: 1, result_type: same_numeric_type, call: negative },
     Function { name: "char", min_args: 1, max_args: 1, result_type: char_type, call: char_code },
+    Function { name: "url_encode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_encode },
     // PARITY_FUNCTIONS
 ];
 
@@ -553,6 +573,14 @@ mod tests {
         assert_eq!(sql_result("char(65)").unwrap(), Value::Text("A".into()));
         assert_eq!(sql_result("char(321)").unwrap(), Value::Text("A".into()));
         assert_eq!(char_code(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_url_encode_uses_form_rules_and_utf8() {
+        assert_eq!(sql_result("url_encode('a b+c')").unwrap(), Value::Text("a+b%2Bc".into()));
+        assert_eq!(url_encode(&[Value::Text("é".into())]).unwrap(),
+            Value::Text("%C3%A9".into()));
+        assert_eq!(url_encode(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
