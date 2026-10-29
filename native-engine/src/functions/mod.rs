@@ -3,6 +3,8 @@ use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema},
 
 mod coalesce;
 
+mod nullif;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -48,6 +50,7 @@ pub(crate) fn text_arg(expr: &Expr, schema: &Schema) -> Result<()> {
 pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match name.to_ascii_uppercase().as_str() {
         "COALESCE" => coalesce::output_type(args, schema),
+        "NULLIF" => nullif::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -55,6 +58,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
 pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
     match name.to_ascii_uppercase().as_str() {
         "COALESCE" => coalesce::eval(args, batch, row),
+        "NULLIF" => nullif::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -78,6 +82,13 @@ mod tests {
         ];
         catalog.register("t", crate::batch::Batch::from_rows(schema, rows)?)?;
         executor::execute(&sql::parse_sql(query)?, &catalog)?.rows()
+    }
+
+    #[test]
+    fn nullif_works_in_native_sql() {
+        assert_eq!(run("SELECT NULLIF(x, 5) AS n FROM t").unwrap(), vec![
+            vec![Value::Null], vec![Value::Null], vec![Value::Integer(-4)],
+        ]);
     }
 
     #[test]
