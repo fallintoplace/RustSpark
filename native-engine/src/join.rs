@@ -12,6 +12,7 @@ use crate::{
 pub enum JoinKind {
     Inner,
     Left,
+    Right,
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
@@ -34,14 +35,16 @@ pub fn hash_join(
         .iter()
         .map(|field| field.name.to_ascii_lowercase())
         .collect();
-    let mut fields = left.schema().fields().to_vec();
+    let mut fields = left.schema().fields().iter().map(|field| {
+        Field::new(&field.name, field.data_type, field.nullable || kind == JoinKind::Right)
+    }).collect::<Vec<_>>();
     for field in right.schema().fields() {
         let mut name = field.name.clone();
         while used.contains(&name.to_ascii_lowercase()) {
             name = format!("right_{name}");
         }
         used.insert(name.to_ascii_lowercase());
-        fields.push(Field::new(name, field.data_type, true));
+        fields.push(Field::new(name, field.data_type, field.nullable || kind == JoinKind::Left));
     }
     let schema = Schema::new(fields)?;
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
@@ -51,12 +54,14 @@ pub fn hash_join(
             right_hash.entry(key.clone()).or_default().push(row);
         }
     }
+    let mut matched_right = vec![false; right.num_rows()];
     let mut output = Vec::new();
     for left_row in 0..left.num_rows() {
         let key = left.value(left_row, left_column)?;
         let right_rows = if key.is_null() { None } else { right_hash.get(key) };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
+                matched_right[right_row] = true;
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
@@ -70,6 +75,17 @@ pub fn hash_join(
             }
             let mut row = left.row(left_row)?;
             row.extend(vec![Value::Null; right.schema().len()]);
+            output.push(row);
+        }
+    }
+    if kind == JoinKind::Right {
+        for right_row in 0..right.num_rows() {
+            if matched_right[right_row] { continue; }
+            if output.len() >= MAX_JOIN_ROWS {
+                return Err(Error::Execution("join output exceeds safety limit".into()));
+            }
+            let mut row = vec![Value::Null; left.schema().len()];
+            row.extend(right.row(right_row)?);
             output.push(row);
         }
     }
