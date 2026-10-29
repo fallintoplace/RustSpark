@@ -28,7 +28,7 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         if ascii { return Ok(Value::Text(text[..target].to_owned())); }
         return Ok(Value::Text(text.chars().take(target).collect()));
     }
-    if pad.is_empty() { return Err(Error::Execution("LPAD/RPAD cannot extend with empty pattern".into())); }
+    if pad.is_empty() { return Ok(Value::Text(text.to_owned())); }
     let pad_chars = pad.chars().collect::<Vec<_>>();
     let mut result = String::with_capacity(
         text.len().saturating_add((target - size).saturating_mul(pad.len().min(4))),
@@ -83,5 +83,17 @@ mod ascii_padding_slice_perf_tests {
         assert_eq!(lpad(&[Value::Text("abcdef".into()), Value::Integer(3)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(rpad(&[Value::Text("abcdef".into()), Value::Integer(6)]).unwrap(), Value::Text("abcdef".into()));
         assert_eq!(lpad(&[Value::Text("é🙂x".into()), Value::Integer(2)]).unwrap(), Value::Text("é🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod empty_padding_spark_tests {
+    use super::*;
+    #[test]
+    fn an_empty_pad_keeps_original_when_extension_is_requested() {
+        assert_eq!(lpad(&[Value::Text("éab".into()), Value::Integer(5), Value::Text("".into())]).unwrap(), Value::Text("éab".into()));
+        assert_eq!(rpad(&[Value::Text("éab".into()), Value::Integer(5), Value::Text("".into())]).unwrap(), Value::Text("éab".into()));
+        assert_eq!(lpad(&[Value::Text("éab".into()), Value::Integer(2), Value::Text("".into())]).unwrap(), Value::Text("éa".into()));
+        assert_eq!(rpad(&[Value::Null, Value::Integer(5), Value::Text("".into())]).unwrap(), Value::Null);
     }
 }
