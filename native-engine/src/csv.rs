@@ -114,11 +114,11 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
-    let header = records.remove(0);
+    let header = std::mem::take(&mut records[0]);
     if header.is_empty() {
         return Err(Error::Schema("CSV input has no columns".into()));
     }
-    if records.len() > MAX_CSV_ROWS {
+    if records.len().saturating_sub(1) > MAX_CSV_ROWS {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
     for row in &records {
@@ -130,11 +130,11 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
         header
             .iter()
             .enumerate()
-            .map(|(column, name)| Field::new(name, kind(&records, column), true))
+            .map(|(column, name)| Field::new(name, kind(&records[1..], column), true))
             .collect(),
     )?;
     let rows = records
-        .into_iter()
+        .into_iter().skip(1)
         .map(|record| {
             record
                 .into_iter()
@@ -211,15 +211,15 @@ pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
-    let header = records.remove(0);
+    let header = std::mem::take(&mut records[0]);
     if header.len() != schema.len() || header.iter()
         .zip(schema.fields()).any(|(name, field)| !name.eq_ignore_ascii_case(&field.name)) {
         return Err(Error::Schema("CSV header differs from declared schema".into()));
     }
-    if records.len() > MAX_CSV_ROWS {
+    if records.len().saturating_sub(1) > MAX_CSV_ROWS {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
-    let rows = records.into_iter().map(|record| {
+    let rows = records.into_iter().skip(1).map(|record| {
         if record.len() != schema.len() {
             return Err(Error::Parse("CSV row width differs from header".into()));
         }
@@ -274,5 +274,23 @@ mod streaming_type_inference_tests {
         assert_eq!(data.schema().field(1).unwrap().data_type, DataType::Boolean);
         assert_eq!(data.schema().field(2).unwrap().data_type, DataType::Float);
         assert_eq!(data.schema().field(3).unwrap().data_type, DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod csv_header_without_shift_perf_tests {
+    use super::*;
+    #[test]
+    fn typed_and_inferred_paths_do_not_consume_header_as_data() {
+        let input = "id,name\n1,alpha\n2,beta\n3,gamma\n";
+        let inferred = from_csv_str(input).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("name", DataType::Text, false),
+        ]).unwrap();
+        let typed = from_csv_str_typed(input, schema).unwrap();
+        assert_eq!(inferred.num_rows(), 3);
+        assert_eq!(typed.num_rows(), 3);
+        assert_eq!(inferred.rows().unwrap(), typed.rows().unwrap());
     }
 }
