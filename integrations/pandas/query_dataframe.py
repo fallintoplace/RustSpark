@@ -21,7 +21,9 @@ def append_named_tables(command, flag, tables):
 
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | None = None, parquet: str | None = None,
-                  max_rows: int = 100_000, query_timeout: int | None = None) -> list[str]:
+                  max_rows: int = 100_000, query_timeout: int | None = None,
+                  csv_tables: dict[str, str | Path] | None = None,
+                  parquet_tables: dict[str, str | Path] | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be empty")
     if (csv is not None or parquet is not None) and (csv_tables or parquet_tables):
