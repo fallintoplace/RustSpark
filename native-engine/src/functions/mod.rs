@@ -104,6 +104,10 @@ pub(crate) fn as_f64(value: &Value) -> Result<f64> {
 pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match name.to_ascii_uppercase().as_str() {
         "COALESCE" => coalesce::output_type(args, schema),
+        "NVL" | "IFNULL" => {
+            check_arity(name, args, 2, 2)?;
+            coalesce::output_type(args, schema)
+        },
         "NULLIF" => nullif::output_type(args, schema),
         "IF" => if_expr::output_type(args, schema),
         "ABS" => abs::output_type(args, schema),
@@ -135,6 +139,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
 pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
     match name.to_ascii_uppercase().as_str() {
         "COALESCE" => coalesce::eval(args, batch, row),
+        "NVL" | "IFNULL" => coalesce::eval(args, batch, row),
         "NULLIF" => nullif::eval(args, batch, row),
         "IF" => if_expr::eval(args, batch, row),
         "ABS" => abs::eval(args, batch, row),
@@ -321,5 +326,19 @@ mod tests {
             vec![Value::Integer(5)],
             vec![Value::Integer(-4)],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod spark_nvl_alias_tests {
+    use crate::{batch::Batch, catalog::Catalog, executor, scalar::Value, schema::{DataType, Field, Schema}, sql};
+    #[test]
+    fn nvl_ifnull_are_lazy_sql_coalesce_aliases() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Integer(7)]]).unwrap()).unwrap();
+        let query = sql::parse_sql("SELECT NVL(n, 3) AS first, IFNULL(5, 9223372036854775807 + 1) AS second FROM t").unwrap();
+        let rows = executor::execute(&query, &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(3), Value::Integer(5)], vec![Value::Integer(7), Value::Integer(5)]]);
     }
 }
