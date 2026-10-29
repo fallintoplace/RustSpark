@@ -13,6 +13,24 @@ fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
     })
 }
 
+fn fast_float_predicate<'a>(
+    batch: &'a Batch,
+    predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], BinaryOp, f64)>> {
+    if let Expr::Binary { left, op, right } = predicate {
+        if let (Expr::Column(column), Expr::Literal(Value::Float(value))) =
+            (left.as_ref(), right.as_ref()) {
+            if integer_comparison(*op, 0, 0).is_some() {
+                let index = batch.schema().column(column)?;
+                if batch.schema().field(index)?.data_type == DataType::Float {
+                    return Ok(Some((batch.column(index)?, *op, *value)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn fast_integer_predicate<'a>(
     batch: &'a Batch,
     predicate: &'a Expr,
@@ -46,6 +64,23 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 }
             }
         }
+    } else if let Some((column, op, rhs)) = fast_float_predicate(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(lhs) = value {
+                if let Some(order) = lhs.partial_cmp(&rhs) {
+                    let keep = match op {
+                        BinaryOp::Equal => order.is_eq(),
+                        BinaryOp::NotEqual => !order.is_eq(),
+                        BinaryOp::Less => order.is_lt(),
+                        BinaryOp::LessEqual => !order.is_gt(),
+                        BinaryOp::Greater => order.is_gt(),
+                        BinaryOp::GreaterEqual => !order.is_lt(),
+                        _ => false,
+                    };
+                    if keep { selected.push(row); }
+                }
+            }
+        }
     } else {
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
@@ -71,6 +106,25 @@ mod tests {
         assert!(select_indices(&batch, &Expr::Column("n".into())).is_err());
         assert!(select_indices(&batch, &Expr::Column("missing".into())).is_err());
         assert!(select_indices(&batch, &Expr::Literal(Value::Null)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn float_fastpath_matches_scalar_semantics_including_nan_and_null() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Float(f64::NAN)],
+                vec![Value::Float(-0.0)], vec![Value::Float(1.25)],
+                vec![Value::Float(3.5)]],
+        ).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual, BinaryOp::Less,
+            BinaryOp::LessEqual, BinaryOp::Greater, BinaryOp::GreaterEqual] {
+            let predicate = Expr::binary(Expr::Column("n".into()), op,
+                Expr::Literal(Value::Float(1.25)));
+            let expected = (0..batch.num_rows()).filter(|&row| {
+                predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+            }).collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+        }
     }
 
     #[test]
