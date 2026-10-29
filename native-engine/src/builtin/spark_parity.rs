@@ -140,6 +140,34 @@ fn find_in_set(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(position))
 }
 
+fn position_type(types: &[DataType]) -> Result<DataType> {
+    if (types == [DataType::Text, DataType::Text])
+        || (types == [DataType::Text, DataType::Text, DataType::Integer]) {
+        Ok(DataType::Integer)
+    } else { Err(Error::Type("POSITION requires substring, text, optional integer start".into())) }
+}
+fn position(args: &[Value]) -> Result<Value> {
+    let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(text) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let start = if args.len() == 3 {
+        let Some(start) = super::integer(&args[2])? else { return Ok(Value::Null); };
+        start.max(1)
+    } else { 1 };
+    let chars_to_skip = usize::try_from(start - 1)
+        .map_err(|_| Error::Execution("POSITION start overflow".into()))?;
+    let Some((byte_start, _)) = text.char_indices().nth(chars_to_skip)
+        .or_else(|| (chars_to_skip == text.chars().count()).then_some((text.len(), '\0'))) else {
+        return Ok(Value::Integer(0));
+    };
+    let Some(relative_byte) = text[byte_start..].find(needle) else {
+        return Ok(Value::Integer(0));
+    };
+    let absolute_byte = byte_start + relative_byte;
+    let index = i64::try_from(text[..absolute_byte].chars().count())
+        .map_err(|_| Error::Execution("POSITION index overflow".into()))?;
+    Ok(Value::Integer(index + 1))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -155,6 +183,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quote", min_args: 1, max_args: 1, result_type: text_text_type, call: quote },
     Function { name: "substring_index", min_args: 3, max_args: 3, result_type: substring_index_type, call: substring_index },
     Function { name: "find_in_set", min_args: 2, max_args: 2, result_type: two_text_integer_type, call: find_in_set },
+    Function { name: "position", min_args: 2, max_args: 3, result_type: position_type, call: position },
     // PARITY_FUNCTIONS
 ];
 
@@ -259,6 +288,14 @@ mod tests {
         assert_eq!(sql_result("find_in_set('ab', 'abc,b,ab,c,def')").unwrap(), Value::Integer(3));
         assert_eq!(sql_result("find_in_set('missing', 'abc,b')").unwrap(), Value::Integer(0));
         assert_eq!(sql_result("find_in_set('a,b', 'a,b')").unwrap(), Value::Integer(0));
+    }
+
+    #[test]
+    fn spark_position_finds_unicode_character_indices() {
+        assert_eq!(sql_result("position('fé', s)").unwrap(), Value::Integer(3));
+        assert_eq!(sql_result("position('a', 'banana', 4)").unwrap(), Value::Integer(4));
+        assert_eq!(sql_result("position('x', s)").unwrap(), Value::Integer(0));
+        assert_eq!(position(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
