@@ -67,6 +67,7 @@ mod url_encode;
 mod url_decode;
 mod try_url_decode;
 mod bin;
+mod format_number;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -154,6 +155,7 @@ const MODULES: &[&[Function]] = &[
     &url_decode::FUNCTIONS,
     &try_url_decode::FUNCTIONS,
     &bin::FUNCTIONS,
+    &format_number::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
