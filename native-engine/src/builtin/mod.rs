@@ -6,6 +6,7 @@ mod nullif;
 mod conditional;
 mod abs_sign;
 mod floor_ceil;
+mod round;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ const MODULES: &[&[Function]] = &[
     &conditional::FUNCTIONS,
     &abs_sign::FUNCTIONS,
     &floor_ceil::FUNCTIONS,
+    &round::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
