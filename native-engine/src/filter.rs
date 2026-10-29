@@ -45,6 +45,14 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("WHERE predicate must be boolean".into()));
     }
+    // Validate the predicate first, then bypass row-wise evaluation when
+    // SQL three-valued semantics determine every row's outcome.
+    if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
+        return batch.slice_rows(0, max_rows.min(batch.num_rows()));
+    }
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
+        return batch.slice_rows(0, 0);
+    }
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
         if keep.len() == max_rows { break; }
@@ -108,5 +116,23 @@ mod consolidated_filter_predicate_preflight_tests {
             assert!(filter_first(&batch, &bad, 0).is_err());
         }
         assert_eq!(filter_first(&batch, &Expr::Literal(Value::Null), 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod literal_bounded_filter_perf_tests {
+    use super::*;
+    #[test]
+    fn true_false_and_null_predicates_skip_unneeded_scan_work() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "n", crate::schema::DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..5)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let true_rows = filter_first(&batch, &Expr::Literal(Value::Boolean(true)), 2).unwrap();
+        assert_eq!(true_rows.num_rows(), 2);
+        assert_eq!(true_rows.row(1).unwrap(), vec![Value::Integer(1)]);
+        for value in [Value::Boolean(false), Value::Null] {
+            assert_eq!(filter_first(&batch, &Expr::Literal(value), 2).unwrap().num_rows(), 0);
+        }
     }
 }
