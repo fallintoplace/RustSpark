@@ -54,6 +54,7 @@ mod tests {
  
 /// Return at most max_rows matching rows, retaining their source order.
 pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<Batch> {
+    validate_predicate(batch, predicate)?;
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
         if keep.len() == max_rows { break; }
@@ -99,5 +100,20 @@ mod filter_preflight_regression {
         assert!(filter(&batch, &Expr::Literal(Value::Integer(1))).is_err());
         assert!(filter(&batch, &Expr::Column("missing".into())).is_err());
         assert_eq!(filter(&batch, &Expr::Literal(Value::Null)).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod filter_first_type_regression {
+    use super::*;
+    use crate::schema::{Field, Schema};
+    #[test]
+    fn zero_limit_does_not_bypass_predicate_type_check() {
+        let batch = Batch::empty(Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap());
+        assert!(filter_first(&batch, &Expr::Literal(Value::Integer(1)), 0).is_err());
+        assert!(filter_first(&batch, &Expr::Column("missing".into()), 0).is_err());
+        assert!(filter_first(&batch, &Expr::Literal(Value::Null), 0).is_ok());
     }
 }
