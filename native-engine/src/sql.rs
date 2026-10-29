@@ -570,7 +570,24 @@ impl Parser {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
             loop {
-                let expression = Expr::Column(self.identifier()?);
+                let expression = if matches!(self.peek(), Some(Token::Number(_))) {
+                    let position = self.usize_literal()?;
+                    let index = position.checked_sub(1)
+                        .ok_or_else(|| Error::Parse("ORDER BY positions start at one".into()))?;
+                    let selected = match &plan {
+                        Plan::Project { selections, .. } => Some(selections.as_slice()),
+                        Plan::Distinct { input } => match input.as_ref() {
+                            Plan::Project { selections, .. } => Some(selections.as_slice()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let alias = selected.and_then(|items| items.get(index))
+                        .ok_or_else(|| Error::Unsupported(
+                            "ORDER BY position requires an explicit projected column".into()
+                        ))?.alias.clone();
+                    Expr::Column(alias)
+                } else { Expr::Column(self.identifier()?) };
                 let descending = if self.take_word("DESC") {
                     true
                 } else {
@@ -776,6 +793,15 @@ mod tests {
             vec![Value::Text("Berlin".into()), Value::Integer(5)],
             vec![Value::Text("Paris".into()), Value::Null],
         ]);
+    }
+
+    #[test]
+    fn order_by_ordinal_resolves_output_schema() {
+        let rows = execute(&parse_sql(
+            "SELECT city, amount AS revenue FROM sales WHERE amount IS NOT NULL ORDER BY 2 DESC LIMIT 1"
+        ).unwrap(), &sales()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("Berlin".into()), Value::Integer(3)]]);
+        assert!(parse_sql("SELECT city FROM sales ORDER BY 0").is_err());
     }
 
     #[test]
