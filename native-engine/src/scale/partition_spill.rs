@@ -66,16 +66,17 @@ impl PartitionWriter {
         let schema = &self.owned.as_ref().ok_or_else(|| Error::Execution("writer finalized".into()))?.schema;
         if batch.schema() != schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
+        let mut groups = vec![Vec::new(); writers.len()];
         for part in BatchChunks::new(batch, self.batch_rows)? {
             control.check()?;
             let part = part?;
-            let mut groups = vec![Vec::new(); writers.len()];
+            for group in &mut groups { group.clear(); }
             for row in 0..part.num_rows() {
                 let index = bucket(&part, row, &self.key_columns, writers.len())?;
                 groups[index].push(row);
             }
-            for (writer, rows) in writers.iter_mut().zip(groups) {
-                if !rows.is_empty() { writer.write_batch(&part.take(&rows)?)?; }
+            for (writer, rows) in writers.iter_mut().zip(&groups) {
+                if !rows.is_empty() { writer.write_batch(&part.take(rows)?)?; }
             }
         }
         Ok(())
@@ -145,5 +146,38 @@ mod consolidated_partition_offset_regressions {
         assert_eq!(bucket(&source, 0, &[0], 8).unwrap(), bucket(&source, 2, &[0], 8).unwrap());
         assert!(bucket(&source, 3, &[0], 8).is_err());
         assert!(bucket(&source, 0, &[2], 8).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reused_partition_bucket_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}, scale::spill::SpillReader};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn many_small_chunks_keep_all_rows_in_original_bucket_order() {
+        let directory = std::env::temp_dir().join(format!(
+            "reused-buckets-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..120).map(|n|
+            vec![if n % 7 == 0 { Value::Null } else { Value::Integer(n % 13) }]
+        ).collect()).unwrap();
+        let mut writer = PartitionWriter::new(&directory, schema, &["k"], 16, 3).unwrap();
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        let files = writer.finish().unwrap();
+        let expected = crate::hash_partition::partition(&batch, &["k"], 16).unwrap();
+        for (index, path) in files.paths().iter().enumerate() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 3).unwrap();
+            let mut actual = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                actual.extend(batch.rows().unwrap());
+            }
+            assert_eq!(actual, expected[index].rows().unwrap());
+        }
+        drop(files);
+        fs::remove_dir(directory).unwrap();
     }
 }
