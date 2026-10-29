@@ -53,6 +53,9 @@ mod levenshtein;
 mod regexp_like;
 mod regexp_replace;
 mod initcap;
+mod octet_length;
+mod bit_length;
+mod char_length;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -126,6 +129,9 @@ const MODULES: &[&[Function]] = &[
     &regexp_like::FUNCTIONS,
     &regexp_replace::FUNCTIONS,
     &initcap::FUNCTIONS,
+    &octet_length::FUNCTIONS,
+    &bit_length::FUNCTIONS,
+    &char_length::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
