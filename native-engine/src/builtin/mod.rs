@@ -79,6 +79,7 @@ mod len;
 mod soundex;
 mod luhn_check;
 mod quote;
+mod md5_digest;
 mod cot;
 mod csc;
 mod sec;
