@@ -21,7 +21,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let digits = usize::try_from(digits)
         .map_err(|_| Error::Execution("FORMAT_NUMBER precision overflow".into()))?;
     if digits > 15 { return Err(Error::Execution("FORMAT_NUMBER supports at most 15 decimal places".into())); }
-    let formatted = format!("{value:.digits$}");
+    let formatted = match args[0] {
+        Value::Integer(number) => {
+            let mut formatted = number.to_string();
+            if digits > 0 {
+                formatted.push('.');
+                formatted.push_str(&"0".repeat(digits));
+            }
+            formatted
+        }
+        _ => format!("{value:.digits$}"),
+    };
     let (negative, unsigned) = formatted.strip_prefix('-')
         .map_or(("", formatted.as_str()), |rest| ("-", rest));
     let (whole, fractional) = unsigned.split_once('.')
@@ -49,5 +59,11 @@ mod tests {
         assert_eq!(evaluate(&[Value::Integer(15), Value::Integer(2)]).unwrap(), Value::Text("15.00".into()));
         assert_eq!(evaluate(&[Value::Integer(1), Value::Integer(-1)]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Integer(i64::MAX), Value::Integer(0)]).unwrap(),
+            Value::Text("9,223,372,036,854,775,807".into()));
+        assert_eq!(evaluate(&[Value::Integer(i64::MIN), Value::Integer(2)]).unwrap(),
+            Value::Text("-9,223,372,036,854,775,808.00".into()));
+        assert_eq!(evaluate(&[Value::Integer(9_007_199_254_740_993), Value::Integer(0)]).unwrap(),
+            Value::Text("9,007,199,254,740,993".into()));
     }
 }
