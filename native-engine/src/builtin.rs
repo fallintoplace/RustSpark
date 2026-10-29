@@ -24,6 +24,12 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(first)
         },
+        "ABS" => {
+            if args.len() != 1 { return Err(Error::Parse("ABS requires one argument".into())); }
+            let kind = args[0].output_type(schema)?;
+            if !matches!(kind, DataType::Integer | DataType::Float) { return Err(Error::Type("ABS requires numeric input".into())); }
+            Ok(kind)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -34,6 +40,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "ABS" => match args {
+            [Value::Integer(value)] => value.checked_abs().map(Value::Integer).ok_or_else(|| Error::Execution("ABS integer overflow".into())),
+            [Value::Float(value)] => Ok(Value::Float(value.abs())),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("ABS requires numeric input".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
