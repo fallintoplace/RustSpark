@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import subprocess
 import tempfile
 
@@ -32,11 +33,17 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
 def query_dataframe(sql: str, *, binary: str = "rustspark",
                     csv: str | None = None, parquet: str | None = None,
-                    max_rows: int = 100_000, query_timeout: int | None = None):
+                    max_rows: int = 100_000, query_timeout: int | None = None,
+                    process_timeout: float | None = None):
     """Load a bounded SQL result as pandas, preserving Arrow logical types.
 
     A DataFrame resides fully in Python memory. Prefer streaming for large data.
     """
+    if process_timeout is not None and (
+        type(process_timeout) not in (int, float) or
+        not math.isfinite(process_timeout) or process_timeout <= 0
+    ):
+        raise ValueError("process_timeout must be finite and positive")
     import pyarrow as pa
 
     with tempfile.TemporaryDirectory(prefix="rustspark-pandas-") as directory:
@@ -45,7 +52,11 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
             sql, output, binary=binary, csv=csv, parquet=parquet,
             max_rows=max_rows, query_timeout=query_timeout,
         )
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    check=False, timeout=process_timeout)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "RustSpark query failed")
         with pa.memory_map(str(output), "r") as source:
