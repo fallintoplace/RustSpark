@@ -13,6 +13,16 @@ fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
     })
 }
 
+fn fast_boolean_column<'a>(batch: &'a Batch, predicate: &Expr) -> Result<Option<&'a [Value]>> {
+    let Expr::Column(name) = predicate else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type == DataType::Boolean {
+        Ok(Some(batch.column(index)?))
+    } else {
+        Ok(None)
+    }
+}
+
 fn fast_float_predicate<'a>(
     batch: &'a Batch,
     predicate: &'a Expr,
@@ -81,6 +91,10 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 }
             }
         }
+    } else if let Some(column) = fast_boolean_column(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if matches!(value, Value::Boolean(true)) { selected.push(row); }
+        }
     } else {
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
@@ -106,6 +120,17 @@ mod tests {
         assert!(select_indices(&batch, &Expr::Column("n".into())).is_err());
         assert!(select_indices(&batch, &Expr::Column("missing".into())).is_err());
         assert!(select_indices(&batch, &Expr::Literal(Value::Null)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn boolean_column_fastpath_skips_false_and_null_rows() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("enabled", DataType::Boolean, true)]).unwrap(),
+            vec![vec![Value::Boolean(true)], vec![Value::Null],
+                vec![Value::Boolean(false)], vec![Value::Boolean(true)]],
+        ).unwrap();
+        let predicate = Expr::Column("enabled".into());
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), vec![0, 3]);
     }
 
     #[test]
