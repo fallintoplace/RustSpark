@@ -69,11 +69,24 @@ impl TaskScheduler {
     }
 
     pub fn finish(&mut self, lease: &Lease, success: bool) -> bool {
+        self.finish_at(lease, success, Instant::now())
+    }
+
+    pub fn finish_at(&mut self, lease: &Lease, success: bool, now: Instant) -> bool {
         let Some(task) = self.tasks.get_mut(&lease.task) else {
             return false;
         };
-        if !matches!(&task.status, TaskStatus::Leased { worker, attempt, .. }
-            if *worker == lease.worker && *attempt == lease.attempt) {
+        let until = match &task.status {
+            TaskStatus::Leased { worker, attempt, until }
+                if *worker == lease.worker && *attempt == lease.attempt => *until,
+            _ => return false,
+        };
+        if now >= until {
+            task.status = if task.attempts >= self.max_attempts {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Queued
+            };
             return false;
         }
         task.status = if success {
@@ -150,3 +163,20 @@ mod task_cancel_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod expired_finish_tests {
+    use super::*;
+
+    #[test]
+    fn expired_attempt_cannot_commit_even_without_another_lease() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([7], 2).unwrap();
+        let first = scheduler.lease(11, now, Duration::from_secs(1)).unwrap().unwrap();
+        assert!(!scheduler.finish_at(&first, true, now + Duration::from_secs(2)));
+        assert_eq!(scheduler.status(7), Some(&TaskStatus::Queued));
+        let retry = scheduler.lease(12, now + Duration::from_secs(2), Duration::from_secs(1)).unwrap().unwrap();
+        assert!(scheduler.finish_at(&retry, true, now + Duration::from_secs(2)));
+        assert_eq!(scheduler.status(7), Some(&TaskStatus::Done));
+    }
+}
