@@ -18,10 +18,12 @@ fn char_length(args: &[Value]) -> Result<Value> {
     }
 }
 
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "char_length", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
+    Function { name: "character_length", min_args: 1, max_args: 1, result_type: char_length_type, call: char_length },
     // PARITY_FUNCTIONS
 ];
 
@@ -51,6 +53,11 @@ mod tests {
         assert_eq!(char_length(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(sql_result("char_length(s)").unwrap(), Value::Integer(4));
         assert!(sql_result("char_length(n)").is_err());
+    }
+
+    #[test]
+    fn spark_character_length_alias() {
+        assert_eq!(sql_result("character_length(s)").unwrap(), Value::Integer(4));
     }
 
     // PARITY_TESTS
