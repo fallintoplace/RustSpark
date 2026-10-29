@@ -93,6 +93,9 @@ pub fn optimize(plan: Plan) -> Plan {
             right_key,
             kind,
         },
+        Plan::UsingJoin { left, right, columns, kind } => Plan::UsingJoin {
+            left: Box::new(optimize(*left)), right: Box::new(optimize(*right)), columns, kind,
+        },
         Plan::MultiJoin { left, right, keys, kind } => Plan::MultiJoin {
             left: Box::new(optimize(*left)), right: Box::new(optimize(*right)), keys, kind,
         },

@@ -469,6 +469,26 @@ impl Parser {
             };
             let Some(kind) = kind else { break };
             let right = self.identifier()?;
+            if self.take_word("USING") {
+                self.expect_symbol('(')?;
+                let mut columns = Vec::new();
+                loop {
+                    let column = self.identifier()?;
+                    if columns.iter().any(|entry: &String| entry.eq_ignore_ascii_case(&column)) {
+                        return Err(Error::Parse("duplicate column in JOIN USING".into()));
+                    }
+                    if columns.len() >= 16 {
+                        return Err(Error::Unsupported("JOIN USING exceeds 16 columns".into()));
+                    }
+                    columns.push(column);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                plan = Plan::UsingJoin {
+                    left: Box::new(plan), right: Box::new(Plan::scan(right)), columns, kind,
+                };
+                continue;
+            }
             self.expect_word("ON")?;
             let left_key = self.identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {
