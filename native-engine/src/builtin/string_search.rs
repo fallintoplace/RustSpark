@@ -21,6 +21,14 @@ fn split_part(args: &[Value]) -> Result<Value> {
     if delimiter.is_empty() {
         return Ok(Value::Text(if index == 1 || index == -1 { text } else { "" }.to_string()));
     }
+    if index == 1 {
+        return Ok(Value::Text(text.split_once(delimiter)
+            .map_or(text, |(first, _)| first).to_owned()));
+    }
+    if index == -1 {
+        return Ok(Value::Text(text.rsplit_once(delimiter)
+            .map_or(text, |(_, last)| last).to_owned()));
+    }
     let result = if index > 0 {
         usize::try_from(index - 1).ok()
             .and_then(|offset| text.split(delimiter).nth(offset))
@@ -70,6 +78,10 @@ mod tests {
     #[test]
     fn split_and_locate_measure_unicode_character_positions() {
         assert_eq!(split_part(&[Value::Text("a,b,c".into()), Value::Text(",".into()), Value::Integer(2)]).unwrap(), Value::Text("b".into()));
+        assert_eq!(split_part(&[Value::Text("a,b,c".into()), Value::Text(",".into()), Value::Integer(1)]).unwrap(), Value::Text("a".into()));
+        assert_eq!(split_part(&[Value::Text("a,b,c".into()), Value::Text(",".into()), Value::Integer(-1)]).unwrap(), Value::Text("c".into()));
+        assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text(",".into()), Value::Integer(-1)]).unwrap(), Value::Text("abc".into()));
+        assert_eq!(split_part(&[Value::Text("é|a|".into()), Value::Text("|".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
         assert_eq!(locate(&[Value::Text("é".into()), Value::Text("café".into())]).unwrap(), Value::Integer(4));
         assert_eq!(instr(&[Value::Text("café".into()), Value::Text("é".into())]).unwrap(), Value::Integer(4));
         assert_eq!(locate(&[Value::Text("z".into()), Value::Text("café".into())]).unwrap(), Value::Integer(0));
