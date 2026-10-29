@@ -22,19 +22,36 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
-    if a.len().checked_mul(b.len()).is_none_or(|cells| cells > 2_000_000) {
+    let (longer, shorter) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
+    if shorter.is_empty() {
+        let distance = longer.len();
+        return Ok(Value::Integer(if threshold.is_some_and(|limit| distance > limit) { -1 }
+            else { i64::try_from(distance).map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()))? }));
+    }
+    let band_width = threshold.map_or(shorter.len(), |limit|
+        limit.saturating_mul(2).saturating_add(1).min(shorter.len()));
+    if longer.len().checked_mul(band_width).is_none_or(|cells| cells > 2_000_000) {
         return Err(Error::Execution("LEVENSHTEIN exceeds native edit-distance work budget".into()));
     }
-    let (longer, shorter) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
-    let mut previous = (0..=shorter.len()).collect::<Vec<_>>();
-    let mut current = vec![0usize; shorter.len() + 1];
+    let limit = threshold.unwrap_or(usize::MAX);
+    let outside = limit.saturating_add(1);
+    let mut previous = (0..=shorter.len()).map(|n| n.min(outside)).collect::<Vec<_>>();
+    let mut current = vec![outside; shorter.len() + 1];
     for (i, from) in longer.iter().enumerate() {
-        current[0] = i + 1;
-        for (j, to) in shorter.iter().enumerate() {
-            let insertion = current[j].saturating_add(1);
-            let deletion = previous[j + 1].saturating_add(1);
-            let substitution = previous[j] + usize::from(from != to);
-            current[j + 1] = insertion.min(deletion).min(substitution);
+        let row = i + 1;
+        let start = if threshold.is_some() { row.saturating_sub(limit).max(1) } else { 1 };
+        let end = if threshold.is_some() { row.saturating_add(limit).min(shorter.len()) }
+            else { shorter.len() };
+        current.fill(outside);
+        current[0] = row.min(outside);
+        for column in start..=end {
+            let insertion = current[column - 1].saturating_add(1);
+            let deletion = previous[column].saturating_add(1);
+            let substitution = previous[column - 1] + usize::from(*from != shorter[column - 1]);
+            current[column] = insertion.min(deletion).min(substitution);
+        }
+        if threshold.is_some() && current[start..=end].iter().all(|&distance| distance > limit) {
+            return Ok(Value::Integer(-1));
         }
         std::mem::swap(&mut previous, &mut current);
     }
@@ -82,5 +99,9 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("a".into()), Value::Text("b".into()), Value::Null])
             .unwrap(), Value::Null);
         assert!(output(&[DataType::Text, DataType::Text, DataType::Text]).is_err());
+        assert_eq!(evaluate(&[Value::Text("a".repeat(2500)), Value::Text("a".repeat(2500)), Value::Integer(0)]).unwrap(), Value::Integer(0));
+        assert_eq!(evaluate(&[Value::Text("a".repeat(2500)), Value::Text("b".repeat(2500)), Value::Integer(1)]).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[Value::Text("é".repeat(2500)), Value::Text(format!("{}a", "é".repeat(2499))), Value::Integer(1)]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(3)]).unwrap(), Value::Integer(3));
     }
 }
