@@ -40,6 +40,73 @@ pub fn hash_join(
 
 /// Hash join over conjunctive equality keys. NULL in any key prevents a match,
 /// while integer/float pairs are compared in a common numeric type.
+
+/// SQL JOIN USING removes duplicate right keys and coalesces key columns
+/// for RIGHT/FULL joins. Key columns precede the non-key payload columns.
+pub fn using_join(
+    left: &Batch, right: &Batch, columns: &[String], kind: JoinKind,
+) -> Result<Batch> {
+    if columns.is_empty() || columns.len() > 16 {
+        return Err(Error::Schema("USING requires 1 to 16 columns".into()));
+    }
+    let pairs = columns.iter().map(|name| (name.as_str(), name.as_str()))
+        .collect::<Vec<_>>();
+    let joined = hash_join_keys(left, right, &pairs, kind)?;
+    if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        return Ok(joined);
+    }
+    let left_width = left.schema().len();
+    let mut used_left = HashSet::new();
+    let mut used_right = HashSet::new();
+    let mut output_fields = Vec::new();
+    let mut output_columns = Vec::new();
+    for name in columns {
+        let li = left.schema().column(name)?;
+        let ri = right.schema().column(name)?;
+        if !used_left.insert(li) || !used_right.insert(ri) {
+            return Err(Error::Schema("duplicate column in JOIN USING".into()));
+        }
+        let left_field = left.schema().field(li)?;
+        let right_field = right.schema().field(ri)?;
+        let target = match (left_field.data_type, right_field.data_type) {
+            (DataType::Integer, DataType::Float)
+            | (DataType::Float, DataType::Integer) => DataType::Float,
+            (a, b) if a == b => a,
+            _ => return Err(Error::Type("JOIN USING key types are incompatible".into())),
+        };
+        let nullable = match kind {
+            JoinKind::Left => left_field.nullable,
+            JoinKind::Right => right_field.nullable,
+            JoinKind::Full => left_field.nullable || right_field.nullable,
+            _ => false,
+        };
+        output_fields.push(Field::new(&left_field.name, target, nullable));
+        let mut values = Vec::with_capacity(joined.num_rows());
+        for row in 0..joined.num_rows() {
+            let first = joined.value(row, li)?;
+            let second = joined.value(row, left_width + ri)?;
+            let mut value = if first.is_null() { second.clone() } else { first.clone() };
+            if target == DataType::Float && matches!(value, Value::Integer(_)) {
+                value = value.cast_to(DataType::Float)?;
+            }
+            values.push(value);
+        }
+        output_columns.push(values);
+    }
+    for (index, field) in joined.schema().fields().iter().enumerate() {
+        let is_key = if index < left_width {
+            used_left.contains(&index)
+        } else {
+            used_right.contains(&(index - left_width))
+        };
+        if !is_key {
+            output_fields.push(field.clone());
+            output_columns.push(joined.column(index)?.to_vec());
+        }
+    }
+    Batch::new_with_row_count(Schema::new(output_fields)?, output_columns, joined.num_rows())
+}
+
 pub fn hash_join_keys(
     left: &Batch, right: &Batch, keys: &[(&str, &str)], kind: JoinKind,
 ) -> Result<Batch> {
