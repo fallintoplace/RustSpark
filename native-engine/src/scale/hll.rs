@@ -34,8 +34,14 @@ impl HyperLogLog {
     pub fn estimate(&self) -> f64 {
         let m = REGISTERS as f64;
         let zeros = self.registers.iter().filter(|&&rank| rank == 0).count();
+        // Ranks are bounded to 65 - PRECISION by add().
+        let mut contributions = [0.0; (65 - PRECISION) as usize + 1];
+        contributions[0] = 1.0;
+        for rank in 1..contributions.len() {
+            contributions[rank] = contributions[rank - 1] * 0.5;
+        }
         let harmonic: f64 = self.registers.iter()
-            .map(|&rank| 2_f64.powi(-(rank as i32))).sum();
+            .map(|&rank| contributions[usize::from(rank)]).sum();
         let alpha = 0.7213 / (1.0 + 1.079 / m);
         let raw = alpha * m * m / harmonic;
         if raw <= 2.5 * m && zeros > 0 {
@@ -150,5 +156,19 @@ mod approximate_distinct_batch_tests {
         let estimate = approximate_distinct_batches(&[first, second], "key").unwrap();
         assert!((estimate - 3000.0).abs() / 3000.0 < 0.15);
         assert_eq!(approximate_distinct_batches(&[], "key").unwrap(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod hll_register_harmonic_perf_tests {
+    use super::*;
+    #[test]
+    fn register_contributions_keep_empty_and_nonempty_estimates() {
+        assert_eq!(HyperLogLog::new().estimate(), 0.0);
+        let mut sketch = HyperLogLog::new();
+        for n in 0..10_000 { sketch.add(&Value::Integer(n)); }
+        let value = sketch.estimate();
+        assert!(value.is_finite());
+        assert!((value - 10_000.0).abs() / 10_000.0 < 0.15);
     }
 }
