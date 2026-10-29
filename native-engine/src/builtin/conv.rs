@@ -8,16 +8,24 @@ fn output(types: &[DataType]) -> Result<DataType> {
     } else { Err(Error::Type("CONV requires text/integer and two integer bases".into())) }
 }
 fn encode(mut value: u64, base: u64, negative: bool) -> String {
-    let mut reversed = String::new();
+    // A u64 needs at most 64 base-2 digits plus one optional minus sign.
+    // Write digits backwards into stack storage and allocate only the result.
+    const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut buffer = [0_u8; 65];
+    let mut start = buffer.len();
     loop {
-        let digit = char::from_digit((value % base) as u32, base as u32)
-            .expect("base validated in CONV");
-        reversed.push(digit.to_ascii_uppercase());
+        start -= 1;
+        buffer[start] = DIGITS[(value % base) as usize];
         value /= base;
         if value == 0 { break; }
     }
-    if negative { reversed.push('-'); }
-    reversed.chars().rev().collect()
+    if negative {
+        start -= 1;
+        buffer[start] = b'-';
+    }
+    std::str::from_utf8(&buffer[start..])
+        .expect("CONV digits are ASCII")
+        .to_owned()
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let input = match &args[0] {
@@ -65,5 +73,8 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("-1".into()), Value::Integer(10), Value::Integer(16)]).unwrap(), Value::Text("FFFFFFFFFFFFFFFF".into()));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
+        assert_eq!(encode(0, 36, false), "0");
+        assert_eq!(encode(u64::MAX, 2, false), "1".repeat(64));
+        assert_eq!(encode(i64::MIN.unsigned_abs(), 10, true), "-9223372036854775808");
     }
 }
