@@ -17,8 +17,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if start < 1 { return Err(Error::Execution("OVERLAY start must be positive".into())); }
     let count = if args.len() == 4 {
         let Some(count) = super::integer(&args[3])? else { return Ok(Value::Null); };
-        usize::try_from(count)
-            .map_err(|_| Error::Execution("OVERLAY length must be nonnegative".into()))?
+        if count < 0 { replacement.chars().count() }
+        else { usize::try_from(count).unwrap_or(usize::MAX) }
     } else {
         replacement.chars().count()
     };
@@ -71,6 +71,18 @@ mod tests {
         assert!(evaluate(&[
             Value::Text("abc".into()), Value::Text("z".into()), Value::Integer(0),
         ]).is_err());
+        assert_eq!(evaluate(&[
+            Value::Text("Spark SQL".into()), Value::Text("CORE".into()),
+            Value::Integer(7), Value::Integer(-1),
+        ]).unwrap(), Value::Text("Spark CORE".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("aéZ".into()), Value::Text("🙂!".into()),
+            Value::Integer(2), Value::Integer(-1),
+        ]).unwrap(), Value::Text("a🙂!".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("abc".into()), Value::Text("X".into()),
+            Value::Integer(2), Value::Integer(0),
+        ]).unwrap(), Value::Text("aXbc".into()));
     }
 }
 
