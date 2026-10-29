@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
+use crate::{batch::Batch, schema::Schema, Error, Result};
 use super::{cancel::QueryControl, chunks::BatchChunks, spill::SpillWriter};
 
 static PARTITION_ID: AtomicU64 = AtomicU64::new(1);
@@ -34,10 +34,10 @@ pub struct PartitionWriter {
     batch_rows: usize,
 }
 
-fn bucket(row: &[Value], keys: &[usize], count: usize) -> usize {
+fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usize> {
     let mut hash = crate::hash_partition::PartitionHasher::default();
-    for &column in keys { row[column].hash(&mut hash); }
-    (hash.finish() % count as u64) as usize
+    for &column in keys { batch.value(row, column)?.hash(&mut hash); }
+    Ok((hash.finish() % count as u64) as usize)
 }
 
 impl PartitionWriter {
@@ -70,12 +70,12 @@ impl PartitionWriter {
             control.check()?;
             let part = part?;
             let mut groups = vec![Vec::new(); writers.len()];
-            for row in part.rows()? {
-                let index = bucket(&row, &self.key_columns, writers.len());
+            for row in 0..part.num_rows() {
+                let index = bucket(&part, row, &self.key_columns, writers.len())?;
                 groups[index].push(row);
             }
             for (writer, rows) in writers.iter_mut().zip(groups) {
-                if !rows.is_empty() { writer.write_batch(&Batch::from_rows(schema.clone(), rows)?)?; }
+                if !rows.is_empty() { writer.write_batch(&part.take(&rows)?)?; }
             }
         }
         Ok(())
@@ -124,5 +124,26 @@ mod tests {
         assert_eq!(seen, 4);
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod consolidated_partition_offset_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn partition_hashes_keys_without_materializing_rows() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2), Value::Text("wide A".repeat(100))],
+            vec![Value::Null, Value::Text("wide B".repeat(100))],
+            vec![Value::Integer(2), Value::Text("wide C".repeat(100))],
+        ]).unwrap();
+        assert_eq!(bucket(&source, 0, &[0], 8).unwrap(), bucket(&source, 2, &[0], 8).unwrap());
+        assert!(bucket(&source, 3, &[0], 8).is_err());
+        assert!(bucket(&source, 0, &[2], 8).is_err());
     }
 }
