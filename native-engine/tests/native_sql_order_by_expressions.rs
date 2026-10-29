@@ -48,8 +48,8 @@ fn spark_order_by_functions_and_multi_column_tiebreakers() {
     ), vec![
         vec![Value::Text("Rome".into()), Value::Integer(7)],
         vec![Value::Text("Paris".into()), Value::Null],
-        vec![Value::Text("Berlin".into()), Value::Integer(3)],
         vec![Value::Text("Vienna".into()), Value::Integer(1)],
+        vec![Value::Text("Berlin".into()), Value::Integer(3)],
     ]);
     assert_eq!(run(
         "SELECT city, amount FROM sales ORDER BY UPPER(city) DESC LIMIT 2"
