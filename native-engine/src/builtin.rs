@@ -101,6 +101,13 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Boolean)
         },
+        "ENDSWITH" => {
+            if args.len() != 2 { return Err(Error::Parse("ENDSWITH requires two arguments".into())); }
+            for arg in args {
+                if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("ENDSWITH requires text".into())); }
+            }
+            Ok(DataType::Boolean)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -219,6 +226,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Text(value), Value::Text(prefix)] => Ok(Value::Boolean(value.starts_with(prefix))),
             [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("STARTSWITH requires text".into())),
+        },
+        "ENDSWITH" => match args {
+            [Value::Text(value), Value::Text(suffix)] => Ok(Value::Boolean(value.ends_with(suffix))),
+            [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
+            _ => Err(Error::Type("ENDSWITH requires text".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
