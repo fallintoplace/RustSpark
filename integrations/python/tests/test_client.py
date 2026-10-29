@@ -120,6 +120,12 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.query_one("SELECT id FROM t", max_rows=1)
 
+    def test_mixed_type_named_table_keys_raise_value_error(self):
+        for invalid in (None, 3):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "Invalid table name"):
+                RustSpark().query("SELECT 1", csv_tables={"good": "good.csv", invalid: "bad.csv"})
+
+
 
 if __name__ == "__main__":
     unittest.main()
