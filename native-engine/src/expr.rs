@@ -39,6 +39,7 @@ pub enum Expr {
     Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
     Call { name: String, args: Vec<Expr> },
     TryCast { expression: Box<Expr>, target: DataType },
+    IsDistinctFrom { left: Box<Expr>, right: Box<Expr>, negated: bool },
 }
 
 impl Expr {
@@ -59,7 +60,8 @@ impl Expr {
                 Value::Integer(_) => DataType::Integer,
                 Value::Float(_) => DataType::Float,
             }),
-            Self::Not(_) | Self::IsNull(_) | Self::Like { .. } => Ok(DataType::Boolean),
+            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
+            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
             Self::TryCast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -110,6 +112,17 @@ impl Expr {
                 None => Value::Null,
             }),
             Self::IsNull(expr) => Ok(Value::Boolean(expr.evaluate(batch, row)?.is_null())),
+            Self::IsDistinctFrom { left, right, negated } => {
+                let left = left.evaluate(batch, row)?;
+                let right = right.evaluate(batch, row)?;
+                let distinct = match (left.is_null(), right.is_null()) {
+                    (true, true) => false,
+                    (true, false) | (false, true) => true,
+                    (false, false) => left.sql_equal(&right)?.map(|equal| !equal)
+                        .unwrap_or_else(|| left != right),
+                };
+                Ok(Value::Boolean(if *negated { !distinct } else { distinct }))
+            },
             Self::Like { value, pattern } => match (
                 value.evaluate(batch, row)?, pattern.evaluate(batch, row)?
             ) {

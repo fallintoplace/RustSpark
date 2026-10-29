@@ -115,10 +115,19 @@ impl Parser {
         loop {
             if min_precedence <= 3 && self.take_word("IS") {
                 let negate = self.take_word("NOT");
-                self.expect_word("NULL")?;
-                left = Expr::IsNull(Box::new(left));
-                if negate {
-                    left = Expr::Not(Box::new(left));
+                if self.take_word("DISTINCT") {
+                    self.expect_word("FROM")?;
+                    left = Expr::IsDistinctFrom {
+                        left: Box::new(left),
+                        right: Box::new(self.expression(4)?),
+                        negated: negate,
+                    };
+                } else {
+                    self.expect_word("NULL")?;
+                    left = Expr::IsNull(Box::new(left));
+                    if negate {
+                        left = Expr::Not(Box::new(left));
+                    }
                 }
                 continue;
             }
@@ -604,6 +613,20 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn is_distinct_from_compares_nulls_without_unknown_results() {
+        let distinct = parse_sql("SELECT amount FROM sales WHERE amount IS DISTINCT FROM 2").unwrap();
+        assert_eq!(execute(&distinct, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Null],
+        ]);
+        let not_distinct = parse_sql("SELECT amount FROM sales WHERE amount IS NOT DISTINCT FROM NULL").unwrap();
+        assert_eq!(execute(&not_distinct, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Null]]);
+        let nulls = parse_sql("SELECT NULL IS DISTINCT FROM NULL AS n FROM sales").unwrap();
+        assert_eq!(execute(&nulls, &sales()).unwrap().row(0).unwrap(),
+            vec![Value::Boolean(false)]);
     }
 
     #[test]
