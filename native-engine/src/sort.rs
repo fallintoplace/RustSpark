@@ -44,6 +44,9 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     if keys.is_empty() {
         return Ok(batch.clone());
     }
+    for key in keys {
+        key.expression.output_type(batch.schema())?;
+    }
     let mut decorated = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         let values = keys
@@ -71,6 +74,14 @@ mod tests {
         scalar::Value,
         schema::{DataType, Field, Schema},
     };
+
+    #[test]
+    fn empty_sort_rejects_unknown_columns() {
+        let batch = Batch::empty(Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap());
+        let missing = [SortKey::ascending(Expr::Column("missing".into()))];
+        assert!(sort(&batch, &missing).is_err());
+        assert_eq!(sort(&batch, &[]).unwrap(), batch);
+    }
 
     #[test]
     fn nulls_and_ties_have_deterministic_order() {
