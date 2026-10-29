@@ -25,10 +25,14 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
         .num_rows()
         .checked_add(right.num_rows())
         .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
-    let mut rows = Vec::with_capacity(count);
-    rows.extend(left.rows()?);
-    rows.extend(right.rows()?);
-    Batch::from_rows(schema, rows)
+    let mut columns = Vec::with_capacity(schema.len());
+    for index in 0..schema.len() {
+        let mut values = Vec::with_capacity(count);
+        values.extend_from_slice(left.column(index)?);
+        values.extend_from_slice(right.column(index)?);
+        columns.push(values);
+    }
+    Batch::new(schema, columns)
 }
 
 #[cfg(test)]
@@ -81,5 +85,21 @@ mod union_distinct_feature_tests {
             vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)],
         ]);
     }
+    #[test]
+    fn wide_union_preserves_all_columns_and_input_order() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2), Value::Text("x".into())],
+        ]).unwrap();
+        assert_eq!(union_all(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("x".into())],
+        ]);
+    }
 }
-
