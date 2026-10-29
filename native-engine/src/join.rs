@@ -138,14 +138,19 @@ pub fn hash_join(
         let key = &left_keys[left_row];
         let right_rows = if joinable(key) { right_hash.get(key) } else { None };
         if let Some(right_rows) = right_rows {
-            for &right_row in right_rows {
+            let mut left_values = left.row(left_row)?;
+            for (match_index, &right_row) in right_rows.iter().enumerate() {
                 if !matched_right.is_empty() {
                     matched_right[right_row] = true;
                 }
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
-                let mut row = left.row(left_row)?;
+                let mut row = if match_index + 1 == right_rows.len() {
+                    std::mem::take(&mut left_values)
+                } else {
+                    left_values.clone()
+                };
                 row.extend(right.row(right_row)?);
                 output.push(row);
             }
@@ -253,5 +258,22 @@ mod nan_join_key_tests {
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Semi).unwrap().num_rows(), 2);
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Anti).unwrap().num_rows(), 0);
         assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Left).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod one_to_many_join_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn repeated_match_rows_preserve_text_payloads_and_order() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false), Field::new("payload", DataType::Text, false),
+        ]).unwrap(), vec![vec![Value::Integer(4), Value::Text("hello".into())]]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(4)], vec![Value::Integer(4)], vec![Value::Integer(4)]]).unwrap();
+        let joined = hash_join(&left, &right, "id", "key", JoinKind::Inner).unwrap();
+        assert_eq!(joined.num_rows(), 3);
+        assert!(joined.rows().unwrap().iter().all(|row| row[1] == Value::Text("hello".into())));
     }
 }
