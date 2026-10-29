@@ -324,6 +324,13 @@ impl Parser {
                 left = Expr::Call { name: "mod".into(), args: vec![left, right] };
                 continue;
             }
+            if self.peek_word("DIV") {
+                if min_precedence > 5 { break; }
+                self.next();
+                let right = self.expression(6)?;
+                left = Expr::Call { name: "div".into(), args: vec![left, right] };
+                continue;
+            }
             let Some((op, precedence)) = self.binary_operator() else {
                 break;
             };
