@@ -1,15 +1,15 @@
 //! Top-K selection using O(k) candidate memory instead of a full sort.
-use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
+use std::{cmp::Ordering, collections::BinaryHeap};
 use crate::{batch::Batch, scalar::Value, sort::SortKey, Result};
 
 #[derive(Clone, Debug)]
-struct Candidate {
+struct Candidate<'a> {
     row: usize,
     values: Vec<Value>,
-    options: Arc<Vec<(bool, bool)>>,
+    options: &'a [(bool, bool)],
 }
 
-fn compare(left: &Candidate, right: &Candidate) -> Ordering {
+fn compare(left: &Candidate<'_>, right: &Candidate<'_>) -> Ordering {
     for ((a, b), (descending, nulls_first)) in left.values.iter()
         .zip(&right.values).zip(left.options.iter()) {
         let order = crate::sort::compare_values(a, b, *descending, *nulls_first);
@@ -18,14 +18,14 @@ fn compare(left: &Candidate, right: &Candidate) -> Ordering {
     left.row.cmp(&right.row)
 }
 
-impl PartialEq for Candidate {
+impl PartialEq for Candidate<'_> {
     fn eq(&self, other: &Self) -> bool { compare(self, other) == Ordering::Equal }
 }
-impl Eq for Candidate {}
-impl PartialOrd for Candidate {
+impl Eq for Candidate<'_> {}
+impl PartialOrd for Candidate<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
-impl Ord for Candidate {
+impl Ord for Candidate<'_> {
     fn cmp(&self, other: &Self) -> Ordering { compare(self, other) }
 }
 
@@ -40,12 +40,12 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
     }
-    let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
+    let options = keys.iter().map(|k| (k.descending, k.nulls_first)).collect::<Vec<_>>();
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
         let values = keys.iter().map(|key| key.expression.evaluate(batch, row))
             .collect::<Result<Vec<_>>>()?;
-        let candidate = Candidate { row, values, options: Arc::clone(&options) };
+        let candidate = Candidate { row, values, options: &options };
         if heap.len() < k {
             heap.push(candidate);
         } else if let Some(worst) = heap.peek() {
