@@ -24,3 +24,7 @@ adequate temp volume for large intermediate results.
 ```sh
 cd integrations/polars && python3 -m unittest -v test_query_lazy.py
 ```
+
+Use `process_timeout` (seconds) to put a deadline on the entire RustSpark
+subprocess, including CSV loading and IPC file export. It is distinct
+from the SQL-only `query_timeout` option.
