@@ -62,6 +62,7 @@ mod find_in_set;
 mod elt;
 mod regexp_instr;
 mod regexp_substr;
+mod regexp_like;
 mod crc32;
 mod url_encode;
 mod url_decode;
@@ -148,6 +149,7 @@ const MODULES: &[&[Function]] = &[
     &elt::FUNCTIONS,
     &regexp_instr::FUNCTIONS,
     &regexp_substr::FUNCTIONS,
+    &regexp_like::FUNCTIONS,
     &crc32::FUNCTIONS,
     &url_encode::FUNCTIONS,
     &url_decode::FUNCTIONS,
