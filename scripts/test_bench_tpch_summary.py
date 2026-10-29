@@ -51,6 +51,12 @@ class SuiteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "query ID"):
             suite.summarize(data)
 
+    def test_hotspot_share_uses_sum_of_all_twenty_two_queries(self):
+        data = suite.summarize(report())
+        self.assertEqual(data["top_latency_queries"], [22, 21, 20])
+        self.assertAlmostEqual(data["top_three_latency_percent"], 63 / 253 * 100, places=2)
+        self.assertGreater(data["sum_median_ms"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
