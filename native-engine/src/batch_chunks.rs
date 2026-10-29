@@ -34,6 +34,8 @@ impl Iterator for BatchChunks<'_> {
     }
 }
 
+impl ExactSizeIterator for BatchChunks<'_> {}
+
 pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
     let schema = first.schema().clone();
@@ -95,5 +97,26 @@ mod zero_column_concat_consolidation_tests {
         let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(concatenate(&[a, b]).unwrap().rows().unwrap(), vec![vec![]; 5]);
+    }
+}
+
+#[cfg(test)]
+mod exact_batch_chunk_iterator_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn remaining_length_is_exact_for_short_last_chunk() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..8)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut iterator = chunks(&batch, 3).unwrap();
+        assert_eq!(iterator.len(), 3);
+        iterator.next().unwrap().unwrap();
+        assert_eq!(iterator.len(), 2);
+        iterator.next().unwrap().unwrap();
+        iterator.next().unwrap().unwrap();
+        assert_eq!(iterator.len(), 0);
+        assert_eq!(iterator.next().is_none(), true);
+        assert_eq!(chunks(&Batch::empty(schema), 1).unwrap().len(), 0);
     }
 }
