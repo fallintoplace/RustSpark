@@ -101,7 +101,8 @@ impl Batch {
             selected.extend(indices.iter().map(|&row| column[row].clone()));
             columns.push(selected);
         }
-        Self::new_with_row_count(self.schema.clone(), columns, indices.len())
+        // Source values already satisfy this batch's schema; row indices were checked above.
+        Ok(Self { schema: self.schema.clone(), columns, rows: indices.len() })
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
@@ -222,5 +223,31 @@ mod zero_column_cardinality_consolidation_tests {
         assert!(input.take(&[3]).is_err());
         assert!(input.slice_rows(0, 4).is_err());
         assert!(Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gathered_validity_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn gather_preserves_nullable_values_and_duplicate_rows() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("large payload".into())],
+        ]).unwrap();
+        let selected = input.take(&[1, 0, 1]).unwrap();
+        assert_eq!(selected.schema(), &schema);
+        assert_eq!(selected.rows().unwrap(), vec![
+            vec![Value::Integer(2), Value::Text("large payload".into())],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("large payload".into())],
+        ]);
+        assert!(input.take(&[2]).is_err());
     }
 }
