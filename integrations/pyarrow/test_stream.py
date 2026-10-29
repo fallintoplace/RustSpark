@@ -78,6 +78,17 @@ class ArrowStreamCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "FINAL ERROR"):
                 list(iter_arrow_batches("SELECT 1", database_dir="/tmp/my db"))
 
+    def test_typed_named_parameters_are_forwarded_verbatim(self):
+        command = build_command("SELECT * FROM data WHERE n > $minimum",
+                                named_params={"minimum": "int64:42"})
+        self.assertIn("minimum=int64:42", command)
+        self.assertIn("$minimum", command[command.index("--sql") + 1])
+        for invalid in ({"bad-name": "int64:1"}, {"valid": "123"},
+                        {"valid": "utf8:" + "x" * 8192}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                build_command("SELECT 1", named_params=invalid)
+
+
 
 if __name__ == "__main__":
     unittest.main()
