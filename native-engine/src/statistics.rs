@@ -27,26 +27,34 @@ impl ColumnStatistics {
     }
 
     pub fn observe(&mut self, value: &Value) -> Result<()> {
-        self.rows = self.rows.checked_add(1)
+        let rows = self.rows.checked_add(1)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
         if value.is_null() {
-            self.nulls += 1;
+            let nulls = self.nulls.checked_add(1)
+                .ok_or_else(|| Error::Execution("statistics NULL count overflow".into()))?;
+            self.rows = rows;
+            self.nulls = nulls;
             return Ok(());
         }
-        if let Some(current) = &self.min {
-            if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
-                self.min = Some(value.clone());
+        let mut min = self.min.clone();
+        let mut max = self.max.clone();
+        if min.is_none() {
+            min = Some(value.clone());
+        } else if let Some(current) = &min {
+            if value.sql_compare(current)? == Some(Ordering::Less) {
+                min = Some(value.clone());
             }
-        } else {
-            self.min = Some(value.clone());
         }
-        if let Some(current) = &self.max {
-            if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
-                self.max = Some(value.clone());
+        if max.is_none() {
+            max = Some(value.clone());
+        } else if let Some(current) = &max {
+            if value.sql_compare(current)? == Some(Ordering::Greater) {
+                max = Some(value.clone());
             }
-        } else {
-            self.max = Some(value.clone());
         }
+        self.rows = rows;
+        self.min = min;
+        self.max = max;
         Ok(())
     }
 
@@ -58,22 +66,28 @@ impl ColumnStatistics {
         if nulls > rows {
             return Err(Error::Execution("invalid NULL count".into()));
         }
+        let mut min = self.min.clone();
+        let mut max = self.max.clone();
         if let Some(value) = &other.min {
-            if self.min.as_ref().is_none_or(|current| {
-                matches!(value.sql_compare(current), Ok(Some(Ordering::Less)))
-            }) {
-                self.min = Some(value.clone());
+            match &min {
+                None => min = Some(value.clone()),
+                Some(current) if value.sql_compare(current)? == Some(Ordering::Less) =>
+                    min = Some(value.clone()),
+                _ => {}
             }
         }
         if let Some(value) = &other.max {
-            if self.max.as_ref().is_none_or(|current| {
-                matches!(value.sql_compare(current), Ok(Some(Ordering::Greater)))
-            }) {
-                self.max = Some(value.clone());
+            match &max {
+                None => max = Some(value.clone()),
+                Some(current) if value.sql_compare(current)? == Some(Ordering::Greater) =>
+                    max = Some(value.clone()),
+                _ => {}
             }
         }
         self.rows = rows;
         self.nulls = nulls;
+        self.min = min;
+        self.max = max;
         Ok(())
     }
 }
@@ -140,3 +154,21 @@ mod multi_batch_statistics_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod transactional_stats_tests {
+    use super::*;
+
+    #[test]
+    fn failed_merge_does_not_mutate_statistics() {
+        let mut numeric = ColumnStatistics { rows: 1, nulls: 0,
+            min: Some(Value::Integer(3)), max: Some(Value::Integer(3)) };
+        let before = numeric.clone();
+        let text = ColumnStatistics { rows: 1, nulls: 0,
+            min: Some(Value::Text("x".into())), max: Some(Value::Text("x".into())) };
+        assert!(numeric.merge(&text).is_err());
+        assert_eq!(numeric, before);
+        assert!(numeric.observe(&Value::Text("bad".into())).is_err());
+        assert_eq!(numeric, before);
+    }
+}
