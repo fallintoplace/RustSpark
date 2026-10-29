@@ -25,3 +25,6 @@ results use RustSpark's Arrow stream instead.
 ```sh
 cd integrations/pandas && python3 -m unittest -v test_query_dataframe.py
 ```
+
+Set `process_timeout` (seconds) to cover startup and Arrow file export
+in addition to the CLI's SQL-only `query_timeout`.
