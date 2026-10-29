@@ -245,6 +245,7 @@ fn infer(
     let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth);
     match plan {
         Plan::Scan { table } => Ok(catalog.get(table)?.schema().clone()),
+        Plan::OneRow => Schema::new(vec![]),
         Plan::Filter { input, predicate } => {
             let schema = child(input)?;
             let kind = predicate.output_type(&schema)?;
@@ -357,6 +358,9 @@ fn lower(
             let batches = RowBatcher::new(reader, source.schema().clone(), options.batch_rows)?;
             Ok(Box::new(batches))
         }
+        Plan::OneRow => Ok(Box::new(std::iter::once(
+            Batch::from_rows(Schema::new(vec![])?, vec![vec![]])
+        ))),
         Plan::Filter { input, predicate } =>
             Ok(Box::new(FilterStream::new(child(input)?, predicate.clone(), control.clone()))),
         Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
