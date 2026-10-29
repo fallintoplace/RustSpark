@@ -45,8 +45,10 @@ def make_command(binary: str, database_dir: Path, template: Path,
         "--stdout-format", "json-array", "--max-rows", str(max_rows),
         "--query-timeout", str(query_timeout),
     ]
+    if any(not isinstance(key, str) or not PARAM_NAME.fullmatch(key) for key in parameters):
+        raise ValueError("Invalid SQL parameter name")
     for key, value in sorted(parameters.items()):
-        if not PARAM_NAME.fullmatch(key) or not isinstance(value, str) or ":" not in value or len(value) > 4096:
+        if not isinstance(value, str) or ":" not in value or len(value) > 4096:
             raise ValueError("Parameters must be typed values, e.g. int64:42")
         arguments.extend(["--named-param", f"{key}={value}"])
     return arguments
