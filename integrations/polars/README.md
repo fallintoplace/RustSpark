@@ -27,3 +27,5 @@ cd integrations/polars && python3 -m unittest -v test_query_lazy.py
 
 Use `database_dir="/path/to/rustspark-database"` to export queries
 against registered tables in persistent RustSpark databases.
+
+Use `json_input="events.json"` for JSON input or `csv_tables={"users": "users.csv"}` and `parquet_tables={"orders": "orders.parquet"}` for named-table joins. Named and unnamed sources cannot be mixed. Set `max_rows=10000` to cap exported rows and `process_timeout=30` to bound the full subprocess, in addition to `query_timeout`.

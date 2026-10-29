@@ -28,3 +28,5 @@ cd integrations/pandas && python3 -m unittest -v test_query_dataframe.py
 
 To query a persistent RustSpark database rather than supplying a file,
 pass `database_dir="/path/to/rustspark-database"`.
+
+Use `json_input="events.json"` for JSON sources, or `csv_tables={"users": "users.csv"}` and `parquet_tables={"orders": "orders.parquet"}` to query named tables in joins. Named and unnamed sources cannot be mixed. Use `named_params={"minimum": "int64:10"}` for typed SQL parameters. `process_timeout=30` limits the full subprocess (including export), separately from `query_timeout`.
