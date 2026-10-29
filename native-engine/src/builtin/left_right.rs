@@ -53,7 +53,20 @@ fn reverse(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
+fn common_prefix_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn common_prefix(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let mut end = 0;
+    for ((offset, first), (_, second)) in left.char_indices().zip(right.char_indices()) {
+        if first != second { break; }
+        end = offset + first.len_utf8();
+    }
+    Ok(Value::Text(left[..end].to_string()))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "common_prefix", min_args: 2, max_args: 2, result_type: common_prefix_type, call: common_prefix },
     Function { name: "left", min_args: 2, max_args: 2, result_type: output, call: left },
     Function { name: "right", min_args: 2, max_args: 2, result_type: output, call: right },
     Function { name: "reverse", min_args: 1, max_args: 1, result_type: reverse_type, call: reverse },
@@ -115,5 +128,17 @@ mod spark_string_width_tests {
         assert_eq!(left(&[input.clone(), Value::Text("n/a".into())]).unwrap(), Value::Null);
         assert_eq!(left(&[input, Value::Null]).unwrap(), Value::Null);
         assert_eq!(output(&[DataType::Text, DataType::Text]).unwrap(), DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod common_prefix_extension_tests {
+    use super::*;
+    #[test]
+    fn preserves_unicode_and_null_semantics() {
+        assert!(crate::builtin::supports("common_prefix"));
+        assert_eq!(common_prefix(&[Value::Text("café-one".into()), Value::Text("café-two".into())]).unwrap(), Value::Text("café-".into()));
+        assert_eq!(common_prefix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }
