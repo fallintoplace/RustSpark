@@ -110,7 +110,7 @@ fn kind(values: &[Vec<String>], column: usize) -> DataType {
 }
 
 pub fn from_csv_str(input: &str) -> Result<Batch> {
-    let mut records = parse_records(input)?;
+    let mut records = parse_records(input.strip_prefix('\u{feff}').unwrap_or(input))?;
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
@@ -201,6 +201,9 @@ mod tests {
         assert_eq!(batch.row(0).unwrap(), vec![Value::Text("hello\nworld".into())]);
         assert!(from_csv_str("a,b\n1").is_err());
         assert!(from_csv_str("a\n\"open").is_err());
+        let bom = from_csv_str("\u{feff}id,name\n1,\u{feff}Jane\n").unwrap();
+        assert_eq!(bom.schema().column("id").unwrap(), 0);
+        assert_eq!(bom.row(0).unwrap(), vec![Value::Integer(1), Value::Text("\u{feff}Jane".into())]);
     }
 }
 
