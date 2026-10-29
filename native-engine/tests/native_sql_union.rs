@@ -20,5 +20,5 @@ fn union_all_applies_global_order_and_limit() {
     assert_eq!(result.rows().unwrap(), vec![
         vec![Value::Integer(1)], vec![Value::Integer(2)],
     ]);
-    assert!(parse_sql("SELECT * FROM a UNION SELECT * FROM b").is_err());
+    assert!(parse_sql("SELECT * FROM a UNION SELECT * FROM b").is_ok());
 }
