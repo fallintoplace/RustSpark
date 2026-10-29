@@ -65,7 +65,14 @@ fn execute_inner(
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
-        Plan::Limit { input, offset, count } => limit::limit(&descend(input)?, *offset, *count)?,
+        Plan::Limit { input, offset, count } => {
+            // A LIMIT over a scan must not materialize and budget the whole input.
+            if let Plan::Scan { table } = input.as_ref() {
+                limit::limit(catalog.get(table)?, *offset, *count)?
+            } else {
+                limit::limit(&descend(input)?, *offset, *count)?
+            }
+        },
         Plan::Distinct { input } => distinct::distinct(&descend(input)?)?,
         Plan::Join {
             left,
@@ -166,5 +173,19 @@ mod tests {
             &catalog,
             ExecutionOptions { max_output_rows: 5, max_plan_depth: 0 }
         ).is_err());
+    }
+    #[test]
+    fn direct_scan_limit_respects_final_result_budget() {
+        let mut catalog = Catalog::new();
+        let data = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..20).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap();
+        catalog.register("large", data).unwrap();
+        let options = ExecutionOptions { max_output_rows: 2, ..ExecutionOptions::default() };
+        let rows = execute_with_options(&Plan::scan("large").limit(11, Some(2)), &catalog, options)
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(11)], vec![Value::Integer(12)]]);
+        assert!(execute_with_options(&Plan::scan("large"), &catalog, options).is_err());
     }
 }
