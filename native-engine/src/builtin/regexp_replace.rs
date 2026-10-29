@@ -26,11 +26,31 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
     } else { 0 };
     let compiled = regex_support::compile(pattern)?;
-    let mut result = String::from(&text[..start]);
-    result.push_str(&compiled.replace_all(&text[start..], replacement));
-    if result.len() > 16 * 1024 * 1024 {
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    let suffix = &text[start..];
+    let mut result = String::with_capacity(text.len().min(MAX_BYTES));
+    result.push_str(&text[..start]);
+    let mut consumed = 0;
+    for captures in compiled.captures_iter(suffix) {
+        let matched = captures.get(0).expect("regex captures always include group zero");
+        let before = &suffix[consumed..matched.start()];
+        if before.len() > MAX_BYTES.saturating_sub(result.len()) {
+            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+        }
+        result.push_str(before);
+        let mut expanded = String::new();
+        captures.expand(replacement, &mut expanded);
+        if expanded.len() > MAX_BYTES.saturating_sub(result.len()) {
+            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+        }
+        result.push_str(&expanded);
+        consumed = matched.end();
+    }
+    let trailing = &suffix[consumed..];
+    if trailing.len() > MAX_BYTES.saturating_sub(result.len()) {
         return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
     }
+    result.push_str(trailing);
     Ok(Value::Text(result))
 }
 
@@ -78,5 +98,22 @@ mod spark_position_regressions {
             Value::Text("éé11".into()), Value::Text("1".into()),
             Value::Text("x".into()), Value::Integer(3),
         ]).unwrap(), Value::Text("ééxx".into()));
+    }
+}
+
+#[cfg(test)]
+mod bounded_regex_replacement_tests {
+    use super::*;
+    #[test]
+    fn preserves_capture_expansion_and_rejects_large_growth() {
+        let output = evaluate(&[
+            Value::Text("é1 é2".into()), Value::Text("(é)([0-9])".into()),
+            Value::Text("$2-$1".into()),
+        ]).unwrap();
+        assert_eq!(output, Value::Text("1-é 2-é".into()));
+        assert!(evaluate(&[
+            Value::Text("x".repeat(20)), Value::Text("x".into()),
+            Value::Text("y".repeat(1024 * 1024)),
+        ]).is_err());
     }
 }
