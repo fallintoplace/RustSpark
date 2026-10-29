@@ -17,7 +17,7 @@ fn abs(args: &[Value]) -> Result<Value> {
 fn sign(args: &[Value]) -> Result<Value> {
     let Some(value) = super::number(&args[0])? else { return Ok(Value::Null) };
     if !value.is_finite() { return Err(Error::Execution("SIGN received nonfinite value".into())); }
-    super::finite(value.signum())
+    super::finite(if value == 0.0 { 0.0 } else { value.signum() })
 }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "abs", min_args: 1, max_args: 1, result_type: abs_type, call: abs },
@@ -33,5 +33,6 @@ mod tests {
         assert!(abs(&[Value::Integer(i64::MIN)]).is_err());
         assert_eq!(sign(&[Value::Integer(-12)]).unwrap(), Value::Float(-1.0));
         assert_eq!(sign(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(sign(&[Value::Integer(0)]).unwrap(), Value::Float(0.0));
     }
 }
