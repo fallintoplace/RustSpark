@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use crate::{batch::Batch, schema::Schema, sort::{self, SortKey}, Error, Result};
-use super::{cancel::QueryControl, chunks::BatchChunks, spill::SpillWriter};
+use super::{cancel::QueryControl, spill::SpillWriter};
 
 static RUN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -47,9 +47,12 @@ where I: IntoIterator<Item = Result<Batch>>
         if incoming.schema() != &schema {
             return Err(Error::Schema("external sort input schema changed".into()));
         }
-        for chunk in BatchChunks::new(&incoming, max_rows_per_run)? {
+        let mut start = 0;
+        while start < incoming.num_rows() {
             control.check()?;
-            let sorted = sort::sort(&chunk?, keys)?;
+            let end = start.saturating_add(max_rows_per_run).min(incoming.num_rows());
+            let sorted = sort::sort_range(&incoming, keys, start, end)?;
+            start = end;
             if sorted.num_rows() == 0 { continue; }
             let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
             let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());

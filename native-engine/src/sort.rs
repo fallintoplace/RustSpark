@@ -49,18 +49,25 @@ pub(crate) fn compare_values(left: &Value, right: &Value, descending: bool, null
 }
 
 pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
-    if keys.is_empty() {
-        return Ok(batch.clone());
+    if keys.is_empty() { return Ok(batch.clone()); }
+    sort_range(batch, keys, 0, batch.num_rows())
+}
+
+/// Sort a bounded row window without copying the input batch first.
+pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Result<Batch> {
+    if start > end || end > batch.num_rows() {
+        return Err(crate::Error::Execution("invalid sort row window".into()));
     }
+    if keys.is_empty() { return batch.slice_rows(start, end); }
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
-    if keys.iter().all(|key| matches!(key.expression, Expr::Column(_))) {
+    if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         let columns = keys.iter().map(|key| match &key.expression {
             Expr::Column(name) => batch.column(batch.schema().column(name)?),
             _ => unreachable!("all sort keys are columns"),
         }).collect::<Result<Vec<_>>>()?;
-        let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let mut indices: Vec<usize> = (start..end).collect();
         indices.sort_by(|&left, &right| {
             for (column, key) in columns.iter().zip(keys) {
                 let cmp = compare_values(&column[left], &column[right], key.descending, key.nulls_first);
@@ -72,24 +79,23 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     }
     let mut key_columns = Vec::with_capacity(keys.len());
     for key in keys {
-        let mut values = Vec::with_capacity(batch.num_rows());
-        for row in 0..batch.num_rows() {
+        let mut values = Vec::with_capacity(end - start);
+        for row in start..end {
             values.push(key.expression.evaluate(batch, row)?);
         }
         key_columns.push(values);
     }
-    let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+    let mut indices: Vec<usize> = (0..end - start).collect();
     indices.sort_by(|&left, &right| {
         for (values, key) in key_columns.iter().zip(keys) {
             let comparison = compare_values(
                 &values[left], &values[right], key.descending, key.nulls_first,
             );
-            if comparison != Ordering::Equal {
-                return comparison;
-            }
+            if comparison != Ordering::Equal { return comparison; }
         }
         Ordering::Equal
     });
+    for index in &mut indices { *index += start; }
     batch.take(&indices)
 }
 
@@ -232,5 +238,25 @@ mod column_major_sort_perf_tests {
             vec![Value::Integer(3), Value::Text("first".into())],
             vec![Value::Integer(3), Value::Text("second".into())],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod range_sort_run_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn range_sort_does_not_sort_or_copy_unselected_input_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..30).rev().map(|n| vec![
+            if n % 11 == 0 { Value::Null } else { Value::Integer(n) }
+        ]).collect()).unwrap();
+        let key = [SortKey::ascending(Expr::Column("n".into()))];
+        for (start, end) in [(0, 3), (7, 15), (27, 30)] {
+            let slice = batch.slice_rows(start, end).unwrap();
+            assert_eq!(sort_range(&batch, &key, start, end).unwrap(), sort(&slice, &key).unwrap());
+        }
+        assert!(sort_range(&batch, &key, 12, 32).is_err());
+        assert_eq!(sort_range(&batch, &[], 5, 8).unwrap(), batch.slice_rows(5, 8).unwrap());
     }
 }
