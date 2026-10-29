@@ -254,9 +254,10 @@ fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
         return Err(Error::Execution("LIKE pattern exceeds work budget".into()));
     }
     let mut prev = vec![false; text.len() + 1];
+    let mut next = vec![false; text.len() + 1];
     prev[0] = true;
     for piece in pieces {
-        let mut next = vec![false; text.len() + 1];
+        next.fill(false);
         match piece {
             LikePiece::Many => {
                 next[0] = prev[0];
@@ -269,7 +270,7 @@ fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
                 for i in 1..=text.len() { next[i] = prev[i - 1] && text[i - 1] == symbol; }
             }
         }
-        prev = next;
+        std::mem::swap(&mut prev, &mut next);
     }
     Ok(prev[text.len()])
 }
@@ -443,5 +444,19 @@ mod consolidated_literal_like_fastpath_tests {
         assert!(sql_like(&text, &text).unwrap());
         assert!(!sql_like(&text, "x").unwrap());
         assert!(sql_like("abc", "a%c").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod like_rolling_buffer_perf_tests {
+    use super::*;
+
+    #[test]
+    fn multiple_wildcards_match_unicode_and_reset_dp_state() {
+        assert!(sql_like_escape("a🙂bbccd", "a%_b%c_", '\\').unwrap());
+        assert!(!sql_like_escape("abc", "%d%", '\\').unwrap());
+        assert!(sql_like_escape("a%b", "a\\%b", '\\').unwrap());
+        assert!(sql_like_escape("", "%%", '\\').unwrap());
+        assert!(!sql_like_escape("", "_%", '\\').unwrap());
     }
 }
