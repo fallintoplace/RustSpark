@@ -73,6 +73,7 @@ mod format_number;
 mod conv;
 mod null_predicates;
 mod len;
+mod soundex;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -166,6 +167,7 @@ const MODULES: &[&[Function]] = &[
     &conv::FUNCTIONS,
     &null_predicates::FUNCTIONS,
     &len::FUNCTIONS,
+    &soundex::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
