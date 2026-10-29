@@ -505,6 +505,58 @@ impl Parser {
                 let count = group_expressions.len();
                 grouping_sets = Some((0..=count).rev()
                     .map(|length| (0..length).collect()).collect());
+            } else if self.take_word("CUBE") {
+                self.expect_symbol('(')?;
+                loop {
+                    if group_expressions.len() >= 8 {
+                        return Err(Error::Parse("CUBE exceeds 8 grouping keys".into()));
+                    }
+                    group_expressions.push(self.expression(0)?);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                let count = group_expressions.len();
+                grouping_sets = Some((0..(1usize << count)).rev().map(|mask| {
+                    (0..count).filter(|index| mask & (1usize << index) != 0)
+                        .collect::<Vec<_>>()
+                }).collect());
+            } else if self.take_word("GROUPING") {
+                self.expect_word("SETS")?;
+                self.expect_symbol('(')?;
+                let mut sets: Vec<Vec<usize>> = Vec::new();
+                loop {
+                    if sets.len() >= 256 {
+                        return Err(Error::Parse("GROUPING SETS exceeds 256 sets".into()));
+                    }
+                    let mut indices = Vec::new();
+                    let parenthesized = self.take_symbol('(');
+                    if !parenthesized || !self.take_symbol(')') {
+                        loop {
+                            let expression = self.expression(0)?;
+                            let index = if let Some(index) = group_expressions.iter()
+                                .position(|known| known == &expression) {
+                                index
+                            } else {
+                                if group_expressions.len() >= 8 {
+                                    return Err(Error::Parse("GROUPING SETS exceeds 8 keys".into()));
+                                }
+                                let index = group_expressions.len();
+                                group_expressions.push(expression);
+                                index
+                            };
+                            if indices.contains(&index) {
+                                return Err(Error::Parse("duplicate key inside GROUPING SET".into()));
+                            }
+                            indices.push(index);
+                            if !self.take_symbol(',') { break; }
+                        }
+                        if parenthesized { self.expect_symbol(')')?; }
+                    }
+                    sets.push(indices);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                grouping_sets = Some(sets);
             } else if self.take_word("ALL") {
                 // Spark GROUP BY ALL derives keys from non-aggregate output expressions.
                 for item in &select {
@@ -587,7 +639,7 @@ impl Parser {
             }
             plan = if let Some(sets) = grouping_sets {
                 if group_by.len() != group_expressions_len {
-                    return Err(Error::Parse("ROLLUP grouping keys must be unique".into()));
+                    return Err(Error::Parse("GROUPING SETS keys must be unique".into()));
                 }
                 Plan::GroupingSets { input: Box::new(plan), group_by, sets, aggregates }
             } else {
