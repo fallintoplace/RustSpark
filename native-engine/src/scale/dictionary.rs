@@ -98,3 +98,78 @@ mod tests {
         assert!(DictionaryColumn::from_batch(&batch, "event", 2, 3, 4).is_err());
     }
 }
+
+ 
+impl DictionaryColumn {
+    /// Concatenate dictionary-coded columns while unifying their string tables.
+    pub fn concatenate(
+        left: &Self, right: &Self,
+        max_distinct: usize, max_dictionary_bytes: usize, max_rows: usize,
+    ) -> Result<Self> {
+        let row_count = left.row_count().checked_add(right.row_count())
+            .filter(|rows| *rows <= max_rows)
+            .ok_or_else(|| Error::Execution("dictionary combined row limit exceeded".into()))?;
+        if left.dictionary.len() > max_distinct || left.encoded_string_bytes > max_dictionary_bytes {
+            return Err(Error::Execution("left dictionary exceeds merge budget".into()));
+        }
+        let mut dictionary = left.dictionary.clone();
+        let mut seen: HashMap<String, u32> = dictionary.iter().enumerate()
+            .map(|(index, text)| (text.clone(), index as u32)).collect();
+        let mut bytes = left.encoded_string_bytes;
+        let mut mapping = Vec::with_capacity(right.dictionary.len());
+        for text in &right.dictionary {
+            let code = if let Some(&existing) = seen.get(text) {
+                existing
+            } else {
+                if dictionary.len() >= max_distinct {
+                    return Err(Error::Execution("dictionary combined cardinality limit exceeded".into()));
+                }
+                bytes = bytes.checked_add(text.len()).filter(|value| *value <= max_dictionary_bytes)
+                    .ok_or_else(|| Error::Execution("dictionary combined byte limit exceeded".into()))?;
+                let next = u32::try_from(dictionary.len())
+                    .map_err(|_| Error::Execution("dictionary combined ID overflow".into()))?;
+                dictionary.push(text.clone());
+                seen.insert(text.clone(), next);
+                next
+            };
+            mapping.push(code);
+        }
+        let mut indices = Vec::with_capacity(row_count);
+        indices.extend_from_slice(&left.indices);
+        for code in &right.indices {
+            indices.push(match code {
+                Some(index) => Some(*mapping.get(*index as usize)
+                    .ok_or_else(|| Error::Execution("invalid dictionary remap code".into()))?),
+                None => None,
+            });
+        }
+        Ok(Self { dictionary, indices, encoded_string_bytes: bytes })
+    }
+}
+
+#[cfg(test)]
+mod dictionary_concat_feature_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn merges_overlapping_dictionaries_without_losing_nulls() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("apple".into())], vec![Value::Null]
+        ]).unwrap();
+        let b = Batch::from_rows(schema, vec![
+            vec![Value::Text("banana".into())], vec![Value::Text("apple".into())],
+        ]).unwrap();
+        let da = DictionaryColumn::from_batch(&a, "s", 4, 40, 5).unwrap();
+        let db = DictionaryColumn::from_batch(&b, "s", 4, 40, 5).unwrap();
+        let merged = DictionaryColumn::concatenate(&da, &db, 3, 40, 5).unwrap();
+        assert_eq!(merged.distinct_count(), 2);
+        assert_eq!(merged.decode().unwrap(), vec![
+            Value::Text("apple".into()), Value::Null,
+            Value::Text("banana".into()), Value::Text("apple".into()),
+        ]);
+        assert!(DictionaryColumn::concatenate(&da, &db, 1, 40, 5).is_err());
+    }
+}
+
