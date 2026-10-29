@@ -70,5 +70,16 @@ class PolarsCommandTests(unittest.TestCase):
                     pass
 
 
+class NamedJsonPolarsTests(unittest.TestCase):
+    def test_json_named_sources_forward_without_string_interpolation(self):
+        command = build_command("SELECT * FROM events", Path("out.arrow"),
+                                json_tables={"events": Path("/tmp/data files/events.json")})
+        self.assertIn("--json-table", command)
+        self.assertIn("events=/tmp/data files/events.json", command)
+        with self.assertRaisesRegex(ValueError, "Named and unnamed"):
+            build_command("SELECT 1", Path("out.arrow"),
+                          csv="input.csv", json_tables={"events": "events.json"})
+
+
 if __name__ == "__main__":
     unittest.main()
