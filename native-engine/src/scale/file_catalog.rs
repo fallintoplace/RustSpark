@@ -52,6 +52,21 @@ impl FileCatalog {
         Ok(())
     }
 
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        let source = normalized(from)?;
+        let destination = normalized(to)?;
+        if !self.tables.contains_key(&source) {
+            return Err(Error::Schema(format!("unknown native file table: {from}")));
+        }
+        if source == destination { return Ok(()); }
+        if self.tables.contains_key(&destination) {
+            return Err(Error::Schema(format!("file-backed table already exists: {to}")));
+        }
+        let table = self.tables.remove(&source).expect("source was checked");
+        self.tables.insert(destination, table);
+        Ok(())
+    }
+
     pub fn unregister(&mut self, name: &str) -> Result<CsvTable> {
         let key = normalized(name)?;
         self.tables.remove(&key)
@@ -77,6 +92,21 @@ mod tests {
     use crate::{scalar::Value, schema::{DataType, Field}};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn rename_preserves_source_metadata_and_rejects_collisions() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("Old", "unopened.csv", schema.clone(), 128).unwrap();
+        catalog.register_csv("Taken", "another.csv", schema, 128).unwrap();
+        assert!(catalog.rename("old", "taken").is_err());
+        assert!(catalog.get("OLD").is_ok());
+        catalog.rename("OLD", "New").unwrap();
+        assert!(catalog.get("old").is_err());
+        assert_eq!(catalog.get("new").unwrap().path(), Path::new("unopened.csv"));
+        catalog.rename("new", "NEW").unwrap();
+        assert!(catalog.rename("missing", "another").is_err());
+    }
 
     #[test]
     fn unregister_does_not_touch_source_files() {
