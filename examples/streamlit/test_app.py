@@ -30,6 +30,27 @@ class StreamlitExampleTests(unittest.TestCase):
         output = list(csv.DictReader(io.StringIO(as_csv(rows))))
         self.assertEqual(output, [{"city": "New York, NY", "sales": "2"}])
 
+
+    @patch("app.subprocess.run")
+    def test_json_upload_selects_the_native_json_input(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, '[{"id":1}]', "")
+        rows = query_csv("rustspark", b'{"id":1}\\n', "SELECT * FROM data",
+                         source_format="json")
+        self.assertEqual(rows, [{"id": 1}])
+        args = run.call_args.args[0]
+        self.assertIn("--json", args)
+        self.assertTrue(args[args.index("--json") + 1].endswith(".json"))
+        with self.assertRaisesRegex(ValueError, "format"):
+            query_csv("rustspark", b"x", "SELECT 1", source_format="parquet")
+
+    def test_csv_export_preserves_keys_from_later_rows(self):
+        rows = [{"city": "Berlin"}, {"city": "Paris", "extra": 7}]
+        output = list(csv.DictReader(io.StringIO(as_csv(rows))))
+        self.assertEqual(output, [
+            {"city": "Berlin", "extra": ""},
+            {"city": "Paris", "extra": "7"},
+        ])
+
     def test_json_export_preserves_unicode_nulls_and_numbers(self):
         rows = [{"city": "Łódź", "count": 4, "fraction": 1.5, "missing": None}]
         self.assertEqual(json.loads(as_json(rows)), rows)
