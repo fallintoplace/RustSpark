@@ -585,7 +585,18 @@ impl Parser {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
             loop {
-                let expression = if matches!(self.peek(), Some(Token::Number(_))) {
+                // An isolated integer is a SELECT-list ordinal. Numeric expressions
+                // (1 + 2, 1.5, 2 * n) remain expressions rather than ordinals.
+                let ordinal = matches!(self.peek(), Some(Token::Number(value)) if
+                    value.chars().all(|ch| ch.is_ascii_digit()))
+                    && match self.tokens.get(self.index + 1) {
+                        None | Some(Token::Symbol(',' | ')' | ';')) => true,
+                        Some(Token::Word(word)) => ["ASC", "DESC", "NULLS", "LIMIT",
+                            "OFFSET", "FETCH", "UNION", "EXCEPT", "INTERSECT"]
+                            .iter().any(|token| word.eq_ignore_ascii_case(token)),
+                        _ => false,
+                    };
+                let expression = if ordinal {
                     let position = self.usize_literal()?;
                     let index = position.checked_sub(1)
                         .ok_or_else(|| Error::Parse("ORDER BY positions start at one".into()))?;
@@ -602,7 +613,7 @@ impl Parser {
                             "ORDER BY position requires an explicit projected column".into()
                         ))?.alias.clone();
                     Expr::Column(alias)
-                } else { Expr::Column(self.identifier()?) };
+                } else { self.expression(0)? };
                 let descending = if self.take_word("DESC") {
                     true
                 } else {
