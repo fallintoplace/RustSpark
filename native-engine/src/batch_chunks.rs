@@ -36,6 +36,7 @@ impl Iterator for BatchChunks<'_> {
 
 pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
+    if batches.len() == 1 { return Ok(first.clone()); }
     let schema = first.schema().clone();
     let mut total = 0_usize;
     for batch in batches {
@@ -95,5 +96,22 @@ mod zero_column_concat_consolidation_tests {
         let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(concatenate(&[a, b]).unwrap().rows().unwrap(), vec![vec![]; 5]);
+    }
+}
+
+#[cfg(test)]
+mod single_batch_concat_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn one_batch_keeps_rows_and_zero_column_schemas() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("é".into())], vec![Value::Null]]
+        ).unwrap();
+        assert_eq!(concatenate(std::slice::from_ref(&batch)).unwrap(), batch);
+        let empty_columns = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        assert_eq!(concatenate(&[empty_columns.clone()]).unwrap().num_rows(), 3);
+        assert_eq!(concatenate(&[empty_columns.clone()]).unwrap(), empty_columns);
     }
 }
