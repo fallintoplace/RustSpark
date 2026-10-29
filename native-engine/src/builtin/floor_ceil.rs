@@ -35,6 +35,7 @@ fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
 
 fn floor(args: &[Value]) -> Result<Value> {
     if args.len() == 2 { return scale_round(args, false); }
+    if let Value::Integer(value) = args[0] { return Ok(Value::Integer(value)); }
     match super::number(&args[0])? {
         Some(v) => checked_integer(v.floor()),
         None => Ok(Value::Null),
@@ -42,6 +43,7 @@ fn floor(args: &[Value]) -> Result<Value> {
 }
 fn ceil(args: &[Value]) -> Result<Value> {
     if args.len() == 2 { return scale_round(args, true); }
+    if let Value::Integer(value) = args[0] { return Ok(Value::Integer(value)); }
     match super::number(&args[0])? {
         Some(v) => checked_integer(v.ceil()),
         None => Ok(Value::Null),
@@ -70,5 +72,9 @@ mod tests {
         assert_eq!(floor(&[Value::Float(3.1411), Value::Integer(-3)]).unwrap(), Value::Float(0.0));
         assert_eq!(floor(&[Value::Float(-3.1411), Value::Integer(-3)]).unwrap(), Value::Float(-1000.0));
         assert!(floor(&[Value::Float(1.0), Value::Integer(30)]).is_err());
+        assert_eq!(floor(&[Value::Integer(i64::MAX)]).unwrap(), Value::Integer(i64::MAX));
+        assert_eq!(ceil(&[Value::Integer(i64::MIN)]).unwrap(), Value::Integer(i64::MIN));
+        assert_eq!(ceil(&[Value::Integer(9_007_199_254_740_993)]).unwrap(),
+            Value::Integer(9_007_199_254_740_993));
     }
 }
