@@ -69,6 +69,9 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
     }
 }
 
+impl<L, R> std::iter::FusedIterator for UnionAllStream<L, R>
+where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +187,9 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
         }
     }
 }
+
+impl<L, R> std::iter::FusedIterator for UnionDistinctStream<L, R>
+where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>> {}
 
 #[cfg(test)]
 mod union_distinct_stream_feature_tests {
@@ -310,5 +316,24 @@ mod union_schema_move_perf_tests {
         assert_eq!(batches[0].num_rows(), 2);
         assert_eq!(batches[0].value(0, 0).unwrap(),
             &Value::Text("large-value".repeat(100)));
+    }
+}
+
+#[cfg(test)]
+mod fused_union_iterators_tests {
+    use super::*;
+    use crate::schema::Schema;
+    fn assert_fused<T: std::iter::FusedIterator>(_stream: &T) {}
+    #[test]
+    fn empty_unions_stay_exhausted() {
+        let schema = Schema::new(vec![]).unwrap();
+        let mut all = UnionAllStream::new(std::iter::empty::<Result<Batch>>(), std::iter::empty::<Result<Batch>>(), schema.clone(), QueryControl::default());
+        assert_fused(&all);
+        assert!(all.next().is_none());
+        assert!(all.next().is_none());
+        let mut distinct = UnionDistinctStream::new(std::iter::empty::<Result<Batch>>(), std::iter::empty::<Result<Batch>>(), schema, QueryControl::default(), 1, 1).unwrap();
+        assert_fused(&distinct);
+        assert!(distinct.next().is_none());
+        assert!(distinct.next().is_none());
     }
 }
