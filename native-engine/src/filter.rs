@@ -122,6 +122,7 @@ mod consolidated_filter_predicate_preflight_tests {
 #[cfg(test)]
 mod literal_bounded_filter_perf_tests {
     use super::*;
+    use crate::schema::Schema;
     #[test]
     fn true_false_and_null_predicates_skip_unneeded_scan_work() {
         let schema = Schema::new(vec![crate::schema::Field::new(
