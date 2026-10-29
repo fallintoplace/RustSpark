@@ -13,9 +13,11 @@ TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def add_named_inputs(command, flag, tables):
-    for name, path in sorted((tables or {}).items()):
+    tables = tables or {}
+    for name in tables:
         if not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None:
             raise ValueError(f"Invalid SQL table name: {name!r}")
+    for name, path in sorted(tables.items()):
         file_path = os.fspath(path)
         if not file_path:
             raise ValueError("Named input paths must not be empty")
