@@ -17,6 +17,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if count > 1_000_000 {
         return Err(Error::Execution("REPEAT exceeds repetition limit".into()));
     }
+    if count == 0 || text.is_empty() {
+        return Ok(Value::Text(String::new()));
+    }
     let bytes = text.len().checked_mul(count)
         .ok_or_else(|| Error::Execution("REPEAT length overflow".into()))?;
     if bytes > 16 * 1024 * 1024 {
@@ -47,5 +50,20 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("x".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
         assert_eq!(evaluate(&[Value::Text("é".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
         assert!(evaluate(&[Value::Text("x".into()), Value::Integer(16_777_217)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod empty_repeat_fast_path_tests {
+    use super::*;
+    #[test]
+    fn handles_zero_counts_and_empty_unicode_input() {
+        assert_eq!(evaluate(&[Value::Text("é".repeat(500_000)), Value::Integer(0)]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Text(String::new()), Value::Integer(1_000_000)]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Text("a".into()), Value::Integer(3)]).unwrap(),
+            Value::Text("aaa".into()));
+        assert!(evaluate(&[Value::Text(String::new()), Value::Integer(1_000_001)]).is_err());
     }
 }
