@@ -75,6 +75,7 @@ mod null_predicates;
 mod len;
 mod soundex;
 mod luhn_check;
+mod quote;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -170,6 +171,7 @@ const MODULES: &[&[Function]] = &[
     &len::FUNCTIONS,
     &soundex::FUNCTIONS,
     &luhn_check::FUNCTIONS,
+    &quote::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
