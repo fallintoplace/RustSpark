@@ -135,7 +135,7 @@ impl RunMerger {
         }
     }
 
-    fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
+    fn append_next(&mut self, output: &mut [Vec<Value>]) -> Result<bool> {
         self.control.check()?;
         if !self.heap_ready {
             for run in &mut self.runs { run.fill()?; }
@@ -146,16 +146,19 @@ impl RunMerger {
             }
             self.heap_ready = true;
         }
-        let Some(&index) = self.heap.first() else { return Ok(None); };
+        let Some(&index) = self.heap.first() else { return Ok(false); };
         let selected = &mut self.runs[index];
-        let row = selected.batch.as_ref().expect("active run batch").row(selected.position)?;
+        let batch = selected.batch.as_ref().expect("active run batch");
+        for (column, dest) in output.iter_mut().enumerate() {
+            dest.push(batch.column(column)?[selected.position].clone());
+        }
         selected.position += 1;
         selected.fill()?;
         if selected.peek(self.keys[0].column).is_none() {
             self.heap.swap_remove(0);
         }
         if !self.heap.is_empty() { self.sift_down(0); }
-        Ok(Some(row))
+        Ok(true)
     }
 }
 
@@ -164,11 +167,13 @@ impl Iterator for RunMerger {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
-        let mut rows = Vec::with_capacity(self.output_batch_rows.min(65_536));
-        while rows.len() < self.output_batch_rows {
-            match self.next_row() {
-                Ok(Some(row)) => rows.push(row),
-                Ok(None) => {
+        let mut columns: Vec<Vec<Value>> =
+            (0..self.schema.len()).map(|_| Vec::new()).collect();
+        let mut rows = 0usize;
+        while rows < self.output_batch_rows {
+            match self.append_next(&mut columns) {
+                Ok(true) => rows += 1,
+                Ok(false) => {
                     self.stopped = true;
                     break;
                 }
@@ -178,8 +183,8 @@ impl Iterator for RunMerger {
                 }
             }
         }
-        if rows.is_empty() { None }
-        else { Some(Batch::from_rows(self.schema.clone(), rows)) }
+        if rows == 0 { None }
+        else { Some(Batch::new_with_row_count(self.schema.clone(), columns, rows)) }
     }
 }
 
@@ -322,6 +327,38 @@ mod columnar_spill_cursor_tests {
         let runs = write_sorted_runs([Ok(batch)], schema.clone(), &keys, &dir, 3, &QueryControl::default()).unwrap();
         let merged = RunMerger::new(runs.files(), schema, &keys, 2, 4, QueryControl::default()).unwrap()
             .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(), expected.rows().unwrap());
+        drop(runs);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod columnar_spill_output_tests {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn multi_key_merge_directly_emits_stable_columnar_batches() {
+        let dir = std::env::temp_dir().join(format!("native-merge-output-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("group", DataType::Integer, false),
+            Field::new("tag", DataType::Text, true), Field::new("payload", DataType::Text, false)]).unwrap();
+        let source = Batch::from_rows(schema.clone(), (0..173).rev().map(|n| vec![
+            Value::Integer(n % 13),
+            if n % 17 == 0 { Value::Null } else { Value::Text(format!("key-{}", n % 5)) },
+            Value::Text(format!("row-{n}-{}", "long".repeat(40)))
+        ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("group".into())),
+            SortKey::ascending(Expr::Column("tag".into()))];
+        let expected = crate::sort::sort(&source, &keys).unwrap();
+        let runs = write_sorted_runs([Ok(source)], schema.clone(), &keys, &dir, 9,
+            &QueryControl::default()).unwrap();
+        let merged = RunMerger::new(runs.files(), schema, &keys, 3, 7,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(merged.iter().all(|b| b.num_rows() <= 7));
         assert_eq!(merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(), expected.rows().unwrap());
         drop(runs);
         fs::remove_dir(dir).unwrap();
