@@ -320,7 +320,8 @@ impl Parser {
             }
             Some(Token::Word(word)) => Ok(Expr::Column(word)),
             Some(Token::Text(text)) => Ok(Expr::Literal(Value::Text(text))),
-            Some(Token::Number(number)) if number.contains('.') => {
+            Some(Token::Number(number))
+                if number.contains('.') || number.contains('e') || number.contains('E') => {
                 let parsed = number
                     .parse::<f64>()
                     .map_err(|_| Error::Parse("invalid floating-point literal".into()))?;
@@ -887,5 +888,24 @@ mod sql_cast_feature_tests {
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(12)], vec![Value::Null]]);
         assert!(parse_sql("SELECT CAST(value AS DATE) FROM t").is_err());
+    }
+}
+
+#[cfg(test)]
+mod scientific_number_sql_regression {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema}};
+    #[test]
+    fn scientific_literals_execute_as_finite_doubles() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap()).unwrap();
+        let plan = parse_sql("SELECT 1e2 AS x, 2E-1 AS y, 3E+2 AS z FROM t").unwrap();
+        let batch = executor::execute(&plan, &catalog).unwrap();
+        assert_eq!(batch.row(0).unwrap(), vec![
+            Value::Float(100.0), Value::Float(0.2), Value::Float(300.0),
+        ]);
+        assert!(parse_sql("SELECT 1e309 FROM t").is_err());
     }
 }
