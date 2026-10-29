@@ -13,7 +13,22 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn regexp_escape_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn regexp_escape(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > 4096 {
+        return Err(crate::Error::Execution("REGEXP_ESCAPE input exceeds pattern budget".into()));
+    }
+    let escaped = regex::escape(text);
+    if escaped.len() > 4096 {
+        return Err(crate::Error::Execution("REGEXP_ESCAPE output exceeds pattern budget".into()));
+    }
+    Ok(Value::Text(escaped))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "regexp_escape", min_args: 1, max_args: 1, result_type: regexp_escape_type, call: regexp_escape },Function {
     name: "regexp_like", min_args: 2, max_args: 2,
     result_type: output, call: evaluate,
 }];
@@ -33,5 +48,20 @@ mod tests {
             "SELECT REGEXP_LIKE(name, '^B.*') AS match_name FROM t"
         ).unwrap(), &catalog).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Boolean(true)], vec![Value::Boolean(false)]]);
+    }
+}
+
+#[cfg(test)]
+mod regexp_escape_extension_tests {
+    use super::*;
+    #[test]
+    fn preserves_unicode_and_null_semantics() {
+        assert!(crate::builtin::supports("regexp_escape"));
+        let escaped = regexp_escape(&[Value::Text("a+b?".into())]).unwrap();
+        let Value::Text(pattern) = escaped else { panic!("expected text"); };
+        assert!(regex_support::compile(&pattern).unwrap().is_match("a+b?"));
+        assert!(!regex_support::compile(&pattern).unwrap().is_match("abbb"));
+        assert_eq!(regexp_escape(&[Value::Null]).unwrap(), Value::Null);
+        assert!(regexp_escape(&[Value::Text("(".repeat(4097))]).is_err());
     }
 }
