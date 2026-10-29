@@ -217,13 +217,19 @@ impl Parser {
             let op = if function == "COUNT" && self.take_symbol('*') {
                 AggregateOp::CountAll
             } else {
+                let distinct = self.take_word("DISTINCT");
                 let expr = self.expression(0)?;
                 match function.as_str() {
+                    "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
-                    "SUM" => AggregateOp::Sum(expr),
-                    "AVG" => AggregateOp::Avg(expr),
-                    "MIN" => AggregateOp::Min(expr),
-                    "MAX" => AggregateOp::Max(expr),
+                    "SUM" if !distinct => AggregateOp::Sum(expr),
+                    "SUM" => return Err(Error::Unsupported("DISTINCT aggregates currently require COUNT".into())),
+                    "AVG" if !distinct => AggregateOp::Avg(expr),
+                    "AVG" => return Err(Error::Unsupported("DISTINCT aggregates currently require COUNT".into())),
+                    "MIN" if !distinct => AggregateOp::Min(expr),
+                    "MIN" => return Err(Error::Unsupported("DISTINCT aggregates currently require COUNT".into())),
+                    "MAX" if !distinct => AggregateOp::Max(expr),
+                    "MAX" => return Err(Error::Unsupported("DISTINCT aggregates currently require COUNT".into())),
                     _ => unreachable!(),
                 }
             };

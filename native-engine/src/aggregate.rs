@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     batch::Batch,
@@ -13,6 +13,7 @@ use crate::{
 pub enum AggregateOp {
     CountAll,
     Count(Expr),
+    CountDistinct(Expr),
     Avg(Expr),
     Sum(Expr),
     Min(Expr),
@@ -35,7 +36,7 @@ impl AggregateItem {
 
     fn output_type(&self, schema: &Schema) -> Result<DataType> {
         match &self.op {
-            AggregateOp::CountAll | AggregateOp::Count(_) => Ok(DataType::Integer),
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) => Ok(DataType::Integer),
             AggregateOp::Avg(expr) => match expr.output_type(schema)? {
                 DataType::Integer | DataType::Float => Ok(DataType::Float),
                 _ => Err(Error::Type("AVG requires numeric input".into())),
@@ -55,6 +56,7 @@ impl AggregateItem {
 #[derive(Clone)]
 enum State {
     Count(i64),
+    DistinctCount { seen: HashSet<Value>, count: i64 },
     Avg { sum: f64, count: i64 },
     Sum(Option<Value>),
     Min(Option<Value>),
@@ -65,6 +67,7 @@ impl State {
     fn new(op: &AggregateOp) -> Self {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
+            AggregateOp::CountDistinct(_) => Self::DistinctCount { seen: HashSet::new(), count: 0 },
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, count: 0 },
             AggregateOp::Sum(_) => Self::Sum(None),
             AggregateOp::Min(_) => Self::Min(None),
@@ -76,6 +79,7 @@ impl State {
         let value = match op {
             AggregateOp::CountAll => Value::Integer(1),
             AggregateOp::Count(expr)
+            | AggregateOp::CountDistinct(expr)
             | AggregateOp::Avg(expr)
             | AggregateOp::Sum(expr)
             | AggregateOp::Min(expr)
@@ -87,6 +91,11 @@ impl State {
                     *count = count
                         .checked_add(1)
                         .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
+                }
+            }
+            Self::DistinctCount { seen, count } => {
+                if !value.is_null() && seen.insert(value) {
+                    *count = count.checked_add(1).ok_or_else(|| Error::Execution("COUNT DISTINCT overflow".into()))?;
                 }
             }
             Self::Avg { sum, count } => {
@@ -129,7 +138,7 @@ impl State {
 
     fn finish(self) -> Value {
         match self {
-            Self::Count(value) => Value::Integer(value),
+            Self::Count(value) | Self::DistinctCount { count: value, .. } => Value::Integer(value),
             Self::Avg { sum, count } => {
                 if count == 0 { Value::Null } else { Value::Float(sum / count as f64) }
             },

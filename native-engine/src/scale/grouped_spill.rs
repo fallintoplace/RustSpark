@@ -52,6 +52,7 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
         AggregateOp::Avg(_) => Err(Error::Unsupported("spill AVG is not implemented".into())),
+        AggregateOp::CountDistinct(_) => Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
     }
 }
 
@@ -61,6 +62,7 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         AggregateOp::Count(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
         AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
+        AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -113,6 +115,7 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
             },
             AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(input)?,
             AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
+            AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
         };
         fields.push(Field::new(&item.alias, ty, true));
     }
@@ -227,6 +230,21 @@ mod tests {
             Path::new("."), 2, 10, 2, &QueryControl::default(),
         ).unwrap_err();
         assert!(error.to_string().contains("spill AVG is not implemented"));
+    }
+
+    #[test]
+    fn native_spill_rejects_unsupported_count_distinct() {
+        let schema = Schema::new(vec![
+            Field::new("g", DataType::Integer, false),
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        let error = grouped_aggregate(
+            Vec::<Result<Batch>>::new(), schema,
+            &[("g".into(), "g".into())],
+            &[AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("n".into())), "unique")],
+            Path::new("."), 2, 10, 2, &QueryControl::default(),
+        ).unwrap_err();
+        assert!(error.to_string().contains("spill COUNT DISTINCT is not implemented"));
     }
 
     #[test]
