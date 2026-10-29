@@ -14,6 +14,7 @@ mod logarithms;
 mod trigonometry;
 mod inverse_trig;
 mod hyperbolic;
+mod inverse_hyperbolic;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -50,6 +51,7 @@ const MODULES: &[&[Function]] = &[
     &trigonometry::FUNCTIONS,
     &inverse_trig::FUNCTIONS,
     &hyperbolic::FUNCTIONS,
+    &inverse_hyperbolic::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
