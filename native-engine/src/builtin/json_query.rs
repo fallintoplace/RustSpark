@@ -22,6 +22,11 @@ fn json_equal_type(types: &[DataType]) -> Result<DataType> {
 fn json_equal(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left == right {
+        // Identical documents need one validation parse, not two full trees.
+        json_path::parse(left)?;
+        return Ok(Value::Boolean(true));
+    }
     let left = json_path::parse(left)?;
     let right = json_path::parse(right)?;
     Ok(Value::Boolean(left == right))
@@ -57,5 +62,20 @@ mod json_equal_extension_tests {
         assert_eq!(json_equal(&[Value::Text("[1,2]".into()), Value::Text("[2,1]".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(json_equal(&[Value::Null, Value::Text("null".into())]).unwrap(), Value::Null);
         assert!(json_equal(&[Value::Text("{broken".into()), Value::Text("{}".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod identical_json_equal_input_tests {
+    use super::*;
+    #[test]
+    fn checks_identical_documents_and_still_rejects_invalid_json() {
+        let doc = Value::Text(r#"{"nested":[1,2,{"x":null}]}"#.into());
+        assert_eq!(json_equal(&[doc.clone(), doc]).unwrap(), Value::Boolean(true));
+        let invalid = Value::Text("{bad".into());
+        assert!(json_equal(&[invalid.clone(), invalid]).is_err());
+        assert_eq!(json_equal(&[Value::Text("[1,2]".into()),
+            Value::Text("[2,1]".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(json_equal(&[Value::Null, Value::Null]).unwrap(), Value::Null);
     }
 }
