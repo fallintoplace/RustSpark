@@ -19,7 +19,19 @@ fn sign(args: &[Value]) -> Result<Value> {
     if !value.is_finite() { return Err(Error::Execution("SIGN received nonfinite value".into())); }
     super::finite(if value == 0.0 { 0.0 } else { value.signum() })
 }
+
+fn is_even_type(types: &[DataType]) -> Result<DataType> {
+    if types[0] == DataType::Integer { Ok(DataType::Boolean) }
+    else { Err(Error::Type("IS_EVEN expects integer input".into())) }
+}
+fn is_even(args: &[Value]) -> Result<Value> {
+    let Some(number) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    Ok(Value::Boolean(number & 1 == 0))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "is_even", min_args: 1, max_args: 1, result_type: is_even_type, call: is_even },
+
     Function { name: "abs", min_args: 1, max_args: 1, result_type: abs_type, call: abs },
     Function { name: "sign", min_args: 1, max_args: 1, result_type: float_type, call: sign },
     Function { name: "signum", min_args: 1, max_args: 1, result_type: float_type, call: sign },
@@ -43,5 +55,19 @@ mod signum_alias_tests {
     #[test]
     fn spark_signum_is_registered() {
         assert!(crate::builtin::supports("signum"));
+    }
+}
+
+#[cfg(test)]
+mod is_even_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_numeric_extremes_and_nulls() {
+        assert!(crate::builtin::supports("is_even"));
+        assert_eq!(is_even(&[Value::Integer(-2)]).unwrap(), Value::Boolean(true));
+        assert_eq!(is_even(&[Value::Integer(i64::MAX)]).unwrap(), Value::Boolean(false));
+        assert_eq!(is_even(&[Value::Integer(i64::MIN)]).unwrap(), Value::Boolean(true));
+        assert_eq!(is_even(&[Value::Integer(0)]).unwrap(), Value::Boolean(true));
+        assert_eq!(is_even(&[Value::Null]).unwrap(), Value::Null);
     }
 }
