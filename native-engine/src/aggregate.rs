@@ -36,8 +36,11 @@ impl AggregateItem {
 
     fn output_type(&self, schema: &Schema) -> Result<DataType> {
         match &self.op {
-            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
-                Ok(DataType::Integer),
+            AggregateOp::CountAll => Ok(DataType::Integer),
+            AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) => {
+                expr.output_type(schema)?;
+                Ok(DataType::Integer)
+            },
             AggregateOp::Sum(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
@@ -294,5 +297,26 @@ mod aggregate_nullability_tests {
         assert!(!output.schema().field(1).unwrap().nullable);
         assert!(!output.schema().field(2).unwrap().nullable);
         assert!(output.schema().field(3).unwrap().nullable);
+    }
+}
+
+#[cfg(test)]
+mod count_column_type_regression {
+    use super::*;
+    #[test]
+    fn missing_count_arguments_are_rejected_with_zero_input_rows() {
+        let data = Batch::empty(Schema::new(vec![
+            Field::new("x", DataType::Integer, true),
+        ]).unwrap());
+        for operation in [
+            AggregateOp::Count(Expr::Column("missing".into())),
+            AggregateOp::CountDistinct(Expr::Column("missing".into())),
+        ] {
+            assert!(aggregate(&data, &[], &[AggregateItem::new(operation, "n")]).is_err());
+        }
+        let valid = aggregate(&data, &[], &[
+            AggregateItem::new(AggregateOp::Count(Expr::Column("x".into())), "n"),
+        ]).unwrap();
+        assert_eq!(valid.row(0).unwrap(), vec![Value::Integer(0)]);
     }
 }
