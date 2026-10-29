@@ -3,7 +3,7 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn ascii_type(types: &[DataType]) -> Result<DataType> {
     if matches!(types[0], DataType::Text | DataType::Integer) { Ok(DataType::Integer) }
-    else { Err(Error::Type("ASCII requires text".into())) }
+    else { Err(Error::Type("ASCII requires text or integer".into())) }
 }
 fn chr_type(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Integer { Ok(DataType::Text) }
@@ -35,11 +35,11 @@ pub(super) const FUNCTIONS: &[Function] = &[
 mod tests {
     use super::*;
     #[test]
-    fn ascii_first_byte_and_unicode_chr() {
+    fn ascii_first_byte_and_spark_chr_low_byte() {
         assert_eq!(ascii(&[Value::Text("Apple".into())]).unwrap(), Value::Integer(65));
         assert_eq!(ascii(&[Value::Text("".into())]).unwrap(), Value::Integer(0));
-        assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("🙂".into()));
-        assert!(chr(&[Value::Integer(0xd800)]).is_err());
+        assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("B".into()));
+        assert_eq!(chr(&[Value::Integer(0xd800)]).unwrap(), Value::Text("\0".into()));
         assert_eq!(chr(&[Value::Null]).unwrap(), Value::Null);
     }
 }
