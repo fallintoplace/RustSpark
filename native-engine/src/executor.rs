@@ -33,6 +33,32 @@ pub fn execute_with_options(
     execute_with_guard(plan, catalog, options, &QueryGuard::default())
 }
 
+fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
+    let mut pending = vec![(plan, 0_usize)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth >= max_depth {
+            return Err(Error::Execution("query plan exceeds maximum depth".into()));
+        }
+        match node {
+            Plan::Scan { .. } => {}
+            Plan::Filter { input, .. }
+            | Plan::Project { input, .. }
+            | Plan::Aggregate { input, .. }
+            | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Distinct { input } => pending.push((input, depth + 1)),
+            Plan::Join { left, right, .. }
+            | Plan::UnionAll { left, right }
+            | Plan::Intersect { left, right }
+            | Plan::Except { left, right } => {
+                pending.push((left, depth + 1));
+                pending.push((right, depth + 1));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check cancellation before and after each plan node.
 /// Blocking operators will support finer-grained interruption separately.
 pub fn execute_with_guard(
@@ -41,6 +67,8 @@ pub fn execute_with_guard(
     options: ExecutionOptions,
     guard: &QueryGuard,
 ) -> Result<Batch> {
+    guard.check()?;
+    validate_depth(plan, options.max_plan_depth)?;
     let optimized = crate::optimizer::optimize(plan.clone());
     execute_inner(&optimized, catalog, &options, 0, guard)
 }
@@ -166,5 +194,23 @@ mod tests {
             &catalog,
             ExecutionOptions { max_output_rows: 5, max_plan_depth: 0 }
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod plan_depth_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_deep_plans_before_optimization_or_scanning() {
+        let mut plan = Plan::scan("missing");
+        for _ in 0..256 {
+            plan = plan.limit(0, Some(1));
+        }
+        let result = execute_with_options(
+            &plan, &Catalog::new(),
+            ExecutionOptions { max_output_rows: 100, max_plan_depth: 32 },
+        );
+        assert!(result.unwrap_err().to_string().contains("maximum depth"));
     }
 }
