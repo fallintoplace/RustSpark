@@ -1,6 +1,6 @@
 //! Bounded worker execution for independent native partitions.
 use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Mutex, atomic::{AtomicBool, Ordering}}};
+    sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
 
 /// Execute a partition-local physical operator across at most max_workers
@@ -24,8 +24,9 @@ where
     }
     let tasks = Mutex::new(input.into_iter().enumerate().collect::<VecDeque<_>>());
     let failed = AtomicBool::new(false);
-    let output: Mutex<Vec<Option<Result<Batch>>>> =
-        Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
+    // Each partition index is assigned to exactly one worker.
+    let output: Vec<OnceLock<Result<Batch>>> =
+        (0..count).map(|_| OnceLock::new()).collect();
     std::thread::scope(|scope| {
         for _ in 0..max_workers.min(count) {
             let tasks = &tasks;
@@ -39,19 +40,18 @@ where
                 let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                     .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
                 if result.is_err() { failed.store(true, Ordering::Release); }
-                output.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(result);
+                assert!(output[index].set(result).is_ok(), "partition output written twice");
             });
         }
     });
-    let output = output.into_inner().unwrap_or_else(|e| e.into_inner());
     // A cancelled task may precede the failed task in input order.
     // Return the actual operator error instead of a missing-result error.
-    if let Some(error) = output.iter().filter_map(Option::as_ref)
+    if let Some(error) = output.iter().filter_map(OnceLock::get)
         .find_map(|result| result.as_ref().err()) {
         return Err(error.clone());
     }
     output.into_iter()
-        .map(|result| result.unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
+        .map(|slot| slot.into_inner().unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
         .collect()
 }
 
@@ -157,5 +157,27 @@ mod serial_worker_fast_path_tests {
         });
         assert!(result.unwrap_err().to_string().contains("stop"));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[cfg(test)]
+mod per_slot_parallel_result_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    #[test]
+    fn independent_results_remain_in_order_across_workers() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, false)]).unwrap();
+        let input = (0..128).map(|n| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(n)]]).unwrap()).collect::<Vec<_>>();
+        let completed = AtomicUsize::new(0);
+        let result = map_partitions(input, 8, |batch| {
+            completed.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(batch)
+        }).unwrap();
+        assert_eq!(completed.load(AtomicOrdering::Relaxed), 128);
+        for (index, batch) in result.iter().enumerate() {
+            assert_eq!(batch.row(0).unwrap(), vec![Value::Integer(index as i64)]);
+        }
     }
 }
