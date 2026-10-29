@@ -146,6 +146,10 @@ impl Value {
                 Ok(Self::Boolean(true)),
             (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
                 Ok(Self::Boolean(false)),
+            (Self::Text(value), DataType::Boolean) if value.trim() == "1" =>
+                Ok(Self::Boolean(true)),
+            (Self::Text(value), DataType::Boolean) if value.trim() == "0" =>
+                Ok(Self::Boolean(false)),
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
     }
@@ -198,5 +202,20 @@ mod text_cast_whitespace_regression {
         assert_eq!(Value::Text(" FALSE ".into()).cast_to(DataType::Boolean).unwrap(),
             Value::Boolean(false));
         assert!(Value::Text(" 42x ".into()).cast_to(DataType::Integer).is_err());
+    }
+}
+
+#[cfg(test)]
+mod numeric_text_boolean_cast_regression {
+    use super::*;
+    use crate::schema::DataType;
+    #[test]
+    fn cast_accepts_zero_and_one_text_boolean_values() {
+        assert_eq!(Value::Text(" 1 ".into()).cast_to(DataType::Boolean).unwrap(),
+            Value::Boolean(true));
+        assert_eq!(Value::Text("0".into()).cast_to(DataType::Boolean).unwrap(),
+            Value::Boolean(false));
+        assert!(Value::Text("2".into()).cast_to(DataType::Boolean).is_err());
+        assert!(Value::Text("-1".into()).cast_to(DataType::Boolean).is_err());
     }
 }
