@@ -66,7 +66,8 @@ impl RunMerger {
         paths: &[impl AsRef<Path>], schema: Schema, keys: &[SortKey],
         input_batch_rows: usize, output_batch_rows: usize, control: QueryControl
     ) -> Result<Self> {
-        if paths.len() > MAX_FAN_IN || input_batch_rows == 0 || output_batch_rows == 0 {
+        if paths.len() > MAX_FAN_IN || input_batch_rows == 0 || output_batch_rows == 0 ||
+            input_batch_rows > 65_536 || output_batch_rows > 65_536 {
             return Err(Error::Execution("invalid external sort fan-in or batch size".into()));
         }
         if keys.is_empty() {
@@ -190,5 +191,18 @@ mod empty_sort_key_tests {
         let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
         assert!(RunMerger::new(&[] as &[&str], schema, &[], 4, 4,
             QueryControl::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod consolidated_merge_batch_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn reject_large_merge_buffers_before_accessing_files() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let files: [&str; 0] = [];
+        assert!(RunMerger::new(&files, schema.clone(), &[], 1, 65_537, QueryControl::default()).is_err());
+        assert!(RunMerger::new(&files, schema, &[], 65_537, 1, QueryControl::default()).is_err());
     }
 }
