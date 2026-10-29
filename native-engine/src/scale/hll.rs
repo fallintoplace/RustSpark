@@ -81,3 +81,33 @@ mod tests {
         assert_eq!(HyperLogLog::new().estimate(), 0.0);
     }
 }
+
+ 
+/// Estimate non-NULL distinct values in a native column, without materializing a set.
+pub fn approximate_distinct(batch: &crate::batch::Batch, column: &str) -> Result<f64> {
+    let index = batch.schema().column(column)?;
+    let mut sketch = HyperLogLog::new();
+    for value in batch.column(index)? {
+        sketch.add(value);
+    }
+    Ok(sketch.estimate())
+}
+
+#[cfg(test)]
+mod approximate_column_feature_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn counts_high_cardinality_input_with_bounded_registers() {
+        let schema = Schema::new(vec![Field::new("user_id", DataType::Integer, true)]).unwrap();
+        let mut rows = (0..5000).map(|id| vec![Value::Integer(id)]).collect::<Vec<_>>();
+        rows.extend((0..1000).map(|id| vec![Value::Integer(id)]));
+        rows.push(vec![Value::Null]);
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let estimate = approximate_distinct(&batch, "user_id").unwrap();
+        assert!((estimate - 5000.0).abs() / 5000.0 < 0.15);
+        assert!(approximate_distinct(&batch, "missing").is_err());
+    }
+}
+
