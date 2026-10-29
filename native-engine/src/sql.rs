@@ -273,9 +273,14 @@ impl Parser {
                 self.expect_word("JOIN")?;
                 Some(JoinKind::Inner)
             } else if self.take_word("LEFT") {
-                self.take_word("OUTER");
-                self.expect_word("JOIN")?;
-                Some(JoinKind::Left)
+                if self.take_word("SEMI") {
+                    self.expect_word("JOIN")?;
+                    Some(JoinKind::Semi)
+                } else {
+                    self.take_word("OUTER");
+                    self.expect_word("JOIN")?;
+                    Some(JoinKind::Left)
+                }
             } else if self.take_word("RIGHT") {
                 self.take_word("OUTER");
                 self.expect_word("JOIN")?;
