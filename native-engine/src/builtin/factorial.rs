@@ -8,7 +8,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn factorial(args: &[Value]) -> Result<Value> {
     let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null) };
     if !(0..=20).contains(&value) {
-        return Err(Error::Execution("FACTORIAL supported only for integers 0..=20".into()));
+        return Ok(Value::Null);
     }
     let mut product = 1_i64;
     for current in 2..=value {
@@ -27,8 +27,9 @@ mod tests {
     fn factorial_bounds_and_nulls() {
         assert_eq!(factorial(&[Value::Integer(0)]).unwrap(), Value::Integer(1));
         assert_eq!(factorial(&[Value::Integer(5)]).unwrap(), Value::Integer(120));
-        assert!(factorial(&[Value::Integer(21)]).is_err());
-        assert!(factorial(&[Value::Integer(-1)]).is_err());
+        assert_eq!(factorial(&[Value::Integer(21)]).unwrap(), Value::Null);
+        assert_eq!(factorial(&[Value::Integer(-1)]).unwrap(), Value::Null);
+        assert_eq!(factorial(&[Value::Integer(i64::MAX)]).unwrap(), Value::Null);
         assert_eq!(factorial(&[Value::Null]).unwrap(), Value::Null);
     }
 }
