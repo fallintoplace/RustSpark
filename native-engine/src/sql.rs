@@ -122,6 +122,25 @@ impl Parser {
                 }
                 continue;
             }
+            if min_precedence <= 3 {
+                let negate = self.peek_word("NOT")
+                    && matches!(self.tokens.get(self.index + 1),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("BETWEEN"));
+                if self.peek_word("BETWEEN") || negate {
+                    if negate { self.next(); }
+                    self.expect_word("BETWEEN")?;
+                    let lower = self.expression(4)?;
+                    self.expect_word("AND")?;
+                    let upper = self.expression(4)?;
+                    let between = Expr::binary(
+                        Expr::binary(left.clone(), BinaryOp::GreaterEqual, lower),
+                        BinaryOp::And,
+                        Expr::binary(left, BinaryOp::LessEqual, upper),
+                    );
+                    left = if negate { Expr::Not(Box::new(between)) } else { between };
+                    continue;
+                }
+            }
             let Some((op, precedence)) = self.binary_operator() else {
                 break;
             };
@@ -493,6 +512,16 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn between_and_not_between_handle_nulls_and_boundaries() {
+        let inside = parse_sql("SELECT amount FROM sales WHERE amount BETWEEN 2 AND 2").unwrap();
+        let outside = parse_sql("SELECT amount FROM sales WHERE amount NOT BETWEEN 2 AND 2").unwrap();
+        assert_eq!(execute(&inside, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)]]);
+        assert_eq!(execute(&outside, &sales()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(3)]]);
     }
 
     #[test]
