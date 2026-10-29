@@ -51,8 +51,14 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
     if input.len() % 4 != 0 || input.len() > MAX_BYTES.div_ceil(3) * 4 {
         return Err(Error::Parse("invalid or oversized BASE64 length".into()));
     }
-    let mut bytes = Vec::with_capacity(input.len() / 4 * 3);
     let chunks = input.len() / 4;
+    let padding = usize::from(input.last() == Some(&b'=')) +
+        usize::from(input.get(input.len().saturating_sub(2)) == Some(&b'='));
+    let decoded_len = chunks * 3 - padding;
+    if decoded_len > MAX_BYTES {
+        return Err(Error::Parse("decoded BASE64 exceeds byte limit".into()));
+    }
+    let mut bytes = Vec::with_capacity(decoded_len);
     for (index, group) in input.chunks_exact(4).enumerate() {
         let padding = if group[2] == b'=' { 2 } else if group[3] == b'=' { 1 } else { 0 };
         if (padding != 0 && index + 1 != chunks) || group[0] == b'=' || group[1] == b'=' ||
@@ -108,5 +114,16 @@ mod base64_reverse_table_perf_tests {
             Value::Text("abcXYZ+/".into()));
         assert!(unbase64_utf8(&[Value::Text("!!!!".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("____".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decoded_budget_regression_tests {
+    use super::*;
+    #[test]
+    fn rejects_encoded_input_that_exceeds_decoded_limit() {
+        assert!(unbase64_utf8(&[Value::Text("AAAA".repeat(333_334))]).is_err());
+        let exactly_one_megabyte = format!("{}AA==", "AAAA".repeat(333_333));
+        assert!(unbase64_utf8(&[Value::Text(exactly_one_megabyte)]).is_ok());
     }
 }
