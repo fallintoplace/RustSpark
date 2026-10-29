@@ -139,11 +139,11 @@ impl StageGraph {
                     StageKind::UnionAll,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
-                Plan::Intersect { left, right } => (
+                Plan::Intersect { left, right, .. } => (
                     StageKind::Intersect,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
-                Plan::Except { left, right } => (
+                Plan::Except { left, right, .. } => (
                     StageKind::Except,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
@@ -187,6 +187,7 @@ mod tests {
         let plan = Plan::Intersect {
             left: Box::new(Plan::scan("a")),
             right: Box::new(Plan::scan("b")),
+            all: true,
         };
         let graph = StageGraph::from_plan(&plan).unwrap();
         let root = graph.root().unwrap();
@@ -200,6 +201,7 @@ mod tests {
         let plan = Plan::Except {
             left: Box::new(Plan::scan("a")),
             right: Box::new(Plan::scan("b")),
+            all: false,
         };
         let graph = StageGraph::from_plan(&plan).unwrap();
         let root = graph.root().unwrap();

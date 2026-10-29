@@ -51,10 +51,12 @@ pub enum Plan {
     Intersect {
         left: Box<Plan>,
         right: Box<Plan>,
+        all: bool,
     },
     Except {
         left: Box<Plan>,
         right: Box<Plan>,
+        all: bool,
     },
 }
 

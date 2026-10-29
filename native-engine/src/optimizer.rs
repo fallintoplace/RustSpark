@@ -97,13 +97,15 @@ pub fn optimize(plan: Plan) -> Plan {
             left: Box::new(optimize(*left)),
             right: Box::new(optimize(*right)),
         },
-        Plan::Intersect { left, right } => Plan::Intersect {
+        Plan::Intersect { left, right, all } => Plan::Intersect {
             left: Box::new(optimize(*left)),
             right: Box::new(optimize(*right)),
+            all,
         },
-        Plan::Except { left, right } => Plan::Except {
+        Plan::Except { left, right, all } => Plan::Except {
             left: Box::new(optimize(*left)),
             right: Box::new(optimize(*right)),
+            all,
         },
     }
 }
