@@ -48,7 +48,7 @@ pub fn external_sort(
                 return Err(Error::Execution("too many external sort runs".into()));
             }
             let end = start.saturating_add(run_rows).min(input_batch.num_rows());
-            let batch = input_batch.take(&(start..end).collect::<Vec<_>>())?;
+            let batch = input_batch.slice_rows(start, end)?;
             let sorted = sort::sort(&batch, keys)?;
             let spill = spill_ipc::spill(spill_dir.as_ref(), schema, &[sorted])?;
             let mut reader = spill.read()?;
