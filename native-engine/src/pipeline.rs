@@ -42,8 +42,14 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     }
 
     pub fn with_limit(mut self, offset: usize, count: Option<usize>) -> Self {
-        self.skip = offset;
-        self.remaining = count;
+        let available = self.remaining.map(|previous| previous.saturating_sub(offset));
+        let advance = offset.min(self.remaining.unwrap_or(usize::MAX));
+        self.skip = self.skip.saturating_add(advance);
+        self.remaining = match (available, count) {
+            (Some(previous), Some(current)) => Some(previous.min(current)),
+            (Some(previous), None) => Some(previous),
+            (None, current) => current,
+        };
         self
     }
 
@@ -155,5 +161,29 @@ mod tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(results[0].num_rows(), 2);
         assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod composed_pagination_window_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn nested_limit_offset_windows_keep_earlier_boundaries() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..10).map(|n| vec![Value::Integer(n)]).collect()
+        ).unwrap();
+        let result = Pipeline::new([Ok(batch.clone())].into_iter())
+            .with_limit(2, Some(5)).with_limit(1, Some(2))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result[0].rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(4)]
+        ]);
+        let empty = Pipeline::new([Ok(batch)].into_iter())
+            .with_limit(0, Some(2)).with_limit(9, Some(3))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert!(empty.is_empty());
     }
 }
