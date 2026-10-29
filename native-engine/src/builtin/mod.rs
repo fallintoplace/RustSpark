@@ -34,6 +34,7 @@ mod string_search;
 mod json_path;
 mod json_valid;
 mod json_type;
+mod json_value;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -89,6 +90,7 @@ const MODULES: &[&[Function]] = &[
     &string_search::FUNCTIONS,
     &json_valid::FUNCTIONS,
     &json_type::FUNCTIONS,
+    &json_value::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
