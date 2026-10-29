@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 __all__ = ["RustSpark", "RustSparkError"]
+
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class RustSparkError(RuntimeError):
@@ -89,13 +92,13 @@ class RustSpark:
                 command.extend([f"--{flag}", os.fspath(value)])
         for flag, values in named.items():
             for table, path in (values or {}).items():
-                if not table or "=" in table:
+                if not isinstance(table, str) or not IDENTIFIER.fullmatch(table):
                     raise ValueError(f"Invalid table name: {table!r}")
                 command.extend([f"--{flag}", f"{table}={os.fspath(path)}"])
         for name, typed_value in (named_params or {}).items():
-            if not name or not name.replace("_", "a").isalnum() or name[0].isdigit():
+            if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
                 raise ValueError(f"Invalid SQL parameter name: {name!r}")
-            if ":" not in typed_value:
+            if not isinstance(typed_value, str) or ":" not in typed_value:
                 raise ValueError(f"Use type:value for parameter {name!r}")
             command.extend(["--named-param", f"{name}={typed_value}"])
         if max_rows is not None:
