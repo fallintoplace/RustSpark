@@ -96,6 +96,11 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("vector filter predicate must be boolean".into()));
     }
+    match predicate {
+        Expr::Literal(Value::Boolean(true)) => return Ok((0..batch.num_rows()).collect()),
+        Expr::Literal(Value::Boolean(false) | Value::Null) => return Ok(Vec::new()),
+        _ => {}
+    }
     let mut selected = Vec::new();
     if let Some((column, op, rhs)) = fast_integer_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -261,5 +266,21 @@ mod constant_left_filter_tests {
                 .collect::<Vec<_>>();
             assert_eq!(select_indices(&batch, &pred).unwrap(), scalar);
         }
+    }
+}
+
+#[cfg(test)]
+mod constant_predicate_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn constants_keep_all_or_no_rows_even_for_zero_width_batches() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        assert_eq!(select_indices(&batch, &Expr::Literal(Value::Boolean(true))).unwrap(), vec![0, 1, 2]);
+        for value in [Value::Boolean(false), Value::Null] {
+            assert!(select_indices(&batch, &Expr::Literal(value)).unwrap().is_empty());
+        }
+        let typed = Batch::empty(Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap());
+        assert!(select_indices(&typed, &Expr::Literal(Value::Integer(1))).is_err());
     }
 }
