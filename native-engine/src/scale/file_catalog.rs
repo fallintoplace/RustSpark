@@ -1,5 +1,5 @@
 //! Lightweight file-backed catalog for the DataFusion-free streaming planner.
-use std::{collections::HashMap, fs::File, io::BufReader, path::{Path, PathBuf}};
+use std::{borrow::Cow, collections::HashMap, fs::File, io::BufReader, path::{Path, PathBuf}};
 use crate::{schema::Schema, Error, Result};
 use super::csv_scan::{CsvRows, open_csv};
 
@@ -23,13 +23,17 @@ pub struct FileCatalog {
     tables: HashMap<String, CsvTable>,
 }
 
-fn normalized(name: &str) -> Result<String> {
+fn normalized(name: &str) -> Result<Cow<'_, str>> {
     if name.is_empty() || !name.bytes().all(|c|
         c.is_ascii_alphanumeric() || c == b'_'
     ) {
         return Err(Error::Schema("expected simple ASCII table identifier".into()));
     }
-    Ok(name.to_ascii_lowercase())
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Ok(Cow::Owned(name.to_ascii_lowercase()))
+    } else {
+        Ok(Cow::Borrowed(name))
+    }
 }
 
 impl FileCatalog {
@@ -43,10 +47,10 @@ impl FileCatalog {
         if schema.is_empty() || max_record_bytes == 0 {
             return Err(Error::Schema("CSV source requires a schema and byte limit".into()));
         }
-        if self.tables.contains_key(&key) {
+        if self.tables.contains_key(key.as_ref()) {
             return Err(Error::Schema(format!("file-backed table already exists: {name}")));
         }
-        self.tables.insert(key, CsvTable {
+        self.tables.insert(key.into_owned(), CsvTable {
             path: path.as_ref().to_path_buf(), schema, max_record_bytes
         });
         Ok(())
@@ -55,27 +59,27 @@ impl FileCatalog {
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
         let source = normalized(from)?;
         let destination = normalized(to)?;
-        if !self.tables.contains_key(&source) {
+        if !self.tables.contains_key(source.as_ref()) {
             return Err(Error::Schema(format!("unknown native file table: {from}")));
         }
         if source == destination { return Ok(()); }
-        if self.tables.contains_key(&destination) {
+        if self.tables.contains_key(destination.as_ref()) {
             return Err(Error::Schema(format!("file-backed table already exists: {to}")));
         }
-        let table = self.tables.remove(&source).expect("source was checked");
-        self.tables.insert(destination, table);
+        let table = self.tables.remove(source.as_ref()).expect("source was checked");
+        self.tables.insert(destination.into_owned(), table);
         Ok(())
     }
 
     pub fn unregister(&mut self, name: &str) -> Result<CsvTable> {
         let key = normalized(name)?;
-        self.tables.remove(&key)
+        self.tables.remove(key.as_ref())
             .ok_or_else(|| Error::Schema(format!("unknown native file table: {name}")))
     }
 
     pub fn get(&self, name: &str) -> Result<&CsvTable> {
         let key = normalized(name)?;
-        self.tables.get(&key)
+        self.tables.get(key.as_ref())
             .ok_or_else(|| Error::Schema(format!("unknown native file table: {name}")))
     }
 
@@ -135,5 +139,25 @@ mod tests {
         assert_eq!(values, vec![vec![Value::Integer(12)], vec![Value::Integer(15)]]);
         assert_eq!(catalog.list(), ["sales_2026"]);
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod borrowed_file_catalog_key_perf_tests {
+    use super::*;
+
+    #[test]
+    fn lowercase_keys_are_borrowed_and_casefolding_is_unchanged() {
+        assert!(matches!(normalized("sales_2026").unwrap(), Cow::Borrowed(_)));
+        assert!(matches!(normalized("Sales_2026").unwrap(), Cow::Owned(_)));
+        assert_eq!(normalized("SALES").unwrap().as_ref(), "sales");
+        assert!(normalized("a-b").is_err());
+        let mut catalog = FileCatalog::new();
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "id", crate::schema::DataType::Integer, true,
+        )]).unwrap();
+        catalog.register_csv("SALES", "unused.csv", schema, 100).unwrap();
+        assert!(catalog.get("sales").is_ok());
+        assert!(catalog.get("Sales").is_ok());
     }
 }
