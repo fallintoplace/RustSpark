@@ -1,5 +1,6 @@
 //! Bounded worker execution for independent native partitions.
-use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind}, sync::Mutex};
+use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Mutex, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
 
 /// Execute a partition-local physical operator across at most max_workers
@@ -14,6 +15,7 @@ where
     let count = input.len();
     if count == 0 { return Ok(Vec::new()); }
     let tasks = Mutex::new(input.into_iter().enumerate().collect::<VecDeque<_>>());
+    let failed = AtomicBool::new(false);
     let output: Mutex<Vec<Option<Result<Batch>>>> =
         Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
     std::thread::scope(|scope| {
@@ -21,17 +23,26 @@ where
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
+            let failed = &failed;
             scope.spawn(move || loop {
+                if failed.load(Ordering::Acquire) { break; }
                 let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
                 let Some((index, batch)) = next else { break; };
                 let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                     .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
+                if result.is_err() { failed.store(true, Ordering::Release); }
                 output.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(result);
             });
         }
     });
-    output.into_inner().unwrap_or_else(|e| e.into_inner())
-        .into_iter()
+    let output = output.into_inner().unwrap_or_else(|e| e.into_inner());
+    // A cancelled task may precede the failed task in input order.
+    // Return the actual operator error instead of a missing-result error.
+    if let Some(error) = output.iter().filter_map(Option::as_ref)
+        .find_map(|result| result.as_ref().err()) {
+        return Err(error.clone());
+    }
+    output.into_iter()
         .map(|result| result.unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
         .collect()
 }
@@ -97,3 +108,25 @@ mod parallel_filter_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod parallel_fail_fast_engine_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn serial_worker_stops_after_first_failure() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)]],
+        ).unwrap();
+        let invoked = AtomicUsize::new(0);
+        let error = map_partitions(vec![batch; 20], 1, |_| {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Execution("worker failed".into()))
+        }).unwrap_err();
+        assert!(error.to_string().contains("worker failed"));
+        assert_eq!(invoked.load(Ordering::SeqCst), 1);
+    }
+}
