@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::{scalar::Value, Error, Result};
 
@@ -43,20 +43,21 @@ impl Field {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schema {
     fields: Vec<Field>,
+    indices: HashMap<String, usize>,
 }
 
 impl Schema {
     pub fn new(fields: Vec<Field>) -> Result<Self> {
-        let mut names = HashSet::new();
-        for field in &fields {
+        let mut indices = HashMap::with_capacity(fields.len());
+        for (index, field) in fields.iter().enumerate() {
             if field.name.trim().is_empty() {
                 return Err(Error::Schema("column names cannot be empty".into()));
             }
-            if !names.insert(field.name.to_ascii_lowercase()) {
+            if indices.insert(field.name.to_ascii_lowercase(), index).is_some() {
                 return Err(Error::Schema(format!("duplicate column: {}", field.name)));
             }
         }
-        Ok(Self { fields })
+        Ok(Self { fields, indices })
     }
 
     pub fn fields(&self) -> &[Field] {
@@ -72,9 +73,12 @@ impl Schema {
     }
 
     pub fn column(&self, name: &str) -> Result<usize> {
-        self.fields
-            .iter()
-            .position(|field| field.name.eq_ignore_ascii_case(name))
+        let index = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            self.indices.get(&name.to_ascii_lowercase())
+        } else {
+            self.indices.get(name)
+        };
+        index.copied()
             .ok_or_else(|| Error::Schema(format!("unknown column: {name}")))
     }
 
@@ -136,3 +140,24 @@ mod schema_projection_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod column_index_perf_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_mixed_ascii_case_and_unicode_with_the_same_rules() {
+        let schema = Schema::new(vec![
+            Field::new("UserId", DataType::Integer, false),
+            Field::new("東京", DataType::Text, true),
+        ]).unwrap();
+        assert_eq!(schema.column("userid").unwrap(), 0);
+        assert_eq!(schema.column("USERID").unwrap(), 0);
+        assert_eq!(schema.column("東京").unwrap(), 1);
+        assert!(schema.column("user_id").is_err());
+        assert!(Schema::new(vec![
+            Field::new("ID", DataType::Integer, true),
+            Field::new("id", DataType::Integer, true),
+        ]).is_err());
+    }
+}
