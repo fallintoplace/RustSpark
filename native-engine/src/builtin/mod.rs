@@ -24,6 +24,7 @@ mod width_bucket;
 mod factorial;
 mod hypot;
 mod log1p;
+mod bankers_round;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -70,6 +71,7 @@ const MODULES: &[&[Function]] = &[
     &factorial::FUNCTIONS,
     &hypot::FUNCTIONS,
     &log1p::FUNCTIONS,
+    &bankers_round::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
