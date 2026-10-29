@@ -11,7 +11,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    let length = i64::try_from(text.chars().count())
+    let length = i64::try_from(if text.is_ascii() { text.len() } else { text.chars().count() })
         .map_err(|_| Error::Execution("character length overflow".into()))?;
     Ok(Value::Integer(length))
 }
@@ -31,5 +31,15 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text(String::new())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ascii_length_fast_path_tests {
+    use super::*;
+    #[test]
+    fn ascii_bytes_and_unicode_characters() {
+        assert_eq!(evaluate(&[Value::Text("abc".repeat(1000))]).unwrap(), Value::Integer(3000));
+        assert_eq!(evaluate(&[Value::Text("aé🙂".into())]).unwrap(), Value::Integer(3));
     }
 }
