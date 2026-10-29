@@ -155,8 +155,10 @@ impl Expr {
                 BinaryOp::Divide => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
-                    if matches!(a, DataType::Integer | DataType::Float)
-                        && matches!(b, DataType::Integer | DataType::Float) {
+                    if (matches!(left.as_ref(), Expr::Literal(Value::Null))
+                        || matches!(a, DataType::Integer | DataType::Float))
+                        && (matches!(right.as_ref(), Expr::Literal(Value::Null))
+                            || matches!(b, DataType::Integer | DataType::Float)) {
                         Ok(DataType::Float)
                     } else {
                         Err(Error::Type("division requires numeric operands".into()))
@@ -607,5 +609,21 @@ mod null_arithmetic_type_regression {
             assert!(Expr::binary(Expr::Literal(Value::Null), op,
                 Expr::Literal(Value::Text("x".into()))).output_type(&schema).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod null_division_type_regression {
+    use super::*;
+    use crate::schema::Field;
+    #[test]
+    fn division_accepts_null_and_rejects_strings() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        assert_eq!(Expr::binary(Expr::Column("n".into()), BinaryOp::Divide,
+            Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Float);
+        assert_eq!(Expr::binary(Expr::Literal(Value::Null), BinaryOp::Divide,
+            Expr::Column("n".into())).output_type(&schema).unwrap(), DataType::Float);
+        assert!(Expr::binary(Expr::Literal(Value::Text("x".into())), BinaryOp::Divide,
+            Expr::Literal(Value::Null)).output_type(&schema).is_err());
     }
 }
