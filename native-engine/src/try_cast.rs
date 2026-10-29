@@ -33,10 +33,15 @@ pub fn convert(value: Value, target: DataType) -> Value {
             Value::Boolean(n) => Value::Boolean(n),
             Value::Integer(n) => Value::Boolean(n != 0),
             Value::Float(n) if n.is_finite() => Value::Boolean(n != 0.0),
-            Value::Text(n) => match n.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" => Value::Boolean(true),
-                "false" | "0" => Value::Boolean(false),
-                _ => Value::Null,
+            Value::Text(n) => {
+                let text = n.trim();
+                if text.eq_ignore_ascii_case("true") || text == "1" {
+                    Value::Boolean(true)
+                } else if text.eq_ignore_ascii_case("false") || text == "0" {
+                    Value::Boolean(false)
+                } else {
+                    Value::Null
+                }
             },
             _ => Value::Null,
         },
