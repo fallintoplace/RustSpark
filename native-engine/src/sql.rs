@@ -387,9 +387,29 @@ impl Parser {
             None
         };
         let offset = if self.take_word("OFFSET") {
-            self.usize_literal()?
+            let offset = self.usize_literal()?;
+            if !self.take_word("ROWS") {
+                self.take_word("ROW");
+            }
+            offset
         } else {
             0
+        };
+        let count = if self.take_word("FETCH") {
+            if count.is_some() {
+                return Err(Error::Parse("LIMIT cannot be combined with FETCH".into()));
+            }
+            if !self.take_word("FIRST") && !self.take_word("NEXT") {
+                return Err(Error::Parse("expected FIRST or NEXT after FETCH".into()));
+            }
+            let requested = self.usize_literal()?;
+            if !self.take_word("ROWS") {
+                self.expect_word("ROW")?;
+            }
+            self.expect_word("ONLY")?;
+            Some(requested)
+        } else {
+            count
         };
         if count.is_some() || offset > 0 {
             plan = plan.limit(offset, count);
@@ -486,5 +506,20 @@ mod tests {
         assert!(parse_sql("SELECT * FROM sales; DROP TABLE sales").is_err());
         assert!(parse_sql("SELECT * FROM sales JOIN customers ON id > id").is_err());
         assert!(parse_sql("SELECT city, SUM(amount) FROM sales").is_err());
+    }
+}
+
+#[cfg(test)]
+mod fetch_pagination_feature_tests {
+    use super::*;
+
+    #[test]
+    fn standard_pagination_builds_native_limit_plan() {
+        let plan = parse_sql("SELECT * FROM sales OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY").unwrap();
+        assert_eq!(plan, Plan::scan("sales").limit(5, Some(10)));
+        let first = parse_sql("SELECT * FROM sales FETCH FIRST 1 ROW ONLY").unwrap();
+        assert_eq!(first, Plan::scan("sales").limit(0, Some(1)));
+        assert!(parse_sql("SELECT * FROM sales LIMIT 1 FETCH NEXT 2 ROWS ONLY").is_err());
+        assert!(parse_sql("SELECT * FROM sales FETCH NEXT 2 ROWS").is_err());
     }
 }
