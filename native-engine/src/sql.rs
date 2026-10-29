@@ -114,7 +114,7 @@ impl Parser {
         match self.peek()? {
             Token::Word(word) if word.eq_ignore_ascii_case("OR") => Some((BinaryOp::Or, 1)),
             Token::Word(word) if word.eq_ignore_ascii_case("AND") => Some((BinaryOp::And, 2)),
-            Token::Operator(op) if op == "=" => Some((BinaryOp::Equal, 3)),
+            Token::Operator(op) if op == "=" || op == "==" => Some((BinaryOp::Equal, 3)),
             Token::Operator(op) if op == "!=" || op == "<>" => Some((BinaryOp::NotEqual, 3)),
             Token::Operator(op) if op == "<" => Some((BinaryOp::Less, 3)),
             Token::Operator(op) if op == "<=" => Some((BinaryOp::LessEqual, 3)),
@@ -131,6 +131,15 @@ impl Parser {
     fn expression(&mut self, min_precedence: u8) -> Result<Expr> {
         let mut left = self.prefix()?;
         loop {
+            if min_precedence <= 3 && self.peek() == Some(&Token::Operator("<=>".into())) {
+                self.next();
+                left = Expr::IsDistinctFrom {
+                    left: Box::new(left),
+                    right: Box::new(self.expression(4)?),
+                    negated: true,
+                };
+                continue;
+            }
             if min_precedence <= 3 && self.take_word("IS") {
                 let negate = self.take_word("NOT");
                 if self.take_word("DISTINCT") {
