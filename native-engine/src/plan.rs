@@ -9,6 +9,8 @@ use crate::{
 /// An owned, DataFusion-independent logical query tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plan {
+    /// SQL's implicit single row used by SELECT expressions without FROM.
+    OneRow,
     Scan {
         table: String,
     },

@@ -33,7 +33,7 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native [--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]] [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -114,8 +114,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
     if sources.is_empty() {
-        if csv.is_some() == parquet.is_some() {
-            return Err(Error::Parse("choose --csv, --parquet, or --source".into()));
+        if csv.is_some() && parquet.is_some() {
+            return Err(Error::Parse("choose only one input source".into()));
         }
     } else if csv.is_some() || parquet.is_some() {
         return Err(Error::Parse("--source cannot be mixed with --csv or --parquet".into()));
@@ -123,8 +123,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if stream && !sources.is_empty() {
         return Err(Error::Unsupported("--stream does not yet support multiple file sources".into()));
     }
-    if stream && parquet.is_some() {
-        return Err(Error::Unsupported("--stream currently supports CSV input only".into()));
+    if stream && csv.is_none() {
+        return Err(Error::Unsupported("--stream requires a CSV source".into()));
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
@@ -319,13 +319,15 @@ fn run() -> Result<()> {
     let mut catalog = Catalog::new();
     if args.sources.is_empty() {
         let data = if let Some(path) = &args.csv {
-            csv::read_csv(path)?
+            Some(csv::read_csv(path)?)
         } else if let Some(path) = &args.parquet {
-            read_parquet_bounded(path)?
+            Some(read_parquet_bounded(path)?)
         } else {
-            return Err(Error::Parse("missing input file".into()));
+            None
         };
-        catalog.register(&args.table, data)?;
+        if let Some(data) = data {
+            catalog.register(&args.table, data)?;
+        }
     } else {
         for (table, path) in &args.sources {
             let data = match path.extension().and_then(|ext| ext.to_str())

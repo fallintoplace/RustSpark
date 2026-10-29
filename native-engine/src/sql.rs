@@ -436,8 +436,8 @@ impl Parser {
                 break;
             }
         }
-        self.expect_word("FROM")?;
-        let mut plan = Plan::scan(self.identifier()?);
+        let has_from = self.take_word("FROM");
+        let mut plan = if has_from { Plan::scan(self.identifier()?) } else { Plan::OneRow };
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
@@ -513,6 +513,9 @@ impl Parser {
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
         let grouped = has_aggregates || !group_columns.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
+        if star && !has_from {
+            return Err(Error::Parse("SELECT * requires FROM".into()));
+        }
         if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
         }
