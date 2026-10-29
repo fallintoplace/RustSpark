@@ -1,5 +1,6 @@
 //! Bounded worker execution for independent native partitions.
-use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind}, sync::Mutex};
+use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Mutex, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
 
 /// Execute a partition-local physical operator across at most max_workers
@@ -16,16 +17,22 @@ where
     let tasks = Mutex::new(input.into_iter().enumerate().collect::<VecDeque<_>>());
     let output: Mutex<Vec<Option<Result<Batch>>>> =
         Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
+    let failed = AtomicBool::new(false);
     std::thread::scope(|scope| {
         for _ in 0..max_workers.min(count) {
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
+            let failed = &failed;
             scope.spawn(move || loop {
-                let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                let next = {
+                    let mut queue = tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    if failed.load(Ordering::Acquire) { None } else { queue.pop_front() }
+                };
                 let Some((index, batch)) = next else { break; };
                 let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                     .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
+                if result.is_err() { failed.store(true, Ordering::Release); }
                 output.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(result);
             });
         }
@@ -97,3 +104,26 @@ mod parallel_filter_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod fail_fast_parallel_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn fatal_error_prevents_more_single_worker_tasks() {
+        let schema = crate::schema::Schema::new(vec![
+            crate::schema::Field::new("n", crate::schema::DataType::Integer, false)
+        ]).unwrap();
+        let batches: Vec<_> = (0..20).map(|n| Batch::from_rows(schema.clone(),
+            vec![vec![crate::scalar::Value::Integer(n)]]).unwrap()).collect();
+        let visited = AtomicUsize::new(0);
+        assert!(map_partitions(batches, 1, |batch| {
+            visited.fetch_add(1, AtomicOrdering::Relaxed);
+            if batch.row(0)?[0] == crate::scalar::Value::Integer(2) {
+                Err(Error::Execution("fatal".into()))
+            } else { Ok(batch) }
+        }).is_err());
+        assert_eq!(visited.load(AtomicOrdering::Relaxed), 3);
+    }
+}
