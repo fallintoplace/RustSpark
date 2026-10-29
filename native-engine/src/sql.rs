@@ -217,6 +217,10 @@ impl Parser {
         if self.take_word("NOT") {
             return Ok(Expr::Not(Box::new(self.expression(3)?)));
         }
+        if self.peek() == Some(&Token::Operator("+".into())) {
+            let _ = self.next();
+            return self.expression(6);
+        }
         if self.peek() == Some(&Token::Operator("-".into())) {
             let _ = self.next();
             return Ok(Expr::binary(
@@ -667,6 +671,14 @@ mod tests {
             &sales(),
         ).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("Paris".into())]]);
+    }
+
+    #[test]
+    fn unary_plus_is_accepted_for_numeric_expressions() {
+        let plan = parse_sql("SELECT +amount AS positive FROM sales WHERE amount IS NOT NULL").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(2)], vec![Value::Integer(3)]
+        ]);
     }
 
     #[test]
