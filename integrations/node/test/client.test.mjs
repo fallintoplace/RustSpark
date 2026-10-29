@@ -75,3 +75,12 @@ test("SQL file and deterministic table and parameter ordering", () => {
   assert.throws(() => client.query("SELECT 1", { sqlFile: "x.sql" }), TypeError);
   assert.throws(() => client.query("", { sqlFile: "" }), TypeError);
 });
+
+test("rejects unsafe SQL numbers instead of silently losing BIGINT precision", () => {
+  for (const stdout of ['[{"id":9007199254740993}]', '[{"nested":{"id":-9007199254740993}}]']) {
+    const client = new RustSpark({ runner: () => ({ status: 0, stdout }) });
+    assert.throws(() => client.query("SELECT id"), RustSparkError);
+  }
+  const exact = new RustSpark({ runner: () => ({ status: 0, stdout: '[{"id":9007199254740991}]' }) });
+  assert.deepEqual(exact.query("SELECT id"), [{ id: Number.MAX_SAFE_INTEGER }]);
+});
