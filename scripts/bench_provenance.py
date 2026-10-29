@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -53,6 +54,13 @@ def git_dirty(directory):
     return None
 
 
+def available_cpu_count():
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count()
+
+
 def host_metadata():
     """Collect platform information independently of the benchmark executable."""
     return {
@@ -60,6 +68,8 @@ def host_metadata():
         "machine": platform.machine(),
         "processor": platform.processor(),
         "python": platform.python_version(),
+        "logical_cpus": os.cpu_count(),
+        "available_cpus": available_cpu_count(),
     }
 
 

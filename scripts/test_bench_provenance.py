@@ -61,6 +61,14 @@ class ProvenanceTests(unittest.TestCase):
         ):
             self.assertEqual(provenance.git_revision("."), "a" * 40)
 
+    def test_records_affinity_limited_cpu_count(self):
+        with mock.patch.object(provenance.os, "cpu_count", return_value=16), \
+             mock.patch.object(provenance.os, "sched_getaffinity",
+                               return_value=set(range(4)), create=True):
+            metadata = provenance.host_metadata()
+        self.assertEqual(metadata["logical_cpus"], 16)
+        self.assertEqual(metadata["available_cpus"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()
