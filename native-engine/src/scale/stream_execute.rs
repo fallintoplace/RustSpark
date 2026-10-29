@@ -233,7 +233,8 @@ pub fn execute(
     plan: &Plan, catalog: &FileCatalog,
     options: &StreamOptions, control: QueryControl
 ) -> Result<BatchStream> {
-    if options.batch_rows == 0 || options.sort_run_rows == 0 ||
+    if options.batch_rows == 0 || options.batch_rows > 65_536 ||
+        options.sort_run_rows == 0 ||
         options.sort_run_rows > 65_536 ||
         !(2..=64).contains(&options.merge_fan_in) || options.max_plan_depth == 0 {
         return Err(Error::Execution("invalid streaming executor settings".into()));
@@ -249,6 +250,17 @@ mod tests {
     use crate::{scalar::Value, schema::{DataType, Field}, sql};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn rejects_oversized_stream_output_batches_before_opening_files() {
+        let options = StreamOptions { batch_rows: 65_537, ..StreamOptions::default() };
+        let result = execute(&Plan::scan("unused"), &FileCatalog::new(),
+            &options, QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
+        let options = StreamOptions { batch_rows: 65_536, ..StreamOptions::default() };
+        assert!(matches!(execute(&Plan::scan("unused"), &FileCatalog::new(),
+            &options, QueryControl::default()), Err(Error::Schema(_))));
+    }
 
     #[test]
     fn rejects_invalid_stream_order_keys_before_reading_sources() {
