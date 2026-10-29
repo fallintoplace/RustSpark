@@ -38,6 +38,7 @@ mod json_value;
 mod json_query;
 mod json_array_length;
 mod json_object_keys;
+mod json_exists;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -97,6 +98,7 @@ const MODULES: &[&[Function]] = &[
     &json_query::FUNCTIONS,
     &json_array_length::FUNCTIONS,
     &json_object_keys::FUNCTIONS,
+    &json_exists::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
