@@ -110,9 +110,22 @@ pub fn read_frames(
     max_frame_bytes: usize,
     max_total_bytes: usize,
 ) -> Result<Vec<Frame>> {
+    read_frames_limited(input, max_frame_bytes, max_total_bytes, 1_000_000)
+}
+
+/// Bound decoded frame count as well as cumulative payload bytes.
+pub fn read_frames_limited(
+    input: &mut impl Read,
+    max_frame_bytes: usize,
+    max_total_bytes: usize,
+    max_frames: usize,
+) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut total = 0_usize;
     while let Some(frame) = read_frame(input, max_frame_bytes)? {
+        if frames.len() >= max_frames {
+            return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
+        }
         total = total.checked_add(frame.payload.len())
             .filter(|used| *used <= max_total_bytes)
             .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
@@ -139,3 +152,21 @@ mod exchange_stream_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod frame_count_limit_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_too_many_empty_payload_frames() {
+        let mut wire = Vec::new();
+        for task in 0..3 {
+            write_frame(&mut wire, &Frame {
+                stage: 1, task, attempt: 0, payload: Vec::new()
+            }, 0).unwrap();
+        }
+        assert_eq!(read_frames_limited(&mut wire.as_slice(), 0, 0, 3)
+            .unwrap().len(), 3);
+        assert!(read_frames_limited(&mut wire.as_slice(), 0, 0, 2).is_err());
+    }
+}
