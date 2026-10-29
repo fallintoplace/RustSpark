@@ -9,7 +9,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let Some(value) = super::string(&args[1])? else { return Ok(Value::Null); };
         value
     } else { "$" };
-    let doc = json_path::parse(text)?;
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    let doc = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(doc) => doc,
+        Err(_) => return Ok(Value::Null),
+    };
     match json_path::lookup(Some(&doc), path)? {
         None | Some(serde_json::Value::Null) => Ok(Value::Null),
         Some(serde_json::Value::Object(map)) => {
@@ -18,7 +24,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                 .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
             Ok(Value::Text(encoded))
         }
-        _ => Err(Error::Type("JSON_OBJECT_KEYS requires an object".into())),
+        _ => Ok(Value::Null),
     }
 }
 
@@ -52,7 +58,7 @@ mod tests {
             Value::Text(r#"["a","b"]"#.into()));
         assert_eq!(evaluate(&[Value::Text(r#"{"nested":{}}"#.into()),
             Value::Text("$.nested".into())]).unwrap(), Value::Text("[]".into()));
-        assert!(evaluate(&[Value::Text("[]".into())]).is_err());
+        assert_eq!(evaluate(&[Value::Text("[]".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Text(r#"{"x":1,"y":2,"z":3}"#.into())]).unwrap(),
             Value::Text(r#"["x","y","z"]"#.into()));
     }
@@ -69,5 +75,17 @@ mod json_has_key_extension_tests {
         assert_eq!(json_has_key(&[doc, Value::Text("z".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(json_has_key(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
         assert!(json_has_key(&[Value::Text("[]".into()), Value::Text("x".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod invalid_json_object_keys_tests {
+    use super::*;
+    #[test]
+    fn non_object_or_malformed_json_produces_null() {
+        for text in ["[]", "7", "{bad", ""] {
+            assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(), Value::Null);
+        }
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
