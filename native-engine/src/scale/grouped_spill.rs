@@ -198,12 +198,13 @@ fn aggregate_shard(
         for row in 0..batch.num_rows() {
             let key = keys.iter().map(|&col| batch.value(row, col).cloned())
                 .collect::<Result<Vec<_>>>()?;
-            if !groups.contains_key(&key) && groups.len() >= max_groups {
-                return Err(Error::Execution("group state count exceeds partition budget".into()));
-            }
+            let at_limit = groups.len() >= max_groups;
             let states = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
+                    if at_limit {
+                        return Err(Error::Execution("group state count exceeds partition budget".into()));
+                    }
                     let initial = items.iter()
                         .map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
@@ -410,5 +411,39 @@ mod spill_count_schema_tests {
         assert!(!result.field(1).unwrap().nullable);
         assert!(!result.field(2).unwrap().nullable);
         assert!(result.field(3).unwrap().nullable);
+    }
+}
+
+#[cfg(test)]
+mod spilled_group_entry_perf_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scale::cancel::QueryControl};
+    use std::fs;
+
+    #[test]
+    fn repeated_text_keys_count_as_one_group() {
+        let path = std::env::temp_dir().join(format!(
+            "spilled-entry-perf-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&path).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let data = Batch::from_rows(schema.clone(), (0..60).map(|_| vec![
+            Value::Text("a very long repeated grouping key".repeat(8))
+        ]).collect()).unwrap();
+        let result = grouped_aggregate([Ok(data)], schema.clone(),
+            &[("k".into(), "k".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "n")],
+            &path, 1, 1, 8, &QueryControl::default()).unwrap();
+        let mut output = Vec::new();
+        for shard in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(shard).unwrap()), 8).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                output.extend(batch.rows().unwrap());
+            }
+        }
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0][1], Value::Integer(60));
+        drop(result);
+        fs::remove_dir(path).unwrap();
     }
 }
