@@ -56,7 +56,27 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        let token = if character.is_ascii_alphabetic() || character == '_' {
+        let token = if character == '`' {
+            let mut value = String::new();
+            let mut closed = false;
+            while let Some(next) = chars.next() {
+                if next == '`' {
+                    if chars.peek() == Some(&'`') {
+                        value.push('`');
+                        chars.next();
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    value.push(next);
+                }
+            }
+            if !closed || value.is_empty() {
+                return Err(Error::Parse("invalid or unterminated quoted identifier".into()));
+            }
+            Token::Word(value)
+        } else if character.is_ascii_alphabetic() || character == '_' {
             let mut value = character.to_string();
             while let Some(next) = chars.peek() {
                 if next.is_ascii_alphanumeric() || *next == '_' {
@@ -203,5 +223,22 @@ mod consolidated_lexer_regressions {
         for query in ["SELECT . FROM t", "SELECT 1e FROM t", "SELECT 1e+ FROM t"] {
             assert!(tokenize(query).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod spark_backtick_identifier_tests {
+    use super::*;
+
+    #[test]
+    fn scans_backtick_identifiers_with_spaces_symbols_and_escaped_backticks() {
+        let tokens = tokenize("SELECT `a b`, `group`, `a``b` FROM `with-dash`").unwrap();
+        assert_eq!(tokens[1], Token::Word("a b".into()));
+        assert_eq!(tokens[3], Token::Word("group".into()));
+        assert_eq!(tokens[5], Token::Word("a`b".into()));
+        assert_eq!(tokens[7], Token::Word("FROM".into()));
+        assert_eq!(tokens[8], Token::Word("with-dash".into()));
+        assert!(tokenize("SELECT `unterminated").is_err());
+        assert!(tokenize("SELECT ``").is_err());
     }
 }
