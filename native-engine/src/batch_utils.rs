@@ -4,6 +4,9 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     if rows_per_batch == 0 {
         return Err(Error::Execution("batch size must be positive".into()));
     }
+    if batch.num_rows() > 0 && batch.num_rows() <= rows_per_batch {
+        return Ok(vec![batch.clone()]);
+    }
     let mut chunks = Vec::with_capacity(batch.num_rows().div_ceil(rows_per_batch));
     let mut start = 0;
     while start < batch.num_rows() {
@@ -150,5 +153,21 @@ mod single_owned_batch_concat_tests {
         let other_schema = Schema::new(vec![crate::schema::Field::new(
             "different", crate::schema::DataType::Text, true)]).unwrap();
         assert!(concat(&other_schema, [first], 5).is_err());
+    }
+}
+
+#[cfg(test)]
+mod one_chunk_split_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn one_chunk_preserves_nullable_rows_and_zero_width_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Integer(7)]]).unwrap();
+        assert_eq!(split(&batch, 2).unwrap(), vec![batch.clone()]);
+        assert_eq!(split(&batch, 100).unwrap(), vec![batch]);
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
+        assert_eq!(split(&zero, 5).unwrap(), vec![zero]);
+        assert!(split(&Batch::empty(Schema::new(vec![]).unwrap()), 5).unwrap().is_empty());
     }
 }
