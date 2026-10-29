@@ -9,6 +9,7 @@ pub struct ScanCursor<'a> {
     predicate: Option<Expr>,
     columns: Vec<usize>,
     output_schema: Schema,
+    identity_projection: bool,
     target_rows: usize,
     next_row: usize,
     failed: bool,
@@ -39,8 +40,10 @@ pub fn scan<'a>(
     let output_schema = Schema::new(columns.iter()
         .map(|&index| Ok(source.schema().field(index)?.clone()))
         .collect::<Result<Vec<_>>>()?)?;
+    let identity_projection = columns.iter().copied().eq(0..source.schema().len());
     Ok(ScanCursor {
-        source, predicate, columns, output_schema, target_rows, next_row: 0, failed: false,
+        source, predicate, columns, output_schema, identity_projection,
+        target_rows, next_row: 0, failed: false,
     })
 }
 
@@ -49,6 +52,14 @@ impl Iterator for ScanCursor<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.failed { return None; }
+        if self.predicate.is_none() && self.identity_projection {
+            if self.next_row == self.source.num_rows() { return None; }
+            let end = self.next_row.saturating_add(self.target_rows).min(self.source.num_rows());
+            let result = self.source.slice_rows(self.next_row, end);
+            self.next_row = end;
+            if result.is_err() { self.failed = true; }
+            return Some(result);
+        }
         let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
@@ -211,5 +222,24 @@ mod scan_failure_tests {
         let mut cursor = scan(&input, Some(Expr::Column("n".into())), &[], 1).unwrap();
         assert!(cursor.next().unwrap().is_err());
         assert!(cursor.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod identity_scan_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn identity_scan_preserves_chunking_and_rows() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Null], vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())], vec![Value::Null],
+        ]).unwrap();
+        let parts = scan(&input, None, &[], 3).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 1]);
+        assert_eq!(parts.iter().flat_map(|p| p.rows().unwrap()).collect::<Vec<_>>(), input.rows().unwrap());
     }
 }
