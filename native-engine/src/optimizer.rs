@@ -29,7 +29,8 @@ pub fn optimize(plan: Plan) -> Plan {
         },
         Plan::Sort { input, keys } => {
             let input = optimize(*input);
-            if keys.is_empty() {
+            if keys.is_empty() ||
+                matches!(&input, Plan::Sort { keys: inner_keys, .. } if inner_keys == &keys) {
                 input
             } else {
                 Plan::Sort { input: Box::new(input), keys }
@@ -153,5 +154,12 @@ mod tests {
             .limit(usize::MAX, Some(1))
             .limit(0, Some(1));
         assert_eq!(optimize(plan.clone()), plan);
+    }
+    #[test]
+    fn redundant_stable_sorts_are_removed() {
+        let keys = vec![crate::sort::SortKey::ascending(Expr::Column("x".into()))];
+        let once = Plan::Sort { input: Box::new(Plan::scan("sales")), keys: keys.clone() };
+        let twice = Plan::Sort { input: Box::new(once.clone()), keys };
+        assert_eq!(optimize(twice), once);
     }
 }
