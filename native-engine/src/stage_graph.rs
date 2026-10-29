@@ -21,10 +21,14 @@ impl StageGraph {
             return Err(Error::Execution("execution graph exceeds 4096 stages".into()));
         }
         let mut index = HashMap::new();
+        let mut total_partitions = 0usize;
         for (position, stage) in stages.iter().enumerate() {
-            if stage.partitions == 0 {
-                return Err(Error::Execution("stage must have at least one partition".into()));
+            if stage.partitions == 0 || stage.partitions > 65_536 {
+                return Err(Error::Execution("stage partition count must be in 1..=65536".into()));
             }
+            total_partitions = total_partitions.checked_add(stage.partitions)
+                .filter(|total| *total <= 1_000_000)
+                .ok_or_else(|| Error::Execution("execution graph partition budget exceeded".into()))?;
             if index.insert(stage.id, position).is_some() {
                 return Err(Error::Execution("duplicate stage ID".into()));
             }
@@ -94,6 +98,17 @@ mod tests {
         ]).unwrap();
         assert_eq!(graph.topological_order(), [1, 2, 3]);
         assert_eq!(graph.ready(&HashSet::from([1, 2])), [3]);
+    }
+
+    #[test]
+    fn partition_fanout_has_a_bounded_budget() {
+        assert!(StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 65_537 },
+        ]).is_err());
+        let stages = (0..16).map(|id| Stage {
+            id, dependencies: vec![], partitions: 65_536,
+        }).collect::<Vec<_>>();
+        assert!(StageGraph::new(stages).is_err());
     }
 
     #[test]
