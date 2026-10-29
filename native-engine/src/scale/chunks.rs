@@ -35,7 +35,18 @@ where I: Iterator<Item = Result<Vec<Value>>>
         let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
         while rows.len() < self.batch_rows {
             match self.input.next() {
-                Some(Ok(row)) => rows.push(row),
+                Some(Ok(row)) => {
+                    if row.len() != self.schema.len() {
+                        let error = Error::Schema("row width does not match schema".into());
+                        if rows.is_empty() {
+                            self.finished = true;
+                            return Some(Err(error));
+                        }
+                        self.pending_error = Some(error);
+                        break;
+                    }
+                    rows.push(row);
+                },
                 Some(Err(error)) => {
                     if rows.is_empty() {
                         self.finished = true;
@@ -108,6 +119,28 @@ mod tests {
         let input = vec![Ok(vec![Value::Integer(7)]), Err(Error::Parse("bad row".into()))];
         let mut batches = RowBatcher::new(input.into_iter(), schema(), 4).unwrap();
         assert_eq!(batches.next().unwrap().unwrap().num_rows(), 1);
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod batcher_malformed_width_tests {
+    use super::*;
+
+    #[test]
+    fn returns_valid_prefix_then_terminal_width_error() {
+        let schema = Schema::new(vec![
+            crate::schema::Field::new("n", crate::schema::DataType::Integer, false)
+        ]).unwrap();
+        let input = vec![
+            Ok(vec![Value::Integer(5)]),
+            Ok(vec![]),
+            Ok(vec![Value::Integer(10)]),
+        ];
+        let mut batches = RowBatcher::new(input.into_iter(), schema, 8).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(5)]]);
         assert!(batches.next().unwrap().is_err());
         assert!(batches.next().is_none());
     }
