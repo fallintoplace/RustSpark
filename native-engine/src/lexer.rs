@@ -128,8 +128,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         } else if matches!(character, '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!') {
             let mut operator = character.to_string();
             if let Some(next) = chars.peek() {
-                if matches!((character, *next), ('<', '=') | ('>', '=') | ('<', '>') | ('!', '=')) {
+                if matches!((character, *next), ('<', '=') | ('>', '=') | ('<', '>') | ('!', '=') | ('=', '=')) {
                     operator.push(chars.next().expect("peeked operator"));
+                    // Spark's <=> is one token, not <= followed by >.
+                    if operator == "<=" && chars.peek() == Some(&'>') {
+                        operator.push(chars.next().expect("peeked null-safe comparison"));
+                    }
                 }
             }
             if operator == "!" {
