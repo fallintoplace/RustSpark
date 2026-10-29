@@ -33,7 +33,12 @@ impl BloomFilter {
     }
 
     fn probe(&self, first: u64, step: u64, seed: u32) -> usize {
-        (first.wrapping_add(u64::from(seed).wrapping_mul(step)) % self.bits as u64) as usize
+        let hash = first.wrapping_add(u64::from(seed).wrapping_mul(step));
+        if self.bits.is_power_of_two() {
+            (hash as usize) & (self.bits - 1)
+        } else {
+            (hash % self.bits as u64) as usize
+        }
     }
 
     pub fn insert(&mut self, key: &Value) {
@@ -139,5 +144,24 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod power_of_two_bloom_probe_tests {
+    use super::*;
+    #[test]
+    fn bitmask_and_modulo_agree_for_power_of_two_sizes() {
+        let filter = BloomFilter::new(4096, 7).unwrap();
+        for first in [0, 1, 63, 4095, u64::MAX] {
+            for seed in 0..7 {
+                let step = 0xfade_1234_5678_9877;
+                let expected = (first.wrapping_add(u64::from(seed).wrapping_mul(step)) % 4096) as usize;
+                assert_eq!(filter.probe(first, step, seed), expected);
+            }
+        }
+        let mut uneven = BloomFilter::new(1001, 7).unwrap();
+        for n in 0..1000 { uneven.insert(&Value::Integer(n)); }
+        for n in 0..1000 { assert!(uneven.might_contain(&Value::Integer(n))); }
     }
 }
