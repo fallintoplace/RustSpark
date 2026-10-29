@@ -81,7 +81,8 @@ pub struct LimitedParquetScan {
 }
 
 pub fn scan_limited(path: impl AsRef<Path>, batch_size: usize, max_rows: usize) -> Result<LimitedParquetScan> {
-    Ok(LimitedParquetScan { inner: scan(path, batch_size)?, remaining: max_rows })
+    let read_rows = batch_size.min(max_rows.max(1));
+    Ok(LimitedParquetScan { inner: scan(path, read_rows)?, remaining: max_rows })
 }
 
 impl Iterator for LimitedParquetScan {
