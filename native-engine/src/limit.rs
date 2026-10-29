@@ -10,7 +10,7 @@ pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch
     let end = count.map_or(batch.num_rows(), |count| {
         start.saturating_add(count).min(batch.num_rows())
     });
-    batch.take(&(start..end).collect::<Vec<_>>())
+    batch.slice_rows(start, end)
 }
 
 #[cfg(test)]
