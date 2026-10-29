@@ -36,7 +36,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "concat_ws", min_args: 2, max_args: 128,
+    name: "concat_ws", min_args: 1, max_args: 128,
     result_type: output, call: evaluate,
 }];
 
@@ -63,5 +63,16 @@ mod tests {
             Value::Text("-".into()), Value::Text("x".repeat(16 * 1024 * 1024)),
             Value::Text("z".into()),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod separator_only_concat_ws_tests {
+    use super::*;
+    #[test]
+    fn returns_empty_string_for_only_a_separator() {
+        assert_eq!(evaluate(&[Value::Text(",".into())]).unwrap(), Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(output(&[DataType::Text]).unwrap(), DataType::Text);
     }
 }
