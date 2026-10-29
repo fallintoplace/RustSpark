@@ -475,10 +475,23 @@ impl Parser {
         let mut group_columns = Vec::new();
         if self.take_word("GROUP") {
             self.expect_word("BY")?;
-            loop {
-                group_columns.push(self.identifier()?);
-                if !self.take_symbol(',') {
-                    break;
+            if self.take_word("ALL") {
+                for item in &select {
+                    if let SelectItem::Scalar(Selection { expression: Expr::Column(name), .. }) = item {
+                        if !group_columns.iter().any(|column: &String| column.eq_ignore_ascii_case(name)) {
+                            group_columns.push(name.clone());
+                        }
+                    } else if matches!(item, SelectItem::Scalar(_)) {
+                        return Err(Error::Unsupported("GROUP BY ALL requires selected grouping columns".into()));
+                    }
+                }
+                if group_columns.is_empty() {
+                    return Err(Error::Unsupported("GROUP BY ALL needs a selected grouping column".into()));
+                }
+            } else {
+                loop {
+                    group_columns.push(self.identifier()?);
+                    if !self.take_symbol(',') { break; }
                 }
             }
         }
@@ -751,6 +764,17 @@ mod tests {
         ).unwrap(), &sales()).unwrap().rows().unwrap();
         assert_eq!(rows, vec![
             vec![Value::Boolean(true)], vec![Value::Boolean(true)], vec![Value::Null]
+        ]);
+    }
+
+    #[test]
+    fn group_by_all_infers_native_dimensions() {
+        let rows = execute(&parse_sql(
+            "SELECT city, SUM(amount) AS total FROM sales GROUP BY ALL ORDER BY city"
+        ).unwrap(), &sales()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text("Berlin".into()), Value::Integer(5)],
+            vec![Value::Text("Paris".into()), Value::Null],
         ]);
     }
 
