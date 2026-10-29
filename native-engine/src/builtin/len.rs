@@ -8,7 +8,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let len = i64::try_from(text.chars().count())
+    let characters = if text.is_ascii() { text.len() } else { text.chars().count() };
+    let len = i64::try_from(characters)
         .map_err(|_| Error::Execution("LEN exceeds integer range".into()))?;
     Ok(Value::Integer(len))
 }
@@ -23,6 +24,10 @@ mod tests {
     #[test]
     fn spark_sql_semantics() {
         assert_eq!(evaluate(&[Value::Text("🙂é".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(evaluate(&[Value::Text("hello world".into())]).unwrap(),
+            Value::Integer(11));
+        assert_eq!(evaluate(&[Value::Text("ASCII + é".into())]).unwrap(),
+            Value::Integer(9));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
