@@ -131,3 +131,27 @@ mod tests {
         assert_eq!(pool.used(), usize::MAX);
     }
 }
+
+ 
+/// Reserve independent operator budgets; partially successful reservations are
+/// released automatically when any later allocation fails.
+pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Reservation>> {
+    requests.iter().map(|bytes| pool.reserve(*bytes)).collect()
+}
+
+#[cfg(test)]
+mod bulk_memory_feature_tests {
+    use super::*;
+
+    #[test]
+    fn partial_failure_returns_all_capacity_to_the_pool() {
+        let pool = MemoryPool::new(100);
+        assert!(reserve_many(&pool, &[20, 30, 60]).is_err());
+        assert_eq!(pool.used(), 0);
+        let reservations = reserve_many(&pool, &[40, 60]).unwrap();
+        assert_eq!(pool.used(), 100);
+        drop(reservations);
+        assert_eq!(pool.used(), 0);
+    }
+}
+
