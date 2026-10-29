@@ -76,6 +76,20 @@ fn initcap(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
+fn space_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Integer] { Ok(DataType::Text) }
+    else { Err(Error::Type("SPACE requires an integer".into())) }
+}
+fn space(args: &[Value]) -> Result<Value> {
+    let Some(count) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let length = usize::try_from(count.max(0))
+        .map_err(|_| Error::Execution("SPACE length is too large".into()))?;
+    if length > 1_000_000 {
+        return Err(Error::Execution("SPACE length exceeds native memory guard".into()));
+    }
+    Ok(Value::Text(" ".repeat(length)))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -87,6 +101,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "lcase", min_args: 1, max_args: 1, result_type: text_text_type, call: lcase },
     Function { name: "ucase", min_args: 1, max_args: 1, result_type: text_text_type, call: ucase },
     Function { name: "initcap", min_args: 1, max_args: 1, result_type: text_text_type, call: initcap },
+    Function { name: "space", min_args: 1, max_args: 1, result_type: space_type, call: space },
     // PARITY_FUNCTIONS
 ];
 
@@ -157,6 +172,14 @@ mod tests {
     fn spark_initcap_preserves_whitespace_and_capitalizes_words() {
         assert_eq!(sql_result("initcap('sPARK   sql')").unwrap(), Value::Text("Spark   Sql".into()));
         assert_eq!(initcap(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_space_generates_bounded_spaces() {
+        assert_eq!(sql_result("space(3)").unwrap(), Value::Text("   ".into()));
+        assert_eq!(space(&[Value::Integer(-2)]).unwrap(), Value::Text(String::new()));
+        assert_eq!(space(&[Value::Null]).unwrap(), Value::Null);
+        assert!(space(&[Value::Integer(1_000_001)]).is_err());
     }
 
     // PARITY_TESTS
