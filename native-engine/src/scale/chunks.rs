@@ -77,10 +77,10 @@ impl Iterator for BatchChunks<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.position >= self.input.num_rows() { return None; }
-        let end = self.position.saturating_add(self.batch_rows).min(self.input.num_rows());
-        let indices = (self.position..end).collect::<Vec<_>>();
+        let start = self.position;
+        let end = start.saturating_add(self.batch_rows).min(self.input.num_rows());
         self.position = end;
-        Some(self.input.take(&indices))
+        Some(self.input.slice_rows(start, end))
     }
 }
 
@@ -110,5 +110,23 @@ mod tests {
         assert_eq!(batches.next().unwrap().unwrap().num_rows(), 1);
         assert!(batches.next().unwrap().is_err());
         assert!(batches.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod chunk_boundaries_regression_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn last_chunk_preserves_null_and_row_order() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Null],
+        ]).unwrap();
+        let rows = BatchChunks::new(&input, 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(rows[1].row(0).unwrap(), vec![Value::Null]);
     }
 }
