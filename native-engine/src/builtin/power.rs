@@ -5,7 +5,7 @@ fn power(args: &[Value]) -> Result<Value> {
     let Some(base) = super::number(&args[0])? else { return Ok(Value::Null) };
     let Some(exponent) = super::number(&args[1])? else { return Ok(Value::Null) };
     let result = match &args[1] {
-        Value::Integer(n) if base == -1.0 => if n & 1 == 0 { 1.0 } else { -1.0 },
+        Value::Integer(n) if base == -1.0 => if *n & 1 == 0 { 1.0 } else { -1.0 },
         Value::Integer(_) if base == 1.0 => 1.0,
         Value::Integer(n) => match i32::try_from(*n) {
             Ok(power) => base.powi(power),
