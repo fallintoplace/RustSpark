@@ -68,7 +68,8 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
@@ -81,7 +82,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if !right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
@@ -91,7 +93,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
     let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
-    for row in right.rows()? {
+    for index in 0..right.num_rows() {
+        let row = right.row(index)?;
         let entry = counts.entry(row).or_insert(0);
         *entry = entry.checked_add(1)
             .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
@@ -104,7 +107,8 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let mut counts = right_counts(&right)?;
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
                 *remaining -= 1;
@@ -195,5 +199,24 @@ mod except_bounded_right_set_regression {
         assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(), vec![
             vec![Value::Integer(3)], vec![Value::Integer(1)],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod streaming_set_row_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn large_duplicate_inputs_keep_stable_set_and_multiset_results() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), (0..200).map(|n| vec![Value::Integer(n % 4)]).collect()).unwrap();
+        let right = Batch::from_rows(schema, (0..100).map(|n| vec![Value::Integer(n % 2)]).collect()).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().column(0).unwrap(),
+            &[Value::Integer(0), Value::Integer(1)]);
+        assert_eq!(except_distinct(&left, &right).unwrap().column(0).unwrap(),
+            &[Value::Integer(2), Value::Integer(3)]);
+        assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 100);
+        assert_eq!(except_all(&left, &right).unwrap().num_rows(), 100);
     }
 }
