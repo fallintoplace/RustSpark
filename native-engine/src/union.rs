@@ -25,10 +25,14 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
         .num_rows()
         .checked_add(right.num_rows())
         .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
-    let mut rows = Vec::with_capacity(count);
-    rows.extend(left.rows()?);
-    rows.extend(right.rows()?);
-    Batch::from_rows(schema, rows)
+    let mut columns = Vec::with_capacity(schema.len());
+    for column in 0..schema.len() {
+        let mut values = Vec::with_capacity(count);
+        values.extend_from_slice(left.column(column)?);
+        values.extend_from_slice(right.column(column)?);
+        columns.push(values);
+    }
+    Batch::new(schema, columns)
 }
 
 #[cfg(test)]
