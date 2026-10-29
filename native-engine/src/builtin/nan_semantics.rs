@@ -23,7 +23,26 @@ fn nanvl(args: &[Value]) -> Result<Value> {
         _ => Err(Error::Type("NANVL expects a floating-point value".into())),
     }
 }
+
+fn isfinite_type(types: &[DataType]) -> Result<DataType> {
+    if matches!(types[0], DataType::Float | DataType::Integer | DataType::Text) {
+        Ok(DataType::Boolean)
+    } else {
+        Err(Error::Type("ISFINITE requires numeric input".into()))
+    }
+}
+
+fn isfinite(args: &[Value]) -> Result<Value> {
+    match &args[0] {
+        Value::Integer(_) => Ok(Value::Boolean(true)),
+        Value::Float(number) => Ok(Value::Boolean(number.is_finite())),
+        Value::Null => Ok(Value::Null),
+        _ => Err(Error::Type("ISFINITE requires numeric input".into())),
+    }
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "isfinite", min_args: 1, max_args: 1, result_type: isfinite_type, call: isfinite },
     Function { name: "isnan", min_args: 1, max_args: 1, result_type: isnan_type, call: isnan },
     Function { name: "nanvl", min_args: 2, max_args: 2, result_type: nanvl_type, call: nanvl },
 ];
@@ -36,5 +55,20 @@ mod tests {
         assert_eq!(isnan(&[Value::Float(f64::NAN)]).unwrap(), Value::Boolean(true));
         assert_eq!(nanvl(&[Value::Float(f64::NAN), Value::Float(42.0)]).unwrap(), Value::Float(42.0));
         assert_eq!(nanvl(&[Value::Null, Value::Float(5.0)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod isfinite_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_finite_numbers_without_rounding_large_integers() {
+        assert!(crate::builtin::supports("isfinite"));
+        assert_eq!(isfinite(&[Value::Integer(i64::MAX)]).unwrap(), Value::Boolean(true));
+        assert_eq!(isfinite(&[Value::Float(f64::NAN)]).unwrap(), Value::Boolean(false));
+        assert_eq!(isfinite(&[Value::Float(f64::INFINITY)]).unwrap(), Value::Boolean(false));
+        assert_eq!(isfinite(&[Value::Float(0.0)]).unwrap(), Value::Boolean(true));
+        assert_eq!(isfinite(&[Value::Null]).unwrap(), Value::Null);
+        assert!(isfinite(&[Value::Text("123".into())]).is_err());
     }
 }
