@@ -4,6 +4,18 @@ use crate::{scalar::Value, Error, Result};
 
 const PRECISION: u32 = 12;
 const REGISTERS: usize = 1 << PRECISION;
+// HLL rank is clamped to 65 - PRECISION, so a 54-entry table is enough.
+const RECIPROCAL_POWERS: [f64; 54] = {
+    let mut values = [0.0; 54];
+    let mut index = 0;
+    let mut value = 1.0;
+    while index < values.len() {
+        values[index] = value;
+        value *= 0.5;
+        index += 1;
+    }
+    values
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HyperLogLog {
@@ -33,9 +45,12 @@ impl HyperLogLog {
 
     pub fn estimate(&self) -> f64 {
         let m = REGISTERS as f64;
-        let zeros = self.registers.iter().filter(|&&rank| rank == 0).count();
-        let harmonic: f64 = self.registers.iter()
-            .map(|&rank| 2_f64.powi(-(rank as i32))).sum();
+        let mut zeros = 0usize;
+        let mut harmonic = 0.0;
+        for &rank in &self.registers {
+            zeros += usize::from(rank == 0);
+            harmonic += RECIPROCAL_POWERS[usize::from(rank)];
+        }
         let alpha = 0.7213 / (1.0 + 1.079 / m);
         let raw = alpha * m * m / harmonic;
         if raw <= 2.5 * m && zeros > 0 {
@@ -167,5 +182,30 @@ mod hll_direct_batch_update_perf_tests {
             parts.push(Batch::from_rows(schema.clone(), values.into_iter().map(|value| vec![value]).collect()).unwrap());
         }
         assert_eq!(approximate_distinct_batches(&parts, "key").unwrap(), expected.estimate());
+    }
+}
+
+#[cfg(test)]
+mod hll_estimation_lookup_tests {
+    use super::*;
+    #[test]
+    fn reciprocal_weights_are_exact_for_every_reachable_rank() {
+        for rank in 0..=65 - PRECISION {
+            let expected = 2_f64.powi(-(rank as i32));
+            assert_eq!(RECIPROCAL_POWERS[rank as usize], expected);
+        }
+    }
+    #[test]
+    fn estimate_agrees_with_reference_harmonic_computation() {
+        let mut sketch = HyperLogLog::new();
+        for value in 0..30_000 { sketch.add(&Value::Integer(value)); }
+        let zeros = sketch.registers.iter().filter(|&&rank| rank == 0).count();
+        let m = REGISTERS as f64;
+        let harmonic: f64 = sketch.registers.iter().map(|&rank| 2_f64.powi(-(rank as i32))).sum();
+        let alpha = 0.7213 / (1.0 + 1.079 / m);
+        let raw = alpha * m * m / harmonic;
+        let reference = if raw <= 2.5 * m && zeros > 0 { m * (m / zeros as f64).ln() } else { raw };
+        assert_eq!(sketch.estimate(), reference);
+        assert_eq!(HyperLogLog::new().estimate(), 0.0);
     }
 }
