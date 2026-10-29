@@ -11,6 +11,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("JSON_VALID document exceeds 16 MiB".into()));
     }
+    // Exact canonical JSON literals require no parser state.
+    if matches!(text, "null" | "true" | "false" | "[]" | "{}") {
+        return Ok(Value::Boolean(true));
+    }
     // The result only needs syntax validity, not an allocated JSON value tree.
     Ok(Value::Boolean(
         serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
@@ -73,5 +77,21 @@ mod json_pretty_extension_tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&formatted).unwrap(), serde_json::json!({"a":[1,2]}));
         assert_eq!(json_pretty(&[Value::Null]).unwrap(), Value::Null);
         assert!(json_pretty(&[Value::Text("{broken".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod canonical_json_valid_literal_tests {
+    use super::*;
+    #[test]
+    fn accepts_canonical_literals_without_relaxing_json_syntax() {
+        for text in ["null", "true", "false", "[]", "{}"] {
+            assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(), Value::Boolean(true));
+        }
+        for text in ["True", "{]", "null trailing", "[]{}", "\u{00a0}true"] {
+            assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(), Value::Boolean(false));
+        }
+        assert_eq!(evaluate(&[Value::Text("  true  ".into())]).unwrap(),
+            Value::Boolean(true));
     }
 }
