@@ -17,7 +17,8 @@ def invoke(args: list[str], timeout: float = 15) -> subprocess.CompletedProcess[
     )
 
 
-def diagnose(binary: str, csv: str | None = None) -> dict:
+def diagnose(binary: str, csv: str | None = None,
+             parquet: str | None = None, json_input: str | None = None) -> dict:
     """Return a support report that avoids filesystem paths and environment values."""
     report = {
         "engine": "rustspark",
@@ -51,14 +52,21 @@ def diagnose(binary: str, csv: str | None = None) -> dict:
     check("standalone_sql", [
         "--sql", "SELECT 42 AS probe", "--stdout-format", "json-array", "--max-rows", "1",
     ], expected="probe")
-    if csv is not None:
-        source = Path(csv)
+    for label, path, flag in (
+        ("csv_input", csv, "--csv"),
+        ("parquet_input", parquet, "--parquet"),
+        ("json_input", json_input, "--json"),
+    ):
+        if path is None:
+            continue
+        source = Path(path)
         if not source.is_file():
-            report["checks"].append({"name": "csv_input", "ok": False, "error": "CSV file not found"})
+            report["checks"].append({"name": label, "ok": False, "error": "Input file not found"})
         else:
-            # A user-supplied CSV path is never copied into the report.
-            check("csv_input", [
-                "--csv", os.fspath(source), "--sql", "SELECT 42 AS probe FROM (SELECT COUNT(*) AS row_count FROM data) AS input_count",
+            # A user-supplied path is never copied into the report.
+            check(label, [
+                flag, os.fspath(source), "--sql",
+                "SELECT 42 AS probe FROM (SELECT COUNT(*) AS row_count FROM data) AS input_count",
                 "--stdout-format", "json-array", "--max-rows", "1",
             ], expected="probe")
     report["ok"] = all(item["ok"] for item in report["checks"])
@@ -68,10 +76,12 @@ def diagnose(binary: str, csv: str | None = None) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="rustspark")
-    parser.add_argument("--csv", help="Optional CSV input to test, path not included in report")
+    parser.add_argument("--csv", help="Optional CSV input to test")
+    parser.add_argument("--parquet", help="Optional Parquet input to test")
+    parser.add_argument("--json-input", help="Optional JSON or NDJSON input to test")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     args = parser.parse_args()
-    report = diagnose(args.binary, args.csv)
+    report = diagnose(args.binary, args.csv, args.parquet, args.json_input)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
