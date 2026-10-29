@@ -70,10 +70,13 @@ impl StageGraph {
     }
 
     pub fn ready(&self, completed: &HashSet<u64>) -> Vec<u64> {
-        self.stages.iter().filter(|stage| {
-            !completed.contains(&stage.id) &&
+        let by_id: HashMap<u64, &Stage> = self.stages.iter()
+            .map(|stage| (stage.id, stage)).collect();
+        self.order.iter().copied().filter(|id| {
+            let stage = by_id[id];
+            !completed.contains(id) &&
                 stage.dependencies.iter().all(|dependency| completed.contains(dependency))
-        }).map(|stage| stage.id).collect()
+        }).collect()
     }
 
     pub fn stages(&self) -> &[Stage] {
@@ -138,5 +141,23 @@ mod stage_chain_feature_tests {
         ]).unwrap();
         assert_eq!(graph.longest_dependency_chain(), 3);
         assert_eq!(StageGraph::new(vec![]).unwrap().longest_dependency_chain(), 0);
+    }
+}
+
+#[cfg(test)]
+mod ready_topology_tests {
+    use super::*;
+
+    #[test]
+    fn runnable_stages_follow_topological_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 8, dependencies: vec![1], partitions: 1 },
+            Stage { id: 9, dependencies: vec![], partitions: 1 },
+            Stage { id: 1, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        let available = graph.ready(&HashSet::new());
+        assert_eq!(available, graph.topological_order().iter().copied()
+            .filter(|id| *id != 8).collect::<Vec<_>>());
+        assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
     }
 }
