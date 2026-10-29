@@ -106,3 +106,34 @@ mod tests {
         assert_eq!(b.used(), 0);
     }
 }
+
+/// Reserve a group of operator allocations in a single atomic admission.
+pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Reservation>> {
+    let total = requests.iter().try_fold(0usize, |sum, &bytes| {
+        sum.checked_add(bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
+    })?;
+    let mut combined = budget.reserve(total)?;
+    let reservations = requests.iter().map(|&bytes| Reservation {
+        budget: budget.clone(), bytes,
+    }).collect();
+    // Transfer the already-charged capacity to independent drop guards.
+    combined.bytes = 0;
+    Ok(reservations)
+}
+
+#[cfg(test)]
+mod grouped_scale_memory_tests {
+    use super::*;
+
+    #[test]
+    fn failed_group_reservation_leaves_budget_uncharged() {
+        let budget = MemoryBudget::new(100).unwrap();
+        assert!(reserve_many(&budget, &[70, 50]).is_err());
+        assert_eq!(budget.used(), 0);
+        let allocations = reserve_many(&budget, &[30, 20]).unwrap();
+        assert_eq!(budget.used(), 50);
+        drop(allocations);
+        assert_eq!(budget.used(), 0);
+    }
+}
