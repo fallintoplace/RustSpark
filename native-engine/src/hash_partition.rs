@@ -30,12 +30,17 @@ pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<
     let columns = indices.iter().map(|&index| batch.column(index))
         .collect::<Result<Vec<_>>>()?;
     let mut groups = vec![Vec::new(); partitions];
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for row in 0..batch.num_rows() {
         let mut hasher = PartitionHasher::default();
         for column in &columns {
             column[row].hash(&mut hasher);
         }
-        let bucket = (hasher.finish() % partitions as u64) as usize;
+        let hash = hasher.finish();
+        let bucket = match mask {
+            Some(mask) => (hash as usize) & mask,
+            None => (hash % partitions as u64) as usize,
+        };
         groups[bucket].push(row);
     }
     groups.into_iter().map(|rows| batch.take(&rows)).collect()
@@ -176,6 +181,30 @@ mod direct_multi_batch_partition_perf_tests {
             }).collect::<Vec<_>>();
             for (batch, expected) in combined.iter().zip(reference) {
                 assert_eq!(batch.rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bitmasked_bucket_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn power_of_two_and_irregular_fanout_match_remainder_reference() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let rows = (0..1_200).map(|n| vec![if n % 29 == 0 { Value::Null } else { Value::Integer(n % 97) }]).collect();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        for fanout in [1, 2, 8, 32, 64, 127, 256, 1024, 4096] {
+            let actual = partition(&batch, &["k"], fanout).unwrap();
+            let mut expected = vec![Vec::new(); fanout];
+            for row in 0..batch.num_rows() {
+                let mut hasher = PartitionHasher::default();
+                batch.value(row, 0).unwrap().hash(&mut hasher);
+                expected[(hasher.finish() % fanout as u64) as usize].push(row);
+            }
+            for (part, indices) in actual.iter().zip(expected) {
+                assert_eq!(part, &batch.take(&indices).unwrap());
             }
         }
     }
