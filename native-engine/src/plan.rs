@@ -11,6 +11,11 @@ use crate::{
 pub enum Plan {
     /// One empty input row for Spark SELECT without a FROM clause.
     OneRow,
+    /// A bounded inline relation with owned rows and an inferred schema.
+    Values {
+        schema: crate::schema::Schema,
+        rows: Vec<Vec<crate::scalar::Value>>,
+    },
     Scan {
         table: String,
     },
