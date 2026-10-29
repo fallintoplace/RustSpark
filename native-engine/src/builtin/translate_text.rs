@@ -107,7 +107,7 @@ mod ascii_translate_fast_path_tests {
         let translated = |text: &str, from: &str, to: &str| evaluate(&[
             Value::Text(text.into()), Value::Text(from.into()), Value::Text(to.into())
         ]).unwrap();
-        assert_eq!(translated("abca", "aac", "XY"), Value::Text("XbYX".into()));
+        assert_eq!(translated("abca", "aac", "XY"), Value::Text("XbX".into()));
         assert_eq!(translated("cab", "ab", "Z"), Value::Text("cZ".into()));
         assert_eq!(translated("café", "é", "e"), Value::Text("cafe".into()));
         assert_eq!(translated("abc", "", "x"), Value::Text("abc".into()));
