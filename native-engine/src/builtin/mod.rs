@@ -52,6 +52,7 @@ mod overlay_text;
 mod levenshtein;
 mod regexp_like;
 mod regexp_replace;
+mod initcap;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -124,6 +125,7 @@ const MODULES: &[&[Function]] = &[
     &levenshtein::FUNCTIONS,
     &regexp_like::FUNCTIONS,
     &regexp_replace::FUNCTIONS,
+    &initcap::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
