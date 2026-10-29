@@ -106,6 +106,11 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
             let count = self.remaining.map_or(available, |left| left.min(available));
             if count == 0 { continue; }
             if let Some(remaining) = self.remaining.as_mut() { *remaining -= count; }
+            if skipped == 0 && count == batch.num_rows() {
+                // The input is already owned by this iterator. Avoid cloning
+                // every column when the requested window contains it entirely.
+                return Some(Ok(batch));
+            }
             return Some(batch.slice_rows(skipped, skipped + count));
         }
     }
@@ -185,5 +190,24 @@ mod scale_limit_contiguous_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(output.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
             vec![vec![Value::Integer(4)], vec![Value::Integer(5)], vec![Value::Integer(6)]]);
+    }
+}
+
+#[cfg(test)]
+mod whole_limit_stream_batch_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn full_middle_and_partial_batches_preserve_limit_results() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batches = [0..3, 3..6, 6..9].into_iter().map(|range| {
+            Ok(Batch::from_rows(schema.clone(), range
+                .map(|n| vec![Value::Integer(n)]).collect()).unwrap())
+        });
+        let result = LimitStream::new(batches, 3, Some(5), QueryControl::default())
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
+        assert_eq!(result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>(),
+            (3..8).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
     }
 }
