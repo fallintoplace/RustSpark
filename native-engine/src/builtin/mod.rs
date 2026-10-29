@@ -17,6 +17,7 @@ mod hyperbolic;
 mod inverse_hyperbolic;
 mod angles;
 mod modular;
+mod bitwise;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -56,6 +57,7 @@ const MODULES: &[&[Function]] = &[
     &inverse_hyperbolic::FUNCTIONS,
     &angles::FUNCTIONS,
     &modular::FUNCTIONS,
+    &bitwise::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
