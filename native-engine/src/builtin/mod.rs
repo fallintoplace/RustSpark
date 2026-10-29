@@ -59,6 +59,7 @@ mod initcap;
 mod space;
 mod substring_index;
 mod find_in_set;
+mod elt;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -138,6 +139,7 @@ const MODULES: &[&[Function]] = &[
     &space::FUNCTIONS,
     &substring_index::FUNCTIONS,
     &find_in_set::FUNCTIONS,
+    &elt::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
