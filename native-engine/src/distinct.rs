@@ -14,12 +14,12 @@ pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
         let key = batch.row(row)?;
-        if !seen.contains(&key) {
-            if seen.len() >= max_keys {
-                return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
+        if seen.len() < max_keys {
+            if seen.insert(key) {
+                indices.push(row);
             }
-            seen.insert(key);
-            indices.push(row);
+        } else if !seen.contains(&key) {
+            return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
         }
     }
     batch.take(&indices)
