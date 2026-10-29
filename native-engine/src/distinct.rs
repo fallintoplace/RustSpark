@@ -5,10 +5,20 @@ use crate::{batch::Batch, Result};
 /// Keep the first occurrence of each complete row. NULL values are equal for
 /// DISTINCT/grouping, unlike WHERE's three-valued comparison semantics.
 pub fn distinct(batch: &Batch) -> Result<Batch> {
+    distinct_with_limit(batch, 1_000_000)
+}
+
+/// Deduplicate complete rows with an explicit key-cardinality admission limit.
+pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
     let mut seen = HashSet::new();
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
-        if seen.insert(batch.row(row)?) {
+        let key = batch.row(row)?;
+        if !seen.contains(&key) {
+            if seen.len() >= max_keys {
+                return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
+            }
+            seen.insert(key);
             indices.push(row);
         }
     }
@@ -85,5 +95,15 @@ mod distinct_on_feature_tests {
         assert!(distinct_on(&input, &[]).is_err());
         assert!(distinct_on(&input, &["unknown"]).is_err());
     }
+    #[test]
+    fn bounded_distinct_counts_unique_keys_not_source_rows() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(1)],
+                 vec![Value::Integer(2)], vec![Value::Integer(3)]],
+        ).unwrap();
+        assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
+            "execution error: DISTINCT key limit exceeded");
+        assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
+    }
 }
-
