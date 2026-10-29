@@ -260,16 +260,18 @@ pub fn aggregate_with_max_groups(
             .iter()
             .map(|(expr, _)| expr.evaluate(batch, row))
             .collect::<Result<Vec<_>>>()?;
-        let index = if let Some(index) = group_indices.get(&key) {
-            *index
-        } else {
-            if groups.len() >= max_groups {
-                return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+        let index = match group_indices.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if groups.len() >= max_groups {
+                    return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+                }
+                let index = groups.len();
+                let key = entry.key().clone();
+                entry.insert(index);
+                groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
+                index
             }
-            let index = groups.len();
-            let _ = group_indices.insert(key.clone(), index);
-            groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
-            index
         };
         for (state, item) in groups[index].1.iter_mut().zip(items) {
             state.update(&item.op, batch, row)?;
