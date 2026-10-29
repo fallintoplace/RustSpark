@@ -62,3 +62,31 @@ mod tests {
         assert_eq!(catalog.list(), ["sales"]);
     }
 }
+
+ 
+impl Catalog {
+    /// Remove a registered table and return its data to the caller.
+    pub fn unregister(&mut self, name: &str) -> Result<Batch> {
+        let normalized = normalize(name)?;
+        self.tables.remove(&normalized)
+            .ok_or_else(|| Error::Schema(format!("unknown table: {name}")))
+    }
+}
+
+#[cfg(test)]
+mod catalog_unregister_feature_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn temporary_tables_can_be_removed_case_insensitively() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        catalog.register("Temp", Batch::empty(schema.clone())).unwrap();
+        assert_eq!(catalog.unregister("TEMP").unwrap().schema(), &schema);
+        assert!(catalog.get("temp").is_err());
+        assert!(catalog.unregister("temp").is_err());
+        catalog.register("temp", Batch::empty(schema)).unwrap();
+    }
+}
+
