@@ -75,6 +75,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     break;
                 }
             }
+            if matches!(chars.peek().copied(), Some('e' | 'E')) {
+                number.push(chars.next().expect("peeked exponent marker"));
+                if matches!(chars.peek().copied(), Some('+' | '-')) {
+                    number.push(chars.next().expect("peeked exponent sign"));
+                }
+                if !chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+                    return Err(Error::Parse("invalid numeric exponent".into()));
+                }
+                while chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+                    number.push(chars.next().expect("peeked exponent digit"));
+                }
+            }
             Token::Number(number)
         } else if character == '\'' || character == '"' {
             let mut value = String::new();
@@ -179,5 +191,19 @@ mod cr_line_comment_regression {
             Token::Word("SELECT".into()), Token::Number("1".into()),
             Token::Word("FROM".into()), Token::Word("sales".into())
         ]);
+    }
+}
+
+#[cfg(test)]
+mod scientific_number_tokens_regression {
+    use super::*;
+    #[test]
+    fn scientific_numbers_keep_exponent_signs_and_reject_missing_digits() {
+        let tokens = tokenize("SELECT 1e2, 3.5E-4, 2E+6 FROM data").unwrap();
+        assert!(tokens.contains(&Token::Number("1e2".into())));
+        assert!(tokens.contains(&Token::Number("3.5E-4".into())));
+        assert!(tokens.contains(&Token::Number("2E+6".into())));
+        assert!(tokenize("SELECT 1e FROM data").is_err());
+        assert!(tokenize("SELECT 1e+ FROM data").is_err());
     }
 }
