@@ -178,6 +178,7 @@ const MODULES: &[&[Function]] = &[
     &cot::FUNCTIONS,
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
+    &bitmap_indices::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
