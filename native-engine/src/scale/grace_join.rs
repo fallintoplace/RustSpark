@@ -108,15 +108,15 @@ where L: IntoIterator<Item = Result<Batch>>,
         // A RIGHT or FULL join must emit build-only rows once per partition,
         // not once for every probe batch.
         let outer_build = matches!(kind, JoinKind::Right | JoinKind::Full);
-        let mut build_keys = HashSet::new();
+        let mut build_keys: HashSet<&Value> = HashSet::new();
         if outer_build {
             for key in build.column(right_index)? {
                 if !key.is_null() && !matches!(key, Value::Float(v) if v.is_nan()) {
-                    build_keys.insert(key.clone());
+                    build_keys.insert(key);
                 }
             }
         }
-        let mut matched_keys = HashSet::new();
+        let mut matched_keys: HashSet<&Value> = HashSet::new();
         let probe_kind = match kind {
             JoinKind::Right => JoinKind::Inner,
             JoinKind::Full => JoinKind::Left,
@@ -131,7 +131,10 @@ where L: IntoIterator<Item = Result<Batch>>,
                         if !key.is_null() &&
                             !matches!(key, Value::Float(v) if v.is_nan()) &&
                             build_keys.contains(key) {
-                            matched_keys.insert(key.clone());
+                            // Hold the canonical build-side key, not a cloned probe key.
+                            if let Some(&build_key) = build_keys.get(key) {
+                                matched_keys.insert(build_key);
+                            }
                         }
                     }
                 }
@@ -272,5 +275,51 @@ mod outer_join_partition_tests {
             drop(output);
         }
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod borrowed_spill_outer_keys_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::fs;
+
+    #[test]
+    fn repeated_long_text_keys_track_outer_matches_across_probe_batches() {
+        let directory = std::env::temp_dir().join(format!(
+            "grace-borrow-perf-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, true)]).unwrap();
+        let common = Value::Text("shared-key-".repeat(128));
+        let left = vec![
+            Batch::from_rows(schema.clone(), vec![vec![common.clone()], vec![Value::Null]]).unwrap(),
+            Batch::from_rows(schema.clone(), vec![
+                vec![common.clone()], vec![Value::Text("only-left".into())]
+            ]).unwrap(),
+        ];
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![common.clone()], vec![common.clone()],
+            vec![Value::Text("only-right".into())], vec![Value::Null],
+        ]).unwrap();
+        let output = grace_join(left.into_iter().map(Ok), [Ok(right)],
+            schema.clone(), schema, "k", "k", JoinKind::Full,
+            &directory, 1, 12, 1, &QueryControl::default()).unwrap();
+        let mut rows = Vec::new();
+        for path in output.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 1).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                rows.extend(batch.rows().unwrap());
+            }
+        }
+        assert_eq!(rows.iter().filter(|row| row[0] == common && row[1] == common).count(), 4);
+        assert_eq!(rows.iter().filter(|row|
+            row[0] == Value::Null && row[1] == Value::Text("only-right".into())).count(), 1);
+        assert_eq!(rows.iter().filter(|row|
+            row[0] == Value::Text("only-left".into()) && row[1] == Value::Null).count(), 1);
+        assert_eq!(rows.iter().filter(|row| row == &&vec![Value::Null, Value::Null]).count(), 2);
+        assert_eq!(rows.len(), 8);
+        drop(output);
+        fs::remove_dir(directory).unwrap();
     }
 }
