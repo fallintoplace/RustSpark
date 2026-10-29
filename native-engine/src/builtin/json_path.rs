@@ -33,28 +33,34 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
                 let mut end = quote.len_utf8();
                 let mut escaped = false;
                 let mut closed = false;
-                let mut key = String::new();
+                let mut owned_key: Option<String> = None;
                 for character in rest[end..].chars() {
+                    let start = end;
                     end += character.len_utf8();
                     if escaped {
                         if character != quote && character != '\\' {
                             return Err(Error::Parse("unsupported JSON path escape".into()));
                         }
-                        key.push(character);
+                        owned_key.as_mut().expect("escape created key buffer").push(character);
                         escaped = false;
                     } else if character == '\\' {
+                        if owned_key.is_none() {
+                            owned_key = Some(rest[quote.len_utf8()..start].to_owned());
+                        }
                         escaped = true;
                     } else if character == quote {
                         closed = true;
                         break;
-                    } else {
+                    } else if let Some(key) = owned_key.as_mut() {
                         key.push(character);
                     }
                 }
                 if !closed || !rest[end..].starts_with(']') {
                     return Err(Error::Parse("unterminated quoted JSON path key".into()));
                 }
-                node = node.and_then(|value| value.get(key.as_str()));
+                let key = owned_key.as_deref()
+                    .unwrap_or(&rest[quote.len_utf8()..end - quote.len_utf8()]);
+                node = node.and_then(|value| value.get(key));
                 tail = &rest[end + 1..];
                 continue;
             }
@@ -110,5 +116,23 @@ mod ascii_json_path_perf_tests {
         assert_eq!(lookup(Some(&doc), "$.rows[200]").unwrap(), None);
         assert!(lookup(Some(&doc), "$.rows[2x]").is_err());
         assert!(lookup(Some(&doc), "$.café").is_err());
+    }
+}
+
+#[cfg(test)]
+mod quoted_json_path_borrow_tests {
+    use super::*;
+    #[test]
+    fn long_unescaped_unicode_and_escaped_keys_are_found() {
+        let long = "a".repeat(2_000);
+        let mut map = serde_json::Map::new();
+        map.insert(long.clone(), serde_json::json!(7));
+        map.insert("é.🙂".into(), serde_json::json!(9));
+        map.insert("a'b".into(), serde_json::json!(11));
+        let doc = serde_json::Value::Object(map);
+        assert_eq!(lookup(Some(&doc), &format!("$['{long}']")).unwrap(), Some(&serde_json::json!(7)));
+        assert_eq!(lookup(Some(&doc), "$['é.🙂']").unwrap(), Some(&serde_json::json!(9)));
+        assert_eq!(lookup(Some(&doc), r"$['a\'b']").unwrap(), Some(&serde_json::json!(11)));
+        assert!(lookup(Some(&doc), r"$['bad\q']").is_err());
     }
 }
