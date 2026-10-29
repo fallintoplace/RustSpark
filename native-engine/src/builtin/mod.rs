@@ -57,6 +57,7 @@ mod octet_length;
 mod bit_length;
 mod char_length;
 mod len;
+mod lcase;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -134,6 +135,7 @@ const MODULES: &[&[Function]] = &[
     &bit_length::FUNCTIONS,
     &char_length::FUNCTIONS,
     &len::FUNCTIONS,
+    &lcase::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
