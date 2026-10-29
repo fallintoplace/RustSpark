@@ -62,6 +62,7 @@ mod find_in_set;
 mod elt;
 mod regexp_instr;
 mod regexp_substr;
+mod crc32;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -144,6 +145,7 @@ const MODULES: &[&[Function]] = &[
     &elt::FUNCTIONS,
     &regexp_instr::FUNCTIONS,
     &regexp_substr::FUNCTIONS,
+    &crc32::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
