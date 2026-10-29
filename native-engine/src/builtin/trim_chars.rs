@@ -53,6 +53,22 @@ fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
 }
 fn normalize_space(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.is_ascii() {
+        let mut output = Vec::with_capacity(input.len());
+        let mut pending = false;
+        for &byte in input.as_bytes() {
+            if byte.is_ascii_whitespace() {
+                pending = !output.is_empty();
+            } else {
+                if pending { output.push(b' '); }
+                pending = false;
+                output.push(byte);
+            }
+        }
+        return Ok(Value::Text(
+            String::from_utf8(output).expect("ASCII normalization stays UTF-8"),
+        ));
+    }
     let mut output = String::with_capacity(input.len());
     let mut pending = false;
     for character in input.chars() {
@@ -127,6 +143,21 @@ mod normalize_space_extension_tests {
         assert!(crate::builtin::supports("normalize_space"));
         assert_eq!(normalize_space(&[Value::Text(" \t A\u{00A0} B \n".into())]).unwrap(), Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Text(" \t ".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_normalize_space_perf_tests {
+    use super::*;
+    #[test]
+    fn collapses_ascii_control_whitespace_without_changing_unicode() {
+        assert_eq!(normalize_space(&[Value::Text(" \t A\x0b B\r\n C  ".into())])
+            .unwrap(), Value::Text("A B C".into()));
+        assert_eq!(normalize_space(&[Value::Text("   ".into())]).unwrap(),
+            Value::Text("".into()));
+        assert_eq!(normalize_space(&[Value::Text("A\u{00A0}B".into())]).unwrap(),
+            Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
     }
 }
