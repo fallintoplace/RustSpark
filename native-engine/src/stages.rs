@@ -72,10 +72,11 @@ impl StageGraph {
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
     pub fn root(&self) -> Option<usize> {
-        let dependencies = self.stages.iter()
-            .flat_map(|stage| stage.inputs.iter().copied())
-            .collect::<HashSet<_>>();
-        let mut roots = self.stages.iter().filter(|stage| !dependencies.contains(&stage.id));
+        let mut referenced = vec![false; self.stages.len()];
+        for stage in &self.stages {
+            for &input in &stage.inputs { referenced[input] = true; }
+        }
+        let mut roots = self.stages.iter().filter(|stage| !referenced[stage.id]);
         match (roots.next(), roots.next()) {
             (Some(root), None) => Some(root.id),
             _ => None,
@@ -270,5 +271,24 @@ mod stage_graph_invariant_consolidation_tests {
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
             Stage { id: 1, kind: StageKind::HashJoin, inputs: vec![0] },
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod dense_root_lookup_tests {
+    use super::*;
+    #[test]
+    fn root_detection_preserves_empty_multiple_and_nonordered_graphs() {
+        assert_eq!(StageGraph::new(vec![]).unwrap().root(), None);
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, kind: StageKind::Filter, inputs: vec![0] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(graph.root(), Some(1));
+        let multiple = StageGraph::new(vec![
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(multiple.root(), None);
     }
 }
