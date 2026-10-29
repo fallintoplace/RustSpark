@@ -212,6 +212,25 @@ impl Parser {
             return Ok(inner);
         }
         match self.next() {
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("CASE") => {
+                let mut branches = Vec::new();
+                while self.take_word("WHEN") {
+                    let condition = self.expression(0)?;
+                    self.expect_word("THEN")?;
+                    let result = self.expression(0)?;
+                    branches.push((condition, result));
+                }
+                if branches.is_empty() {
+                    return Err(Error::Parse("CASE requires WHEN".into()));
+                }
+                let else_expr = if self.take_word("ELSE") {
+                    Some(Box::new(self.expression(0)?))
+                } else {
+                    None
+                };
+                self.expect_word("END")?;
+                Ok(Expr::Case { branches, else_expr })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 Ok(Expr::Literal(Value::Null))
             }
@@ -558,6 +577,16 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn case_when_handles_multiple_branches_and_else() {
+        let plan = parse_sql("SELECT CASE WHEN amount IS NULL THEN 0 WHEN amount >= 3 THEN 10 ELSE 1 END AS bucket FROM sales").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(10)],
+            vec![Value::Integer(0)],
+        ]);
     }
 
     #[test]
