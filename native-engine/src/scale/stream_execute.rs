@@ -145,10 +145,19 @@ fn infer(
         }
         Plan::UnionAll { left, right } => {
             let left_schema = child(left)?;
-            if left_schema != child(right)? {
-                return Err(Error::Schema("UNION ALL inputs have different schemas".into()));
+            let right_schema = child(right)?;
+            if left_schema.len() != right_schema.len() {
+                return Err(Error::Schema("UNION ALL column counts differ".into()));
             }
-            Ok(left_schema)
+            let fields = left_schema.fields().iter().zip(right_schema.fields())
+                .map(|(left, right)| {
+                    if left.data_type != right.data_type {
+                        return Err(Error::Type("UNION ALL column types differ".into()));
+                    }
+                    Ok(Field::new(&left.name, left.data_type,
+                        left.nullable || right.nullable))
+                }).collect::<Result<Vec<_>>>()?;
+            Schema::new(fields)
         }
         _ => Err(Error::Unsupported(
             "streaming schema inference is unavailable for this operator".into(),
@@ -355,5 +364,27 @@ mod distinct_stream_feature_tests {
             vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]
         ]);
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod union_inference_engine_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn union_matches_columns_by_position_and_widens_nullability() {
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("a", "a.csv", Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), 128).unwrap();
+        catalog.register_csv("b", "b.csv", Schema::new(vec![
+            Field::new("other", DataType::Integer, true),
+        ]).unwrap(), 128).unwrap();
+        let plan = Plan::UnionAll {
+            left: Box::new(Plan::scan("a")), right: Box::new(Plan::scan("b"))
+        };
+        let inferred = output_schema(&plan, &catalog, &StreamOptions::default()).unwrap();
+        assert_eq!(inferred.fields(), &[Field::new("id", DataType::Integer, true)]);
     }
 }
