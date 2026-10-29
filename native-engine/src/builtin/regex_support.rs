@@ -12,7 +12,12 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
     }
     if let Some(compiled) = CACHE.with(|cache| {
-        cache.borrow().iter().find(|(key, _)| key == pattern).map(|(_, regex)| regex.clone())
+        let mut entries = cache.borrow_mut();
+        let index = entries.iter().position(|(key, _)| key == pattern)?;
+        let cached = entries.remove(index);
+        let compiled = cached.1.clone();
+        entries.push(cached);
+        Some(compiled)
     }) {
         return Ok(compiled);
     }
@@ -49,5 +54,23 @@ mod tests {
             assert!(compile(pattern).unwrap().is_match(pattern));
         }
         CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
+    }
+}
+
+#[cfg(test)]
+mod cache_lru_regression_tests {
+    use super::*;
+    #[test]
+    fn frequently_used_patterns_survive_eviction() {
+        CACHE.with(|cache| cache.borrow_mut().clear());
+        for pattern in ["^one$", "^two$", "^three$", "^four$"] { compile(pattern).unwrap(); }
+        compile("^one$").unwrap();
+        compile("^five$").unwrap();
+        CACHE.with(|cache| {
+            let cache = cache.borrow();
+            assert!(cache.iter().any(|(key, _)| key == "^one$"));
+            assert!(!cache.iter().any(|(key, _)| key == "^two$"));
+            assert_eq!(cache.len(), CACHE_ENTRIES);
+        });
     }
 }
