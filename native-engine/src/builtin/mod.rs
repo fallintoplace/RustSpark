@@ -27,6 +27,7 @@ mod log1p;
 mod bankers_round;
 mod nan_semantics;
 mod padding;
+mod ascii_chr;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -76,6 +77,7 @@ const MODULES: &[&[Function]] = &[
     &bankers_round::FUNCTIONS,
     &nan_semantics::FUNCTIONS,
     &padding::FUNCTIONS,
+    &ascii_chr::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
