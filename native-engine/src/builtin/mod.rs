@@ -44,6 +44,7 @@ mod regex_support;
 mod regexp_extract;
 mod regexp_count;
 mod concat_ws;
+mod concat_text;
 mod trim_chars;
 mod repeat_text;
 mod translate_text;
@@ -143,6 +144,7 @@ const MODULES: &[&[Function]] = &[
     &regexp_extract::FUNCTIONS,
     &regexp_count::FUNCTIONS,
     &concat_ws::FUNCTIONS,
+    &concat_text::FUNCTIONS,
     &trim_chars::FUNCTIONS,
     &repeat_text::FUNCTIONS,
     &translate_text::FUNCTIONS,
