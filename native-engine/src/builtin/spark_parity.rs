@@ -95,6 +95,36 @@ fn quote(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(format!("'{}'", text.replace('\'', "\\'"))))
 }
 
+fn substring_index_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text, DataType::Text, DataType::Integer] { Ok(DataType::Text) }
+    else { Err(Error::Type("SUBSTRING_INDEX requires text, delimiter and integer count".into())) }
+}
+fn substring_index(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let Some(count) = super::integer(&args[2])? else { return Ok(Value::Null); };
+    if delimiter.is_empty() || count == 0 { return Ok(Value::Text(String::new())); }
+    if count > 0 {
+        let mut next = 0;
+        for _ in 0..(count as u64) {
+            let Some(found) = text[next..].find(delimiter) else {
+                return Ok(Value::Text(text.to_owned()));
+            };
+            next += found + delimiter.len();
+        }
+        Ok(Value::Text(text[..next - delimiter.len()].to_owned()))
+    } else {
+        let mut end = text.len();
+        for _ in 0..count.unsigned_abs() {
+            let Some(found) = text[..end].rfind(delimiter) else {
+                return Ok(Value::Text(text.to_owned()));
+            };
+            end = found;
+        }
+        Ok(Value::Text(text[end + delimiter.len()..].to_owned()))
+    }
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -108,6 +138,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "initcap", min_args: 1, max_args: 1, result_type: text_text_type, call: initcap },
     Function { name: "space", min_args: 1, max_args: 1, result_type: space_type, call: space },
     Function { name: "quote", min_args: 1, max_args: 1, result_type: text_text_type, call: quote },
+    Function { name: "substring_index", min_args: 3, max_args: 3, result_type: substring_index_type, call: substring_index },
     // PARITY_FUNCTIONS
 ];
 
@@ -193,6 +224,18 @@ mod tests {
         assert_eq!(sql_result("quote(s)").unwrap(), Value::Text("'café'".into()));
         assert_eq!(quote(&[Value::Text("don't".into())]).unwrap(), Value::Text("'don\\'t'".into()));
         assert_eq!(quote(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_substring_index_counts_both_directions() {
+        assert_eq!(sql_result("substring_index('www.apache.org', '.', 2)").unwrap(),
+            Value::Text("www.apache".into()));
+        assert_eq!(sql_result("substring_index('www.apache.org', '.', -1)").unwrap(),
+            Value::Text("org".into()));
+        assert_eq!(sql_result("substring_index('a.b', '.', 99)").unwrap(),
+            Value::Text("a.b".into()));
+        assert_eq!(substring_index(&[Value::Null, Value::Text(".".into()), Value::Integer(1)]).unwrap(),
+            Value::Null);
     }
 
     // PARITY_TESTS
