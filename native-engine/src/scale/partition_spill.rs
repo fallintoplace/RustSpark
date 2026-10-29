@@ -1,6 +1,5 @@
 //! Disk-backed hash exchange for columnar batch iterators.
 use std::{
-    collections::hash_map::DefaultHasher,
     fs::{File, OpenOptions},
     hash::{Hash, Hasher},
     io::BufWriter,
@@ -36,9 +35,9 @@ pub struct PartitionWriter {
 }
 
 fn bucket(row: &[Value], keys: &[usize], count: usize) -> usize {
-    let mut hash = DefaultHasher::new();
+    let mut hash = crate::hash_partition::PartitionHasher::default();
     for &column in keys { row[column].hash(&mut hash); }
-    (hash.finish() as usize) % count
+    (hash.finish() % count as u64) as usize
 }
 
 impl PartitionWriter {
@@ -110,14 +109,16 @@ mod tests {
         let mut writer = PartitionWriter::new(&dir, schema, &["id"], 8, 2).unwrap();
         writer.write_batch(&batch, &QueryControl::default()).unwrap();
         let files = writer.finish().unwrap();
+        let expected = crate::hash_partition::partition(&batch, &["id"], 8).unwrap();
         let mut seen = 0;
-        for file in files.paths() {
+        for (index, file) in files.paths().iter().enumerate() {
             let mut reader = SpillReader::new(BufReader::new(File::open(file).unwrap()), 2).unwrap();
             let mut ids = Vec::new();
             while let Some(batch) = reader.next_batch().unwrap() {
                 ids.extend(batch.rows().unwrap().into_iter().map(|row| row[0].clone()));
             }
             assert_ne!(ids.iter().filter(|x| **x == Value::Integer(1)).count(), 1);
+            assert_eq!(ids, expected[index].column(0).unwrap(), "in-memory and spilled hash partitions must agree");
             seen += ids.len();
         }
         assert_eq!(seen, 4);
