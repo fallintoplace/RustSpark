@@ -122,7 +122,13 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
         "BIT_COUNT" => bit_count::output_type(args, schema),
         "BIT_GET" => bit_get::output_type(args, schema),
-        _ => crate::builtin::output_type(name, args, schema),
+        _ => {
+            if crate::builtin::supports(name) {
+                crate::builtin::output_type(name, args, schema)
+            } else {
+                crate::builtin_extra::return_type(name, args, schema)
+            }
+        },
     }
 }
 
@@ -147,7 +153,15 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
         "BIT_COUNT" => bit_count::eval(args, batch, row),
         "BIT_GET" => bit_get::eval(args, batch, row),
-        _ => crate::builtin::evaluate(name, args, batch, row),
+        _ => {
+            if crate::builtin::supports(name) {
+                crate::builtin::evaluate(name, args, batch, row)
+            } else {
+                let values = args.iter().map(|arg| arg.evaluate(batch, row))
+                    .collect::<Result<Vec<_>>>()?;
+                crate::builtin_extra::evaluate(name, &values)
+            }
+        },
     }
 }
 

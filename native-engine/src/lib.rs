@@ -23,6 +23,7 @@ pub mod expr;
 mod functions;
 /// Additional typed native scalar built-ins.
 pub mod builtin;
+mod builtin_extra;
 
 pub mod filter;
 
@@ -39,6 +40,7 @@ pub mod distinct;
 pub mod join;
 
 pub mod union;
+pub mod set_ops;
 
 pub mod plan;
 

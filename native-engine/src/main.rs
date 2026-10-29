@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     io::{self, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -9,6 +9,7 @@ use rustspark_native::{
     Error, Result,
     catalog::Catalog,
     csv, csv_stream::CsvStream,
+    parquet_scan,
     executor,
     batch::Batch,
     expr::Expr,
@@ -21,7 +22,8 @@ use rustspark_native::{
 };
 
 struct Args {
-    csv: PathBuf,
+    csv: Option<PathBuf>,
+    parquet: Option<PathBuf>,
     table: String,
     sql: String,
     stream: bool,
@@ -29,11 +31,12 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native --csv FILE [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...]\n     Native --stream supports SELECT, WHERE, and LIMIT on bounded CSV record batches.\n     Supported types: text, bool, int64, float64. Other SQL runs in the bounded legacy mode."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
+    let mut parquet = None;
     let mut table = "data".to_string();
     let mut sql = None;
     let mut sql_file = None;
@@ -56,6 +59,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--csv" => {
                 if csv.replace(PathBuf::from(value)).is_some() {
                     return Err(Error::Parse("duplicate --csv".into()));
+                }
+            }
+            "--parquet" => {
+                if parquet.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --parquet".into()));
                 }
             }
             "--table" => table = value,
@@ -83,7 +91,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
-    let csv = csv.ok_or_else(|| Error::Parse("--csv is required".into()))?;
+    if csv.is_some() == parquet.is_some() {
+        return Err(Error::Parse("choose exactly one of --csv or --parquet".into()));
+    }
+    if stream && parquet.is_some() {
+        return Err(Error::Unsupported("--stream currently supports CSV input only".into()));
+    }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
         (None, Some(path)) => fs::read_to_string(path)?,
@@ -92,7 +105,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, table, sql, stream, csv_schema }))
+    Ok(Some(Args { csv, parquet, table, sql, stream, csv_schema }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -184,7 +197,8 @@ fn run_stream(args: &Args) -> Result<()> {
         return Err(Error::Schema(format!("unknown table: {table}")));
     }
 
-    let input = BufReader::new(fs::File::open(&args.csv)?);
+    let path = args.csv.as_ref().ok_or_else(|| Error::Unsupported("streaming requires CSV input".into()))?;
+    let input = BufReader::new(fs::File::open(path)?);
     let csv = if let Some(spec) = &args.csv_schema {
         CsvStream::new_typed(input, 4_096, 1024 * 1024, parse_stream_schema(spec)?)?
     } else {
@@ -217,6 +231,31 @@ fn run_stream(args: &Args) -> Result<()> {
     Ok(())
 }
 
+const MAX_PARQUET_ROWS: usize = 1_000_000;
+
+fn read_parquet_bounded(path: &Path) -> Result<Batch> {
+    let mut schema: Option<Schema> = None;
+    let mut rows = Vec::new();
+    for next in parquet_scan::scan(path, 4_096)? {
+        let batch = next?;
+        if let Some(current) = &schema {
+            if current != batch.schema() {
+                return Err(Error::Schema("Parquet batch schema changed".into()));
+            }
+        } else {
+            schema = Some(batch.schema().clone());
+        }
+        let total = rows.len().checked_add(batch.num_rows())
+            .ok_or_else(|| Error::Execution("Parquet row count overflow".into()))?;
+        if total > MAX_PARQUET_ROWS {
+            return Err(Error::Execution("Parquet input exceeds native 1000000 row limit".into()));
+        }
+        rows.extend(batch.rows()?);
+    }
+    let schema = schema.ok_or_else(|| Error::Unsupported("empty Parquet data cannot yet be queried in the native CLI".into()))?;
+    Batch::from_rows(schema, rows)
+}
+
 fn run() -> Result<()> {
     let Some(args) = parse_args(env::args().skip(1))? else {
         println!("{}", usage());
@@ -226,7 +265,14 @@ fn run() -> Result<()> {
         return run_stream(&args);
     }
     let mut catalog = Catalog::new();
-    catalog.register(&args.table, csv::read_csv(&args.csv)?)?;
+    let data = if let Some(path) = &args.csv {
+        csv::read_csv(path)?
+    } else if let Some(path) = &args.parquet {
+        read_parquet_bounded(path)?
+    } else {
+        return Err(Error::Parse("missing input file".into()));
+    };
+    catalog.register(&args.table, data)?;
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
     let stdout = io::stdout();
@@ -256,6 +302,12 @@ mod tests {
         assert!(parse_args(args.into_iter().map(String::from)).is_err());
         let args = ["--csv", "data.csv", "--sql", "SELECT * FROM data"];
         assert!(parse_args(args.into_iter().map(String::from)).unwrap().is_some());
+        let args = ["--parquet", "data.parquet", "--sql", "SELECT * FROM data"];
+        assert!(parse_args(args.into_iter().map(String::from)).unwrap().is_some());
+        let args = ["--parquet", "data.parquet", "--csv", "data.csv", "--sql", "SELECT * FROM data"];
+        assert!(parse_args(args.into_iter().map(String::from)).is_err());
+        let args = ["--parquet", "data.parquet", "--sql", "SELECT * FROM data", "--stream"];
+        assert!(parse_args(args.into_iter().map(String::from)).is_err());
     }
 
     #[test]
