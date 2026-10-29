@@ -396,8 +396,8 @@ impl Parser {
             let _ = self.next();
             self.expect_symbol('(')?;
             let distinct = self.take_word("DISTINCT");
-            if distinct && function != "COUNT" {
-                return Err(Error::Unsupported("DISTINCT is only supported for COUNT".into()));
+            if distinct && !["COUNT", "SUM", "AVG"].contains(&function.as_str()) {
+                return Err(Error::Unsupported("DISTINCT is supported for COUNT, SUM and AVG".into()));
             }
             let op = if function == "COUNT" && !distinct && self.take_symbol('*') {
                 AggregateOp::CountAll
@@ -410,7 +410,9 @@ impl Parser {
                         branches: vec![(expr, Expr::Literal(Value::Integer(1)))],
                         else_expr: None,
                     }),
+                    "SUM" if distinct => AggregateOp::SumDistinct(expr),
                     "SUM" => AggregateOp::Sum(expr),
+                    "AVG" if distinct => AggregateOp::AvgDistinct(expr),
                     "AVG" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
