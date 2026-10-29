@@ -14,13 +14,17 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let Some(width) = super::integer(&args[1])? else { return Ok(Value::Null); };
     // Spark returns an empty string when length is zero or negative.
     let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
-    let result: String = if from_right {
-        let character_count = text.chars().count();
-        text.chars().skip(character_count.saturating_sub(count)).collect()
+    if count == 0 { return Ok(Value::Text(String::new())); }
+    let result = if from_right {
+        let start = text.char_indices().rev().nth(count - 1)
+            .map_or(0, |(offset, _)| offset);
+        &text[start..]
     } else {
-        text.chars().take(count).collect()
+        let end = text.char_indices().nth(count)
+            .map_or(text.len(), |(offset, _)| offset);
+        &text[..end]
     };
-    Ok(Value::Text(result))
+    Ok(Value::Text(result.to_owned()))
 }
 
 fn left(args: &[Value]) -> Result<Value> { slice(args, false) }
