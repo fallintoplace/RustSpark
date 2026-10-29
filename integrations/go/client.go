@@ -16,25 +16,7 @@ import (
     "strings"
 )
 
-var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*// Package rustsparklocal invokes the local RustSpark CLI with typed bindings.
-// It is not a network driver and does not claim Spark API compatibility.
-package rustsparklocal
-
-import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "io"
-    "os/exec"
-    "regexp"
-    "sort"
-    "strconv"
-    "strings"
-)
-
-)
+var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\z`)
 
 var errOutputLimit = errors.New("RustSpark stdout exceeded MaxOutputBytes")
 
