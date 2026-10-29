@@ -13,8 +13,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     match json_path::lookup(Some(&doc), path)? {
         None | Some(serde_json::Value::Null) => Ok(Value::Null),
         Some(serde_json::Value::Object(map)) => {
-            let keys = map.keys().cloned().collect::<Vec<_>>();
-            Ok(Value::Text(serde_json::json!(keys).to_string()))
+            let keys = map.keys().collect::<Vec<_>>();
+            let encoded = serde_json::to_string(&keys)
+                .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
+            Ok(Value::Text(encoded))
         }
         _ => Err(Error::Type("JSON_OBJECT_KEYS requires an object".into())),
     }
@@ -35,5 +37,7 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text(r#"{"nested":{}}"#.into()),
             Value::Text("$.nested".into())]).unwrap(), Value::Text("[]".into()));
         assert!(evaluate(&[Value::Text("[]".into())]).is_err());
+        assert_eq!(evaluate(&[Value::Text(r#"{"x":1,"y":2,"z":3}"#.into())]).unwrap(),
+            Value::Text(r#"["x","y","z"]"#.into()));
     }
 }
