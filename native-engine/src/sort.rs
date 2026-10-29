@@ -55,6 +55,16 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
+    if let [key] = keys {
+        if let Expr::Column(name) = &key.expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            let mut indices = (0..batch.num_rows()).collect::<Vec<_>>();
+            indices.sort_by(|&left, &right| {
+                compare_values(&column[left], &column[right], key.descending, key.nulls_first)
+            });
+            return batch.take(&indices);
+        }
+    }
     let mut decorated = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         let values = keys
@@ -153,5 +163,26 @@ mod sort_key_preflight_regression {
         assert!(sort(&batch, &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
         assert_eq!(sort(&batch, &[SortKey::ascending(Expr::Column("x".into()))])
             .unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod single_column_sort_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn single_column_fast_path_preserves_stable_ties_and_nulls() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(2), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Integer(2), Value::Integer(3)],
+            vec![Value::Integer(1), Value::Integer(4)],
+        ]).unwrap();
+        let rows = sort(&input, &[SortKey::ascending(Expr::Column("SCORE".into()))]).unwrap().rows().unwrap();
+        assert_eq!(rows.iter().map(|r| r[1].clone()).collect::<Vec<_>>(),
+            vec![Value::Integer(2), Value::Integer(4), Value::Integer(1), Value::Integer(3)]);
     }
 }
