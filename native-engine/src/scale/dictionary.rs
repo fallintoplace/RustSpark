@@ -80,13 +80,18 @@ impl DictionaryColumn {
             return Err(Error::Execution("dictionary decode budget exceeded".into()));
         }
         let mut rows = Vec::with_capacity(self.indices.len());
-        for index in 0..self.indices.len() {
-            let value = self.value(index)?;
-            if let Value::Text(text) = &value {
-                used = used.checked_add(text.len())
-                    .filter(|bytes| *bytes <= max_bytes)
-                    .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
-            }
+        for code in &self.indices {
+            let value = match code {
+                None => Value::Null,
+                Some(id) => {
+                    let text = self.dictionary.get(*id as usize)
+                        .ok_or_else(|| Error::Execution("invalid dictionary code".into()))?;
+                    used = used.checked_add(text.len())
+                        .filter(|bytes| *bytes <= max_bytes)
+                        .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+                    Value::Text(text.clone())
+                }
+            };
             rows.push(value);
         }
         Ok(rows)
@@ -234,5 +239,21 @@ mod borrowed_dictionary_interning_perf_tests {
         let coded = DictionaryColumn::from_batch(&batch, "s", 2, 4096, 5).unwrap();
         assert_eq!(coded.distinct_count(), 2);
         assert_eq!(coded.decode().unwrap(), values);
+    }
+}
+
+#[cfg(test)]
+mod budget_before_decode_allocation_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+    #[test]
+    fn rejects_expansion_while_retaining_exact_valid_decoding() {
+        let large = "z".repeat(4_096);
+        let schema = Schema::new(vec![Field::new("v", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![vec![Value::Text(large.clone())], vec![Value::Null], vec![Value::Text(large.clone())]]).unwrap();
+        let dict = DictionaryColumn::from_batch(&input, "v", 1, 4_096, 3).unwrap();
+        let baseline = 3 * std::mem::size_of::<Value>();
+        assert!(dict.decode_with_budget(baseline + 8_191).is_err());
+        assert_eq!(dict.decode_with_budget(baseline + 8_192).unwrap(), vec![Value::Text(large.clone()), Value::Null, Value::Text(large)]);
     }
 }
