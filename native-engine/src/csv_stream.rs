@@ -168,7 +168,7 @@ impl<R: BufRead> Iterator for CsvStream<R> {
             self.exhausted = true;
             return Some(Err(error));
         }
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
         for _ in 0..self.batch_rows {
             match self.records.record() {
                 Ok(Some(fields)) => {
@@ -181,11 +181,11 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                         self.pending_error = Some(error);
                         break;
                     }
-                    let converted = fields.into_iter().enumerate().map(|(index, text)| {
+                    let converted = fields.into_iter().zip(self.schema.fields()).map(|(text, field)| {
                         if text.is_empty() {
                             return Ok(Value::Null);
                         }
-                        let kind = self.schema.field(index)?.data_type;
+                        let kind = field.data_type;
                         match kind {
                             DataType::Text => Ok(Value::Text(text)),
                             DataType::Boolean => {
