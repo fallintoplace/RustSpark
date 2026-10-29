@@ -10,7 +10,7 @@ use crate::{
 
 pub struct Pipeline<I> {
     source: I,
-    predicate: Option<Expr>,
+    predicates: Vec<Expr>,
     selections: Option<Vec<Selection>>,
     skip: usize,
     remaining: Option<usize>,
@@ -22,7 +22,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     pub fn new(source: I) -> Self {
         Self {
             source,
-            predicate: None,
+            predicates: Vec::new(),
             selections: None,
             skip: 0,
             remaining: None,
@@ -32,7 +32,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     }
 
     pub fn with_filter(mut self, predicate: Expr) -> Self {
-        self.predicate = Some(predicate);
+        self.predicates.push(predicate);
         self
     }
 
@@ -76,7 +76,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 if let Some(metrics) = &self.metrics {
                     metrics.record_input(batch.num_rows() as u64)?;
                 }
-                if let Some(predicate) = &self.predicate {
+                for predicate in &self.predicates {
                     batch = filter::filter(&batch, predicate)?;
                 }
                 if let Some(selections) = &self.selections {
@@ -155,5 +155,29 @@ mod tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(results[0].num_rows(), 2);
         assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod chained_filter_pipeline_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn multiple_filters_preserve_all_where_conditions() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap(),
+            (0..7).map(|n| vec![Value::Integer(n)]).collect()
+        ).unwrap();
+        let gt = Expr::binary(Expr::Column("value".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(2)));
+        let lt = Expr::binary(Expr::Column("value".into()),
+            BinaryOp::Less, Expr::Literal(Value::Integer(5)));
+        let result = Pipeline::new([Ok(batch)].into_iter())
+            .with_filter(gt).with_filter(lt)
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result[0].rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(4)]
+        ]);
     }
 }
