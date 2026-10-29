@@ -168,6 +168,31 @@ fn position(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(index + 1))
 }
 
+fn substr_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text, DataType::Integer]
+        || types == [DataType::Text, DataType::Integer, DataType::Integer] {
+        Ok(DataType::Text)
+    } else {
+        Err(Error::Type("SUBSTR requires text, integer start, optional integer length".into()))
+    }
+}
+fn substr(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(position) = super::integer(&args[1])? else { return Ok(Value::Null); };
+    let count = if args.len() == 3 {
+        let Some(length) = super::integer(&args[2])? else { return Ok(Value::Null); };
+        usize::try_from(length).map_err(|_| Error::Execution("SUBSTR length must be nonnegative".into()))?
+    } else { usize::MAX };
+    let total_chars = text.chars().count();
+    let start = if position < 0 {
+        let back = usize::try_from(position.unsigned_abs()).unwrap_or(usize::MAX);
+        total_chars.saturating_sub(back)
+    } else {
+        usize::try_from(position.saturating_sub(1)).unwrap_or(usize::MAX)
+    };
+    Ok(Value::Text(text.chars().skip(start).take(count).collect()))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -184,6 +209,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "substring_index", min_args: 3, max_args: 3, result_type: substring_index_type, call: substring_index },
     Function { name: "find_in_set", min_args: 2, max_args: 2, result_type: two_text_integer_type, call: find_in_set },
     Function { name: "position", min_args: 2, max_args: 3, result_type: position_type, call: position },
+    Function { name: "substr", min_args: 2, max_args: 3, result_type: substr_type, call: substr },
     // PARITY_FUNCTIONS
 ];
 
@@ -296,6 +322,14 @@ mod tests {
         assert_eq!(sql_result("position('a', 'banana', 4)").unwrap(), Value::Integer(4));
         assert_eq!(sql_result("position('x', s)").unwrap(), Value::Integer(0));
         assert_eq!(position(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_substr_supports_optional_length_and_negative_start() {
+        assert_eq!(sql_result("substr('Spark SQL', -3)").unwrap(), Value::Text("SQL".into()));
+        assert_eq!(sql_result("substr(s, 2, 2)").unwrap(), Value::Text("af".into()));
+        assert_eq!(sql_result("substr(s, 0, 2)").unwrap(), Value::Text("ca".into()));
+        assert!(sql_result("substr(s, 1, -1)").is_err());
     }
 
     // PARITY_TESTS
