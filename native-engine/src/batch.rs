@@ -99,14 +99,12 @@ impl Batch {
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
             for &row in indices {
-                let value = column.get(row).ok_or_else(|| {
-                    Error::Execution(format!("row index out of bounds: {row}"))
-                })?;
-                selected.push(value.clone());
+                selected.push(column[row].clone());
             }
             columns.push(selected);
         }
-        Self::new_with_row_count(self.schema.clone(), columns, indices.len())
+        // The input already satisfies the schema and all indices were checked above.
+        Ok(Self { schema: self.schema.clone(), columns, rows: indices.len() })
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
