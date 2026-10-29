@@ -307,6 +307,16 @@ fn positive(args: &[Value]) -> Result<Value> {
     }
 }
 
+fn negative(args: &[Value]) -> Result<Value> {
+    match &args[0] {
+        Value::Integer(number) => number.checked_neg().map(Value::Integer)
+            .ok_or_else(|| Error::Execution("NEGATIVE integer overflow".into())),
+        Value::Float(number) => super::finite(-number),
+        Value::Null => Ok(Value::Null),
+        _ => Err(Error::Type("NEGATIVE requires numeric input".into())),
+    }
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -333,6 +343,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "csc", min_args: 1, max_args: 1, result_type: number_float_type, call: csc },
     Function { name: "bin", min_args: 1, max_args: 1, result_type: bin_type, call: bin },
     Function { name: "positive", min_args: 1, max_args: 1, result_type: same_numeric_type, call: positive },
+    Function { name: "negative", min_args: 1, max_args: 1, result_type: same_numeric_type, call: negative },
     // PARITY_FUNCTIONS
 ];
 
@@ -517,6 +528,13 @@ mod tests {
     fn spark_positive_preserves_value_and_type() {
         assert_eq!(sql_result("positive(-5)").unwrap(), Value::Integer(-5));
         assert_eq!(positive(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_negative_checked_negation() {
+        assert_eq!(sql_result("negative(5)").unwrap(), Value::Integer(-5));
+        assert_eq!(negative(&[Value::Null]).unwrap(), Value::Null);
+        assert!(negative(&[Value::Integer(i64::MIN)]).is_err());
     }
 
     // PARITY_TESTS
