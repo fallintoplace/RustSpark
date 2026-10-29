@@ -8,7 +8,7 @@ export class RustSparkError extends Error {
 }
 
 function addNamedTables(args, flag, tables = {}) {
-  for (const [table, path] of Object.entries(tables)) {
+  for (const [table, path] of Object.entries(tables).sort(([a], [b]) => a.localeCompare(b, "en"))) {
     if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table) || typeof path !== "string") {
       throw new TypeError("Table names must be SQL identifiers and paths must be strings");
     }
@@ -26,11 +26,14 @@ export class RustSpark {
   query(sql, {
     input, csv, parquet, json,
     csvTables, parquetTables, jsonTables,
-    namedParams, maxRows, queryTimeout, processTimeoutMs,
+    namedParams, sqlFile, maxRows, queryTimeout, processTimeoutMs,
     maxOutputBytes = 64 * 1024 * 1024,
   } = {}) {
-    if (typeof sql !== "string" || !sql.trim()) {
-      throw new TypeError("SQL must be a nonempty string");
+    if (typeof sql !== "string" || (sql.trim() === "") === (sqlFile === undefined)) {
+      throw new TypeError("Provide exactly one nonempty SQL string or sqlFile");
+    }
+    if (sqlFile !== undefined && (typeof sqlFile !== "string" || sqlFile.trim() === "")) {
+      throw new TypeError("sqlFile must be a nonempty file path");
     }
     const unnamed = { input, csv, parquet, json };
     const selected = Object.values(unnamed).filter((value) => value != null);
@@ -52,7 +55,7 @@ export class RustSpark {
       throw new RangeError("maxOutputBytes must be positive");
     }
 
-    const args = ["--sql", sql, "--stdout-format", "json-array"];
+    const args = sqlFile !== undefined ? ["--sql-file", sqlFile, "--stdout-format", "json-array"] : ["--sql", sql, "--stdout-format", "json-array"];
     if (this.databaseDir !== null) args.push("--database-dir", String(this.databaseDir));
     for (const [key, value] of Object.entries(unnamed)) {
       if (value !== undefined && value !== null) args.push(`--${key}`, String(value));
@@ -60,7 +63,7 @@ export class RustSpark {
     addNamedTables(args, "--csv-table", csvTables);
     addNamedTables(args, "--parquet-table", parquetTables);
     addNamedTables(args, "--json-table", jsonTables);
-    for (const [name, value] of Object.entries(namedParams ?? {})) {
+    for (const [name, value] of Object.entries(namedParams ?? {}).sort(([a], [b]) => a.localeCompare(b, "en"))) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== "string" || !value.includes(":")) {
         throw new TypeError(`Invalid typed SQL parameter: ${name}`);
       }
@@ -90,5 +93,13 @@ export class RustSpark {
       throw new RustSparkError("RustSpark returned an unexpected JSON result");
     }
     return rows;
+  }
+  queryOne(sql, options = {}) {
+    if (options.maxRows !== undefined) {
+      throw new TypeError("queryOne sets maxRows automatically");
+    }
+    const rows = this.query(sql, { ...options, maxRows: 2 });
+    if (rows.length > 1) throw new RustSparkError("queryOne expected at most one row");
+    return rows[0] ?? null;
   }
 }
