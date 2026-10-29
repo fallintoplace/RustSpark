@@ -42,6 +42,11 @@ fn common_suffix_type(types: &[DataType]) -> Result<DataType> { super::text_type
 fn common_suffix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left.is_ascii() && right.is_ascii() {
+        let shared = left.bytes().rev().zip(right.bytes().rev())
+            .take_while(|(first, second)| first == second).count();
+        return Ok(Value::Text(left[left.len() - shared..].to_owned()));
+    }
     let mut start = left.len();
     for ((offset, first), (_, second)) in left.char_indices().rev().zip(right.char_indices().rev()) {
         if first != second { break; }
@@ -116,5 +121,19 @@ mod common_suffix_extension_tests {
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod common_ascii_suffix_tests {
+    use super::*;
+    #[test]
+    fn ascii_suffixes_and_unicode_remain_correct() {
+        let tail = "xyz".repeat(1000);
+        let left = Value::Text(format!("a{tail}"));
+        let right = Value::Text(format!("b{tail}"));
+        assert_eq!(common_suffix(&[left, right]).unwrap(), Value::Text(tail));
+        assert_eq!(common_suffix(&[Value::Text("ab🙂é".into()), Value::Text("cd🙂é".into())]).unwrap(),
+            Value::Text("🙂é".into()));
     }
 }
