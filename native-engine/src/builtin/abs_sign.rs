@@ -22,6 +22,7 @@ fn sign(args: &[Value]) -> Result<Value> {
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "abs", min_args: 1, max_args: 1, result_type: abs_type, call: abs },
     Function { name: "sign", min_args: 1, max_args: 1, result_type: float_type, call: sign },
+    Function { name: "signum", min_args: 1, max_args: 1, result_type: float_type, call: sign },
 ];
 
 #[cfg(test)]
@@ -34,5 +35,13 @@ mod tests {
         assert_eq!(sign(&[Value::Integer(-12)]).unwrap(), Value::Float(-1.0));
         assert_eq!(sign(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(sign(&[Value::Integer(0)]).unwrap(), Value::Float(0.0));
+    }
+}
+
+#[cfg(test)]
+mod signum_alias_tests {
+    #[test]
+    fn spark_signum_is_registered() {
+        assert!(crate::builtin::supports("signum"));
     }
 }
