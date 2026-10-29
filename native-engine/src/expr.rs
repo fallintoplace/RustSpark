@@ -61,8 +61,16 @@ impl Expr {
                 Value::Integer(_) => DataType::Integer,
                 Value::Float(_) => DataType::Float,
             }),
-            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
-            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::Not(inner) => {
+                if matches!(inner.as_ref(), Expr::Literal(Value::Null))
+                    || inner.output_type(schema)? == DataType::Boolean {
+                    Ok(DataType::Boolean)
+                } else {
+                    Err(Error::Type("NOT requires a boolean operand".into()))
+                }
+            },
+            Self::IsNull(_) | Self::Like { .. } | Self::IsDistinctFrom { .. } =>
+                Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -350,5 +358,25 @@ mod division_type_preflight_tests {
         let valid = Expr::binary(Expr::Column("price".into()),
             BinaryOp::Divide, Expr::Literal(Value::Integer(2)));
         assert_eq!(valid.output_type(&schema).unwrap(), DataType::Float);
+    }
+}
+
+#[cfg(test)]
+mod not_type_preflight_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn not_rejects_integer_and_unknown_columns_even_without_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("flag", DataType::Boolean, true),
+        ]).unwrap();
+        assert!(Expr::Not(Box::new(Expr::Column("n".into()))).output_type(&schema).is_err());
+        assert!(Expr::Not(Box::new(Expr::Column("missing".into()))).output_type(&schema).is_err());
+        assert_eq!(Expr::Not(Box::new(Expr::Column("flag".into())))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert_eq!(Expr::Not(Box::new(Expr::Literal(Value::Null)))
+            .output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
