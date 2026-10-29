@@ -117,9 +117,16 @@ impl Expr {
                 | BinaryOp::Less
                 | BinaryOp::LessEqual
                 | BinaryOp::Greater
-                | BinaryOp::GreaterEqual
-                | BinaryOp::And
-                | BinaryOp::Or => Ok(DataType::Boolean),
+                | BinaryOp::GreaterEqual => Ok(DataType::Boolean),
+                BinaryOp::And | BinaryOp::Or => {
+                    for operand in [left.as_ref(), right.as_ref()] {
+                        if !matches!(operand, Expr::Literal(Value::Null))
+                            && operand.output_type(schema)? != DataType::Boolean {
+                            return Err(Error::Type("AND/OR require boolean operands".into()));
+                        }
+                    }
+                    Ok(DataType::Boolean)
+                },
                 BinaryOp::Divide => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
@@ -465,5 +472,25 @@ mod distinct_from_type_regression {
             .output_type(&schema).is_err());
         assert_eq!(distinct(Expr::Column("n".into()), Expr::Literal(Value::Null))
             .output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod logic_type_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn logical_operators_reject_numeric_and_unknown_operands() {
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true),
+            Field::new("n", DataType::Integer, false)]).unwrap();
+        for op in [BinaryOp::And, BinaryOp::Or] {
+            assert!(Expr::binary(Expr::Column("flag".into()), op,
+                Expr::Column("n".into())).output_type(&schema).is_err());
+            assert!(Expr::binary(Expr::Literal(Value::Boolean(false)), op,
+                Expr::Column("missing".into())).output_type(&schema).is_err());
+            assert_eq!(Expr::binary(Expr::Column("flag".into()), op,
+                Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
+        }
     }
 }
