@@ -122,7 +122,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
         "BIT_COUNT" => bit_count::output_type(args, schema),
         "BIT_GET" => bit_get::output_type(args, schema),
-        _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
+        _ => crate::builtin::output_type(name, args, schema),
     }
 }
 
@@ -147,7 +147,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
         "BIT_COUNT" => bit_count::eval(args, batch, row),
         "BIT_GET" => bit_get::eval(args, batch, row),
-        _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
+        _ => crate::builtin::evaluate(name, args, batch, row),
     }
 }
 

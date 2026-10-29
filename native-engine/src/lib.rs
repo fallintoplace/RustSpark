@@ -21,6 +21,8 @@ pub mod catalog;
 pub mod expr;
 
 mod functions;
+/// Additional typed native scalar built-ins.
+pub mod builtin;
 
 pub mod filter;
 
