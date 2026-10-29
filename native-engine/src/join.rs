@@ -80,10 +80,10 @@ pub fn hash_join(
     let left_keys = left.column(left_column)?;
     let right_keys = right.column(right_column)?;
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-        let mut keys = HashSet::new();
+        let mut keys: HashSet<&Value> = HashSet::with_capacity(right.num_rows());
         for row in 0..right.num_rows() {
             let key = &right_keys[row];
-            if joinable(key) { keys.insert(key.clone()); }
+            if joinable(key) { keys.insert(key); }
         }
         let mut indices = Vec::new();
         for row in 0..left.num_rows() {
@@ -275,5 +275,22 @@ mod one_to_many_join_perf_tests {
         let joined = hash_join(&left, &right, "id", "key", JoinKind::Inner).unwrap();
         assert_eq!(joined.num_rows(), 3);
         assert!(joined.rows().unwrap().iter().all(|row| row[1] == Value::Text("hello".into())));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_semi_join_keys_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn avoids_materialization_without_changing_null_or_duplicate_results() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, true)]).unwrap();
+        let long = "large-key".repeat(500);
+        let left = Batch::from_rows(schema.clone(), vec![vec![Value::Text(long.clone())], vec![Value::Null], vec![Value::Text("other".into())], vec![Value::Text(long.clone())]]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Text(long.clone())], vec![Value::Text(long.clone())]]).unwrap();
+        assert_eq!(hash_join(&left, &right, "k", "k", JoinKind::Semi).unwrap().rows().unwrap(),
+            vec![vec![Value::Text(long.clone())], vec![Value::Text(long.clone())]]);
+        assert_eq!(hash_join(&left, &right, "k", "k", JoinKind::Anti).unwrap().rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Text("other".into())]]);
     }
 }
