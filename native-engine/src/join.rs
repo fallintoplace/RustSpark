@@ -97,7 +97,7 @@ pub fn hash_join_using(left: &Batch, right: &Batch, keys: &[String], kind: JoinK
         }
     }
     let compose = |lhs: Option<&[Value]>, rhs: Option<&[Value]>| {
-        let mut result = Vec::with_capacity(fields.len());
+        let mut result = Vec::with_capacity(schema.len());
         for (&li, &ri) in left_keys.iter().zip(&right_keys) {
             result.push(lhs.and_then(|row| row.get(li)).filter(|v| !v.is_null())
                 .or_else(|| rhs.and_then(|row| row.get(ri)))
