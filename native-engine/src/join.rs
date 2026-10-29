@@ -313,3 +313,114 @@ mod borrowed_join_key_perf_tests {
         assert_eq!(outer.row(2).unwrap(), vec![Value::Null, Value::Null]);
     }
 }
+
+pub struct PreparedHashJoin<'a> {
+    right: &'a Batch,
+    left_schema: Schema,
+    left_column: usize,
+    kind: JoinKind,
+    output_schema: Schema,
+    right_hash: HashMap<&'a Value, Vec<usize>>,
+}
+
+impl<'a> PreparedHashJoin<'a> {
+    pub fn new(
+        left_schema: Schema, right: &'a Batch,
+        left_key: &str, right_key: &str, kind: JoinKind,
+    ) -> Result<Self> {
+        if matches!(kind, JoinKind::Right | JoinKind::Full) {
+            return Err(Error::Unsupported("prepared hash join needs a probe-side join kind".into()));
+        }
+        let left_column = left_schema.column(left_key)?;
+        let right_column = right.schema().column(right_key)?;
+        if left_schema.field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
+            return Err(Error::Type("join key types must match".into()));
+        }
+        let output_schema = hash_join(
+            &Batch::empty(left_schema.clone()), &Batch::empty(right.schema().clone()),
+            left_key, right_key, kind,
+        )?.schema().clone();
+        let mut right_hash: HashMap<&Value, Vec<usize>> = HashMap::new();
+        for (row, key) in right.column(right_column)?.iter().enumerate() {
+            if joinable(key) { right_hash.entry(key).or_default().push(row); }
+        }
+        Ok(Self { right, left_schema, left_column, kind, output_schema, right_hash })
+    }
+
+    pub fn probe(&self, left: &Batch) -> Result<Batch> {
+        if left.schema() != &self.left_schema {
+            return Err(Error::Schema("prepared join probe schema mismatch".into()));
+        }
+        if matches!(self.kind, JoinKind::Semi | JoinKind::Anti) {
+            let mut selected = Vec::new();
+            for row in 0..left.num_rows() {
+                let key = left.value(row, self.left_column)?;
+                let matched = joinable(key) && self.right_hash.contains_key(key);
+                if (self.kind == JoinKind::Semi && matched) ||
+                    (self.kind == JoinKind::Anti && !matched) {
+                    if selected.len() >= MAX_JOIN_ROWS {
+                        return Err(Error::Execution("join output exceeds safety limit".into()));
+                    }
+                    selected.push(row);
+                }
+            }
+            return left.take(&selected);
+        }
+        let mut rows = Vec::new();
+        for left_row in 0..left.num_rows() {
+            let key = left.value(left_row, self.left_column)?;
+            let matches = if joinable(key) { self.right_hash.get(key) } else { None };
+            if let Some(right_rows) = matches {
+                // Materialize the probe row once, not once per matching build row.
+                let prefix = left.row(left_row)?;
+                for &right_row in right_rows {
+                    if rows.len() >= MAX_JOIN_ROWS {
+                        return Err(Error::Execution("join output exceeds safety limit".into()));
+                    }
+                    let mut output = prefix.clone();
+                    output.extend(self.right.row(right_row)?);
+                    rows.push(output);
+                }
+            } else if self.kind == JoinKind::Left {
+                if rows.len() >= MAX_JOIN_ROWS {
+                    return Err(Error::Execution("join output exceeds safety limit".into()));
+                }
+                let mut output = left.row(left_row)?;
+                output.extend(std::iter::repeat_n(Value::Null, self.right.schema().len()));
+                rows.push(output);
+            }
+        }
+        Batch::from_rows(self.output_schema.clone(), rows)
+    }
+}
+
+#[cfg(test)]
+mod prepared_hash_join_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn prepared_batches_match_regular_join_for_all_probe_kinds() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let key = "repeated-long-key".repeat(30);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(key.clone())], vec![Value::Null],
+            vec![Value::Text("absent".into())], vec![Value::Text(key.clone())],
+            vec![Value::Text("other".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text(key.clone())], vec![Value::Text(key.clone())],
+            vec![Value::Null], vec![Value::Text("other".into())],
+        ]).unwrap();
+        for kind in [JoinKind::Inner, JoinKind::Left, JoinKind::Semi, JoinKind::Anti] {
+            let prepared = PreparedHashJoin::new(left.schema().clone(), &right, "key", "key", kind).unwrap();
+            let a = left.slice_rows(0, 2).unwrap();
+            let b = left.slice_rows(2, 5).unwrap();
+            let mut actual = prepared.probe(&a).unwrap().rows().unwrap();
+            actual.extend(prepared.probe(&b).unwrap().rows().unwrap());
+            let expected = hash_join(&left, &right, "key", "key", kind).unwrap();
+            assert_eq!(actual, expected.rows().unwrap(), "kind: {kind:?}");
+            assert!(prepared.probe(&Batch::empty(Schema::new(vec![]).unwrap())).is_err());
+        }
+    }
+}

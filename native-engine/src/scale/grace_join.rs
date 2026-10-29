@@ -122,6 +122,10 @@ where L: IntoIterator<Item = Result<Batch>>,
             JoinKind::Full => JoinKind::Left,
             other => other,
         };
+        // Build the hash index once per shard, not for each probe chunk.
+        let prepared = join::PreparedHashJoin::new(
+            left_schema.clone(), &build, left_key, right_key, probe_kind,
+        )?;
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
             for piece in BatchChunks::new(&batch, io_batch_rows.min(256))? {
@@ -138,7 +142,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                         }
                     }
                 }
-                let joined = join::hash_join(&piece, &build, left_key, right_key, probe_kind)?;
+                let joined = prepared.probe(&piece)?;
                 for output_chunk in BatchChunks::new(&joined, io_batch_rows)? {
                     let output_chunk = output_chunk?;
                     if output_chunk.num_rows() != 0 {
