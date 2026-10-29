@@ -6,7 +6,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowKind { RowNumber, Rank, DenseRank }
+pub enum WindowKind { RowNumber, Rank, DenseRank, Lag, Lead }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSpec {
@@ -14,6 +14,9 @@ pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     pub order_by: Vec<SortKey>,
     pub alias: String,
+    pub argument: Option<Expr>,
+    pub offset: usize,
+    pub default: Option<Expr>,
 }
 
 fn compare_keys(left: &[Value], right: &[Value], keys: &[SortKey]) -> Ordering {
@@ -36,6 +39,16 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
         }
         for expr in &spec.partition_by { expr.output_type(input.schema())?; }
         for key in &spec.order_by { key.expression.output_type(input.schema())?; }
+        let result_type = if let Some(argument) = &spec.argument {
+            let ty = argument.output_type(input.schema())?;
+            if let Some(default) = &spec.default {
+                let default_type = default.output_type(input.schema())?;
+                if default_type != ty && !matches!(default, Expr::Literal(Value::Null)) {
+                    return Err(Error::Type("LAG/LEAD default must match argument type".into()));
+                }
+            }
+            ty
+        } else { DataType::Integer };
         let mut partitions: HashMap<Vec<Value>, Vec<(usize, Vec<Value>)>> = HashMap::new();
         for row in 0..input.num_rows() {
             let group_key = spec.partition_by.iter()
@@ -47,6 +60,27 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
         let mut result = vec![Value::Null; input.num_rows()];
         for mut partition in partitions.into_values() {
             partition.sort_by(|(_, left), (_, right)| compare_keys(left, right, &spec.order_by));
+            if matches!(spec.kind, WindowKind::Lag | WindowKind::Lead) {
+                let argument = spec.argument.as_ref().ok_or_else(||
+                    Error::Execution("LAG/LEAD requires a value expression".into()))?;
+                for position in 0..partition.len() {
+                    let row = partition[position].0;
+                    let target = match spec.kind {
+                        WindowKind::Lag => position.checked_sub(spec.offset),
+                        WindowKind::Lead => position.checked_add(spec.offset)
+                            .filter(|next| *next < partition.len()),
+                        _ => unreachable!(),
+                    };
+                    result[row] = if let Some(index) = target {
+                        argument.evaluate(input, partition[index].0)?
+                    } else if let Some(default) = &spec.default {
+                        default.evaluate(input, row)?
+                    } else {
+                        Value::Null
+                    };
+                }
+                continue;
+            }
             let mut rank = 1usize;
             let mut dense_rank = 1usize;
             let mut last: Option<Vec<Value>> = None;
@@ -61,6 +95,7 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
                     WindowKind::RowNumber => position + 1,
                     WindowKind::Rank => rank,
                     WindowKind::DenseRank => dense_rank,
+                    WindowKind::Lag | WindowKind::Lead => unreachable!("navigation handled above"),
                 };
                 result[row] = Value::Integer(i64::try_from(number)
                     .map_err(|_| Error::Execution("ranking index overflow".into()))?);
@@ -68,7 +103,8 @@ pub fn evaluate(input: &Batch, specs: &[WindowSpec]) -> Result<Batch> {
             }
         }
         let mut fields = output.schema().fields().to_vec();
-        fields.push(Field::new(&spec.alias, DataType::Integer, false));
+        fields.push(Field::new(&spec.alias, result_type,
+            matches!(spec.kind, WindowKind::Lag | WindowKind::Lead)));
         let schema = Schema::new(fields)?;
         let mut rows = output.rows()?;
         for (row, value) in rows.iter_mut().zip(result) { row.push(value); }
