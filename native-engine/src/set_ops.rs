@@ -100,8 +100,9 @@ fn right_counts(
         let at_limit = counts.len() >= max_distinct_keys;
         match counts.entry(row) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                *entry.get_mut() = entry.get().checked_add(1)
+                let next = entry.get().checked_add(1)
                     .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+                *entry.get_mut() = next;
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if at_limit {
