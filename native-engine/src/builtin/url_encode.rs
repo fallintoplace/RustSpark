@@ -9,6 +9,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > MAX_OUTPUT_BYTES {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
+    if text.bytes().all(|byte| matches!(byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*'
+    )) {
+        return Ok(Value::Text(text.to_owned()));
+    }
     let mut encoded = String::with_capacity(text.len());
     for &byte in text.as_bytes() {
         let escaped = !matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ');
@@ -43,5 +48,19 @@ mod tests {
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(evaluate(&[Value::Text("🙂".repeat(1_400_000))]).is_err());
         assert!(evaluate(&[Value::Text("a".repeat(MAX_OUTPUT_BYTES + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod safe_ascii_url_encode_tests {
+    use super::*;
+    #[test]
+    fn copies_safe_identifier_bytes_without_changing_escape_semantics() {
+        let safe = "A_b-Z.9*".repeat(4096);
+        assert_eq!(evaluate(&[Value::Text(safe.clone())]).unwrap(), Value::Text(safe));
+        assert_eq!(evaluate(&[Value::Text("a b+c".into())]).unwrap(),
+            Value::Text("a+b%2Bc".into()));
+        assert_eq!(evaluate(&[Value::Text("é".into())]).unwrap(),
+            Value::Text("%C3%A9".into()));
     }
 }
