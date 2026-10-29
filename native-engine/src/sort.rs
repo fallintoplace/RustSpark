@@ -55,6 +55,17 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
+    if keys.len() == 1 {
+        if let Expr::Column(name) = &keys[0].expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            let key = &keys[0];
+            let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+            indices.sort_by(|&a, &b| {
+                compare_values(&column[a], &column[b], key.descending, key.nulls_first)
+            });
+            return batch.take(&indices);
+        }
+    }
     let mut decorated = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         let values = keys
