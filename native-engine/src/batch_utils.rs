@@ -19,19 +19,23 @@ pub fn concat(
     batches: impl IntoIterator<Item = Batch>,
     max_rows: usize,
 ) -> Result<Batch> {
-    let mut rows = Vec::new();
+    let mut columns: Vec<Vec<crate::scalar::Value>> =
+        (0..schema.len()).map(|_| Vec::new()).collect();
+    let mut total_rows = 0usize;
     for batch in batches {
         if batch.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
-        let total = rows.len().checked_add(batch.num_rows())
+        total_rows = total_rows.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
-        if total > max_rows {
+        if total_rows > max_rows {
             return Err(Error::Execution("batch collection row limit exceeded".into()));
         }
-        rows.extend(batch.rows()?);
+        for (index, column) in columns.iter_mut().enumerate() {
+            column.extend_from_slice(batch.column(index)?);
+        }
     }
-    Batch::from_rows(schema.clone(), rows)
+    Batch::new(schema.clone(), columns)
 }
 
 #[cfg(test)]
