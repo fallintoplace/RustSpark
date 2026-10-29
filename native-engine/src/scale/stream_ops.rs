@@ -21,9 +21,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
         loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                return Some(Err(error));
+            }
             let next = self.input.next()?;
-            let result = self.control.check().and_then(|_| next)
-                .and_then(|batch| filter::filter(&batch, &self.predicate));
+            let result = next.and_then(|batch| filter::filter(&batch, &self.predicate));
             match result {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
@@ -54,9 +57,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Err(error) = self.control.check() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         let next = self.input.next()?;
-        let result = self.control.check().and_then(|_| next)
-            .and_then(|batch| project::project(&batch, &self.selections));
+        let result = next.and_then(|batch| project::project(&batch, &self.selections));
         if result.is_err() { self.stopped = true; }
         Some(result)
     }
@@ -82,11 +88,11 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped || self.remaining == Some(0) { return None; }
         loop {
-            let next = self.input.next()?;
             if let Err(error) = self.control.check() {
                 self.stopped = true;
                 return Some(Err(error));
             }
+            let next = self.input.next()?;
             let batch = match next {
                 Ok(batch) => batch,
                 Err(error) => {
@@ -128,5 +134,27 @@ mod tests {
             vec![Value::Integer(10)], vec![Value::Integer(11)],
             vec![Value::Integer(12)], vec![Value::Integer(13)]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod cancelled_stream_poll_tests {
+    use super::*;
+
+    fn never_polled() -> impl Iterator<Item = Result<Batch>> {
+        std::iter::from_fn(|| panic!("canceled stream must not poll input"))
+    }
+
+    #[test]
+    fn canceled_operators_do_not_advance_the_source() {
+        let control = QueryControl::default();
+        control.cancel();
+        let mut filter = FilterStream::new(never_polled(),
+            Expr::Literal(crate::scalar::Value::Boolean(true)), control.clone());
+        assert!(filter.next().unwrap().is_err());
+        let mut project = ProjectStream::new(never_polled(), vec![], control.clone());
+        assert!(project.next().unwrap().is_err());
+        let mut limit = LimitStream::new(never_polled(), 0, Some(1), control);
+        assert!(limit.next().unwrap().is_err());
     }
 }
