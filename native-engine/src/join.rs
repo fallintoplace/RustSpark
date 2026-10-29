@@ -24,6 +24,44 @@ fn joinable(key: &Value) -> bool {
     !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
 }
 
+/// Join schemas must rename colliding right columns in a stable, case-insensitive way.
+fn combined_schema(left: &Batch, right: &Batch, kind: JoinKind) -> Result<Schema> {
+    let mut used: HashSet<String> = left.schema().fields().iter()
+        .map(|field| field.name.to_ascii_lowercase()).collect();
+    let mut fields = left.schema().fields().iter().map(|field| {
+        Field::new(&field.name, field.data_type,
+            field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
+    }).collect::<Vec<_>>();
+    for field in right.schema().fields() {
+        let mut name = field.name.clone();
+        while used.contains(&name.to_ascii_lowercase()) {
+            name = format!("right_{name}");
+        }
+        used.insert(name.to_ascii_lowercase());
+        fields.push(Field::new(name, field.data_type,
+            field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
+    }
+    Schema::new(fields)
+}
+
+/// Evaluate a bounded Cartesian product with checked cardinality before allocation.
+pub fn cross_join(left: &Batch, right: &Batch) -> Result<Batch> {
+    let schema = combined_schema(left, right, JoinKind::Inner)?;
+    let count = left.num_rows().checked_mul(right.num_rows())
+        .filter(|n| *n <= MAX_JOIN_ROWS)
+        .ok_or_else(|| Error::Execution("join output exceeds safety limit".into()))?;
+    let mut rows = Vec::with_capacity(count);
+    for left_row in 0..left.num_rows() {
+        let lhs = left.row(left_row)?;
+        for right_row in 0..right.num_rows() {
+            let mut combined = lhs.clone();
+            combined.extend(right.row(right_row)?);
+            rows.push(combined);
+        }
+    }
+    Batch::from_rows(schema, rows)
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
@@ -55,26 +93,7 @@ pub fn hash_join(
         }
         return left.take(&indices);
     }
-    let mut used: HashSet<String> = left
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.name.to_ascii_lowercase())
-        .collect();
-    let mut fields = left.schema().fields().iter().map(|field| {
-        Field::new(&field.name, field.data_type,
-            field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
-    }).collect::<Vec<_>>();
-    for field in right.schema().fields() {
-        let mut name = field.name.clone();
-        while used.contains(&name.to_ascii_lowercase()) {
-            name = format!("right_{name}");
-        }
-        used.insert(name.to_ascii_lowercase());
-        fields.push(Field::new(name, field.data_type,
-            field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
-    }
-    let schema = Schema::new(fields)?;
+    let schema = combined_schema(left, right, kind)?;
     if kind == JoinKind::Inner && (left.num_rows() == 0 || right.num_rows() == 0) {
         return Ok(Batch::empty(schema));
     }

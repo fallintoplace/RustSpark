@@ -84,6 +84,10 @@ pub fn optimize(plan: Plan) -> Plan {
                 Plan::Distinct { input: Box::new(child) }
             }
         }
+        Plan::CrossJoin { left, right } => Plan::CrossJoin {
+            left: Box::new(optimize(*left)),
+            right: Box::new(optimize(*right)),
+        },
         Plan::Join {
             left, right, left_key, right_key, kind,
         } => Plan::Join {

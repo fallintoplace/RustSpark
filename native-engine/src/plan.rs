@@ -37,6 +37,11 @@ pub enum Plan {
     Distinct {
         input: Box<Plan>,
     },
+    /// Explicit Cartesian product, bounded by the native join output budget.
+    CrossJoin {
+        left: Box<Plan>,
+        right: Box<Plan>,
+    },
     Join {
         left: Box<Plan>,
         right: Box<Plan>,
