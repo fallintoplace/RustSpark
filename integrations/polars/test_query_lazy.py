@@ -11,6 +11,13 @@ class PolarsCommandTests(unittest.TestCase):
         self.assertIn("/tmp/a b.csv", command)
         self.assertIn("--output-arrow", command)
 
+    def test_bounds_lazy_ipc_export_rows(self):
+        command = build_command("SELECT 1", Path("rows.arrow"), max_rows=25)
+        self.assertEqual(command[command.index("--max-rows") + 1], "25")
+        for invalid in (0, -1, True, 1.5):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                build_command("SELECT 1", Path("rows.arrow"), max_rows=invalid)
+
     def test_rejects_conflicting_sources(self):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")

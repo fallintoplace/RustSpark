@@ -10,7 +10,8 @@ from typing import Iterator
 
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | None = None, parquet: str | None = None,
-                  query_timeout: int | None = None) -> list[str]:
+                  query_timeout: int | None = None,
+                  max_rows: int | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be blank")
     if csv is not None and parquet is not None:
@@ -24,6 +25,10 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
         if query_timeout <= 0:
             raise ValueError("query_timeout must be positive")
         command.extend(["--query-timeout", str(query_timeout)])
+    if max_rows is not None:
+        if type(max_rows) is not int or max_rows < 1:
+            raise ValueError("max_rows must be a positive integer")
+        command.extend(["--max-rows", str(max_rows)])
     return command
 
 
@@ -31,6 +36,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                          csv: str | None = None, parquet: str | None = None,
                          query_timeout: int | None = None,
+                         max_rows: int | None = None,
                          temp_dir: str | None = None) -> Iterator[object]:
     """Export Arrow once and provide a lazy Polars scan while the file exists.
 
@@ -42,7 +48,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
         result = Path(directory) / "result.arrow"
         command = build_command(
             sql, result, binary=binary, csv=csv, parquet=parquet,
-            query_timeout=query_timeout,
+            query_timeout=query_timeout, max_rows=max_rows,
         )
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode:
