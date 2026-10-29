@@ -98,3 +98,80 @@ mod tests {
         assert!(scan(&source, None, &[], 0).is_err());
     }
 }
+
+
+/// A globally paginated native scan, maintaining offset across batch boundaries.
+pub struct WindowedScan<'a> {
+    inner: ScanCursor<'a>,
+    skip: usize,
+    remaining: usize,
+    stopped: bool,
+}
+
+pub fn scan_window<'a>(
+    source: &'a Batch,
+    predicate: Option<Expr>,
+    projected_columns: &[&str],
+    target_rows: usize,
+    offset: usize,
+    count: usize,
+) -> Result<WindowedScan<'a>> {
+    Ok(WindowedScan {
+        inner: scan(source, predicate, projected_columns, target_rows)?,
+        skip: offset,
+        remaining: count,
+        stopped: false,
+    })
+}
+
+impl Iterator for WindowedScan<'_> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped || self.remaining == 0 { return None; }
+        loop {
+            let batch = match self.inner.next()? {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            };
+            if self.skip >= batch.num_rows() {
+                self.skip -= batch.num_rows();
+                continue;
+            }
+            let available = batch.num_rows() - self.skip;
+            let count = self.remaining.min(available);
+            let offset = self.skip;
+            self.skip = 0;
+            self.remaining -= count;
+            return Some(crate::limit::limit(&batch, offset, Some(count)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod scan_window_feature_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn applies_global_offset_after_filtering_and_projects_rows() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), (0..12).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let filter = Expr::binary(Expr::Column("n".into()), crate::expr::BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(3)));
+        let result = scan_window(&source, Some(filter), &["n"], 2, 3, 4).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(6)], vec![Value::Integer(7)],
+            vec![Value::Integer(8)], vec![Value::Integer(9)]
+        ]);
+        assert_eq!(scan_window(&source, None, &[], 3, 0, 0).unwrap().count(), 0);
+        assert!(scan_window(&source, None, &[], 0, 0, 1).is_err());
+    }
+}
+
