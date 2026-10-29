@@ -6,10 +6,9 @@ fn output(types: &[DataType]) -> Result<DataType> {
     if types.len() == 2 && types[1] != DataType::Integer {
         return Err(Error::Type("BROUND scale must be an integer".into()));
     }
-    Ok(DataType::Float)
+    Ok(if types[0] == DataType::Integer { DataType::Integer } else { DataType::Float })
 }
 fn round_even(args: &[Value]) -> Result<Value> {
-    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
     let scale = if args.len() == 2 {
         let Some(scale) = super::integer(&args[1])? else { return Ok(Value::Null) };
         scale
@@ -17,16 +16,33 @@ fn round_even(args: &[Value]) -> Result<Value> {
     if !(-15..=15).contains(&scale) {
         return Err(Error::Execution("BROUND scale must be within [-15,15]".into()));
     }
-    if scale == 0 { return super::finite(x.round_ties_even()); }
+    if let Value::Integer(value) = args[0] {
+        if scale >= 0 { return Ok(Value::Integer(value)); }
+        let factor = 10_i128.pow((-scale) as u32);
+        let value = i128::from(value);
+        let magnitude = value.abs();
+        let quotient = magnitude / factor;
+        let remainder = magnitude % factor;
+        let increment = remainder > factor / 2 || (remainder == factor / 2 && quotient % 2 == 1);
+        let rounded = (quotient + i128::from(increment)) * factor * value.signum();
+        return i64::try_from(rounded).map(Value::Integer)
+            .map_err(|_| Error::Execution("BROUND integer overflow".into()));
+    }
+    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
     let factor = 10_f64.powi(scale.unsigned_abs() as i32);
     let result = if scale >= 0 { (x * factor).round_ties_even() / factor }
         else { (x / factor).round_ties_even() * factor };
     super::finite(result)
 }
-fn rint(args: &[Value]) -> Result<Value> { round_even(args) }
+fn rint(args: &[Value]) -> Result<Value> {
+    match super::number(&args[0])? {
+        Some(value) => super::finite(value.round_ties_even()),
+        None => Ok(Value::Null),
+    }
+}
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "bround", min_args: 1, max_args: 2, result_type: output, call: round_even },
-    Function { name: "rint", min_args: 1, max_args: 1, result_type: output, call: rint },
+    Function { name: "rint", min_args: 1, max_args: 1, result_type: float_type, call: rint },
 ];
 #[cfg(test)]
 mod tests {
@@ -41,5 +57,22 @@ mod tests {
             .unwrap(), Value::Float(-4.0));
         assert_eq!(round_even(&[Value::Float(125.0), Value::Integer(-1)]).unwrap(), Value::Float(120.0));
         assert_eq!(round_even(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bigint_bround_exactness_tests {
+    use super::*;
+    #[test]
+    fn round_even_preserves_bigint_and_rint_remains_float() {
+        assert_eq!(output(&[DataType::Integer]).unwrap(), DataType::Integer);
+        assert_eq!(round_even(&[Value::Integer(i64::MAX)]).unwrap(), Value::Integer(i64::MAX));
+        assert_eq!(round_even(&[Value::Integer(9_007_199_254_740_993), Value::Integer(2)]).unwrap(),
+            Value::Integer(9_007_199_254_740_993));
+        assert_eq!(round_even(&[Value::Integer(125), Value::Integer(-1)]).unwrap(), Value::Integer(120));
+        assert_eq!(round_even(&[Value::Integer(135), Value::Integer(-1)]).unwrap(), Value::Integer(140));
+        assert_eq!(round_even(&[Value::Integer(-125), Value::Integer(-1)]).unwrap(), Value::Integer(-120));
+        assert_eq!(rint(&[Value::Integer(3)]).unwrap(), Value::Float(3.0));
+        assert_eq!(rint(&[Value::Null]).unwrap(), Value::Null);
     }
 }
