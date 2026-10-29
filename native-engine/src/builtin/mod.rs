@@ -40,6 +40,7 @@ mod json_array_length;
 mod json_object_keys;
 mod json_exists;
 mod json_extract;
+mod regex_support;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
