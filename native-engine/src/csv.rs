@@ -67,6 +67,9 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
                         let _ = chars.next();
                     }
                     finish_record(&mut records, &mut row, &mut field);
+                    if records.len() > MAX_CSV_ROWS {
+                        return Err(Error::Execution("CSV row count limit exceeded".into()));
+                    }
                     state = State::Start;
                 }
                 '"' if state == State::Start => state = State::Quoted,
@@ -80,15 +83,15 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
                 }
             },
         }
-        if records.len() > MAX_CSV_ROWS {
-            return Err(Error::Execution("CSV row count limit exceeded".into()));
-        }
     }
     if state == State::Quoted {
         return Err(Error::Parse("unterminated CSV quote".into()));
     }
     if !row.is_empty() || !field.is_empty() || state == State::AfterQuote {
         finish_record(&mut records, &mut row, &mut field);
+    }
+    if records.len() > MAX_CSV_ROWS {
+        return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
     Ok(records)
 }
