@@ -33,3 +33,7 @@ streaming for large datasets. Persistent databases remain single-writer.
 ```sh
 cd integrations/go && go test ./...
 ```
+
+For large results, `QueryNDJSON(ctx, sql, opts, writer)` streams newline-delimited
+JSON objects to an `io.Writer` without materializing every row. Choose an
+output writer with an appropriate byte budget for untrusted data.

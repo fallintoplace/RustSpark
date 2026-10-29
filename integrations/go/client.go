@@ -124,3 +124,29 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     }
     return nil, errors.New("unexpected additional JSON output")
 }
+
+// QueryNDJSON streams newline-delimited JSON rows to output without storing
+// them in memory. The caller is responsible for JSON parsing and byte limits.
+// An output write failure stops the query subprocess.
+func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, output io.Writer) error {
+    if output == nil { return errors.New("NDJSON output writer must not be nil") }
+    args, err := c.arguments(sql, opts)
+    if err != nil { return err }
+    for index := 0; index+1 < len(args); index++ {
+        if args[index] == "--stdout-format" {
+            args[index+1] = "json"
+            break
+        }
+    }
+    binary := c.Binary
+    if binary == "" { binary = "rustspark" }
+    command := exec.CommandContext(ctx, binary, args...)
+    command.Stdout = output
+    var stderr bytes.Buffer
+    command.Stderr = &stderr
+    if err := command.Run(); err != nil {
+        if ctx.Err() != nil { return ctx.Err() }
+        return fmt.Errorf("RustSpark NDJSON query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+    }
+    return nil
+}
