@@ -77,9 +77,15 @@ where I: IntoIterator<Item = Result<Batch>>
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         result.paths.push(path);
         let mut output = SpillWriter::new(BufWriter::new(file), schema.clone())?;
-        let unique = Batch::from_rows(schema.clone(), seen.into_iter().collect())?;
-        for part in BatchChunks::new(&unique, io_batch_rows)? {
-            output.write_batch(&part?)?;
+        let mut pending = Vec::with_capacity(io_batch_rows.min(seen.len()));
+        for row in seen {
+            pending.push(row);
+            if pending.len() == io_batch_rows {
+                output.write_batch(&Batch::from_rows(schema.clone(), std::mem::take(&mut pending))?)?;
+            }
+        }
+        if !pending.is_empty() {
+            output.write_batch(&Batch::from_rows(schema.clone(), pending)?)?;
         }
         output.finish()?;
     }
