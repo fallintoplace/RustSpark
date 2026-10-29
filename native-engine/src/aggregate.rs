@@ -179,6 +179,15 @@ pub fn aggregate(
     group_by: &[(Expr, String)],
     items: &[AggregateItem],
 ) -> Result<Batch> {
+    aggregate_with_max_groups(batch, group_by, items, 1_000_000)
+}
+
+pub fn aggregate_with_max_groups(
+    batch: &Batch,
+    group_by: &[(Expr, String)],
+    items: &[AggregateItem],
+    max_groups: usize,
+) -> Result<Batch> {
     let mut fields = Vec::with_capacity(group_by.len() + items.len());
     for (expr, alias) in group_by {
         fields.push(Field::new(alias, expr.output_type(batch.schema())?, true));
@@ -193,6 +202,9 @@ pub fn aggregate(
     let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
 
     if batch.num_rows() == 0 && group_by.is_empty() {
+        if max_groups == 0 {
+            return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+        }
         groups.push((Vec::new(), items.iter().map(|item| State::new(&item.op)).collect()));
     }
     for row in 0..batch.num_rows() {
@@ -203,6 +215,9 @@ pub fn aggregate(
         let index = if let Some(index) = group_indices.get(&key) {
             *index
         } else {
+            if groups.len() >= max_groups {
+                return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
+            }
             let index = groups.len();
             let _ = group_indices.insert(key.clone(), index);
             groups.push((key, items.iter().map(|item| State::new(&item.op)).collect()));
@@ -225,6 +240,18 @@ pub fn aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_cardinality_guard_rejects_before_new_group_allocation() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            (0..4).map(|value| vec![Value::Integer(value)]).collect(),
+        ).unwrap();
+        let key = [(Expr::Column("id".into()), "key".into())];
+        assert!(aggregate_with_max_groups(&input, &key, &[], 2).is_err());
+        assert_eq!(aggregate_with_max_groups(&input, &key, &[], 4).unwrap().num_rows(), 4);
+        assert!(aggregate_with_max_groups(&input, &[], &[AggregateItem::new(AggregateOp::CountAll, "n")], 0).is_err());
+    }
 
     #[test]
     fn empty_input_count_is_zero_and_sum_is_null() {
