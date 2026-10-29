@@ -52,15 +52,22 @@ impl PartialGroupSum {
             return Err(Error::Type("group key schema changed between partitions".into()));
         }
         self.key_type = Some(kind);
-        for row in 0..batch.num_rows() {
-            let key_value = batch.value(row, key)?.clone();
-            if !self.groups.contains_key(&key_value) && self.groups.len() >= self.max_groups {
-                return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
-            }
-            let state = self.groups.entry(key_value).or_default();
+        let key_values = batch.column(key)?;
+        let amounts = batch.column(amount)?;
+        for (key_value, value) in key_values.iter().zip(amounts) {
+            let at_limit = self.groups.len() >= self.max_groups;
+            let state = match self.groups.entry(key_value.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    if at_limit {
+                        return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
+                    }
+                    entry.insert(State::default())
+                }
+            };
             state.rows = state.rows.checked_add(1)
                 .ok_or_else(|| Error::Execution("group count overflow".into()))?;
-            match batch.value(row, amount)? {
+            match value {
                 Value::Integer(value) => {
                     state.sum = state.sum.checked_add(i128::from(*value))
                         .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?;
