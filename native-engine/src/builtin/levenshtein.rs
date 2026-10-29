@@ -42,8 +42,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let start = if threshold.is_some() { row.saturating_sub(limit).max(1) } else { 1 };
         let end = if threshold.is_some() { row.saturating_add(limit).min(shorter.len()) }
             else { shorter.len() };
-        current.fill(outside);
         current[0] = row.min(outside);
+        // Only the band boundaries need clearing between rows.
+        if start > 1 { current[start - 1] = outside; }
+        if end < shorter.len() { current[end + 1] = outside; }
         for column in start..=end {
             let insertion = current[column - 1].saturating_add(1);
             let deletion = previous[column].saturating_add(1);
