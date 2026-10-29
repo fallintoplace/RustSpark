@@ -16,7 +16,39 @@ import (
     "strings"
 )
 
-var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*// Package rustsparklocal invokes the local RustSpark CLI with typed bindings.
+// It is not a network driver and does not claim Spark API compatibility.
+package rustsparklocal
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "os/exec"
+    "regexp"
+    "sort"
+    "strconv"
+    "strings"
+)
+
+)
+
+var errOutputLimit = errors.New("RustSpark stdout exceeded MaxOutputBytes")
+
+type boundedOutput struct {
+    bytes.Buffer
+    limit int
+}
+
+func (output *boundedOutput) Write(chunk []byte) (int, error) {
+    if len(chunk) > output.limit-output.Len() {
+        return 0, errOutputLimit
+    }
+    return output.Buffer.Write(chunk)
+}
 
 // Client calls an installed RustSpark binary without a shell.
 type Client struct {
@@ -30,6 +62,7 @@ type Options struct {
     NamedParams map[string]string
     MaxRows int
     QueryTimeoutSeconds int
+    MaxOutputBytes int
 }
 
 func addNamed(args []string, flag string, tables map[string]string) ([]string, error) {
@@ -85,8 +118,8 @@ func (c Client) arguments(sql string, opts Options) ([]string, error) {
         }
         args = append(args, "--named-param", name+"="+typedValue)
     }
-    if opts.MaxRows < 0 || opts.QueryTimeoutSeconds < 0 {
-        return nil, errors.New("max rows and query timeout must not be negative")
+    if opts.MaxRows < 0 || opts.QueryTimeoutSeconds < 0 || opts.MaxOutputBytes < 0 {
+        return nil, errors.New("max rows, query timeout and output byte limit must not be negative")
     }
     if opts.MaxRows > 0 {
         args = append(args, "--max-rows", strconv.Itoa(opts.MaxRows))
@@ -105,7 +138,9 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
     command := exec.CommandContext(ctx, binary, args...)
-    var output, stderr bytes.Buffer
+    output := boundedOutput{limit: opts.MaxOutputBytes}
+    if output.limit == 0 { output.limit = 64 * 1024 * 1024 }
+    var stderr bytes.Buffer
     command.Stdout, command.Stderr = &output, &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return nil, ctx.Err() }
