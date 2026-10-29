@@ -27,7 +27,25 @@ fn remainder(args: &[Value], positive: bool) -> Result<Value> {
 }
 fn modulo(args: &[Value]) -> Result<Value> { remainder(args, false) }
 fn pmod(args: &[Value]) -> Result<Value> { remainder(args, true) }
+
+fn gcd_type(types: &[DataType]) -> Result<DataType> {
+    if types.iter().all(|kind| *kind == DataType::Integer) { Ok(DataType::Integer) }
+    else { Err(Error::Type("GCD requires integer inputs".into())) }
+}
+fn gcd(args: &[Value]) -> Result<Value> {
+    let Some(a) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let Some(b) = super::integer(&args[1])? else { return Ok(Value::Null); };
+    let mut a = a.unsigned_abs();
+    let mut b = b.unsigned_abs();
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    i64::try_from(a).map(Value::Integer)
+        .map_err(|_| Error::Execution("GCD result exceeds BIGINT range".into()))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "gcd", min_args: 2, max_args: 2, result_type: gcd_type, call: gcd },
     Function { name: "mod", min_args: 2, max_args: 2, result_type: output, call: modulo },
     Function { name: "pmod", min_args: 2, max_args: 2, result_type: output, call: pmod },
 ];
@@ -40,5 +58,19 @@ mod tests {
         assert_eq!(pmod(&[Value::Integer(-10), Value::Integer(3)]).unwrap(), Value::Integer(2));
         assert!(modulo(&[Value::Integer(i64::MIN), Value::Integer(-1)]).is_err());
         assert!(pmod(&[Value::Integer(1), Value::Integer(0)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gcd_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_integer_boundaries_and_nulls() {
+        assert!(crate::builtin::supports("gcd"));
+        assert_eq!(gcd(&[Value::Integer(-54), Value::Integer(24)]).unwrap(), Value::Integer(6));
+        assert_eq!(gcd(&[Value::Integer(0), Value::Integer(0)]).unwrap(), Value::Integer(0));
+        assert_eq!(gcd(&[Value::Integer(i64::MIN), Value::Integer(3)]).unwrap(), Value::Integer(1));
+        assert!(gcd(&[Value::Integer(i64::MIN), Value::Integer(0)]).is_err());
+        assert_eq!(gcd(&[Value::Null, Value::Integer(5)]).unwrap(), Value::Null);
     }
 }
