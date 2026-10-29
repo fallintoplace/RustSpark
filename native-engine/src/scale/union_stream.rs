@@ -107,7 +107,7 @@ mod tests {
 /// Bounded UNION DISTINCT across two input streams, preserving first appearance.
 pub struct UnionDistinctStream<L, R> {
     inner: UnionAllStream<L, R>,
-    seen: std::collections::HashSet<Vec<crate::scalar::Value>>,
+    seen: std::collections::HashMap<Vec<crate::scalar::Value>, ()>,
     retained_bytes: usize,
     max_keys: usize,
     max_bytes: usize,
@@ -124,7 +124,7 @@ impl<L, R> UnionDistinctStream<L, R> {
         }
         Ok(Self {
             inner: UnionAllStream::new(left, right, schema, control),
-            seen: std::collections::HashSet::new(),
+            seen: std::collections::HashMap::new(),
             retained_bytes: 0, max_keys, max_bytes, stopped: false,
         })
     }
@@ -154,24 +154,29 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         return Some(Err(error));
                     }
                 };
-                if self.seen.contains(&key) { continue; }
-                let footprint = key.iter().fold(
-                    64usize.saturating_add(key.len().saturating_mul(
-                        std::mem::size_of::<crate::scalar::Value>())),
-                    |total, value| match value {
-                        crate::scalar::Value::Text(text) => total.saturating_add(text.len()),
-                        _ => total,
+                let at_limit = self.seen.len() >= self.max_keys;
+                match self.seen.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(_) => continue,
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let key = entry.key();
+                        let footprint = key.iter().fold(
+                            64usize.saturating_add(key.len().saturating_mul(
+                                std::mem::size_of::<crate::scalar::Value>())),
+                            |total, value| match value {
+                                crate::scalar::Value::Text(text) => total.saturating_add(text.len()),
+                                _ => total,
+                            }
+                        );
+                        let next_total = self.retained_bytes.checked_add(footprint);
+                        if at_limit || next_total.is_none_or(|bytes| bytes > self.max_bytes) {
+                            self.stopped = true;
+                            return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
+                        }
+                        self.retained_bytes = next_total.expect("validated set memory");
+                        entry.insert(());
+                        selected.push(row);
                     }
-                );
-                let next_total = self.retained_bytes.checked_add(footprint);
-                if self.seen.len() >= self.max_keys ||
-                    next_total.is_none_or(|bytes| bytes > self.max_bytes) {
-                    self.stopped = true;
-                    return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
                 }
-                self.retained_bytes = next_total.expect("validated set memory");
-                self.seen.insert(key);
-                selected.push(row);
             }
             if !selected.is_empty() {
                 return Some(batch.take(&selected));
@@ -257,5 +262,27 @@ mod consolidated_empty_union_skip_tests {
             schema, QueryControl::default()).collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].row(0).unwrap(), vec![Value::Integer(5)]);
+    }
+}
+
+#[cfg(test)]
+mod union_distinct_single_probe_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn duplicate_keys_remain_allowed_at_exact_capacity() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]).unwrap();
+        let b = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]).unwrap();
+        let batches = UnionDistinctStream::new([Ok(a)].into_iter(), [Ok(b)].into_iter(),
+            schema, QueryControl::default(), 2, 8192).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.into_iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
     }
 }
