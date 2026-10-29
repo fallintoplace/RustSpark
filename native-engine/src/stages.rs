@@ -46,6 +46,10 @@ impl StageGraph {
             }
         }
         for stage in &stages {
+            let mut seen = HashSet::new();
+            if stage.inputs.iter().any(|dependency| !seen.insert(*dependency)) {
+                return Err(Error::Schema("stage has duplicate dependencies".into()));
+            }
             if stage.inputs.iter().any(|dependency| !unique.contains(dependency)) {
                 return Err(Error::Schema("stage depends on an unknown stage".into()));
             }
@@ -197,5 +201,19 @@ mod tests {
         assert!(StageGraph::new(vec![
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![2] },
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod duplicate_stage_edges_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_repeated_inputs_to_a_single_stage() {
+        let result = StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 1, kind: StageKind::Project, inputs: vec![0, 0] },
+        ]);
+        assert!(result.is_err());
     }
 }
