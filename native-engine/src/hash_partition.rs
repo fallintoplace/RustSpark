@@ -22,7 +22,7 @@ impl Hasher for PartitionHasher {
 }
 
 pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
-    if partitions == 0 || keys.is_empty() {
+    if partitions == 0 || partitions > 4096 || keys.is_empty() {
         return Err(Error::Execution("partition count and hash keys must be nonempty".into()));
     }
     let indices = keys.iter().map(|key| batch.schema().column(key))
@@ -71,6 +71,9 @@ mod tests {
  
 /// Partition successive batches using identical hash keys and concatenate each bucket.
 pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
+    if partitions == 0 || partitions > 4096 || keys.is_empty() {
+        return Err(Error::Execution("partition count and hash keys must be nonempty and <= 4096".into()));
+    }
     let first = input.first().ok_or_else(|| Error::Schema("partition input needs a schema".into()))?;
     let schema = first.schema();
     let mut buckets: Vec<Vec<Batch>> = vec![Vec::new(); partitions];
@@ -109,3 +112,17 @@ mod partition_batches_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod partition_fanout_safety_tests {
+    use super::*;
+
+    #[test]
+    fn huge_partition_count_fails_before_allocation() {
+        let batch = Batch::empty(crate::schema::Schema::new(vec![
+            crate::schema::Field::new("key", crate::schema::DataType::Integer, true)
+        ]).unwrap());
+        assert!(partition(&batch, &["key"], usize::MAX).is_err());
+        assert!(partition_batches(&[batch], &["key"], usize::MAX).is_err());
+    }
+}
