@@ -139,7 +139,7 @@ mod tests {
         let plan = sql::parse_sql("SELECT COALESCE(n, 3) AS fallback FROM t").unwrap();
         let rows = executor::execute(&plan, &catalog).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Integer(3)], vec![Value::Integer(8)]]);
-        let plan = sql::parse_sql("SELECT COALESCE(9, 1 / 0) AS safe FROM t").unwrap();
+        let plan = sql::parse_sql("SELECT COALESCE(9, 9223372036854775807 + 1) AS safe FROM t").unwrap();
         assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap()[0], Value::Integer(9));
         assert!(sql::parse_sql("SELECT COALESCE(n,) FROM t").is_err());
     }
