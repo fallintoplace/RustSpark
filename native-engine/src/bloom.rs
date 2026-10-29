@@ -18,23 +18,37 @@ impl BloomFilter {
         Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes })
     }
 
-    fn bit(&self, key: &Value, seed: u32) -> usize {
+    fn seeded_hash(key: &Value, seed: u32) -> u64 {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         seed.hash(&mut hash);
         key.hash(&mut hash);
-        (hash.finish() % self.bits as u64) as usize
+        hash.finish()
+    }
+
+    fn probes(&self, key: &Value) -> (u64, u64) {
+        let first = Self::seeded_hash(key, 0);
+        let step = if self.hashes == 1 { 0 } else {
+            Self::seeded_hash(key, 1).wrapping_sub(first) | 1
+        };
+        (first, step)
+    }
+
+    fn bit(&self, first: u64, step: u64, probe: u32) -> usize {
+        (first.wrapping_add(step.wrapping_mul(u64::from(probe))) % self.bits as u64) as usize
     }
 
     pub fn insert(&mut self, key: &Value) {
-        for seed in 0..self.hashes {
-            let bit = self.bit(key, seed);
+        let (first, step) = self.probes(key);
+        for probe in 0..self.hashes {
+            let bit = self.bit(first, step, probe);
             self.words[bit / 64] |= 1_u64 << (bit % 64);
         }
     }
 
     pub fn might_contain(&self, key: &Value) -> bool {
-        (0..self.hashes).all(|seed| {
-            let bit = self.bit(key, seed);
+        let (first, step) = self.probes(key);
+        (0..self.hashes).all(|probe| {
+            let bit = self.bit(first, step, probe);
             (self.words[bit / 64] & (1_u64 << (bit % 64))) != 0
         })
     }
@@ -126,5 +140,20 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_double_hash_perf_tests {
+    use super::*;
+    #[test]
+    fn maximum_probe_count_has_no_false_negatives() {
+        let mut filter = BloomFilter::new(4096, 16).unwrap();
+        for value in 0..1024 { filter.insert(&Value::Integer(value)); }
+        for value in 0..1024 { assert!(filter.might_contain(&Value::Integer(value))); }
+        let single = BloomFilter::new(4096, 1).unwrap();
+        let (first, step) = single.probes(&Value::Text("key".into()));
+        assert_eq!(step, 0);
+        assert!(single.bit(first, step, 0) < 4096);
     }
 }
