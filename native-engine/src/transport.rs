@@ -56,29 +56,18 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
 }
 
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
-    let mut magic = [0u8; 4];
-    if input.read(&mut magic[..1])? == 0 {
-        return Ok(None);
-    }
-    input.read_exact(&mut magic[1..])?;
-    if &magic != MAGIC {
+    // Read one byte first to preserve clean EOF at frame boundaries.
+    let mut header = [0u8; 32];
+    if input.read(&mut header[..1])? == 0 { return Ok(None); }
+    input.read_exact(&mut header[1..])?;
+    if &header[..4] != MAGIC {
         return Err(Error::Parse("invalid exchange frame magic or version".into()));
     }
-    fn read_u32(input: &mut impl Read) -> Result<u32> {
-        let mut bytes = [0u8; 4];
-        input.read_exact(&mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-    fn read_u64(input: &mut impl Read) -> Result<u64> {
-        let mut bytes = [0u8; 8];
-        input.read_exact(&mut bytes)?;
-        Ok(u64::from_le_bytes(bytes))
-    }
-    let stage = read_u64(input)?;
-    let task = read_u64(input)?;
-    let attempt = read_u32(input)?;
-    let len = read_u32(input)? as usize;
-    let expected_checksum = read_u32(input)?;
+    let stage = u64::from_le_bytes(header[4..12].try_into().expect("fixed u64 header"));
+    let task = u64::from_le_bytes(header[12..20].try_into().expect("fixed u64 header"));
+    let attempt = u32::from_le_bytes(header[20..24].try_into().expect("fixed u32 header"));
+    let len = u32::from_le_bytes(header[24..28].try_into().expect("fixed u32 header")) as usize;
+    let expected_checksum = u32::from_le_bytes(header[28..32].try_into().expect("fixed u32 header"));
     if len > max_bytes {
         return Err(Error::Execution("received exchange frame exceeds memory budget".into()));
     }
@@ -234,5 +223,27 @@ mod exchange_header_write_coalescing_tests {
         assert_eq!(writer.calls, 2);
         assert_eq!(writer.bytes.len(), 32 + 4096);
         assert_eq!(read_frame(&mut writer.bytes.as_slice(), 4096).unwrap(), Some(frame));
+    }
+}
+
+#[cfg(test)]
+mod exchange_header_read_coalescing_tests {
+    use super::*;
+    struct CountingReader<'a> { inner: &'a [u8], calls: usize }
+    impl Read for CountingReader<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            self.inner.read(bytes)
+        }
+    }
+    #[test]
+    fn complete_header_and_payload_take_three_reads() {
+        let frame = Frame { stage: 1024, task: 512, attempt: 7, payload: vec![9; 48] };
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &frame, 48).unwrap();
+        let mut reader = CountingReader { inner: &encoded, calls: 0 };
+        assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
+        assert_eq!(reader.calls, 3);
+        assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
     }
 }
