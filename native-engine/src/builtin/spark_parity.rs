@@ -58,6 +58,24 @@ fn ucase(args: &[Value]) -> Result<Value> {
     })
 }
 
+fn initcap(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let mut result = String::with_capacity(text.len());
+    let mut word_start = true;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            word_start = true;
+            result.push(ch);
+        } else if word_start {
+            result.extend(ch.to_uppercase());
+            word_start = false;
+        } else {
+            result.extend(ch.to_lowercase());
+        }
+    }
+    Ok(Value::Text(result))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -68,6 +86,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "bit_length", min_args: 1, max_args: 1, result_type: char_length_type, call: bit_length },
     Function { name: "lcase", min_args: 1, max_args: 1, result_type: text_text_type, call: lcase },
     Function { name: "ucase", min_args: 1, max_args: 1, result_type: text_text_type, call: ucase },
+    Function { name: "initcap", min_args: 1, max_args: 1, result_type: text_text_type, call: initcap },
     // PARITY_FUNCTIONS
 ];
 
@@ -132,6 +151,12 @@ mod tests {
     fn spark_ucase_uppercases_unicode() {
         assert_eq!(sql_result("ucase(s)").unwrap(), Value::Text("CAFÉ".into()));
         assert_eq!(ucase(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_initcap_preserves_whitespace_and_capitalizes_words() {
+        assert_eq!(sql_result("initcap('sPARK   sql')").unwrap(), Value::Text("Spark   Sql".into()));
+        assert_eq!(initcap(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
