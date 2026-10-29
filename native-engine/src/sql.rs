@@ -255,6 +255,14 @@ impl Parser {
                 self.take_word("OUTER");
                 self.expect_word("JOIN")?;
                 Some(JoinKind::Left)
+            } else if self.take_word("RIGHT") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Right)
+            } else if self.take_word("FULL") {
+                self.take_word("OUTER");
+                self.expect_word("JOIN")?;
+                Some(JoinKind::Full)
             } else {
                 None
             };
@@ -486,5 +494,20 @@ mod tests {
         assert!(parse_sql("SELECT * FROM sales; DROP TABLE sales").is_err());
         assert!(parse_sql("SELECT * FROM sales JOIN customers ON id > id").is_err());
         assert!(parse_sql("SELECT city, SUM(amount) FROM sales").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod outer_join_sql_feature_tests {
+    use super::*;
+
+    #[test]
+    fn right_and_full_join_lower_to_native_join_kinds() {
+        for (name, kind) in [("RIGHT", JoinKind::Right), ("FULL OUTER", JoinKind::Full)] {
+            let query = format!("SELECT * FROM l {name} JOIN r ON id = id");
+            let plan = parse_sql(&query).unwrap();
+            assert!(matches!(plan, Plan::Join { kind: actual, .. } if actual == kind));
+        }
     }
 }
