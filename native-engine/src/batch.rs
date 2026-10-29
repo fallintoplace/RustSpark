@@ -98,12 +98,7 @@ impl Batch {
         let mut columns = Vec::with_capacity(self.columns.len());
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
-            for &row in indices {
-                let value = column.get(row).ok_or_else(|| {
-                    Error::Execution(format!("row index out of bounds: {row}"))
-                })?;
-                selected.push(value.clone());
-            }
+            selected.extend(indices.iter().map(|&row| column[row].clone()));
             columns.push(selected);
         }
         Self::new_with_row_count(self.schema.clone(), columns, indices.len())
