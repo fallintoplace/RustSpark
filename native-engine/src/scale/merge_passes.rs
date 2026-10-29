@@ -44,7 +44,8 @@ pub fn merge_to_fan_in(
     };
     while result.current.len() > fan_in {
         control.check()?;
-        let mut next_pass = Vec::new();
+        // Each fan-in group emits exactly one path in the next pass.
+        let mut next_pass = Vec::with_capacity(result.current.len().div_ceil(fan_in));
         for group in result.current.chunks(fan_in) {
             control.check()?;
             if group.len() == 1 {
