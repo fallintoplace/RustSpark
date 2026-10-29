@@ -63,6 +63,7 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
         key.expression.output_type(batch.schema())?;
     }
     if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        if end - start <= 1 { return batch.slice_rows(start, end); }
         let columns = keys.iter().map(|key| match &key.expression {
             Expr::Column(name) => batch.column(batch.schema().column(name)?),
             _ => unreachable!("all sort keys are columns"),
@@ -258,5 +259,21 @@ mod range_sort_run_tests {
         }
         assert!(sort_range(&batch, &key, 12, 32).is_err());
         assert_eq!(sort_range(&batch, &[], 5, 8).unwrap(), batch.slice_rows(5, 8).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod single_row_sort_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn one_row_column_sorts_preserve_schema_and_validate_keys() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![vec![Value::Text("é".into())]]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("value".into()))];
+        assert_eq!(sort_range(&batch, &keys, 0, 1).unwrap(), batch);
+        assert_eq!(sort_range(&batch, &keys, 0, 0).unwrap().schema(), &schema);
+        assert!(sort_range(&batch,
+            &[SortKey::ascending(Expr::Column("unknown".into()))], 0, 1).is_err());
     }
 }
