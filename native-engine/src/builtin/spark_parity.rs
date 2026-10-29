@@ -400,6 +400,17 @@ fn regexp_substr(args: &[Value]) -> Result<Value> {
         .unwrap_or(Value::Null))
 }
 
+fn regexp_instr(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
+    super::regex_support::check_input(text)?;
+    let regex = super::regex_support::compile(pattern)?;
+    let Some(matched) = regex.find(text) else { return Ok(Value::Integer(0)); };
+    let position = i64::try_from(text[..matched.start()].chars().count())
+        .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()))?;
+    Ok(Value::Integer(position + 1))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -432,6 +443,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_decode },
     Function { name: "try_url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: try_url_decode },
     Function { name: "regexp_substr", min_args: 2, max_args: 2, result_type: two_text_text_type, call: regexp_substr },
+    Function { name: "regexp_instr", min_args: 2, max_args: 2, result_type: two_text_integer_type, call: regexp_instr },
     // PARITY_FUNCTIONS
 ];
 
@@ -662,6 +674,17 @@ mod tests {
             Value::Text("123".into()));
         assert_eq!(sql_result("regexp_substr('abc', '[0-9]+')").unwrap(), Value::Null);
         assert!(sql_result("regexp_substr('abc', '[')").is_err());
+    }
+
+    #[test]
+    fn spark_regexp_instr_uses_unicode_character_positions() {
+        assert_eq!(sql_result("regexp_instr('abc123xyz', '[0-9]+')").unwrap(),
+            Value::Integer(4));
+        assert_eq!(sql_result("regexp_instr('café 123', '[0-9]+')").unwrap(),
+            Value::Integer(6));
+        assert_eq!(sql_result("regexp_instr('abc', '[0-9]+')").unwrap(),
+            Value::Integer(0));
+        assert!(sql_result("regexp_instr('abc', '[')").is_err());
     }
 
     // PARITY_TESTS
