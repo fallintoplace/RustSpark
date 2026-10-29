@@ -5,7 +5,7 @@ use crate::{
     Result,
 };
 
-pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
+fn compatible_union_schema(left: &Batch, right: &Batch) -> Result<Schema> {
     if left.schema().len() != right.schema().len() {
         return Err(Error::Schema("UNION column counts must match".into()));
     }
@@ -20,7 +20,11 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
             a.nullable || b.nullable,
         ));
     }
-    let schema = Schema::new(fields)?;
+    Schema::new(fields)
+}
+
+pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    let schema = compatible_union_schema(left, right)?;
     let count = left
         .num_rows()
         .checked_add(right.num_rows())
@@ -64,7 +68,18 @@ mod tests {
  
 /// UNION DISTINCT matches columns by position and removes repeated complete rows.
 pub fn union_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
-    crate::distinct::distinct(&union_all(left, right)?)
+    let schema = compatible_union_schema(left, right)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for input in [left, right] {
+        for index in 0..input.num_rows() {
+            let row = input.row(index)?;
+            if seen.insert(row.clone()) {
+                rows.push(row);
+            }
+        }
+    }
+    Batch::from_rows(schema, rows)
 }
 
 #[cfg(test)]
@@ -87,3 +102,29 @@ mod union_distinct_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod incremental_union_distinct_regression {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn deduplicates_across_inputs_and_widens_nullability() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("left_id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(2)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("right_id", DataType::Integer, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(2)], vec![Value::Null],
+            vec![Value::Integer(3)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let output = union_distinct(&left, &right).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Integer(2)], vec![Value::Null], vec![Value::Integer(3)],
+        ]);
+        assert_eq!(output.schema().fields()[0].name, "left_id");
+        assert!(output.schema().fields()[0].nullable);
+    }
+}
