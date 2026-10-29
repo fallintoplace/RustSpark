@@ -89,9 +89,9 @@ impl Iterator for BatchChunks<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.position >= self.input.num_rows() { return None; }
         let end = self.position.saturating_add(self.batch_rows).min(self.input.num_rows());
-        let indices = (self.position..end).collect::<Vec<_>>();
+        let start = self.position;
         self.position = end;
-        Some(self.input.take(&indices))
+        Some(self.input.slice_rows(start, end))
     }
 }
 
