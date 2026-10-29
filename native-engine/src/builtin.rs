@@ -64,6 +64,13 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Text)
         },
+        "REPLACE" => {
+            if args.len() != 3 { return Err(Error::Parse("REPLACE requires three arguments".into())); }
+            for arg in args {
+                if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("REPLACE requires text arguments".into())); }
+            }
+            Ok(DataType::Text)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -127,6 +134,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             }
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
+        },
+        "REPLACE" => match args {
+            [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] => Ok(Value::Text(text.replace(pattern.as_str(), replacement))),
+            [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
+            _ => Err(Error::Type("REPLACE requires three text arguments".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
