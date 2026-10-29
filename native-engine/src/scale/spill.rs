@@ -202,10 +202,11 @@ impl<R: Read> SpillReader<R> {
             return Err(Error::Execution("spill batch exceeds configured limits".into()));
         }
         let mut bytes_seen = 0usize;
-        let mut output = Vec::with_capacity(rows);
+        let mut columns: Vec<Vec<Value>> = (0..self.schema.len())
+            .map(|_| Vec::with_capacity(rows))
+            .collect();
         for _ in 0..rows {
-            let mut row = Vec::with_capacity(self.schema.len());
-            for _ in self.schema.fields() {
+            for column in &mut columns {
                 let value = match read_byte(&mut self.input)? {
                     0 => Value::Null,
                     1 => Value::Boolean(false),
@@ -223,11 +224,10 @@ impl<R: Read> SpillReader<R> {
                     5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
                     _ => return Err(Error::Parse("invalid spill value tag".into())),
                 };
-                row.push(value);
+                column.push(value);
             }
-            output.push(row);
         }
-        Ok(Some(Batch::from_rows(self.schema.clone(), output)?))
+        Ok(Some(Batch::new_with_row_count(self.schema.clone(), columns, rows)?))
     }
 }
 
