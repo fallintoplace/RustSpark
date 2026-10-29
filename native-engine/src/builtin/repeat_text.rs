@@ -12,8 +12,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(times) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    let count = usize::try_from(times)
-        .map_err(|_| Error::Execution("REPEAT count must be nonnegative".into()))?;
+    let count = usize::try_from(times.max(0))
+        .map_err(|_| Error::Execution("REPEAT count overflow".into()))?;
     if count > 1_000_000 {
         return Err(Error::Execution("REPEAT exceeds repetition limit".into()));
     }
@@ -44,7 +44,8 @@ mod tests {
         let rows = executor::execute(&sql::parse_sql("SELECT REPEAT(name, 3) AS n FROM t").unwrap(), &catalog)
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("ééé".into())], vec![Value::Null]]);
-        assert!(evaluate(&[Value::Text("x".into()), Value::Integer(-1)]).is_err());
+        assert_eq!(evaluate(&[Value::Text("x".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
+        assert_eq!(evaluate(&[Value::Text("é".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
         assert!(evaluate(&[Value::Text("x".into()), Value::Integer(16_777_217)]).is_err());
     }
 }
