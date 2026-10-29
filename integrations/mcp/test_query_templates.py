@@ -29,6 +29,8 @@ class TemplatesTests(unittest.TestCase):
     def test_query_results_require_json_object_rows(self):
         self.assertEqual(parse_query_rows('[{"x":1},{"x":null}]'), [{"x": 1}, {"x": None}])
         self.assertEqual(parse_query_rows("[]"), [])
+        with self.assertRaisesRegex(ValueError, "Nonfinite"):
+            parse_query_rows('[{"x":1e999}]')
         for text in ("{}", "[null]", "[1]", "[[]]", "[NaN]", "invalid"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_query_rows(text)
