@@ -94,6 +94,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             } else {
                 Token::Word(value)
             }
+        } else if character == '|' {
+            if chars.peek() != Some(&'|') {
+                return Err(Error::Parse("expected || concatenation operator".into()));
+            }
+            let _ = chars.next();
+            Token::Operator("||".into())
         } else if matches!(character, ',' | '(' | ')' | '*' | ';') {
             Token::Symbol(character)
         } else if matches!(character, '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!') {
