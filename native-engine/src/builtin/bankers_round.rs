@@ -30,7 +30,10 @@ fn round_even(args: &[Value]) -> Result<Value> {
     }
     let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
     let factor = 10_f64.powi(scale.unsigned_abs() as i32);
-    let result = if scale >= 0 { (x * factor).round_ties_even() / factor }
+    let result = if scale >= 0 {
+        if x.abs() > f64::MAX / factor { return super::finite(x); }
+        (x * factor).round_ties_even() / factor
+    }
         else { (x / factor).round_ties_even() * factor };
     super::finite(result)
 }
@@ -74,5 +77,17 @@ mod bigint_bround_exactness_tests {
         assert_eq!(round_even(&[Value::Integer(-125), Value::Integer(-1)]).unwrap(), Value::Integer(-120));
         assert_eq!(rint(&[Value::Integer(3)]).unwrap(), Value::Float(3.0));
         assert_eq!(rint(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod large_finite_bround_float_tests {
+    use super::*;
+    #[test]
+    fn large_finite_values_skip_overflowing_decimal_scaling() {
+        assert_eq!(round_even(&[Value::Float(f64::MAX), Value::Integer(2)]).unwrap(), Value::Float(f64::MAX));
+        assert_eq!(round_even(&[Value::Float(-f64::MAX), Value::Integer(15)]).unwrap(), Value::Float(-f64::MAX));
+        assert_eq!(round_even(&[Value::Float(2.5)]).unwrap(), Value::Float(2.0));
+        assert_eq!(round_even(&[Value::Float(3.5)]).unwrap(), Value::Float(4.0));
     }
 }
