@@ -53,6 +53,20 @@ fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
 }
 fn normalize_space(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.is_ascii() {
+        let mut output = String::with_capacity(input.len());
+        let mut pending = false;
+        for byte in input.bytes() {
+            if byte.is_ascii_whitespace() {
+                pending = !output.is_empty();
+            } else {
+                if pending { output.push(' '); }
+                pending = false;
+                output.push(char::from(byte));
+            }
+        }
+        return Ok(Value::Text(output));
+    }
     let mut output = String::with_capacity(input.len());
     let mut pending = false;
     for character in input.chars() {
@@ -127,6 +141,19 @@ mod normalize_space_extension_tests {
         assert!(crate::builtin::supports("normalize_space"));
         assert_eq!(normalize_space(&[Value::Text(" \t A\u{00A0} B \n".into())]).unwrap(), Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Text(" \t ".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod normalize_ascii_whitespace_fast_path_tests {
+    use super::*;
+    #[test]
+    fn repeated_ascii_whitespace_collapses_without_changing_unicode_behavior() {
+        let input = format!("{}word{}end{}", " \t".repeat(10_000), "\n\r ".repeat(10_000), " \t".repeat(5_000));
+        assert_eq!(normalize_space(&[Value::Text(input)]).unwrap(), Value::Text("word end".into()));
+        assert_eq!(normalize_space(&[Value::Text(" a\x0bb\x0cc ".into())]).unwrap(), Value::Text("a b c".into()));
+        assert_eq!(normalize_space(&[Value::Text("é\u{00a0}🙂".into())]).unwrap(), Value::Text("é 🙂".into()));
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
     }
 }
