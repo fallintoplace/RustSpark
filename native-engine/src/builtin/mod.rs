@@ -286,6 +286,16 @@ pub fn evaluate(name: &str, arguments: &[Expr], batch: &Batch, row: usize) -> Re
         }
         return Ok(Value::Null);
     }
+    if name.eq_ignore_ascii_case("elt") {
+        let index = arguments[0].evaluate(batch, row)?;
+        let Some(index) = integer(&index)? else { return Ok(Value::Null); };
+        let selected = index.checked_sub(1).and_then(|n| usize::try_from(n).ok())
+            .and_then(|offset| offset.checked_add(1));
+        return match selected.and_then(|position| arguments.get(position)) {
+            Some(argument) => argument.evaluate(batch, row),
+            None => Ok(Value::Null),
+        };
+    }
     let evaluated = arguments.iter().map(|arg| arg.evaluate(batch, row))
         .collect::<Result<Vec<_>>>()?;
     (function.call)(&evaluated)
@@ -307,5 +317,28 @@ mod tests {
         let plan = sql::parse_sql("SELECT COALESCE(9, 9223372036854775807 + 1) AS safe FROM t").unwrap();
         assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap()[0], Value::Integer(9));
         assert!(sql::parse_sql("SELECT COALESCE(n,) FROM t").is_err());
+    }
+}
+
+#[cfg(test)]
+mod elt_lazy_evaluation_tests {
+    use super::*;
+    use crate::expr::BinaryOp;
+    #[test]
+    fn skip_unselected_failing_expression() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![vec![]]).unwrap();
+        let failing = Expr::Cast {
+            expression: Box::new(Expr::binary(Expr::Literal(Value::Integer(1)),
+                BinaryOp::Divide, Expr::Literal(Value::Integer(0)))),
+            target: DataType::Text,
+        };
+        let args = [Expr::Literal(Value::Integer(1)),
+            Expr::Literal(Value::Text("ok".into())), failing.clone()];
+        assert_eq!(output_type("elt", &args, &schema).unwrap(), DataType::Text);
+        assert_eq!(evaluate("elt", &args, &batch, 0).unwrap(), Value::Text("ok".into()));
+        let out_of_bounds = [Expr::Literal(Value::Integer(5)),
+            Expr::Literal(Value::Text("ok".into())), failing];
+        assert_eq!(evaluate("elt", &out_of_bounds, &batch, 0).unwrap(), Value::Null);
     }
 }
