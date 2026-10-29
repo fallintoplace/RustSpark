@@ -72,6 +72,7 @@ mod bin;
 mod format_number;
 mod conv;
 mod null_predicates;
+mod len;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -164,6 +165,7 @@ const MODULES: &[&[Function]] = &[
     &format_number::FUNCTIONS,
     &conv::FUNCTIONS,
     &null_predicates::FUNCTIONS,
+    &len::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
