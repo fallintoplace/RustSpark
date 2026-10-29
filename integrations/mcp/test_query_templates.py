@@ -26,6 +26,16 @@ class TemplatesTests(unittest.TestCase):
             make_command("rustspark", Path("/db"), Path("q.sql"),
                          {"bad-name": "int64:3"})
 
+    def test_per_query_limits_cannot_exceed_service_caps(self):
+        command = make_command("rustspark", Path("/db"), Path("q.sql"), {},
+                               max_rows=5, query_timeout=2)
+        self.assertEqual(command[command.index("--max-rows") + 1], "5")
+        self.assertEqual(command[command.index("--query-timeout") + 1], "2")
+        for rows, timeout in ((201, 1), (1, 21), (True, 1), (1, 0)):
+            with self.subTest(rows=rows, timeout=timeout), self.assertRaises(ValueError):
+                make_command("rustspark", Path("/db"), Path("q.sql"), {},
+                             max_rows=rows, query_timeout=timeout)
+
 
 if __name__ == "__main__":
     unittest.main()
