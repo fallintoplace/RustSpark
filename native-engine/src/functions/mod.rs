@@ -1,4 +1,5 @@
 //! Native scalar functions. Each function is typed and evaluated without DataFusion.
+use std::borrow::Cow;
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
 mod coalesce;
@@ -42,6 +43,16 @@ mod width_bucket;
 mod bit_count;
 
 mod bit_get;
+
+// Function names are often uppercase already. Avoid allocating a new String
+// for every evaluated row and for repeated output-type checks.
+fn uppercase_name(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        Cow::Owned(name.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
 
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
@@ -106,7 +117,7 @@ pub(crate) fn as_f64(value: &Value) -> Result<f64> {
 }
 
 pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
-    match name.to_ascii_uppercase().as_str() {
+    match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::output_type(args, schema),
         "NVL" | "IFNULL" => {
             check_arity(name, args, 2, 2)?;
@@ -143,7 +154,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
 }
 
 pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
-    match name.to_ascii_uppercase().as_str() {
+    match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::eval(args, batch, row),
         "NVL" | "IFNULL" => coalesce::eval(args, batch, row),
         "NULLIF" => nullif::eval(args, batch, row),
@@ -175,6 +186,18 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
                 crate::builtin_extra::evaluate(name, &values)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod uppercase_dispatch_perf_tests {
+    use super::*;
+
+    #[test]
+    fn borrows_uppercase_names_and_normalizes_lower_and_mixed_case() {
+        assert!(matches!(uppercase_name("COALESCE"), Cow::Borrowed(_)));
+        assert_eq!(uppercase_name("coalesce").as_ref(), "COALESCE");
+        assert_eq!(uppercase_name("CoAlEsCe").as_ref(), "COALESCE");
     }
 }
 
