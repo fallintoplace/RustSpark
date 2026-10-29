@@ -69,3 +69,32 @@ mod tests {
         });
     }
 }
+
+impl Snapshot {
+    /// Combine independent stage snapshots, rejecting counter overflow.
+    pub fn merge(self, other: Self) -> Result<Self> {
+        let add = |a: u64, b: u64| a.checked_add(b)
+            .ok_or_else(|| Error::Execution("merged metric overflow".into()));
+        Ok(Self {
+            input_rows: add(self.input_rows, other.input_rows)?,
+            output_rows: add(self.output_rows, other.output_rows)?,
+            input_batches: add(self.input_batches, other.input_batches)?,
+            output_batches: add(self.output_batches, other.output_batches)?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod metrics_merge_feature_tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_are_summed_and_overflow_is_rejected() {
+        let first = Snapshot { input_rows: 100, output_rows: 20, input_batches: 3, output_batches: 1 };
+        let second = Snapshot { input_rows: 5, output_rows: 2, input_batches: 1, output_batches: 1 };
+        assert_eq!(first.merge(second).unwrap(), Snapshot {
+            input_rows: 105, output_rows: 22, input_batches: 4, output_batches: 2,
+        });
+        assert!(Snapshot { input_rows: u64::MAX, ..first }.merge(second).is_err());
+    }
+}
