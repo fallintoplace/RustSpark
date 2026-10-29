@@ -112,7 +112,7 @@ pub fn read_frames(
 ) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut total = 0_usize;
-    while let Some(frame) = read_frame(input, max_frame_bytes)? {
+    while let Some(frame) = read_frame(input, max_frame_bytes.min(max_total_bytes.saturating_sub(total)))? {
         total = total.checked_add(frame.payload.len())
             .filter(|used| *used <= max_total_bytes)
             .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
@@ -139,3 +139,21 @@ mod exchange_stream_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod exchange_preflight_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_second_frame_does_not_read_payload() {
+        let mut encoded = Vec::new();
+        for task in 0..2 {
+            write_frame(&mut encoded, &Frame { stage: 1, task, attempt: 1,
+                payload: vec![7; 8] }, 8).unwrap();
+        }
+        let mut reader = Cursor::new(&encoded);
+        assert!(read_frames(&mut reader, 8, 8).is_err());
+        assert!(reader.position() < encoded.len() as u64);
+    }
+}
