@@ -35,8 +35,9 @@ fn split_count_type(types: &[DataType]) -> Result<DataType> {
 fn split_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
-    let count = if delimiter.is_empty() { input.chars().count() }
-        else { input.match_indices(delimiter).count().saturating_add(1) };
+    let count = if delimiter.is_empty() {
+        if input.is_ascii() { input.len() } else { input.chars().count() }
+    } else { input.match_indices(delimiter).count().saturating_add(1) };
     Ok(Value::Integer(i64::try_from(count)
         .map_err(|_| Error::Execution("SPLIT_COUNT overflow".into()))?))
 }
@@ -75,5 +76,16 @@ mod split_count_extension_tests {
         assert_eq!(split_count(&[Value::Text("abc".into()), Value::Text(",".into())]).unwrap(), Value::Integer(1));
         assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text("".into())]).unwrap(), Value::Integer(2));
         assert_eq!(split_count(&[Value::Null, Value::Text(",".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod split_count_ascii_empty_delimiter_tests {
+    use super::*;
+    #[test]
+    fn preserves_unicode_and_ascii_empty_delimiter_counts() {
+        assert_eq!(split_count(&[Value::Text("abcd".repeat(4096)), Value::Text(String::new())]).unwrap(), Value::Integer(16_384));
+        assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text(String::new())]).unwrap(), Value::Integer(2));
+        assert_eq!(split_count(&[Value::Text("a,,b".into()), Value::Text(",".into())]).unwrap(), Value::Integer(3));
     }
 }
