@@ -24,6 +24,9 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
     let result = if count == 0 {
         ""
+    } else if text.is_ascii() {
+        let width = count.min(text.len());
+        if from_right { &text[text.len() - width..] } else { &text[..width] }
     } else if from_right {
         let start = text.char_indices().rev().nth(count - 1)
             .map_or(0, |(byte, _)| byte);
@@ -140,5 +143,18 @@ mod common_prefix_extension_tests {
         assert_eq!(common_prefix(&[Value::Text("café-one".into()), Value::Text("café-two".into())]).unwrap(), Value::Text("café-".into()));
         assert_eq!(common_prefix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_slice_width_fast_path_tests {
+    use super::*;
+    #[test]
+    fn covers_ascii_width_edges_and_utf8() {
+        let input = Value::Text("hello".into());
+        assert_eq!(left(&[input.clone(), Value::Integer(2)]).unwrap(), Value::Text("he".into()));
+        assert_eq!(right(&[input.clone(), Value::Integer(2)]).unwrap(), Value::Text("lo".into()));
+        assert_eq!(right(&[input.clone(), Value::Integer(i64::MAX)]).unwrap(), input);
+        assert_eq!(left(&[Value::Text("é🙂".into()), Value::Integer(1)]).unwrap(), Value::Text("é".into()));
     }
 }
