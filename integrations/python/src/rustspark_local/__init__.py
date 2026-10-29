@@ -125,3 +125,12 @@ class RustSpark:
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise RustSparkError("RustSpark returned an unexpected JSON result shape")
         return rows
+
+    def query_one(self, sql: str, **options: Any) -> dict[str, Any] | None:
+        """Return at most one row. Raise if the result contains multiple rows."""
+        if "max_rows" in options:
+            raise ValueError("query_one controls max_rows to detect duplicate rows")
+        rows = self.query(sql, max_rows=2, **options)
+        if len(rows) > 1:
+            raise RustSparkError("query_one expected at most one row")
+        return rows[0] if rows else None
