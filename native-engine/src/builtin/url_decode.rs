@@ -13,6 +13,9 @@ fn hex(byte: u8) -> Option<u8> {
 }
 
 pub(super) fn decode(text: &str) -> Result<String> {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("URL_DECODE input exceeds native 16 MiB budget".into()));
+    }
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -51,5 +54,6 @@ mod tests {
         assert!(decode("%GG").is_err());
         assert!(decode("%FF").is_err());
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert!(decode(&"a".repeat(16 * 1024 * 1024 + 1)).is_err());
     }
 }
