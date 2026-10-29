@@ -27,6 +27,24 @@ impl Catalog {
         Ok(())
     }
 
+    /// Rename a registered table only when the target does not already exist.
+    /// Validation happens before removing the source.
+    pub fn rename(&mut self, source: &str, destination: &str) -> Result<()> {
+        let from = normalize(source)?;
+        let to = normalize(destination)?;
+        if !self.tables.contains_key(&from) {
+            return Err(Error::Schema(format!("unknown table: {source}")));
+        }
+        if from == to { return Ok(()); }
+        if self.tables.contains_key(&to) {
+            return Err(Error::Schema(format!("table already exists: {destination}")));
+        }
+        let batch = self.tables.remove(&from)
+            .ok_or_else(|| Error::Schema(format!("unknown table: {source}")))?;
+        self.tables.insert(to, batch);
+        Ok(())
+    }
+
     pub fn get(&self, name: &str) -> Result<&Batch> {
         let normalized = normalize(name)?;
         self.tables
@@ -90,3 +108,27 @@ mod catalog_unregister_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod catalog_rename_engine_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn failed_rename_preserves_both_tables_and_data() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            schema.clone(), vec![vec![Value::Integer(7)]],
+        ).unwrap()).unwrap();
+        catalog.register("taken", Batch::empty(schema)).unwrap();
+        assert!(catalog.rename("source", "taken").is_err());
+        assert!(catalog.rename("source", "white space").is_err());
+        assert!(catalog.rename("missing", "future").is_err());
+        assert_eq!(catalog.get("source").unwrap().row(0).unwrap(), vec![Value::Integer(7)]);
+        catalog.rename("SOURCE", "renamed").unwrap();
+        assert!(catalog.get("source").is_err());
+        assert_eq!(catalog.get("RENAMED").unwrap().row(0).unwrap(), vec![Value::Integer(7)]);
+        catalog.rename("renamed", "RENAMED").unwrap();
+    }
+}
