@@ -1,15 +1,32 @@
 use crate::{Error, Result};
+use std::cell::RefCell;
+
+thread_local! {
+    static CACHE: RefCell<Vec<(String, regex::Regex)>> = const { RefCell::new(Vec::new()) };
+}
+const CACHE_ENTRIES: usize = 4;
 
 /// Bound the cost of compiling user-supplied regex programs.
 pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
     if pattern.len() > 4096 {
         return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
     }
-    regex::RegexBuilder::new(pattern)
+    if let Some(compiled) = CACHE.with(|cache| {
+        cache.borrow().iter().find(|(key, _)| key == pattern).map(|(_, regex)| regex.clone())
+    }) {
+        return Ok(compiled);
+    }
+    let compiled = regex::RegexBuilder::new(pattern)
         .size_limit(8 * 1024 * 1024)
         .dfa_size_limit(8 * 1024 * 1024)
         .build()
-        .map_err(|error| Error::Execution(format!("invalid native regular expression: {error}")))
+        .map_err(|error| Error::Execution(format!("invalid native regular expression: {error}")))?;
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == CACHE_ENTRIES { cache.remove(0); }
+        cache.push((pattern.to_owned(), compiled.clone()));
+    });
+    Ok(compiled)
 }
 
 pub(super) fn check_input(text: &str) -> Result<()> {
@@ -27,5 +44,10 @@ mod tests {
         assert!(compile(&"a".repeat(4097)).is_err());
         assert!(compile("(").is_err());
         assert!(compile("(?i)^hello$").unwrap().is_match("HELLO"));
+        for _ in 0..10 { assert!(compile("(?i)^hello$").unwrap().is_match("hello")); }
+        for pattern in ["a", "b", "c", "d", "e"] {
+            assert!(compile(pattern).unwrap().is_match(pattern));
+        }
+        CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
     }
 }
