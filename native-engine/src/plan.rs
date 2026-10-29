@@ -51,6 +51,13 @@ pub enum Plan {
         keys: Vec<(String, String)>,
         kind: JoinKind,
     },
+    /// Spark USING (col1, col2) merges the join key columns in the output.
+    UsingJoin {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        keys: Vec<String>,
+        kind: JoinKind,
+    },
     UnionAll {
         left: Box<Plan>,
         right: Box<Plan>,
