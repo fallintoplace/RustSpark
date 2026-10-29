@@ -69,11 +69,15 @@ impl TaskScheduler {
     }
 
     pub fn finish(&mut self, lease: &Lease, success: bool) -> bool {
+        self.finish_at(lease, success, Instant::now())
+    }
+
+    pub fn finish_at(&mut self, lease: &Lease, success: bool, now: Instant) -> bool {
         let Some(task) = self.tasks.get_mut(&lease.task) else {
             return false;
         };
-        if !matches!(&task.status, TaskStatus::Leased { worker, attempt, .. }
-            if *worker == lease.worker && *attempt == lease.attempt) {
+        if !matches!(&task.status, TaskStatus::Leased { worker, attempt, until }
+            if *worker == lease.worker && *attempt == lease.attempt && *until > now) {
             return false;
         }
         task.status = if success {
@@ -150,3 +154,16 @@ mod task_cancel_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod stale_lease_tests {
+    use super::*;
+    #[test]
+    fn expired_completion_is_not_accepted() {
+        let now = Instant::now();
+        let mut tasks = TaskScheduler::new([42], 2).unwrap();
+        let lease = tasks.lease(1, now, Duration::from_secs(2)).unwrap().unwrap();
+        assert!(!tasks.finish_at(&lease, true, now + Duration::from_secs(2)));
+        assert_ne!(tasks.status(42), Some(&TaskStatus::Done));
+    }
+}
