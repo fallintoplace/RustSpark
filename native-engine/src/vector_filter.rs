@@ -18,12 +18,14 @@ fn fast_text_equality<'a>(
 ) -> Result<Option<(&'a [Value], bool, &'a str)>> {
     if let Expr::Binary { left, op, right } = predicate {
         if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-            if let (Expr::Column(name), Expr::Literal(Value::Text(value))) =
-                (left.as_ref(), right.as_ref()) {
-                let index = batch.schema().column(name)?;
-                if batch.schema().field(index)?.data_type == DataType::Text {
-                    return Ok(Some((batch.column(index)?, *op == BinaryOp::Equal, value)));
-                }
+            let (name, value) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(name), Expr::Literal(Value::Text(value))) |
+                (Expr::Literal(Value::Text(value)), Expr::Column(name)) => (name, value),
+                _ => return Ok(None),
+            };
+            let index = batch.schema().column(name)?;
+            if batch.schema().field(index)?.data_type == DataType::Text {
+                return Ok(Some((batch.column(index)?, *op == BinaryOp::Equal, value)));
             }
         }
     }
@@ -260,6 +262,35 @@ mod constant_left_filter_tests {
                 .filter(|&row| pred.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true))
                 .collect::<Vec<_>>();
             assert_eq!(select_indices(&batch, &pred).unwrap(), scalar);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reversed_text_comparison_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn literal_left_comparisons_match_scalar_on_nulls_and_unicode() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("city", DataType::Text, true)]).unwrap(),
+            vec![
+                vec![Value::Null],
+                vec![Value::Text("東京".into())],
+                vec![Value::Text("Paris".into())],
+                vec![Value::Text("東京".into())],
+            ],
+        ).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual] {
+            let predicate = Expr::binary(
+                Expr::Literal(Value::Text("東京".into())),
+                op, Expr::Column("city".into()),
+            );
+            let expected = (0..input.num_rows()).filter(|&row| {
+                predicate.evaluate(&input, row).unwrap().as_boolean().unwrap() == Some(true)
+            }).collect::<Vec<_>>();
+            assert_eq!(select_indices(&input, &predicate).unwrap(), expected);
         }
     }
 }
