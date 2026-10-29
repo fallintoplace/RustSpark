@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use crate::{batch::Batch, Error, Result};
 
 #[derive(Default)]
-struct PartitionHasher(u64);
+pub(crate) struct PartitionHasher(u64);
 
 impl Hasher for PartitionHasher {
     fn finish(&self) -> u64 {
