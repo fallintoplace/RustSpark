@@ -67,28 +67,30 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
-    let mut rows = Vec::new();
+    let mut selected = Vec::new();
     for index in 0..left.num_rows() {
         let row = left.row(index)?;
-        if right_rows.contains(&row) && emitted.insert(row.clone()) {
-            rows.push(row);
+        // Move the deduplication key into the set, and gather selected rows
+        // only once after the pass. Avoid storing and transposing cloned rows.
+        if right_rows.contains(&row) && emitted.insert(row) {
+            selected.push(index);
         }
     }
-    Batch::from_rows(schema, rows)
+    left.take(&selected)?.into_widened_schema(schema)
 }
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
-    let mut rows = Vec::new();
+    let mut selected = Vec::new();
     for index in 0..left.num_rows() {
         let row = left.row(index)?;
-        if !right_rows.contains(&row) && emitted.insert(row.clone()) {
-            rows.push(row);
+        if !right_rows.contains(&row) && emitted.insert(row) {
+            selected.push(index);
         }
     }
-    Batch::from_rows(schema, rows)
+    left.take(&selected)?.into_widened_schema(schema)
 }
 
 fn right_counts(right: &Batch) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
@@ -218,5 +220,42 @@ mod streaming_set_row_perf_tests {
             &[Value::Integer(2), Value::Integer(3)]);
         assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 100);
         assert_eq!(except_all(&left, &right).unwrap().num_rows(), 100);
+    }
+}
+
+#[cfg(test)]
+mod distinct_set_gather_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn distinct_set_results_keep_first_occurrences_and_widen_nullability() {
+        let left_schema = Schema::new(vec![
+            Field::new("value", DataType::Text, false),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("different", DataType::Text, true),
+            Field::new("id", DataType::Integer, true),
+        ]).unwrap();
+        let text = "é🙂".repeat(2048);
+        let left = Batch::from_rows(left_schema, vec![
+            vec![Value::Text(text.clone()), Value::Integer(1)],
+            vec![Value::Text(text.clone()), Value::Integer(1)],
+            vec![Value::Text("other".into()), Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(right_schema, vec![
+            vec![Value::Text(text.clone()), Value::Integer(1)],
+        ]).unwrap();
+        let matched = intersect_distinct(&left, &right).unwrap();
+        assert_eq!(matched.num_rows(), 1);
+        assert!(matched.schema().fields().iter().all(|f| f.nullable));
+        assert_eq!(matched.row(0).unwrap()[0], Value::Text(text));
+        let excluded = except_distinct(&left, &right).unwrap();
+        assert_eq!(excluded.num_rows(), 1);
+        assert_eq!(excluded.row(0).unwrap(), vec![
+            Value::Text("other".into()), Value::Integer(2),
+        ]);
+        assert!(excluded.schema().fields().iter().all(|f| f.nullable));
     }
 }
