@@ -123,11 +123,13 @@ where L: IntoIterator<Item = Result<Batch>>,
         )?;
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
-            for piece in BatchChunks::new(&batch, io_batch_rows.min(256))? {
-                let piece = piece?;
-                let joined = prepared.probe_with_matches(
-                    &piece, matched_right.as_deref_mut(),
+            let mut start = 0;
+            while start < batch.num_rows() {
+                let end = start.saturating_add(io_batch_rows.min(256)).min(batch.num_rows());
+                let joined = prepared.probe_range_with_matches(
+                    &batch, start, end, matched_right.as_deref_mut(),
                 )?;
+                start = end;
                 for output_chunk in BatchChunks::new(&joined, io_batch_rows)? {
                     let output_chunk = output_chunk?;
                     if output_chunk.num_rows() != 0 {
