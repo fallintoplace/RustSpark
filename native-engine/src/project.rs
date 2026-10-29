@@ -48,8 +48,18 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
         .map(|_| Vec::with_capacity(batch.num_rows()))
         .collect();
     for (column, selection) in columns.iter_mut().zip(selections) {
-        for row in 0..batch.num_rows() {
-            column.push(selection.expression.evaluate(batch, row)?);
+        match &selection.expression {
+            Expr::Column(name) => {
+                column.extend_from_slice(batch.column(batch.schema().column(name)?)?);
+            }
+            Expr::Literal(value) => {
+                column.resize(batch.num_rows(), value.clone());
+            }
+            expression => {
+                for row in 0..batch.num_rows() {
+                    column.push(expression.evaluate(batch, row)?);
+                }
+            }
         }
     }
     Batch::new_with_row_count(schema, columns, batch.num_rows())
@@ -158,5 +168,27 @@ mod zero_column_projection_consolidation_tests {
             assert_eq!(projected.schema().len(), 0);
             assert_eq!(projected.rows().unwrap(), vec![vec![]; 2]);
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_fast_path_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn direct_projection_repeats_columns_and_literals_with_nulls() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("data", DataType::Text, true),
+        ]).unwrap(), vec![vec![Value::Null], vec![Value::Text("abc".into())]]).unwrap();
+        let output = project(&input, &[
+            Selection::new(Expr::Column("data".into()), "left"),
+            Selection::new(Expr::Column("DATA".into()), "right"),
+            Selection::new(Expr::Literal(Value::Integer(9)), "fixed"),
+        ]).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Null, Value::Null, Value::Integer(9)],
+            vec![Value::Text("abc".into()), Value::Text("abc".into()), Value::Integer(9)],
+        ]);
     }
 }
