@@ -17,6 +17,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .ok_or_else(|| Error::Execution("REGEXP_COUNT overflow".into()))?;
         return Ok(Value::Integer(count));
     }
+    // Non-overlapping substring matches are identical to regex matches
+    // for ASCII alphanumeric and underscore-only patterns.
+    if !pattern.is_empty() && pattern.len() <= 4096 &&
+        pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        let count = text.match_indices(pattern).count();
+        return i64::try_from(count).map(Value::Integer)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+    }
     let re = regex_support::compile(pattern)?;
     let count = re.find_iter(text).count();
     Ok(Value::Integer(i64::try_from(count)
@@ -42,5 +50,20 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("".into()),
             Value::Text("".into())]).unwrap(), Value::Integer(1));
         assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod literal_regexp_count_fast_path_tests {
+    use super::*;
+    #[test]
+    fn counts_nonoverlapping_literal_and_regex_matches() {
+        assert_eq!(evaluate(&[Value::Text("abababa".into()),
+            Value::Text("aba".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(evaluate(&[Value::Text("éa🙂a".into()),
+            Value::Text("a".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(evaluate(&[Value::Text("aaa".into()),
+            Value::Text("a+".into())]).unwrap(), Value::Integer(1));
+        assert!(evaluate(&[Value::Text("hello".into()), Value::Text("(".into())]).is_err());
     }
 }
