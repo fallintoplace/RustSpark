@@ -31,11 +31,21 @@ The native crate is experimental and is not the default RustSpark engine.
 cargo run --manifest-path native-engine/Cargo.toml -- --csv tests/fixtures/sales.csv --table sales --sql "SELECT city, SUM(amount) AS total FROM sales GROUP BY city ORDER BY city"
 ```
 
-The native CLI runs without DataFusion. It currently operates on bounded,
-in-memory CSV inputs and a deliberately restricted SQL subset. SQL JOIN,
-UNION and some other operators are available in the native Rust API, but
-not exposed through SQL yet. It does not yet read Parquet or support
-disk spill, parallel scheduling, or distributed execution.
+The native CLI runs without DataFusion. It supports a deliberately restricted
+SQL subset, including native joins, grouping, and distinct set operations.
+It can read CSV and Parquet, but the primary CLI still materializes input in
+memory and cannot use distributed execution. Parquet input is capped at
+1,000,000 rows; unsupported Arrow column types and empty Parquet data fail
+with explicit errors. The separate streaming CSV CLI has different limits.
+
+Query a Parquet file through the native engine:
+
+```sh
+cargo run --manifest-path native-engine/Cargo.toml -- --parquet /data/sales.parquet --table sales --sql 'SELECT city, SUM(amount) AS total FROM sales GROUP BY city'
+```
+
+Use exactly one of `--csv` or `--parquet`. The `--stream` option currently
+requires CSV and is not a Parquet streaming feature.
 
 ## Streaming SQL with external sorting
 
