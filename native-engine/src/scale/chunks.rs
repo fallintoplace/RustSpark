@@ -33,7 +33,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
         }
 
         let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
-        while rows.len() < self.batch_rows {
+        while rows.len() < self.batch_rows.min(65_536) {
             match self.input.next() {
                 Some(Ok(row)) => rows.push(row),
                 Some(Err(error)) => {
@@ -110,5 +110,19 @@ mod tests {
         assert_eq!(batches.next().unwrap().unwrap().num_rows(), 1);
         assert!(batches.next().unwrap().is_err());
         assert!(batches.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod max_batch_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn large_requested_batch_is_split_at_memory_boundary() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, false)]).unwrap();
+        let rows = (0..65_537).map(|n| Ok(vec![Value::Integer(n)]));
+        let batches = RowBatcher::new(rows, schema, usize::MAX).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [65_536, 1]);
     }
 }
