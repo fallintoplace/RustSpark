@@ -48,6 +48,14 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
+    if text.is_ascii() {
+        let Some(suffix) = text.get(offset..) else { return Ok(Value::Integer(0)); };
+        let Some(found) = suffix.find(needle) else { return Ok(Value::Integer(0)); };
+        let position = offset.checked_add(found).and_then(|n| n.checked_add(1))
+            .and_then(|n| i64::try_from(n).ok())
+            .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
+        return Ok(Value::Integer(position));
+    }
     let Some(start) = text.char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(text.len()))
@@ -167,5 +175,23 @@ mod strcmp_extension_tests {
         assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
         assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
         assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_locate_fast_path_tests {
+    use super::*;
+    #[test]
+    fn respects_one_based_offsets_and_empty_match_at_end() {
+        let input = Value::Text(format!("{}end", "a".repeat(4096)));
+        assert_eq!(locate(&[Value::Text("end".into()), input.clone()]).unwrap(),
+            Value::Integer(4097));
+        assert_eq!(locate(&[Value::Text("".into()), input.clone(),
+            Value::Integer(4100)]).unwrap(), Value::Integer(4100));
+        assert_eq!(locate(&[Value::Text("a".into()), input.clone(),
+            Value::Integer(4101)]).unwrap(), Value::Integer(0));
+        assert_eq!(locate(&[Value::Text("東京".into()), input]).unwrap(), Value::Integer(0));
+        assert_eq!(locate(&[Value::Text("🙂".into()),
+            Value::Text("é🙂z".into())]).unwrap(), Value::Integer(2));
     }
 }
