@@ -106,7 +106,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
             let count = self.remaining.map_or(available, |left| left.min(available));
             if count == 0 { continue; }
             if let Some(remaining) = self.remaining.as_mut() { *remaining -= count; }
-            return Some(batch.take(&(skipped..skipped + count).collect::<Vec<_>>()));
+            return Some(batch.slice_rows(skipped, skipped + count));
         }
     }
 }
@@ -167,5 +167,23 @@ mod cancellation_before_upstream_tests {
         assert!(limit.next().unwrap().is_err());
         assert!(limit.next().is_none());
         assert_eq!(polls.get(), 0);
+    }
+}
+
+#[cfg(test)]
+mod scale_limit_contiguous_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn streaming_slice_preserves_offset_across_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let parts = [0..3, 3..6, 6..9].into_iter().map(|range| {
+            Ok(Batch::from_rows(schema.clone(), range.map(|n| vec![Value::Integer(n)]).collect()).unwrap())
+        });
+        let output = LimitStream::new(parts, 4, Some(3), QueryControl::default())
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            vec![vec![Value::Integer(4)], vec![Value::Integer(5)], vec![Value::Integer(6)]]);
     }
 }
