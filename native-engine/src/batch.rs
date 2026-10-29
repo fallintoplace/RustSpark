@@ -143,7 +143,10 @@ impl Batch {
         if start > end || end > self.num_rows() {
             return Err(Error::Execution("invalid batch row slice".into()));
         }
-        self.take(&(start..end).collect::<Vec<_>>())
+        let columns = self.columns.iter()
+            .map(|column| column[start..end].to_vec())
+            .collect();
+        Self::new(self.schema.clone(), columns)
     }
 }
 
@@ -165,5 +168,16 @@ mod batch_slicing_feature_tests {
         assert!(input.slice_rows(3, 4).is_err());
         assert!(input.slice_rows(2, 1).is_err());
     }
+    #[test]
+    fn direct_slicing_matches_take_for_nullable_columns() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Integer, false),
+            Field::new("b", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("b".into())],
+            vec![Value::Integer(3), Value::Null],
+        ]).unwrap();
+        assert_eq!(input.slice_rows(1, 3).unwrap(), input.take(&[1, 2]).unwrap());
+    }
 }
-
