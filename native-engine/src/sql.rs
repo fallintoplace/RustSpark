@@ -201,20 +201,19 @@ impl Parser {
                     if negate { self.next(); }
                     self.expect_word("IN")?;
                     self.expect_symbol('(')?;
+                    if self.take_symbol(')') {
+                        return Err(Error::Parse("IN requires at least one expression".into()));
+                    }
                     let mut choices = Vec::new();
                     loop {
+                        if choices.len() >= 4_096 {
+                            return Err(Error::Parse("IN list exceeds 4096 expressions".into()));
+                        }
                         choices.push(self.expression(0)?);
                         if !self.take_symbol(',') { break; }
                     }
                     self.expect_symbol(')')?;
-                    let mut choices = choices.into_iter();
-                    let first = choices.next().expect("nonempty IN list");
-                    let mut predicate = Expr::binary(left.clone(), BinaryOp::Equal, first);
-                    for choice in choices {
-                        predicate = Expr::binary(predicate, BinaryOp::Or,
-                            Expr::binary(left.clone(), BinaryOp::Equal, choice));
-                    }
-                    left = if negate { Expr::Not(Box::new(predicate)) } else { predicate };
+                    left = Expr::InList { needle: Box::new(left), choices, negated };
                     continue;
                 }
             }
