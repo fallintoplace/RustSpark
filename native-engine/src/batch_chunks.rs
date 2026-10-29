@@ -53,7 +53,7 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         }
     }
-    Batch::new(schema, columns)
+    Batch::new_with_row_count(schema, columns, total)
 }
 
 #[cfg(test)]
@@ -83,5 +83,17 @@ mod tests {
         let other = Batch::empty(Schema::new(vec![Field::new("another", DataType::Text, true)]).unwrap());
         assert!(concatenate(&[first, other]).is_err());
         assert!(concatenate(&[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_column_concat_consolidation_tests {
+    use super::*;
+    #[test]
+    fn concatenation_preserves_zero_column_rows() {
+        let schema = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
+        assert_eq!(concatenate(&[a, b]).unwrap().rows().unwrap(), vec![vec![]; 5]);
     }
 }

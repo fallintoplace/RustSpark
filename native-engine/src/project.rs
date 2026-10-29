@@ -52,7 +52,7 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
             column.push(selection.expression.evaluate(batch, row)?);
         }
     }
-    Batch::new(schema, columns)
+    Batch::new_with_row_count(schema, columns, batch.num_rows())
 }
 
 #[cfg(test)]
@@ -99,7 +99,7 @@ pub fn project_columns(batch: &Batch, names: &[&str]) -> Result<Batch> {
         fields.push(batch.schema().field(position)?.clone());
         values.push(batch.column(position)?.to_vec());
     }
-    Batch::new(Schema::new(fields)?, values)
+    Batch::new_with_row_count(Schema::new(fields)?, values, batch.num_rows())
 }
 
 #[cfg(test)]
@@ -143,5 +143,20 @@ mod selected_nullability_tests {
         assert!(!result.schema().field(0).unwrap().nullable);
         assert!(!result.schema().field(1).unwrap().nullable);
         assert!(result.schema().field(2).unwrap().nullable);
+    }
+}
+
+#[cfg(test)]
+mod zero_column_projection_consolidation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn both_projection_paths_keep_zero_width_row_counts() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let source = Batch::from_rows(schema, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        for projected in [project(&source, &[]).unwrap(), project_columns(&source, &[]).unwrap()] {
+            assert_eq!(projected.schema().len(), 0);
+            assert_eq!(projected.rows().unwrap(), vec![vec![]; 2]);
+        }
     }
 }

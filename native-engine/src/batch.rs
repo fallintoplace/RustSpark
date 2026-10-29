@@ -50,10 +50,8 @@ impl Batch {
     }
 
     pub fn from_rows(schema: Schema, rows: Vec<Vec<Value>>) -> Result<Self> {
-        if schema.is_empty() && !rows.is_empty() {
-            return Err(Error::Schema("nonempty rows require columns".into()));
-        }
-        let mut columns = vec![Vec::with_capacity(rows.len()); schema.len()];
+        let row_count = rows.len();
+        let mut columns = vec![Vec::with_capacity(row_count); schema.len()];
         for row in rows {
             if row.len() != schema.len() {
                 return Err(Error::Schema("row width does not match schema".into()));
@@ -62,7 +60,7 @@ impl Batch {
                 column.push(value);
             }
         }
-        Self::new(schema, columns)
+        Self::new_with_row_count(schema, columns, row_count)
     }
 
     pub fn schema(&self) -> &Schema {
@@ -108,7 +106,7 @@ impl Batch {
             }
             columns.push(selected);
         }
-        Self::new(self.schema.clone(), columns)
+        Self::new_with_row_count(self.schema.clone(), columns, indices.len())
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
@@ -163,7 +161,7 @@ impl Batch {
         let columns = self.columns.iter()
             .map(|column| column[start..end].to_vec())
             .collect();
-        Self::new(self.schema.clone(), columns)
+        Self::new_with_row_count(self.schema.clone(), columns, end - start)
     }
 }
 
@@ -203,5 +201,23 @@ mod batch_slice_edge_tests {
         assert_eq!(output.num_rows(), 0);
         assert_eq!(output.schema(), input.schema());
         assert_eq!(input.slice_rows(1, 2).unwrap().row(0).unwrap(), vec![Value::Null]);
+    }
+}
+
+#[cfg(test)]
+mod zero_column_cardinality_consolidation_tests {
+    use super::*;
+    #[test]
+    fn zero_width_rows_survive_construction_gather_and_slice() {
+        let schema = Schema::new(vec![]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![vec![], vec![], vec![]]).unwrap();
+        assert_eq!(input.num_rows(), 3);
+        assert_eq!(input.rows().unwrap(), vec![vec![]; 3]);
+        assert_eq!(input.take(&[2, 0, 2]).unwrap().rows().unwrap(), vec![vec![]; 3]);
+        assert_eq!(input.slice_rows(1, 3).unwrap().rows().unwrap(), vec![vec![]; 2]);
+        assert_eq!(input.slice_rows(2, 2).unwrap().num_rows(), 0);
+        assert!(input.take(&[3]).is_err());
+        assert!(input.slice_rows(0, 4).is_err());
+        assert!(Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).is_err());
     }
 }

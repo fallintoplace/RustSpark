@@ -36,7 +36,7 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
         values.extend_from_slice(right.column(column)?);
         columns.push(values);
     }
-    Batch::new(schema, columns)
+    Batch::new_with_row_count(schema, columns, count)
 }
 
 #[cfg(test)]
@@ -126,5 +126,18 @@ mod incremental_union_distinct_regression {
         ]);
         assert_eq!(output.schema().fields()[0].name, "left_id");
         assert!(output.schema().fields()[0].nullable);
+    }
+}
+
+#[cfg(test)]
+mod zero_column_union_consolidation_tests {
+    use super::*;
+    #[test]
+    fn union_preserves_zero_width_multiset_cardinality() {
+        let schema = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
+        assert_eq!(union_all(&a, &b).unwrap().rows().unwrap(), vec![vec![]; 5]);
+        assert_eq!(union_distinct(&a, &b).unwrap().rows().unwrap(), vec![vec![]]);
     }
 }
