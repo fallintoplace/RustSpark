@@ -115,7 +115,7 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Text(lhs) = value {
-                if (lhs == rhs) == equals { selected.push(row); }
+                if (lhs.as_str() == rhs) == equals { selected.push(row); }
             }
         }
     } else {
