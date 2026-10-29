@@ -61,6 +61,7 @@ mod substring_index;
 mod find_in_set;
 mod elt;
 mod regexp_instr;
+mod regexp_substr;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -142,6 +143,7 @@ const MODULES: &[&[Function]] = &[
     &find_in_set::FUNCTIONS,
     &elt::FUNCTIONS,
     &regexp_instr::FUNCTIONS,
+    &regexp_substr::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
