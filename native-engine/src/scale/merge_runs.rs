@@ -77,6 +77,9 @@ impl RunMerger {
         if paths.len() > MAX_FAN_IN || input_batch_rows == 0 || output_batch_rows == 0 {
             return Err(Error::Execution("invalid external sort fan-in or batch size".into()));
         }
+        if keys.is_empty() {
+            return Err(Error::Execution("external merge needs at least one sort key".into()));
+        }
         let mut selected = Vec::new();
         for key in keys {
             let Expr::Column(name) = &key.expression else {
@@ -182,5 +185,18 @@ mod tests {
         assert_eq!(values, (0..71).map(Value::Integer).collect::<Vec<_>>());
         drop(runs);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod empty_sort_key_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn rejects_unordered_merges_without_opening_files() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        assert!(RunMerger::new(&[] as &[&str], schema, &[], 4, 4,
+            QueryControl::default()).is_err());
     }
 }
