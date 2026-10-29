@@ -9,19 +9,29 @@ fn output(types: &[DataType]) -> Result<DataType> {
     }
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
-    let value = match args[0] {
-        Value::Integer(n) => n as f64,
-        Value::Float(n) if n.is_finite() => n,
-        Value::Float(_) => return Err(Error::Execution("FORMAT_NUMBER requires finite number".into())),
-        Value::Null => return Ok(Value::Null),
-        _ => return Err(Error::Type("FORMAT_NUMBER requires a number".into())),
-    };
+    if args[0].is_null() { return Ok(Value::Null); }
+    if !matches!(args[0], Value::Integer(_) | Value::Float(_)) {
+        return Err(Error::Type("FORMAT_NUMBER requires a number".into()));
+    }
     let Some(digits) = super::integer(&args[1])? else { return Ok(Value::Null) };
     if digits < 0 { return Ok(Value::Null) }
     let digits = usize::try_from(digits)
         .map_err(|_| Error::Execution("FORMAT_NUMBER precision overflow".into()))?;
     if digits > 15 { return Err(Error::Execution("FORMAT_NUMBER supports at most 15 decimal places".into())); }
-    let formatted = format!("{value:.digits$}");
+    let formatted = match args[0] {
+        Value::Integer(value) => {
+            // Casting BIGINT to f64 silently rounds values above 2^53.
+            let mut result = value.to_string();
+            if digits > 0 {
+                result.push('.');
+                result.push_str(&"0".repeat(digits));
+            }
+            result
+        }
+        Value::Float(value) if value.is_finite() => format!("{value:.digits$}"),
+        Value::Float(_) => return Err(Error::Execution("FORMAT_NUMBER requires finite number".into())),
+        _ => unreachable!("numeric input already validated"),
+    };
     let (negative, unsigned) = formatted.strip_prefix('-')
         .map_or(("", formatted.as_str()), |rest| ("-", rest));
     let (whole, fractional) = unsigned.split_once('.')
@@ -70,4 +80,14 @@ mod grouped_number_single_output_perf_tests {
         assert_eq!(evaluate(&[Value::Integer(0), Value::Integer(3)]).unwrap(),
             Value::Text("0.000".into()));
     }
+    #[test]
+    fn preserves_64_bit_integer_precision_without_float_roundtrip() {
+        assert_eq!(evaluate(&[Value::Integer(9_007_199_254_740_993), Value::Integer(0)]).unwrap(),
+            Value::Text("9,007,199,254,740,993".into()));
+        assert_eq!(evaluate(&[Value::Integer(i64::MAX), Value::Integer(2)]).unwrap(),
+            Value::Text("9,223,372,036,854,775,807.00".into()));
+        assert_eq!(evaluate(&[Value::Integer(i64::MIN), Value::Integer(0)]).unwrap(),
+            Value::Text("-9,223,372,036,854,775,808".into()));
+    }
+
 }
