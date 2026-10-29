@@ -8,7 +8,7 @@ import subprocess
 from typing import Iterator
 
 
-TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\\Z")
+TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def add_named_inputs(command, flag, tables):
