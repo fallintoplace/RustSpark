@@ -26,6 +26,16 @@ class TemplatesTests(unittest.TestCase):
             make_command("rustspark", Path("/db"), Path("q.sql"),
                          {"bad-name": "int64:3"})
 
+    def test_overrides_keep_query_execution_bounded(self):
+        command = make_command("rustspark", Path("/db"), Path("q.sql"), {},
+                               max_rows=25, query_timeout=5)
+        self.assertEqual(command[command.index("--max-rows") + 1], "25")
+        self.assertEqual(command[command.index("--query-timeout") + 1], "5")
+        for options in ({"max_rows": 0}, {"max_rows": 201},
+                        {"max_rows": True}, {"query_timeout": 21}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                make_command("rustspark", Path("/db"), Path("q.sql"), {}, **options)
+
 
 if __name__ == "__main__":
     unittest.main()

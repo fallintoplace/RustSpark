@@ -34,8 +34,10 @@ def make_command(binary: str, database_dir: Path, template: Path,
                  query_timeout: int = 20) -> list[str]:
     if len(parameters) > 32:
         raise ValueError("Too many SQL parameters")
-    if max_rows < 1 or query_timeout < 1:
-        raise ValueError("Query deadline and row limit must be positive")
+    if type(max_rows) is not int or not 1 <= max_rows <= 200:
+        raise ValueError("max_rows must be between 1 and 200")
+    if type(query_timeout) is not int or not 1 <= query_timeout <= 20:
+        raise ValueError("query_timeout must be between 1 and 20 seconds")
     arguments = [
         binary, "--database-dir", str(database_dir), "--sql-file", str(template),
         "--stdout-format", "json-array", "--max-rows", str(max_rows),
