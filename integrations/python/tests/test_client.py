@@ -120,6 +120,12 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.query_one("SELECT id FROM t", max_rows=1)
 
+    def test_named_table_paths_are_nonempty_text_paths(self):
+        for path in ("", b"/tmp/events.json", 17):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Named source paths"):
+                RustSpark().query("SELECT 1", json_tables={"events": path})
+
+
 
 if __name__ == "__main__":
     unittest.main()
