@@ -150,6 +150,10 @@ impl Value {
             (Self::Integer(value), DataType::Text) => Ok(Self::Text(value.to_string())),
             (Self::Float(value), DataType::Text) => Ok(Self::Text(value.to_string())),
             (Self::Integer(value), DataType::Float) => Ok(Self::Float(*value as f64)),
+            (Self::Boolean(value), DataType::Integer) => Ok(Self::Integer(i64::from(*value))),
+            (Self::Integer(value), DataType::Boolean) => Ok(Self::Boolean(*value != 0)),
+            (Self::Float(value), DataType::Boolean) if value.is_finite() =>
+                Ok(Self::Boolean(*value != 0.0)),
             (Self::Float(value), DataType::Integer) => {
                 if !value.is_finite() || *value < i64::MIN as f64 ||
                     *value >= -(i64::MIN as f64) {
@@ -157,14 +161,18 @@ impl Value {
                 }
                 Ok(Self::Integer(value.trunc() as i64))
             }
-            (Self::Text(value), DataType::Integer) => value.parse::<i64>()
+            (Self::Text(value), DataType::Integer) => value.trim().parse::<i64>()
                 .map(Self::Integer).map_err(|_| Error::Type("invalid BIGINT cast".into())),
-            (Self::Text(value), DataType::Float) => value.parse::<f64>().ok()
+            (Self::Text(value), DataType::Float) => value.trim().parse::<f64>().ok()
                 .filter(|n| n.is_finite()).map(Self::Float)
                 .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
-            (Self::Text(value), DataType::Boolean) if value.eq_ignore_ascii_case("true") =>
+            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("true") =>
                 Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.eq_ignore_ascii_case("false") =>
+            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
+                Ok(Self::Boolean(false)),
+            (Self::Text(value), DataType::Boolean) if value.trim() == "1" =>
+                Ok(Self::Boolean(true)),
+            (Self::Text(value), DataType::Boolean) if value.trim() == "0" =>
                 Ok(Self::Boolean(false)),
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
@@ -208,5 +216,28 @@ mod mixed_numeric_precision_tests {
         assert_eq!(Value::Integer(1).sql_compare(&Value::Float(1.25)).unwrap(), Some(Ordering::Less));
         assert_eq!(Value::Integer(0).sql_compare(&Value::Float(f64::INFINITY)).unwrap(), Some(Ordering::Less));
         assert_eq!(Value::Integer(0).sql_compare(&Value::Float(f64::NAN)).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_native_cast_tests {
+    use super::*;
+    use crate::schema::DataType;
+    #[test]
+    fn cast_accepts_numeric_booleans_and_rejects_nonfinite() {
+        assert_eq!(Value::Boolean(true).cast_to(DataType::Integer).unwrap(), Value::Integer(1));
+        assert_eq!(Value::Integer(-2).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
+        assert_eq!(Value::Integer(0).cast_to(DataType::Boolean).unwrap(), Value::Boolean(false));
+        assert_eq!(Value::Float(0.5).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
+        assert!(Value::Float(f64::NAN).cast_to(DataType::Boolean).is_err());
+    }
+    #[test]
+    fn cast_trims_text_and_accepts_boolean_zero_one() {
+        assert_eq!(Value::Text(" 42 ".into()).cast_to(DataType::Integer).unwrap(), Value::Integer(42));
+        assert_eq!(Value::Text(" .5 ".into()).cast_to(DataType::Float).unwrap(), Value::Float(0.5));
+        assert_eq!(Value::Text(" FALSE ".into()).cast_to(DataType::Boolean).unwrap(), Value::Boolean(false));
+        assert_eq!(Value::Text(" 1 ".into()).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
+        assert_eq!(Value::Text("0".into()).cast_to(DataType::Boolean).unwrap(), Value::Boolean(false));
+        assert!(Value::Text("2".into()).cast_to(DataType::Boolean).is_err());
     }
 }
