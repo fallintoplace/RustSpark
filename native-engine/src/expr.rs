@@ -35,7 +35,7 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
-    Like { value: Box<Expr>, pattern: Box<Expr> },
+    Like { value: Box<Expr>, pattern: Box<Expr>, escape: Option<Box<Expr>> },
     Case { branches: Vec<(Expr, Expr)>, else_expr: Option<Box<Expr>> },
     Call { name: String, args: Vec<Expr> },
     TryCast { expression: Box<Expr>, target: DataType },
@@ -165,13 +165,27 @@ impl Expr {
                 };
                 Ok(Value::Boolean(if *negated { !distinct } else { distinct }))
             },
-            Self::Like { value, pattern } => match (
-                value.evaluate(batch, row)?, pattern.evaluate(batch, row)?
-            ) {
-                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-                (Value::Text(value), Value::Text(pattern)) =>
-                    Ok(Value::Boolean(sql_like(&value, &pattern)?)),
-                _ => Err(Error::Type("LIKE requires text values".into())),
+            Self::Like { value, pattern, escape } => {
+                let value = value.evaluate(batch, row)?;
+                let pattern = pattern.evaluate(batch, row)?;
+                let escaped = match escape {
+                    None => Value::Text("\\".into()),
+                    Some(expr) => expr.evaluate(batch, row)?,
+                };
+                match (value, pattern, escaped) {
+                    (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) =>
+                        Ok(Value::Null),
+                    (Value::Text(value), Value::Text(pattern), Value::Text(escape)) => {
+                        let mut chars = escape.chars();
+                        let escape = chars.next().ok_or_else(||
+                            Error::Type("LIKE ESCAPE must be one character".into()))?;
+                        if chars.next().is_some() {
+                            return Err(Error::Type("LIKE ESCAPE must be one character".into()));
+                        }
+                        Ok(Value::Boolean(sql_like_escape(&value, &pattern, escape)?))
+                    }
+                    _ => Err(Error::Type("LIKE and ESCAPE require text values".into())),
+                }
             },
             Self::TryCast { expression, target } =>
                 Ok(crate::try_cast::convert(expression.evaluate(batch, row)?, *target)),
@@ -204,33 +218,65 @@ impl Expr {
 }
 
 /// SQL LIKE wildcard matching with bounded working memory and work.
-fn sql_like(input: &str, pattern: &str) -> Result<bool> {
-    if !pattern.contains('%') && !pattern.contains('_') {
-        return Ok(input == pattern);
+
+#[derive(Clone, Copy)]
+enum LikePiece { Literal(char), One, Many }
+
+fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
+    let mut symbols = pattern.chars();
+    let mut pieces = Vec::new();
+    while let Some(symbol) = symbols.next() {
+        let next = if symbol == escape {
+            let literal = symbols.next().ok_or_else(||
+                Error::Parse("LIKE pattern ends with ESCAPE character".into()))?;
+            if !matches!(literal, '_' | '%') && literal != escape {
+                return Err(Error::Parse("LIKE ESCAPE may only escape %, _ or itself".into()));
+            }
+            LikePiece::Literal(literal)
+        } else {
+            match symbol {
+                '%' => LikePiece::Many,
+                '_' => LikePiece::One,
+                other => LikePiece::Literal(other),
+            }
+        };
+        pieces.push(next);
     }
-    let text: Vec<char> = input.chars().collect();
-    let pattern: Vec<char> = pattern.chars().collect();
-    if (text.len() + 1).checked_mul(pattern.len() + 1).is_none_or(|cells| cells > 8_000_000) {
+    if pieces.iter().all(|piece| matches!(piece, LikePiece::Literal(_))) {
+        return Ok(input.chars().eq(pieces.iter().map(|piece| match piece {
+            LikePiece::Literal(ch) => *ch,
+            _ => unreachable!(),
+        })));
+    }
+    let text = input.chars().collect::<Vec<_>>();
+    if (text.len() + 1).checked_mul(pieces.len() + 1)
+        .is_none_or(|cells| cells > 8_000_000) {
         return Err(Error::Execution("LIKE pattern exceeds work budget".into()));
     }
     let mut prev = vec![false; text.len() + 1];
     prev[0] = true;
-    for symbol in pattern {
+    for piece in pieces {
         let mut next = vec![false; text.len() + 1];
-        if symbol == '%' {
-            next[0] = prev[0];
-            for index in 1..=text.len() {
-                next[index] = prev[index] || next[index - 1];
+        match piece {
+            LikePiece::Many => {
+                next[0] = prev[0];
+                for i in 1..=text.len() { next[i] = prev[i] || next[i - 1]; }
             }
-        } else {
-            for index in 1..=text.len() {
-                next[index] = prev[index - 1]
-                    && (symbol == '_' || symbol == text[index - 1]);
+            LikePiece::One => {
+                for i in 1..=text.len() { next[i] = prev[i - 1]; }
+            }
+            LikePiece::Literal(symbol) => {
+                for i in 1..=text.len() { next[i] = prev[i - 1] && text[i - 1] == symbol; }
             }
         }
         prev = next;
     }
     Ok(prev[text.len()])
+}
+
+#[cfg(test)]
+fn sql_like(input: &str, pattern: &str) -> Result<bool> {
+    sql_like_escape(input, pattern, '\\')
 }
 
 fn bool_to_value(value: Option<bool>) -> Value {
