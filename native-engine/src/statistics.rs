@@ -68,22 +68,31 @@ impl ColumnStatistics {
         if nulls > rows {
             return Err(Error::Execution("invalid NULL count".into()));
         }
+        // Validate both extrema before committing counters or bounds.
+        let mut min = self.min.clone();
+        let mut max = self.max.clone();
         if let Some(value) = &other.min {
-            if self.min.as_ref().is_none_or(|current| {
-                matches!(value.sql_compare(current), Ok(Some(Ordering::Less)))
-            }) {
-                self.min = Some(value.clone());
+            if let Some(current) = &min {
+                if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
+                    min = Some(value.clone());
+                }
+            } else {
+                min = Some(value.clone());
             }
         }
         if let Some(value) = &other.max {
-            if self.max.as_ref().is_none_or(|current| {
-                matches!(value.sql_compare(current), Ok(Some(Ordering::Greater)))
-            }) {
-                self.max = Some(value.clone());
+            if let Some(current) = &max {
+                if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
+                    max = Some(value.clone());
+                }
+            } else {
+                max = Some(value.clone());
             }
         }
         self.rows = rows;
         self.nulls = nulls;
+        self.min = min;
+        self.max = max;
         Ok(())
     }
 }
@@ -174,5 +183,30 @@ mod observation_atomicity_tests {
         let before = stats.clone();
         assert!(stats.observe(&Value::Null).is_err());
         assert_eq!(stats, before);
+    }
+}
+
+#[cfg(test)]
+mod merged_statistics_atomicity_consolidation_tests {
+    use super::*;
+    #[test]
+    fn incompatible_merge_preserves_stats_exactly() {
+        let mut first = ColumnStatistics { rows: 2, nulls: 0,
+            min: Some(Value::Integer(2)), max: Some(Value::Integer(8)) };
+        let other = ColumnStatistics { rows: 1, nulls: 0,
+            min: Some(Value::Text("a".into())), max: Some(Value::Text("z".into())) };
+        let before = first.clone();
+        assert!(first.merge(&other).is_err());
+        assert_eq!(first, before);
+    }
+    #[test]
+    fn overflow_does_not_partially_update_extrema() {
+        let mut first = ColumnStatistics { rows: u64::MAX, nulls: 0,
+            min: Some(Value::Integer(2)), max: Some(Value::Integer(8)) };
+        let other = ColumnStatistics { rows: 1, nulls: 0,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(9)) };
+        let before = first.clone();
+        assert!(first.merge(&other).is_err());
+        assert_eq!(first, before);
     }
 }
