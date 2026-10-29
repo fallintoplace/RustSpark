@@ -166,6 +166,21 @@ impl Parser {
                     continue;
                 }
             }
+            if min_precedence <= 3 {
+                let negate = self.peek_word("NOT")
+                    && matches!(self.tokens.get(self.index + 1),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("LIKE"));
+                if self.peek_word("LIKE") || negate {
+                    if negate { self.next(); }
+                    self.expect_word("LIKE")?;
+                    let expr = Expr::Like {
+                        value: Box::new(left),
+                        pattern: Box::new(self.expression(4)?),
+                    };
+                    left = if negate { Expr::Not(Box::new(expr)) } else { expr };
+                    continue;
+                }
+            }
             let Some((op, precedence)) = self.binary_operator() else {
                 break;
             };
@@ -543,6 +558,14 @@ mod tests {
                 vec![Value::Text("Paris".into()), Value::Integer(1), Value::Null],
             ]
         );
+    }
+
+    #[test]
+    fn like_and_not_like_support_unicode_and_nulls() {
+        let plan = parse_sql("SELECT city FROM sales WHERE city LIKE 'Ber%' AND city NOT LIKE '%s'").unwrap();
+        assert_eq!(execute(&plan, &sales()).unwrap().num_rows(), 2);
+        let null_pattern = parse_sql("SELECT amount FROM sales WHERE amount LIKE NULL").unwrap();
+        assert!(execute(&null_pattern, &sales()).is_err());
     }
 
     #[test]

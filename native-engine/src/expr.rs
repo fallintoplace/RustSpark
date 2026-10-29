@@ -35,6 +35,7 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
+    Like { value: Box<Expr>, pattern: Box<Expr> },
 }
 
 impl Expr {
@@ -55,7 +56,7 @@ impl Expr {
                 Value::Integer(_) => DataType::Integer,
                 Value::Float(_) => DataType::Float,
             }),
-            Self::Not(_) | Self::IsNull(_) => Ok(DataType::Boolean),
+            Self::Not(_) | Self::IsNull(_) | Self::Like { .. } => Ok(DataType::Boolean),
             Self::Binary { left, op, right } => match op {
                 BinaryOp::Equal
                 | BinaryOp::NotEqual
@@ -90,6 +91,14 @@ impl Expr {
                 None => Value::Null,
             }),
             Self::IsNull(expr) => Ok(Value::Boolean(expr.evaluate(batch, row)?.is_null())),
+            Self::Like { value, pattern } => match (
+                value.evaluate(batch, row)?, pattern.evaluate(batch, row)?
+            ) {
+                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                (Value::Text(value), Value::Text(pattern)) =>
+                    Ok(Value::Boolean(sql_like(&value, &pattern)?)),
+                _ => Err(Error::Type("LIKE requires text values".into())),
+            },
             Self::Binary { left, op, right } => {
                 let left = left.evaluate(batch, row)?;
                 let right = right.evaluate(batch, row)?;
@@ -97,6 +106,33 @@ impl Expr {
             }
         }
     }
+}
+
+/// SQL LIKE wildcard matching with bounded working memory and work.
+fn sql_like(input: &str, pattern: &str) -> Result<bool> {
+    let text: Vec<char> = input.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    if (text.len() + 1).checked_mul(pattern.len() + 1).is_none_or(|cells| cells > 8_000_000) {
+        return Err(Error::Execution("LIKE pattern exceeds work budget".into()));
+    }
+    let mut prev = vec![false; text.len() + 1];
+    prev[0] = true;
+    for symbol in pattern {
+        let mut next = vec![false; text.len() + 1];
+        if symbol == '%' {
+            next[0] = prev[0];
+            for index in 1..=text.len() {
+                next[index] = prev[index] || next[index - 1];
+            }
+        } else {
+            for index in 1..=text.len() {
+                next[index] = prev[index - 1]
+                    && (symbol == '_' || symbol == text[index - 1]);
+            }
+        }
+        prev = next;
+    }
+    Ok(prev[text.len()])
 }
 
 fn bool_to_value(value: Option<bool>) -> Value {
@@ -191,6 +227,14 @@ mod tests {
             vec![vec![Value::Null], vec![Value::Integer(4)]],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn like_wildcards_and_unicode_are_character_aware() {
+        assert!(sql_like("café", "caf_").unwrap());
+        assert!(sql_like("abc", "a%c").unwrap());
+        assert!(!sql_like("abc", "a_d").unwrap());
+        assert!(sql_like("", "%").unwrap());
     }
 
     #[test]
