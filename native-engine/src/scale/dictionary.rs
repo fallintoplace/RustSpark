@@ -68,7 +68,28 @@ impl DictionaryColumn {
     }
 
     pub fn decode(&self) -> Result<Vec<Value>> {
-        (0..self.row_count()).map(|index| self.value(index)).collect()
+        self.decode_with_budget(64 * 1024 * 1024)
+    }
+
+    /// Refuse to expand a compact dictionary beyond the caller's memory budget.
+    pub fn decode_with_budget(&self, max_bytes: usize) -> Result<Vec<Value>> {
+        let mut used = self.indices.len()
+            .checked_mul(std::mem::size_of::<Value>())
+            .ok_or_else(|| Error::Execution("dictionary decoded size overflow".into()))?;
+        if used > max_bytes {
+            return Err(Error::Execution("dictionary decode budget exceeded".into()));
+        }
+        let mut rows = Vec::with_capacity(self.indices.len());
+        for index in 0..self.indices.len() {
+            let value = self.value(index)?;
+            if let Value::Text(text) = &value {
+                used = used.checked_add(text.len())
+                    .filter(|bytes| *bytes <= max_bytes)
+                    .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+            }
+            rows.push(value);
+        }
+        Ok(rows)
     }
 
     pub fn estimated_bytes(&self) -> usize {
@@ -173,3 +194,23 @@ mod dictionary_concat_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod bounded_dictionary_decode_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn repeated_text_is_accounted_per_decoded_row() {
+        let schema = Schema::new(vec![Field::new("tag", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("aaaa".into())],
+            vec![Value::Text("aaaa".into())],
+        ]).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&batch, "tag", 1, 4, 2).unwrap();
+        let overhead = 2 * std::mem::size_of::<Value>();
+        assert!(dictionary.decode_with_budget(overhead + 7).is_err());
+        assert_eq!(dictionary.decode_with_budget(overhead + 8).unwrap(),
+            vec![Value::Text("aaaa".into()), Value::Text("aaaa".into())]);
+    }
+}
