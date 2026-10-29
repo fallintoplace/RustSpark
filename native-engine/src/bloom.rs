@@ -53,6 +53,9 @@ impl BloomFilter {
     }
 
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
+
+    /// Clear inserted keys while retaining the allocated bitset.
+    pub fn clear(&mut self) { self.words.fill(0); }
 }
 
 #[cfg(test)]
@@ -139,5 +142,22 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_reuse_tests {
+    use super::*;
+    #[test]
+    fn reset_keeps_capacity_but_drops_previous_membership() {
+        let mut filter = BloomFilter::new(2048, 3).unwrap();
+        let before = filter.byte_size();
+        filter.insert(&Value::Integer(15));
+        assert!(filter.might_contain(&Value::Integer(15)));
+        filter.clear();
+        assert_eq!(filter.byte_size(), before);
+        assert!(!filter.might_contain(&Value::Integer(15)));
+        filter.insert(&Value::Integer(99));
+        assert!(filter.might_contain(&Value::Integer(99)));
     }
 }
