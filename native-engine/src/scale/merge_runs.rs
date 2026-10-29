@@ -58,6 +58,8 @@ pub struct RunMerger {
     keys: Vec<Key>,
     output_batch_rows: usize,
     control: QueryControl,
+    primed: bool,
+    refill_run: Option<usize>,
     stopped: bool,
 }
 
@@ -96,7 +98,8 @@ impl RunMerger {
             });
         }
         Ok(Self {
-            runs, schema, keys: selected, output_batch_rows, control, stopped: false
+            runs, schema, keys: selected, output_batch_rows, control,
+            primed: false, refill_run: None, stopped: false
         })
     }
 
@@ -110,7 +113,12 @@ impl RunMerger {
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
         self.control.check()?;
-        for run in &mut self.runs { run.fill()?; }
+        if !self.primed {
+            for run in &mut self.runs { run.fill()?; }
+            self.primed = true;
+        } else if let Some(index) = self.refill_run.take() {
+            self.runs[index].fill()?;
+        }
         let mut best = None;
         for (index, run) in self.runs.iter().enumerate() {
             if let Some(row) = run.peek() {
@@ -122,6 +130,7 @@ impl RunMerger {
         let Some(index) = best else { return Ok(None); };
         let row = self.runs[index].peek().unwrap().to_vec();
         self.runs[index].position += 1;
+        self.refill_run = Some(index);
         Ok(Some(row))
     }
 }
@@ -204,5 +213,33 @@ mod consolidated_merge_batch_budget_tests {
         let files: [&str; 0] = [];
         assert!(RunMerger::new(&files, schema.clone(), &[], 1, 65_537, QueryControl::default()).is_err());
         assert!(RunMerger::new(&files, schema, &[], 65_537, 1, QueryControl::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod selective_spill_refill_perf_tests {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::fs;
+
+    #[test]
+    fn uneven_runs_with_duplicate_keys_merge_without_losing_rows() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-merge-perf-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(),
+            [9, 3, 3, 1, 8, 2, 9, 5, 3, 7, 0].into_iter()
+                .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let runs = write_sorted_runs([Ok(input.clone())], schema.clone(), &keys,
+            &directory, 2, &QueryControl::default()).unwrap();
+        let result = RunMerger::new(runs.files(), schema, &keys, 1, 3, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let actual = result.iter().flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual, crate::sort::sort(&input, &keys).unwrap().rows().unwrap());
+        drop(runs);
+        fs::remove_dir(directory).unwrap();
     }
 }
