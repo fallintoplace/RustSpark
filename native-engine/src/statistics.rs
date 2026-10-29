@@ -35,28 +35,26 @@ impl ColumnStatistics {
         } else {
             self.nulls
         };
-        let mut min = self.min.clone();
-        let mut max = self.max.clone();
+        let mut replace_min = false;
+        let mut replace_max = false;
         if !value.is_null() {
-            if let Some(current) = &min {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Less)) {
-                    min = Some(value.clone());
-                }
-            } else {
-                min = Some(value.clone());
-            }
-            if let Some(current) = &max {
-                if matches!(value.sql_compare(current)?, Some(Ordering::Greater)) {
-                    max = Some(value.clone());
-                }
-            } else {
-                max = Some(value.clone());
-            }
+            replace_min = match &self.min {
+                Some(current) => matches!(value.sql_compare(current)?, Some(Ordering::Less)),
+                None => true,
+            };
+            replace_max = match &self.max {
+                Some(current) => matches!(value.sql_compare(current)?, Some(Ordering::Greater)),
+                None => true,
+            };
         }
         self.rows = rows;
         self.nulls = nulls;
-        self.min = min;
-        self.max = max;
+        if replace_min {
+            self.min = Some(value.clone());
+        }
+        if replace_max {
+            self.max = Some(value.clone());
+        }
         Ok(())
     }
 
