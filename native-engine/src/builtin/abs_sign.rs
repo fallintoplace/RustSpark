@@ -15,9 +15,15 @@ fn abs(args: &[Value]) -> Result<Value> {
     }
 }
 fn sign(args: &[Value]) -> Result<Value> {
-    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null) };
-    if !value.is_finite() { return Err(Error::Execution("SIGN received nonfinite value".into())); }
-    super::finite(if value == 0.0 { 0.0 } else { value.signum() })
+    match &args[0] {
+        Value::Integer(value) => Ok(Value::Float(value.signum() as f64)),
+        Value::Null => Ok(Value::Null),
+        Value::Float(value) => {
+            if !value.is_finite() { return Err(Error::Execution("SIGN received nonfinite value".into())); }
+            super::finite(if *value == 0.0 { 0.0 } else { value.signum() })
+        }
+        _ => Err(Error::Type("SIGN expects numeric value".into())),
+    }
 }
 
 fn is_even_type(types: &[DataType]) -> Result<DataType> {
@@ -47,6 +53,10 @@ mod tests {
         assert_eq!(sign(&[Value::Integer(-12)]).unwrap(), Value::Float(-1.0));
         assert_eq!(sign(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(sign(&[Value::Integer(0)]).unwrap(), Value::Float(0.0));
+        assert_eq!(sign(&[Value::Integer(i64::MIN)]).unwrap(), Value::Float(-1.0));
+        assert_eq!(sign(&[Value::Integer(i64::MAX)]).unwrap(), Value::Float(1.0));
+        assert_eq!(sign(&[Value::Float(-0.0)]).unwrap(), Value::Float(0.0));
+        assert!(sign(&[Value::Float(f64::NAN)]).is_err());
     }
 }
 
