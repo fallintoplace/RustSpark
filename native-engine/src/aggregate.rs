@@ -59,6 +59,16 @@ impl AggregateItem {
     }
 }
 
+const MAX_COUNT_DISTINCT_KEYS: usize = 1_000_000;
+
+fn insert_count_distinct(values: &mut HashSet<Value>, value: Value, limit: usize) -> Result<()> {
+    if values.len() >= limit && !values.contains(&value) {
+        return Err(Error::Execution("COUNT DISTINCT key budget exceeded".into()));
+    }
+    values.insert(value);
+    Ok(())
+}
+
 #[derive(Clone)]
 enum State {
     Count(i64),
@@ -100,7 +110,9 @@ impl State {
                 }
             }
             Self::CountDistinct(values) => {
-                if !value.is_null() { values.insert(value); }
+                if !value.is_null() {
+                    insert_count_distinct(values, value, MAX_COUNT_DISTINCT_KEYS)?;
+                }
             }
             Self::Sum(total) => {
                 if value.is_null() {
@@ -318,5 +330,19 @@ mod count_column_type_regression {
             AggregateItem::new(AggregateOp::Count(Expr::Column("x".into())), "n"),
         ]).unwrap();
         assert_eq!(valid.row(0).unwrap(), vec![Value::Integer(0)]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_count_distinct_regression {
+    use super::*;
+    #[test]
+    fn distinct_budget_counts_only_new_keys_and_ignores_duplicates() {
+        let mut keys = HashSet::new();
+        insert_count_distinct(&mut keys, Value::Integer(1), 2).unwrap();
+        insert_count_distinct(&mut keys, Value::Integer(2), 2).unwrap();
+        insert_count_distinct(&mut keys, Value::Integer(2), 2).unwrap();
+        assert!(insert_count_distinct(&mut keys, Value::Integer(3), 2).is_err());
+        assert_eq!(keys.len(), 2);
     }
 }
