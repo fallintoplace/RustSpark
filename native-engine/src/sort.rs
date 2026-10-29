@@ -52,6 +52,9 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     if keys.is_empty() {
         return Ok(batch.clone());
     }
+    for key in keys {
+        key.expression.output_type(batch.schema())?;
+    }
     let mut decorated = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         let values = keys
@@ -126,5 +129,21 @@ mod nan_sort_engine_tests {
         assert_eq!(sorted.value(4, 0).unwrap(), &Value::Null);
         assert_eq!(topk::top_k(&input, &keys, 3).unwrap().rows().unwrap(),
             sorted.slice_rows(0, 3).unwrap().rows().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod sort_key_preflight_regression {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn sort_checks_keys_even_without_input_rows() {
+        let batch = Batch::empty(Schema::new(vec![
+            Field::new("x", DataType::Integer, false),
+        ]).unwrap());
+        assert!(sort(&batch, &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
+        assert_eq!(sort(&batch, &[SortKey::ascending(Expr::Column("x".into()))])
+            .unwrap().num_rows(), 0);
     }
 }
