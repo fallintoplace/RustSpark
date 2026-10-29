@@ -124,3 +124,21 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     }
     return nil, errors.New("unexpected additional JSON output")
 }
+
+// QueryOne returns nil for no rows and an error if the query returns more than one row.
+// A two-row limit detects non-unique results without loading the complete query output.
+func (c Client) QueryOne(ctx context.Context, sql string, opts Options) (map[string]any, error) {
+    if opts.MaxRows != 0 {
+        return nil, errors.New("QueryOne controls MaxRows automatically")
+    }
+    opts.MaxRows = 2
+    rows, err := c.Query(ctx, sql, opts)
+    if err != nil { return nil, err }
+    return oneRow(rows)
+}
+
+func oneRow(rows []map[string]any) (map[string]any, error) {
+    if len(rows) > 1 { return nil, errors.New("QueryOne expected at most one row") }
+    if len(rows) == 0 { return nil, nil }
+    return rows[0], nil
+}

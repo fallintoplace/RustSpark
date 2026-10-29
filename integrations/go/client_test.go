@@ -45,3 +45,12 @@ func contains(values []string, needle string) bool {
     for _, value := range values { if value == needle { return true } }
     return false
 }
+
+func TestOneRowBoundsCardinality(t *testing.T) {
+    row, err := oneRow(nil)
+    if err != nil || row != nil { t.Fatalf("expected empty result, got %v: %v", row, err) }
+    row, err = oneRow([]map[string]any{{"id": 1}})
+    if err != nil || row["id"] != 1 { t.Fatalf("unexpected row %v: %v", row, err) }
+    _, err = oneRow([]map[string]any{{"id": 1}, {"id": 2}})
+    if err == nil { t.Fatal("expected multi-row error") }
+}
