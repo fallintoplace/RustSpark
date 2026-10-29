@@ -51,7 +51,17 @@ fn unhex_utf8(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Type("UNHEX_UTF8 decoded bytes are not valid UTF-8".into()))?;
     Ok(Value::Text(decoded))
 }
+fn try_unhex_utf8(args: &[Value]) -> Result<Value> {
+    match unhex_utf8(args) {
+        Ok(value) => Ok(value),
+        Err(Error::Parse(_) | Error::Type(_)) => Ok(Value::Null),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "try_unhex_utf8", min_args: 1, max_args: 1,
+        result_type: unhex_type, call: try_unhex_utf8 },
     Function { name: "hex", min_args: 1, max_args: 1, result_type: hex_type, call: hex },
     Function { name: "unhex_utf8", min_args: 1, max_args: 1, result_type: unhex_type, call: unhex_utf8 },
 ];
@@ -94,5 +104,18 @@ mod hex_byte_buffer_perf_tests {
         let input = Value::Text("x".repeat(1024));
         let encoded = hex(&[input.clone()]).unwrap();
         assert_eq!(unhex_utf8(&[encoded]).unwrap(), input);
+    }
+}
+
+#[cfg(test)]
+mod try_unhex_utf8_extension_tests {
+    use super::*;
+    #[test]
+    fn returns_null_for_invalid_encoding_and_preserves_unicode() {
+        assert!(crate::builtin::supports("try_unhex_utf8"));
+        assert_eq!(try_unhex_utf8(&[Value::Text("c3a9".into())]).unwrap(), Value::Text("é".into()));
+        assert_eq!(try_unhex_utf8(&[Value::Text("FF".into())]).unwrap(), Value::Null);
+        assert_eq!(try_unhex_utf8(&[Value::Text("GG".into())]).unwrap(), Value::Null);
+        assert_eq!(try_unhex_utf8(&[Value::Null]).unwrap(), Value::Null);
     }
 }
