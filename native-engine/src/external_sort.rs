@@ -82,7 +82,7 @@ impl Iterator for ExternalSort {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
-        let mut rows = Vec::with_capacity(self.output_rows);
+        let mut rows = Vec::with_capacity(self.output_rows.min(65_536));
         while rows.len() < self.output_rows {
             let mut best: Option<usize> = None;
             for i in 0..self.runs.len() {
@@ -166,5 +166,18 @@ mod tests {
             vec![input], &schema, &keys, std::env::temp_dir(), 2, 3
         ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(merged.iter().flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>(), expected);
+    }
+}
+
+#[cfg(test)]
+mod output_allocation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn empty_input_accepts_large_output_batch_setting() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
+        let mut output = external_sort(Vec::<Batch>::new(), &schema, &[],
+            std::env::temp_dir(), 1, usize::MAX).unwrap();
+        assert!(output.next().is_none());
     }
 }
