@@ -40,6 +40,11 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args[0].output_type(schema)? != DataType::Text { return Err(Error::Type("UPPER requires text".into())); }
             Ok(DataType::Text)
         },
+        "LENGTH" => {
+            if args.len() != 1 { return Err(Error::Parse("LENGTH requires one argument".into())); }
+            if args[0].output_type(schema)? != DataType::Text { return Err(Error::Type("LENGTH requires text".into())); }
+            Ok(DataType::Integer)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -66,6 +71,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Text(value)] => Ok(Value::Text(value.to_uppercase())),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("UPPER requires text".into())),
+        },
+        "LENGTH" => match args {
+            [Value::Text(value)] => Ok(Value::Integer(i64::try_from(value.chars().count()).map_err(|_| Error::Execution("text length overflow".into()))?)),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("LENGTH requires text".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
