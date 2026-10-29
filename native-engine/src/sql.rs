@@ -617,7 +617,8 @@ impl Parser {
                         false
                     }
                 } else {
-                    descending
+                    // Spark defaults to NULLS FIRST for ascending, LAST for descending.
+                    !descending
                 };
                 keys.push(SortKey {
                     expression,
