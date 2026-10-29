@@ -184,7 +184,9 @@ pub fn aggregate(
         fields.push(Field::new(alias, expr.output_type(batch.schema())?, true));
     }
     for item in items {
-        fields.push(Field::new(&item.alias, item.output_type(batch.schema())?, true));
+        let nullable = !matches!(&item.op,
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
+        fields.push(Field::new(&item.alias, item.output_type(batch.schema())?, nullable));
     }
     let schema = Schema::new(fields)?;
     let mut group_indices: HashMap<Vec<Value>, usize> = HashMap::new();
@@ -269,5 +271,28 @@ mod tests {
         assert_eq!(output.row(1).unwrap(), vec![
             Value::Text("a".into()), Value::Integer(1), Value::Integer(3),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod aggregate_nullability_tests {
+    use super::*;
+
+    #[test]
+    fn counts_are_required_and_sum_remains_nullable() {
+        let input = Batch::empty(Schema::new(vec![
+            Field::new("value", DataType::Integer, true)
+        ]).unwrap());
+        let output = aggregate(&input, &[], &[
+            AggregateItem::new(AggregateOp::CountAll, "all"),
+            AggregateItem::new(AggregateOp::Count(Expr::Column("value".into())), "present"),
+            AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("value".into())), "unique"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("value".into())), "sum"),
+        ]).unwrap();
+        assert_eq!(output.row(0).unwrap()[0], Value::Integer(0));
+        assert!(!output.schema().field(0).unwrap().nullable);
+        assert!(!output.schema().field(1).unwrap().nullable);
+        assert!(!output.schema().field(2).unwrap().nullable);
+        assert!(output.schema().field(3).unwrap().nullable);
     }
 }
