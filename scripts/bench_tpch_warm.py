@@ -97,7 +97,9 @@ def parse_shell(stdout, stderr, requests, warmup, repeat):
         if len(samples) != repeat:
             raise ValueError(f"Query Q{number:02} has missing samples")
         result["median_ms"] = round(statistics.median(samples), 3)
-        result["p95_ms"] = sorted(samples)[math.ceil(0.95 * len(samples)) - 1]
+        ordered = sorted(samples)
+        result["p95_ms"] = ordered[math.ceil(0.95 * len(ordered)) - 1]
+        result["p99_ms"] = ordered[math.ceil(0.99 * len(ordered)) - 1]
         result["status"] = "ok"
     return [{"id": number, **row} for number, row in sorted(grouped.items())]
 
