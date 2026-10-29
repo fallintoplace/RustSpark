@@ -30,6 +30,9 @@ impl Ord for Candidate {
 }
 
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
+    for key in keys {
+        key.expression.output_type(batch.schema())?;
+    }
     if k == 0 { return batch.take(&[]); }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
@@ -112,3 +115,20 @@ mod topk_offset_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod topk_key_preflight_regression {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field, Schema}};
+    #[test]
+    fn topk_rejects_unknown_sort_columns_with_zero_k() {
+        let input = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        let missing = SortKey::ascending(Expr::Column("unknown".into()));
+        assert!(top_k(&input, &[missing.clone()], 0).is_err());
+        assert!(top_k(&input, &[missing], 1).is_err());
+        assert_eq!(top_k(&input, &[SortKey::ascending(Expr::Column("id".into()))], 0)
+            .unwrap().num_rows(), 0);
+    }
+}
