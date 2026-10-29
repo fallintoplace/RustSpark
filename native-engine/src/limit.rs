@@ -10,7 +10,7 @@ pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch
     let end = count.map_or(batch.num_rows(), |count| {
         start.saturating_add(count).min(batch.num_rows())
     });
-    batch.take(&(start..end).collect::<Vec<_>>())
+    batch.slice_rows(start, end)
 }
 
 #[cfg(test)]
@@ -31,5 +31,20 @@ mod tests {
         assert_eq!(limit(&batch, 1, Some(1)).unwrap().rows().unwrap(), vec![vec![Value::Integer(2)]]);
         assert_eq!(limit(&batch, 9, Some(2)).unwrap().num_rows(), 0);
         assert!(limit(&batch, usize::MAX, Some(1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_limit_slice_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn huge_offset_returns_empty_and_keeps_schema() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)]]).unwrap();
+        let result = limit(&input, usize::MAX, None).unwrap();
+        assert_eq!(result.num_rows(), 0);
+        assert_eq!(result.schema(), &schema);
     }
 }
