@@ -36,6 +36,24 @@ fn read_bounded(input: &mut impl Read, bound: usize) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+fn read_text_bounded(
+    input: &mut impl Read, bytes_seen: &mut usize
+) -> Result<String> {
+    let length = read_u32(input)?;
+    if length > MAX_TEXT_BYTES {
+        return Err(Error::Execution("spill text value exceeds byte limit".into()));
+    }
+    let next = bytes_seen.checked_add(length)
+        .filter(|total| *total <= MAX_BATCH_BYTES)
+        .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+    let mut buffer = vec![0; length];
+    input.read_exact(&mut buffer)?;
+    let text = String::from_utf8(buffer)
+        .map_err(|_| Error::Parse("invalid spill UTF-8".into()))?;
+    *bytes_seen = next;
+    Ok(text)
+}
+
 fn type_code(data_type: DataType) -> u8 {
     match data_type {
         DataType::Boolean => 1,
@@ -179,16 +197,7 @@ impl<R: Read> SpillReader<R> {
                         self.input.read_exact(&mut b)?;
                         Value::Float(f64::from_bits(u64::from_le_bytes(b)))
                     }
-                    5 => {
-                        let encoded = read_bounded(&mut self.input, MAX_TEXT_BYTES)?;
-                        bytes_seen = bytes_seen.checked_add(encoded.len())
-                            .ok_or_else(|| Error::Execution("spill batch byte count overflow".into()))?;
-                        if bytes_seen > MAX_BATCH_BYTES {
-                            return Err(Error::Execution("spill batch exceeds byte limit".into()));
-                        }
-                        Value::Text(String::from_utf8(encoded)
-                            .map_err(|_| Error::Parse("invalid spill UTF-8".into()))?)
-                    }
+                    5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
                     _ => return Err(Error::Parse("invalid spill value tag".into())),
                 };
                 row.push(value);
@@ -234,5 +243,23 @@ mod tests {
         bytes.pop();
         let mut reader = SpillReader::new(Cursor::new(bytes), 100).unwrap();
         assert!(reader.next_batch().is_err());
+    }
+}
+
+#[cfg(test)]
+mod spill_byte_preflight_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn rejects_exhausted_batch_budget_before_reading_text_payload() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&2u32.to_le_bytes());
+        let mut input = Cursor::new(data);
+        let mut already_used = MAX_BATCH_BYTES - 1;
+        let error = read_text_bounded(&mut input, &mut already_used).unwrap_err();
+        assert!(error.to_string().contains("spill batch exceeds byte limit"));
+        assert_eq!(already_used, MAX_BATCH_BYTES - 1);
+        assert_eq!(input.position(), 4);
     }
 }
