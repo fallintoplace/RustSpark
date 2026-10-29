@@ -114,11 +114,18 @@ pub fn can_skip_columns(
             return false;
         }
     }
+    can_skip_columns_inner(stats, predicate)
+}
+
+fn can_skip_columns_inner(
+    stats: &std::collections::HashMap<String, ColumnStatistics>,
+    predicate: &Expr,
+) -> bool {
     match predicate {
         Expr::Binary { left, op: BinaryOp::And, right } =>
-            can_skip_columns(stats, left) || can_skip_columns(stats, right),
+            can_skip_columns_inner(stats, left) || can_skip_columns_inner(stats, right),
         Expr::Binary { left, op: BinaryOp::Or, right } =>
-            can_skip_columns(stats, left) && can_skip_columns(stats, right),
+            can_skip_columns_inner(stats, left) && can_skip_columns_inner(stats, right),
         _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
     }
 }
@@ -165,5 +172,25 @@ mod inconsistent_column_statistics_tests {
         let predicate = Expr::binary(Expr::Column("value".into()),
             BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(2)));
         assert!(!can_skip_columns(&stats, &predicate));
+    }
+}
+
+#[cfg(test)]
+mod nested_metadata_validation_tests {
+    use super::*;
+    #[test]
+    fn nested_boolean_pruning_keeps_inconsistent_metadata_conservative() {
+        let good = ColumnStatistics { rows: 10, nulls: 0,
+            min: Some(Value::Integer(5)), max: Some(Value::Integer(10)) };
+        let inconsistent = ColumnStatistics { rows: 11, nulls: 0,
+            min: Some(Value::Integer(100)), max: Some(Value::Integer(200)) };
+        let impossible = Expr::binary(Expr::Column("x".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(100)));
+        let compound = Expr::binary(impossible.clone(), BinaryOp::And,
+            Expr::binary(impossible.clone(), BinaryOp::Or, impossible));
+        let mut stats = std::collections::HashMap::from([("x".into(), good)]);
+        assert!(can_skip_columns(&stats, &compound));
+        stats.insert("y".into(), inconsistent);
+        assert!(!can_skip_columns(&stats, &compound));
     }
 }
