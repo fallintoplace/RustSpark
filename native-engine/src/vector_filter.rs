@@ -17,16 +17,30 @@ fn fast_integer_predicate<'a>(
     batch: &'a Batch,
     predicate: &'a Expr,
 ) -> Result<Option<(&'a [Value], BinaryOp, i64)>> {
-    if let Expr::Binary { left, op, right } = predicate {
-        if let (Expr::Column(column), Expr::Literal(Value::Integer(value))) =
-            (left.as_ref(), right.as_ref()) {
-            if integer_comparison(*op, 0, 0).is_some() {
-                let index = batch.schema().column(column)?;
-                if batch.schema().field(index)?.data_type == crate::schema::DataType::Integer {
-                    return Ok(Some((batch.column(index)?, *op, *value)));
-                }
-            }
+    let Expr::Binary { left, op, right } = predicate else {
+        return Ok(None);
+    };
+    let (name, op, value) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(name), Expr::Literal(Value::Integer(value))) =>
+            (name, *op, *value),
+        (Expr::Literal(Value::Integer(value)), Expr::Column(name)) => {
+            let reversed = match op {
+                BinaryOp::Less => BinaryOp::Greater,
+                BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                BinaryOp::Greater => BinaryOp::Less,
+                BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                other => *other,
+            };
+            (name, reversed, *value)
         }
+        _ => return Ok(None),
+    };
+    if integer_comparison(op, 0, 0).is_none() {
+        return Ok(None);
+    }
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type == crate::schema::DataType::Integer {
+        return Ok(Some((batch.column(index)?, op, value)));
     }
     Ok(None)
 }
@@ -92,5 +106,29 @@ mod tests {
         ).unwrap();
         let predicate = Expr::IsNull(Box::new(Expr::Column("n".into())));
         assert_eq!(select_indices(&batch, &predicate).unwrap(), vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod constant_left_filter_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn reversed_comparisons_match_scalar_sql_evaluation() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(-1)],
+                 vec![Value::Integer(5)], vec![Value::Integer(9)]],
+        ).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual, BinaryOp::Less,
+                   BinaryOp::LessEqual, BinaryOp::Greater, BinaryOp::GreaterEqual] {
+            let pred = Expr::binary(Expr::Literal(Value::Integer(5)),
+                op, Expr::Column("n".into()));
+            let scalar = (0..batch.num_rows())
+                .filter(|&row| pred.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &pred).unwrap(), scalar);
+        }
     }
 }
