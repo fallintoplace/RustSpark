@@ -8,8 +8,15 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let escaped = text.replace('\'', "\\'");
-    Ok(Value::Text(format!("'{escaped}'")))
+    let extra = text.bytes().filter(|byte| *byte == b'\'').count();
+    let mut escaped = String::with_capacity(text.len() + extra + 2);
+    escaped.push('\'');
+    for character in text.chars() {
+        if character == '\'' { escaped.push('\\'); }
+        escaped.push(character);
+    }
+    escaped.push('\'');
+    Ok(Value::Text(escaped))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -24,5 +31,14 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("Don't".into())]).unwrap(), Value::Text("'Don\\'t'".into()));
         assert_eq!(evaluate(&[Value::Text("".into())]).unwrap(), Value::Text("''".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod quote_single_allocation_tests {
+    use super::*;
+    #[test]
+    fn escapes_multiple_quotes_and_unicode() {
+        assert_eq!(evaluate(&[Value::Text("é'a'b".into())]).unwrap(), Value::Text("'é\\'a\\'b'".into()));
     }
 }
