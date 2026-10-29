@@ -237,6 +237,13 @@ impl Parser {
         }
         if self.peek() == Some(&Token::Operator("-".into())) {
             let _ = self.next();
+            // i64::MIN has a positive magnitude one greater than i64::MAX.
+            // Recognize it before parsing the positive part as an i64.
+            if matches!(self.peek(), Some(Token::Number(number))
+                if number == "9223372036854775808") {
+                let _ = self.next();
+                return Ok(Expr::Literal(Value::Integer(i64::MIN)));
+            }
             return Ok(Expr::binary(
                 Expr::Literal(Value::Integer(0)),
                 BinaryOp::Subtract,
@@ -924,5 +931,22 @@ mod leading_decimal_sql_regression {
         assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap(), vec![
             Value::Float(0.5), Value::Float(2.5)
         ]);
+    }
+}
+
+#[cfg(test)]
+mod minimum_integer_sql_literal_regression {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema}};
+    #[test]
+    fn minimum_bigint_literal_roundtrips_through_native_sql() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        catalog.register("t", Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap()).unwrap();
+        let parsed = parse_sql("SELECT -9223372036854775808 AS min_value FROM t").unwrap();
+        assert_eq!(executor::execute(&parsed, &catalog).unwrap().row(0).unwrap(),
+            vec![Value::Integer(i64::MIN)]);
+        assert!(parse_sql("SELECT -9223372036854775809 FROM t").is_err());
     }
 }
