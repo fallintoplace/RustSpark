@@ -22,8 +22,8 @@ impl Hasher for PartitionHasher {
 }
 
 pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
-    if partitions == 0 || keys.is_empty() {
-        return Err(Error::Execution("partition count and hash keys must be nonempty".into()));
+    if partitions == 0 || partitions > 4096 || keys.is_empty() {
+        return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
     }
     let indices = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
@@ -71,6 +71,9 @@ mod tests {
  
 /// Partition successive batches using identical hash keys and concatenate each bucket.
 pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
+    if partitions == 0 || partitions > 4096 || keys.is_empty() {
+        return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
+    }
     let first = input.first().ok_or_else(|| Error::Schema("partition input needs a schema".into()))?;
     let schema = first.schema();
     let mut buckets: Vec<Vec<Batch>> = vec![Vec::new(); partitions];
@@ -109,3 +112,19 @@ mod partition_batches_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod partition_allocation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn refuses_excessive_buckets_without_allocating_them() {
+        let batch = Batch::empty(
+            Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap(),
+        );
+        assert!(partition(&batch, &["id"], usize::MAX).is_err());
+        assert!(partition_batches(&[batch.clone()], &["id"], usize::MAX).is_err());
+        assert!(partition_batches(&[batch], &["id"], 0).is_err());
+    }
+}
