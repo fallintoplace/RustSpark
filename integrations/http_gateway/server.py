@@ -46,6 +46,13 @@ def command_for_template(binary: str, database: Path, template: Path,
     return args
 
 
+def parse_result_rows(text: str) -> list[dict]:
+    rows = json.loads(text)
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("SQL result must be a list of objects")
+    return rows
+
+
 def make_handler(*, secret: str, queries: Path, database: Path,
                  binary: str, max_rows: int, timeout: int):
     class Handler(BaseHTTPRequestHandler):
@@ -102,9 +109,7 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 if result.returncode:
                     self.send_json(422, {"error": "Query failed"})
                     return
-                rows = json.loads(result.stdout)
-                if not isinstance(rows, list):
-                    raise ValueError("Unexpected result")
+                rows = parse_result_rows(result.stdout)
                 self.send_json(200, {"rows": rows})
             except subprocess.TimeoutExpired:
                 self.send_json(504, {"error": "Query timeout"})
