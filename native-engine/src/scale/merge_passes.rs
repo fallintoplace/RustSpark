@@ -44,7 +44,8 @@ pub fn merge_to_fan_in(
     };
     while result.current.len() > fan_in {
         control.check()?;
-        let mut next_pass = Vec::new();
+        // Each fan-in group emits exactly one path in the next pass.
+        let mut next_pass = Vec::with_capacity(result.current.len().div_ceil(fan_in));
         for group in result.current.chunks(fan_in) {
             control.check()?;
             if group.len() == 1 {
@@ -101,5 +102,16 @@ mod tests {
         assert_eq!(rows, (0..101).map(Value::Integer).collect::<Vec<_>>());
         drop(merged);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod merge_pass_fan_in_capacity_tests {
+    use super::*;
+    #[test]
+    fn fan_in_group_capacity_covers_partial_final_groups() {
+        assert_eq!(9_usize.div_ceil(4), 3);
+        assert_eq!(8_usize.div_ceil(4), 2);
+        assert_eq!(1_usize.div_ceil(4), 1);
     }
 }
