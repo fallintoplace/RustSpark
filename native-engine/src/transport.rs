@@ -12,13 +12,29 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
+const fn crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut value = byte as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = (value >> 1) ^ if value & 1 != 0 { 0xedb88320 } else { 0 };
+            bit += 1;
+        }
+        table[byte] = value;
+        byte += 1;
+    }
+    table
+}
+
+const CRC32_TABLE: [u32; 256] = crc32_table();
+
 fn checksum(bytes: &[u8]) -> u32 {
     let mut value = !0u32;
-    for byte in bytes {
-        value ^= u32::from(*byte);
-        for _ in 0..8 {
-            value = (value >> 1) ^ if value & 1 != 0 { 0xedb88320 } else { 0 };
-        }
+    for &byte in bytes {
+        let index = ((value as u8) ^ byte) as usize;
+        value = (value >> 8) ^ CRC32_TABLE[index];
     }
     !value
 }
@@ -183,5 +199,16 @@ mod consolidated_exchange_budget_tests {
         write_frame(&mut wire, &Frame { stage: 1, task: 2, attempt: 1, payload: vec![2; 8] }, 16).unwrap();
         assert!(read_frames(&mut wire.as_slice(), 16, 10).unwrap_err().to_string().contains("memory budget"));
         assert_eq!(read_frames(&mut wire.as_slice(), 16, 12).unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod crc32_regression {
+    use super::checksum;
+
+    #[test]
+    fn ieee_reference_vectors() {
+        assert_eq!(checksum(b""), 0);
+        assert_eq!(checksum(b"123456789"), 0xcbf4_3926);
     }
 }
