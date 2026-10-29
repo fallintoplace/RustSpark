@@ -65,6 +65,15 @@ fn execute_inner(
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
+        Plan::Limit { input, offset, count: Some(count) } if *count > 0
+            && matches!(input.as_ref(), Plan::Sort { .. }) => {
+            let Plan::Sort { input: source, keys } = input.as_ref() else {
+                unreachable!("checked sort plan");
+            };
+            let source = execute_inner(source, catalog, options, depth + 2, guard)?;
+            guard.check()?;
+            crate::topk::top_k_offset(&source, keys, *offset, *count)?
+        }
         Plan::Limit { input, offset, count } => limit::limit(&descend(input)?, *offset, *count)?,
         Plan::Distinct { input } => distinct::distinct(&descend(input)?)?,
         Plan::Join {
@@ -166,5 +175,35 @@ mod tests {
             &catalog,
             ExecutionOptions { max_output_rows: 5, max_plan_depth: 0 }
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sort_limit_topk_execution_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}, sort::SortKey};
+
+    #[test]
+    fn topk_execution_matches_stable_full_sort_with_pagination() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            vec![
+                vec![Value::Integer(3)], vec![Value::Null],
+                vec![Value::Integer(1)], vec![Value::Integer(3)],
+                vec![Value::Integer(2)], vec![Value::Integer(4)],
+            ],
+        ).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("items", input.clone()).unwrap();
+        let keys = vec![SortKey::ascending(Expr::Column("n".into()))];
+        let plan = Plan::Limit {
+            input: Box::new(Plan::Sort {
+                input: Box::new(Plan::scan("items")), keys: keys.clone()
+            }),
+            offset: 1, count: Some(3),
+        };
+        let expected = crate::limit::limit(&crate::sort::sort(&input, &keys).unwrap(),
+            1, Some(3)).unwrap();
+        assert_eq!(execute(&plan, &catalog).unwrap(), expected);
     }
 }
