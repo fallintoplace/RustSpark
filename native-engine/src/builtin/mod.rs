@@ -30,6 +30,7 @@ mod padding;
 mod ascii_chr;
 mod hex_utf8;
 mod base64_utf8;
+mod string_search;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -82,6 +83,7 @@ const MODULES: &[&[Function]] = &[
     &ascii_chr::FUNCTIONS,
     &hex_utf8::FUNCTIONS,
     &base64_utf8::FUNCTIONS,
+    &string_search::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
