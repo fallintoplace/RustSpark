@@ -13,6 +13,9 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn pad(args: &[Value], left: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(len) = super::integer(&args[1])? else { return Ok(Value::Null) };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("LPAD/RPAD input exceeds 16 MiB".into()));
+    }
     let target = usize::try_from(len.max(0))
         .map_err(|_| Error::Execution("LPAD/RPAD length overflow".into()))?;
     if target > MAX_CHARS {
@@ -20,6 +23,9 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     }
     let pad = if args.len() == 3 {
         let Some(value) = super::string(&args[2])? else { return Ok(Value::Null) };
+        if value.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("LPAD/RPAD padding pattern exceeds 16 MiB".into()));
+        }
         value
     } else { " " };
     let ascii = text.is_ascii();
@@ -116,5 +122,19 @@ mod single_character_padding_tests {
             Value::Text("x界界界".into()));
         assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("ab".into())]).unwrap(),
             Value::Text("xaba".into()));
+    }
+}
+
+#[cfg(test)]
+mod bounded_padding_inputs_tests {
+    use super::*;
+    #[test]
+    fn rejects_huge_inputs_but_preserves_unicode_padding() {
+        assert_eq!(lpad(&[Value::Text("é".into()), Value::Integer(3),
+            Value::Text("🙂".into())]).unwrap(), Value::Text("🙂🙂é".into()));
+        assert!(lpad(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
+            Value::Integer(1)]).is_err());
+        assert!(rpad(&[Value::Text("x".into()), Value::Integer(2),
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }
