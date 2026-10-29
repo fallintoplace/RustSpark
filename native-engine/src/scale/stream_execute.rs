@@ -1,5 +1,5 @@
 //! Streaming physical execution of the supported native logical-plan subset.
-use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
+use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
 use crate::{
     aggregate::AggregateOp, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
     project::Selection, scalar::Value,
@@ -149,7 +149,7 @@ const MAX_STREAM_DISTINCT_BYTES: usize = 64 * 1024 * 1024;
 struct DistinctOutput {
     source: BatchStream,
     control: QueryControl,
-    seen: HashSet<Vec<Value>>,
+    seen: HashMap<Vec<Value>, ()>,
     retained_bytes: usize,
     max_keys: usize,
     max_bytes: usize,
@@ -159,7 +159,7 @@ struct DistinctOutput {
 impl DistinctOutput {
     fn new(source: BatchStream, control: QueryControl, max_keys: usize, max_bytes: usize) -> Self {
         Self {
-            source, control, seen: HashSet::new(), retained_bytes: 0,
+            source, control, seen: HashMap::new(), retained_bytes: 0,
             max_keys, max_bytes, stopped: false,
         }
     }
@@ -191,23 +191,28 @@ impl Iterator for DistinctOutput {
                         return Some(Err(error));
                     }
                 };
-                if self.seen.contains(&key) { continue; }
-                let footprint = key.iter().fold(
-                    64usize.saturating_add(key.len().saturating_mul(std::mem::size_of::<Value>())),
-                    |total, value| match value {
-                        Value::Text(text) => total.saturating_add(text.len()),
-                        _ => total,
-                    },
-                );
-                let next_total = self.retained_bytes.checked_add(footprint);
-                if self.seen.len() >= self.max_keys ||
-                    next_total.is_none_or(|size| size > self.max_bytes) {
-                    self.stopped = true;
-                    return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
+                let at_limit = self.seen.len() >= self.max_keys;
+                match self.seen.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(_) => continue,
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let key = entry.key();
+                        let footprint = key.iter().fold(
+                            64usize.saturating_add(key.len().saturating_mul(std::mem::size_of::<Value>())),
+                            |total, value| match value {
+                                Value::Text(text) => total.saturating_add(text.len()),
+                                _ => total,
+                            },
+                        );
+                        let next_total = self.retained_bytes.checked_add(footprint);
+                        if at_limit || next_total.is_none_or(|size| size > self.max_bytes) {
+                            self.stopped = true;
+                            return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
+                        }
+                        self.retained_bytes = next_total.expect("validated DISTINCT memory");
+                        entry.insert(());
+                        selected.push(row);
+                    }
                 }
-                self.retained_bytes = next_total.expect("validated DISTINCT memory");
-                self.seen.insert(key);
-                selected.push(row);
             }
             if !selected.is_empty() {
                 return Some(batch.take(&selected));
@@ -744,5 +749,31 @@ mod native_streamed_join_tests {
         assert!(rows.contains(&vec![Value::Integer(3), Value::Integer(3)]));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod stream_distinct_single_probe_perf_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_wide_rows_remain_valid_at_key_limit() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let first = Value::Text("a".repeat(512));
+        let second = Value::Text("b".repeat(512));
+        let data = Batch::from_rows(schema.clone(), vec![
+            vec![first.clone()], vec![second.clone()], vec![first.clone()], vec![second.clone()]
+        ]).unwrap();
+        let source: BatchStream = Box::new([Ok(data)].into_iter());
+        let results = DistinctOutput::new(source, QueryControl::default(), 2, 4096)
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(results.into_iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            vec![vec![first], vec![second]]);
+        let overflowing = Batch::from_rows(schema, vec![
+            vec![Value::Text("a".into())], vec![Value::Text("b".into())]
+        ]).unwrap();
+        let source: BatchStream = Box::new([Ok(overflowing)].into_iter());
+        assert!(DistinctOutput::new(source, QueryControl::default(), 1, 4096)
+            .next().unwrap().is_err());
     }
 }
