@@ -45,16 +45,24 @@ pub fn cross_join(left: &Batch, right: &Batch) -> Result<Batch> {
         fields.push(Field::new(name, field.data_type, field.nullable));
     }
     let schema = Schema::new(fields)?;
-    let mut rows = Vec::with_capacity(count);
-    for l in 0..left.num_rows() {
-        let prefix = left.row(l)?;
-        for r in 0..right.num_rows() {
-            let mut row = prefix.clone();
-            row.extend(right.row(r)?);
-            rows.push(row);
+    let mut columns = Vec::with_capacity(schema.len());
+    for index in 0..left.schema().len() {
+        let source = left.column(index)?;
+        let mut output = Vec::with_capacity(count);
+        for value in source {
+            output.extend(std::iter::repeat_n(value.clone(), right.num_rows()));
         }
+        columns.push(output);
     }
-    Batch::from_rows(schema, rows)
+    for index in 0..right.schema().len() {
+        let source = right.column(index)?;
+        let mut output = Vec::with_capacity(count);
+        for _ in 0..left.num_rows() {
+            output.extend_from_slice(source);
+        }
+        columns.push(output);
+    }
+    Batch::new_with_row_count(schema, columns, count)
 }
 
 pub fn hash_join(
