@@ -167,8 +167,10 @@ impl Iterator for RunMerger {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        // Bound speculative memory across wide schemas and short final batches.
+        let initial_capacity = self.output_batch_rows.min(64);
         let mut columns: Vec<Vec<Value>> =
-            (0..self.schema.len()).map(|_| Vec::new()).collect();
+            (0..self.schema.len()).map(|_| Vec::with_capacity(initial_capacity)).collect();
         let mut rows = 0usize;
         while rows < self.output_batch_rows {
             match self.append_next(&mut columns) {
@@ -360,6 +362,35 @@ mod columnar_spill_output_tests {
             QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert!(merged.iter().all(|b| b.num_rows() <= 7));
         assert_eq!(merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(), expected.rows().unwrap());
+        drop(runs);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod merge_output_preallocation_tests {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn small_final_merge_batch_preserves_all_values_and_order() {
+        let dir = std::env::temp_dir().join(format!("rustspark-merge-buffers-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..35).rev()
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("id".into()))];
+        let runs = write_sorted_runs([Ok(batch)], schema.clone(), &keys, &dir, 7,
+            &QueryControl::default()).unwrap();
+        let merger = RunMerger::new(runs.files(), schema, &keys, 7, 16,
+            QueryControl::default()).unwrap();
+        let parts = merger.collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [16, 16, 3]);
+        assert_eq!(parts.iter().flat_map(|batch| batch.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>(),
+            (0..35).map(Value::Integer).collect::<Vec<_>>());
         drop(runs);
         fs::remove_dir(dir).unwrap();
     }
