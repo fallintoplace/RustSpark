@@ -435,7 +435,7 @@ mod spilled_group_entry_budget_tests {
         let mut reader = SpillReader::new(BufReader::new(File::open(&output.paths()[0]).unwrap()), 2).unwrap();
         let mut rows = Vec::new();
         while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
-        rows.sort_by_key(|row| if let Value::Integer(n) = row[0] { n } else { 0 });
+        rows.sort_by_key(|row| if let Value::Integer(n) = &row[0] { *n } else { 0 });
         assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(3)], vec![Value::Integer(2), Value::Integer(2)]]);
         drop(output);
         let limited = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]]).unwrap();
