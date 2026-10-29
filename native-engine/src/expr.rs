@@ -95,7 +95,14 @@ impl Expr {
                     Err(Error::Type("IS DISTINCT FROM requires comparable operands".into()))
                 }
             },
-            Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
+            Self::TryCast { expression, target } => {
+                expression.output_type(schema)?;
+                Ok(*target)
+            },
+            Self::Cast { expression, target } => {
+                expression.output_type(schema)?;
+                Ok(*target)
+            },
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
                 for (condition, _) in branches {
@@ -551,5 +558,32 @@ mod case_condition_type_regression {
         assert!(make(Expr::Column("missing".into())).output_type(&schema).is_err());
         assert_eq!(make(Expr::Literal(Value::Null)).output_type(&schema).unwrap(),
             DataType::Integer);
+    }
+}
+
+#[cfg(test)]
+mod try_cast_source_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn try_cast_checks_source_column_on_empty_input() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let cast = |source| Expr::TryCast { expression: Box::new(source), target: DataType::Text };
+        assert!(cast(Expr::Column("missing".into())).output_type(&schema).is_err());
+        assert_eq!(cast(Expr::Column("n".into())).output_type(&schema).unwrap(), DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod cast_column_validation_regression {
+    use super::*;
+    use crate::schema::Field;
+    #[test]
+    fn cast_rejects_missing_column_even_when_no_rows_exist() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Text, true)]).unwrap();
+        let cast = |source| Expr::Cast { expression: Box::new(source), target: DataType::Integer };
+        assert!(cast(Expr::Column("unknown".into())).output_type(&schema).is_err());
+        assert_eq!(cast(Expr::Column("x".into())).output_type(&schema).unwrap(), DataType::Integer);
     }
 }
