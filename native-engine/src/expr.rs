@@ -325,6 +325,8 @@ mod short_circuit_feature_tests {
         assert_eq!(no.evaluate(&batch(), 0).unwrap(), Value::Boolean(false));
         assert_eq!(yes.evaluate(&batch(), 0).unwrap(), Value::Boolean(true));
     }
+}
+
 #[cfg(test)]
 mod like_literal_fastpath_tests {
     use super::*;
