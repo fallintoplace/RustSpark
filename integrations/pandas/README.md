@@ -25,3 +25,7 @@ results use RustSpark's Arrow stream instead.
 ```sh
 cd integrations/pandas && python3 -m unittest -v test_query_dataframe.py
 ```
+
+Use `csv_tables={"users": "users.csv"}` and
+`parquet_tables={"orders": "orders.parquet"}` to query several named
+input tables in one Arrow-backed DataFrame export.
