@@ -24,7 +24,23 @@ fn word_count_type(types: &[DataType]) -> Result<DataType> {
 }
 fn word_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let count = i64::try_from(input.split_whitespace().count())
+    let words = if input.is_ascii() {
+        let mut count = 0_usize;
+        let mut inside_word = false;
+        for byte in input.bytes() {
+            let whitespace = matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c');
+            if whitespace {
+                inside_word = false;
+            } else if !inside_word {
+                count += 1;
+                inside_word = true;
+            }
+        }
+        count
+    } else {
+        input.split_whitespace().count()
+    };
+    let count = i64::try_from(words)
         .map_err(|_| Error::Execution("WORD_COUNT overflow".into()))?;
     Ok(Value::Integer(count))
 }
@@ -61,4 +77,19 @@ mod word_count_extension_tests {
         assert_eq!(word_count(&[Value::Text("東京\u{00A0}é".into())]).unwrap(), Value::Integer(2));
         assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
     }
+}
+
+#[cfg(test)]
+mod ascii_word_count_byte_scan_tests {
+    use super::*;
+    #[test]
+    fn matches_unicode_whitespace_behavior_for_ascii_control_bytes() {
+        for text in ["", "a", "  a  b ", "a\tb\nc\rd", "a\x0bb\x0cc", " \t\n\x0b\x0c\r "] {
+            let expected = input_reference(text);
+            assert_eq!(word_count(&[Value::Text(text.into())]).unwrap(), Value::Integer(expected));
+        }
+        assert_eq!(word_count(&[Value::Text("é\u{00A0}東京".into())]).unwrap(),
+            Value::Integer(2));
+    }
+    fn input_reference(text: &str) -> i64 { text.split_whitespace().count() as i64 }
 }
