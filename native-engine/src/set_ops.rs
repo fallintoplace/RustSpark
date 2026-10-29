@@ -44,7 +44,7 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let schema = compatible_schema(left, right)?;
-    let right_rows: HashSet<_> = right.rows()?.into_iter().collect();
+    let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
     for row in left.rows()? {
@@ -140,5 +140,25 @@ mod bounded_right_set_key_regression {
         let left = Batch::from_rows(schema, vec![vec![Value::Integer(2)]]).unwrap();
         assert_eq!(intersect_distinct(&left, &right).unwrap().row(0).unwrap(),
             vec![Value::Integer(2)]);
+    }
+}
+
+#[cfg(test)]
+mod except_bounded_right_set_regression {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn except_keeps_order_and_ignores_duplicate_right_keys() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(2)],
+            vec![Value::Integer(3)], vec![Value::Integer(1)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2)], vec![Value::Integer(2)],
+        ]).unwrap();
+        assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(1)],
+        ]);
     }
 }
