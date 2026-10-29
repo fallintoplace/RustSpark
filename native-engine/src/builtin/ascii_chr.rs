@@ -10,11 +10,18 @@ fn chr_type(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Integer { Ok(DataType::Text) }
     else { Err(Error::Type("CHR requires integer code point".into())) }
 }
+fn leading_decimal_byte(mut value: u64) -> u8 {
+    while value >= 10 { value /= 10; }
+    b'0' + value as u8
+}
+
 fn ascii(args: &[Value]) -> Result<Value> {
     let byte = match &args[0] {
         Value::Null => return Ok(Value::Null),
         Value::Text(text) => text.as_bytes().first().copied().unwrap_or(0),
-        Value::Integer(number) => number.to_string().as_bytes()[0],
+        Value::Integer(number) => {
+            if *number < 0 { b'-' } else { leading_decimal_byte(*number as u64) }
+        },
         Value::Float(number) => number.to_string().as_bytes()[0],
         _ => return Err(Error::Type("ASCII requires text or numeric input".into())),
     };
@@ -46,5 +53,18 @@ mod tests {
         assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));
         assert_eq!(ascii(&[Value::Integer(-42)]).unwrap(), Value::Integer(45));
         assert_eq!(ascii(&[Value::Float(3.14)]).unwrap(), Value::Integer(51));
+    }
+}
+
+#[cfg(test)]
+mod zero_alloc_integer_ascii_tests {
+    use super::*;
+    #[test]
+    fn matches_leading_decimal_digit_for_all_integer_boundaries() {
+        for value in [0, 9, 10, 99, 100, 123456789, i64::MAX, i64::MIN, -1] {
+            let expected = i64::from(value.to_string().as_bytes()[0]);
+            assert_eq!(ascii(&[Value::Integer(value)]).unwrap(), Value::Integer(expected));
+        }
+        assert_eq!(ascii(&[Value::Null]).unwrap(), Value::Null);
     }
 }
