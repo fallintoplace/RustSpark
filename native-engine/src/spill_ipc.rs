@@ -23,7 +23,7 @@ impl SpillFile {
         let file = File::open(&self.path)?;
         let inner = FileReader::try_new(file, None)
             .map_err(|e| Error::Execution(format!("open Arrow spill: {e}")))?;
-        Ok(SpillReader { inner })
+        Ok(SpillReader { inner, failed: false })
     }
 }
 
@@ -33,17 +33,23 @@ impl Drop for SpillFile {
 
 pub struct SpillReader {
     inner: FileReader<File>,
+    failed: bool,
 }
 
 impl Iterator for SpillReader {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|record| {
+        if self.failed { return None; }
+        let result = self.inner.next().map(|record| {
             let record = record
                 .map_err(|e| Error::Execution(format!("read Arrow spill: {e}")))?;
             arrow_bridge::from_arrow(&record)
-        })
+        });
+        if result.as_ref().is_some_and(Result::is_err) {
+            self.failed = true;
+        }
+        result
     }
 }
 
@@ -91,5 +97,29 @@ mod tests {
         let path = temp.path().to_path_buf();
         drop(temp);
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod malformed_ipc_reader_tests {
+    use super::*;
+    use std::sync::Arc;
+    use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
+
+    #[test]
+    fn unrepresentable_arrow_integer_terminates_spill_iteration() {
+        let path = std::env::temp_dir().join(format!(
+            "native-invalid-arrow-spill-{}-{}.arrow", std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let array = Arc::new(UInt64Array::from(vec![u64::MAX])) as ArrayRef;
+        let record = RecordBatch::try_from_iter(vec![("n", array)]).unwrap();
+        let mut writer = FileWriter::try_new(File::create(&path).unwrap(), &record.schema()).unwrap();
+        writer.write(&record).unwrap();
+        writer.finish().unwrap();
+        let file = SpillFile { path };
+        let mut reader = file.read().unwrap();
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
     }
 }
