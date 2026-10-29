@@ -120,6 +120,19 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.query_one("SELECT id FROM t", max_rows=1)
 
+    @patch("rustspark_local.subprocess.run")
+    def test_parameter_order_and_limits(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        client = RustSpark()
+        client.query("SELECT 1", named_params={"zeta": "int64:2", "alpha": "int64:1"})
+        argv = run.call_args.args[0]
+        self.assertLess(argv.index("alpha=int64:1"), argv.index("zeta=int64:2"))
+        with self.assertRaisesRegex(ValueError, "Too many"):
+            client.query("SELECT 1", named_params={f"p{i}": "int64:1" for i in range(65)})
+        with self.assertRaisesRegex(ValueError, "type:value"):
+            client.query("SELECT 1", named_params={"p": "utf8:" + "x" * 8192})
+
+
 
 if __name__ == "__main__":
     unittest.main()
