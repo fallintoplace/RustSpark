@@ -18,8 +18,12 @@ fn fast_text_equality<'a>(
 ) -> Result<Option<(&'a [Value], bool, &'a str)>> {
     if let Expr::Binary { left, op, right } = predicate {
         if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-            if let (Expr::Column(name), Expr::Literal(Value::Text(value))) =
-                (left.as_ref(), right.as_ref()) {
+            let operands = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(name), Expr::Literal(Value::Text(value))) |
+                (Expr::Literal(Value::Text(value)), Expr::Column(name)) => Some((name, value)),
+                _ => None,
+            };
+            if let Some((name, value)) = operands {
                 let index = batch.schema().column(name)?;
                 if batch.schema().field(index)?.data_type == DataType::Text {
                     return Ok(Some((batch.column(index)?, *op == BinaryOp::Equal, value)));
@@ -260,6 +264,24 @@ mod constant_left_filter_tests {
                 .filter(|&row| pred.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true))
                 .collect::<Vec<_>>();
             assert_eq!(select_indices(&batch, &pred).unwrap(), scalar);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reversed_text_fast_path_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn constant_left_text_predicates_keep_null_semantics() {
+        let batch = Batch::from_rows(Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("x".into())], vec![Value::Null], vec![Value::Text("y".into())]]).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual] {
+            let expr = Expr::binary(Expr::Literal(Value::Text("x".into())), op, Expr::Column("s".into()));
+            let expected = (0..batch.num_rows()).filter(|&row|
+                expr.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+            ).collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &expr).unwrap(), expected);
         }
     }
 }
