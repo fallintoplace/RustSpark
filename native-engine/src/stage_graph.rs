@@ -131,16 +131,16 @@ mod tests {
 impl StageGraph {
     /// Number of stages in the longest dependency chain (zero for an empty graph).
     pub fn longest_dependency_chain(&self) -> usize {
-        let by_id: HashMap<u64, &Stage> = self.stages.iter().map(|stage| (stage.id, stage)).collect();
-        let mut depth = HashMap::new();
-        for id in &self.order {
-            let stage = by_id[id];
-            let longest_parent = stage.dependencies.iter()
-                .map(|parent| depth.get(parent).copied().unwrap_or(0))
+        let by_id: HashMap<u64, usize> = self.stages.iter().enumerate()
+            .map(|(index, stage)| (stage.id, index)).collect();
+        let mut depth = vec![0; self.stages.len()];
+        for &index in &self.order_indices {
+            let longest_parent = self.stages[index].dependencies.iter()
+                .map(|parent| depth[by_id[parent]])
                 .max().unwrap_or(0);
-            depth.insert(*id, longest_parent + 1);
+            depth[index] = longest_parent + 1;
         }
-        depth.values().copied().max().unwrap_or(0)
+        depth.into_iter().max().unwrap_or(0)
     }
 }
 
@@ -176,5 +176,20 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod indexed_stage_chain_depth_tests {
+    use super::*;
+    #[test]
+    fn depth_is_independent_of_input_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 99, dependencies: vec![15, 16], partitions: 1 },
+            Stage { id: 16, dependencies: vec![], partitions: 1 },
+            Stage { id: 15, dependencies: vec![2], partitions: 1 },
+            Stage { id: 2, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.longest_dependency_chain(), 3);
     }
 }
