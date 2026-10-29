@@ -8,7 +8,7 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     let mut start = 0;
     while start < batch.num_rows() {
         let end = start.saturating_add(rows_per_batch).min(batch.num_rows());
-        chunks.push(batch.take(&(start..end).collect::<Vec<_>>())?);
+        chunks.push(batch.slice_rows(start, end)?);
         start = end;
     }
     Ok(chunks)
