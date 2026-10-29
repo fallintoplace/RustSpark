@@ -126,6 +126,10 @@ impl Value {
             (Self::Integer(value), DataType::Text) => Ok(Self::Text(value.to_string())),
             (Self::Float(value), DataType::Text) => Ok(Self::Text(value.to_string())),
             (Self::Integer(value), DataType::Float) => Ok(Self::Float(*value as f64)),
+            (Self::Boolean(value), DataType::Integer) => Ok(Self::Integer(i64::from(*value))),
+            (Self::Integer(value), DataType::Boolean) => Ok(Self::Boolean(*value != 0)),
+            (Self::Float(value), DataType::Boolean) if value.is_finite() =>
+                Ok(Self::Boolean(*value != 0.0)),
             (Self::Float(value), DataType::Integer) => {
                 if !value.is_finite() || *value < i64::MIN as f64 ||
                     *value >= -(i64::MIN as f64) {
@@ -160,5 +164,23 @@ mod native_cast_feature_tests {
         assert!(Value::Float(f64::INFINITY).cast_to(DataType::Integer).is_err());
         assert!(Value::Float(i64::MAX as f64).cast_to(DataType::Integer).is_err());
         assert!(Value::Text("x".into()).cast_to(DataType::Integer).is_err());
+    }
+}
+
+#[cfg(test)]
+mod boolean_numeric_cast_tests {
+    use super::*;
+    use crate::schema::DataType;
+
+    #[test]
+    fn cast_matches_try_cast_for_supported_boolean_numbers() {
+        assert_eq!(Value::Boolean(true).cast_to(DataType::Integer).unwrap(), Value::Integer(1));
+        assert_eq!(Value::Boolean(false).cast_to(DataType::Integer).unwrap(), Value::Integer(0));
+        assert_eq!(Value::Integer(-5).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
+        assert_eq!(Value::Integer(0).cast_to(DataType::Boolean).unwrap(), Value::Boolean(false));
+        assert_eq!(Value::Float(0.0).cast_to(DataType::Boolean).unwrap(), Value::Boolean(false));
+        assert_eq!(Value::Float(0.5).cast_to(DataType::Boolean).unwrap(), Value::Boolean(true));
+        assert!(Value::Float(f64::NAN).cast_to(DataType::Boolean).is_err());
+        assert!(Value::Float(f64::INFINITY).cast_to(DataType::Boolean).is_err());
     }
 }
