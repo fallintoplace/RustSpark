@@ -98,6 +98,12 @@ impl Expr {
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
+                for (condition, _) in branches {
+                    if !matches!(condition, Expr::Literal(Value::Null))
+                        && condition.output_type(schema)? != DataType::Boolean {
+                        return Err(Error::Type("CASE WHEN requires boolean conditions".into()));
+                    }
+                }
                 let mut output = None;
                 for expr in branches.iter().map(|(_, value)| value)
                     .chain(else_expr.iter().map(Box::as_ref))
@@ -526,5 +532,24 @@ mod comparison_type_regression {
             Expr::Literal(Value::Float(2.0))).output_type(&schema).unwrap(), DataType::Boolean);
         assert_eq!(Expr::binary(Expr::Column("n".into()), BinaryOp::Equal,
             Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod case_condition_type_regression {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn case_rejects_integer_and_unknown_when_without_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let make = |condition| Expr::Case {
+            branches: vec![(condition, Expr::Literal(Value::Integer(1)))],
+            else_expr: Some(Box::new(Expr::Literal(Value::Integer(0)))),
+        };
+        assert!(make(Expr::Column("n".into())).output_type(&schema).is_err());
+        assert!(make(Expr::Column("missing".into())).output_type(&schema).is_err());
+        assert_eq!(make(Expr::Literal(Value::Null)).output_type(&schema).unwrap(),
+            DataType::Integer);
     }
 }
