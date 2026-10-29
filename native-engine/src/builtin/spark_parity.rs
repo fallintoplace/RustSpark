@@ -51,6 +51,13 @@ fn lcase(args: &[Value]) -> Result<Value> {
     })
 }
 
+fn ucase(args: &[Value]) -> Result<Value> {
+    Ok(match super::string(&args[0])? {
+        Some(value) => Value::Text(value.to_uppercase()),
+        None => Value::Null,
+    })
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -60,6 +67,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "octet_length", min_args: 1, max_args: 1, result_type: char_length_type, call: octet_length },
     Function { name: "bit_length", min_args: 1, max_args: 1, result_type: char_length_type, call: bit_length },
     Function { name: "lcase", min_args: 1, max_args: 1, result_type: text_text_type, call: lcase },
+    Function { name: "ucase", min_args: 1, max_args: 1, result_type: text_text_type, call: ucase },
     // PARITY_FUNCTIONS
 ];
 
@@ -118,6 +126,12 @@ mod tests {
     fn spark_lcase_lowercases_unicode() {
         assert_eq!(sql_result("lcase('CAFÉ')").unwrap(), Value::Text("café".into()));
         assert_eq!(lcase(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_ucase_uppercases_unicode() {
+        assert_eq!(sql_result("ucase(s)").unwrap(), Value::Text("CAFÉ".into()));
+        assert_eq!(ucase(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
