@@ -14,7 +14,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if !digit.is_ascii_digit() { return Ok(Value::Boolean(false)); }
         let mut n = u32::from(digit - b'0');
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        checksum = (checksum + n) % 10;
+        checksum += n;
+        if checksum >= 10 { checksum -= 10; }
     }
     Ok(Value::Boolean(checksum == 0))
 }
@@ -34,6 +35,25 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("1234x678".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(evaluate(&[Value::Text("0".repeat(100_000))]).unwrap(),
             Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod luhn_modulo_elimination_tests {
+    use super::*;
+    #[test]
+    fn rolling_remainder_matches_reference_implementation() {
+        for number in 0..20_000 {
+            let text = format!("{number:05}");
+            let mut sum = 0u32;
+            for (index, digit) in text.bytes().rev().enumerate() {
+                let mut n = u32::from(digit - b'0');
+                if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
+                sum = (sum + n) % 10;
+            }
+            assert_eq!(evaluate(&[Value::Text(text)]).unwrap(), Value::Boolean(sum == 0));
+        }
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
