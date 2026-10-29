@@ -58,6 +58,8 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Max(_) => Ok(State::Max(None)),
         AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
+        AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
+            Err(Error::Unsupported("spilled SUM/AVG DISTINCT not implemented".into())),
     }
 }
 
@@ -67,6 +69,8 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
+        AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
+            return Err(Error::Unsupported("spilled SUM/AVG DISTINCT not implemented".into())),
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -138,6 +142,8 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
     for item in items {
         let ty = match &item.op {
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) => DataType::Integer,
+            AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
+                return Err(Error::Unsupported("spilled SUM/AVG DISTINCT not implemented".into())),
             AggregateOp::Sum(expr) => match expr.output_type(input)? {
                 DataType::Integer => DataType::Integer,
                 DataType::Float => DataType::Float,
