@@ -43,14 +43,20 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
             })
             .collect::<Result<Vec<_>>>()?,
     )?;
-    let mut columns: Vec<Vec<Value>> = selections
-        .iter()
-        .map(|_| Vec::with_capacity(batch.num_rows()))
-        .collect();
-    for (column, selection) in columns.iter_mut().zip(selections) {
-        for row in 0..batch.num_rows() {
-            column.push(selection.expression.evaluate(batch, row)?);
-        }
+    let mut columns: Vec<Vec<Value>> = Vec::with_capacity(selections.len());
+    for selection in selections {
+        let column = match &selection.expression {
+            Expr::Column(name) => batch.column(batch.schema().column(name)?)?.to_vec(),
+            Expr::Literal(value) => vec![value.clone(); batch.num_rows()],
+            expression => {
+                let mut values = Vec::with_capacity(batch.num_rows());
+                for row in 0..batch.num_rows() {
+                    values.push(expression.evaluate(batch, row)?);
+                }
+                values
+            }
+        };
+        columns.push(column);
     }
     Batch::new_with_row_count(schema, columns, batch.num_rows())
 }
