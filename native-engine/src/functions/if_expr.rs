@@ -26,10 +26,11 @@ pub(super) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
 pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
     let matched = args[0].evaluate(batch, row)?.as_boolean()? == Some(true);
     let value = args[if matched { 1 } else { 2 }].evaluate(batch, row)?;
-    Ok(match (output_type(args, batch.schema())?, value) {
-        (DataType::Float, Value::Integer(n)) => Value::Float(n as f64),
-        (_, value) => value,
-    })
+    match value {
+        Value::Integer(n) if output_type(args, batch.schema())? == DataType::Float =>
+            Ok(Value::Float(n as f64)),
+        value => Ok(value),
+    }
 }
 
 #[cfg(test)]
@@ -50,5 +51,26 @@ mod tests {
         let mut no = yes.clone();
         no[0] = Expr::Literal(Value::Boolean(false));
         assert_eq!(eval(&no, &batch, 0).unwrap(), Value::Float(0.5));
+    }
+}
+
+#[cfg(test)]
+mod if_noninteger_result_fast_path_tests {
+    use super::*;
+    #[test]
+    fn text_null_and_floats_do_not_need_numeric_promotion() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 1).unwrap();
+        let text = [Expr::Literal(Value::Boolean(true)),
+                    Expr::Literal(Value::Text("Berlin".into())),
+                    Expr::Literal(Value::Text("Paris".into()))];
+        assert_eq!(eval(&text, &batch, 0).unwrap(), Value::Text("Berlin".into()));
+        let null = [Expr::Literal(Value::Boolean(true)),
+                    Expr::Literal(Value::Null),
+                    Expr::Literal(Value::Float(1.0))];
+        assert_eq!(eval(&null, &batch, 0).unwrap(), Value::Null);
+        let mixed = [Expr::Literal(Value::Boolean(true)),
+                     Expr::Literal(Value::Integer(2)),
+                     Expr::Literal(Value::Float(1.5))];
+        assert_eq!(eval(&mixed, &batch, 0).unwrap(), Value::Float(2.0));
     }
 }
