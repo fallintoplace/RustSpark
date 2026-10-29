@@ -1,7 +1,7 @@
 import json
 import unittest
 from pathlib import Path
-from server import command_for_template, validate_params
+from server import command_for_template, validate_params, parse_result_rows
 
 
 class GatewayTests(unittest.TestCase):
@@ -25,6 +25,14 @@ class GatewayTests(unittest.TestCase):
         for body in invalid:
             with self.subTest(body=body), self.assertRaises((ValueError, json.JSONDecodeError)):
                 validate_params(body)
+
+    def test_sql_backend_results_require_object_rows(self):
+        self.assertEqual(parse_result_rows('[{"city":"Berlin"},{"amount":3}]'),
+                         [{"city": "Berlin"}, {"amount": 3}])
+        self.assertEqual(parse_result_rows("[]"), [])
+        for invalid in ('{}', '[1]', '[null]', '[{},"text"]', 'invalid'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_result_rows(invalid)
 
 
 if __name__ == "__main__":
