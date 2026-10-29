@@ -203,3 +203,62 @@ mod tests {
         assert!(from_csv_str("a\n\"open").is_err());
     }
 }
+
+ 
+/// Decode bounded CSV input using a declared schema and matching header order.
+pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
+    let mut records = parse_records(input.strip_prefix('\u{feff}').unwrap_or(input))?;
+    if records.is_empty() {
+        return Err(Error::Parse("CSV input has no header".into()));
+    }
+    let header = records.remove(0);
+    if header.len() != schema.len() || header.iter()
+        .zip(schema.fields()).any(|(name, field)| !name.eq_ignore_ascii_case(&field.name)) {
+        return Err(Error::Schema("CSV header differs from declared schema".into()));
+    }
+    if records.len() > MAX_CSV_ROWS {
+        return Err(Error::Execution("CSV row count limit exceeded".into()));
+    }
+    let rows = records.into_iter().map(|record| {
+        if record.len() != schema.len() {
+            return Err(Error::Parse("CSV row width differs from header".into()));
+        }
+        record.into_iter().enumerate().map(|(index, text)| {
+            if text.is_empty() { return Ok(Value::Null); }
+            match schema.field(index)?.data_type {
+                DataType::Text => Ok(Value::Text(text)),
+                DataType::Integer => text.parse::<i64>().map(Value::Integer)
+                    .map_err(|_| Error::Parse("invalid typed CSV integer".into())),
+                DataType::Float => text.parse::<f64>().ok().filter(|n| n.is_finite())
+                    .map(Value::Float).ok_or_else(|| Error::Parse("invalid typed CSV float".into())),
+                DataType::Boolean if text.eq_ignore_ascii_case("true") => Ok(Value::Boolean(true)),
+                DataType::Boolean if text.eq_ignore_ascii_case("false") => Ok(Value::Boolean(false)),
+                DataType::Boolean => Err(Error::Parse("invalid typed CSV boolean".into())),
+            }
+        }).collect::<Result<Vec<_>>>()
+    }).collect::<Result<Vec<_>>>()?;
+    Batch::from_rows(schema, rows)
+}
+
+#[cfg(test)]
+mod typed_csv_feature_tests {
+    use super::*;
+
+    #[test]
+    fn strict_csv_preserves_type_and_required_column() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let input = "\u{feff}ID,label\n1,001\n2,\n";
+        let parsed = from_csv_str_typed(input, schema.clone()).unwrap();
+        assert_eq!(parsed.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("001".into())],
+            vec![Value::Integer(2), Value::Null]
+        ]);
+        assert!(from_csv_str_typed("id,label\n,missing\n", schema.clone()).is_err());
+        assert!(from_csv_str_typed("id,label\nx,z\n", schema.clone()).is_err());
+        assert!(from_csv_str_typed("label,id\nx,1\n", schema).is_err());
+    }
+}
+
