@@ -20,6 +20,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if group > 100 { return Err(Error::Execution("REGEXP_EXTRACT group budget exceeded".into())); }
     regex_support::check_input(text)?;
     let re = regex_support::compile(pattern)?;
+    if group == 0 {
+        return Ok(re.find(text)
+            .map_or(Value::Null, |matched| Value::Text(matched.as_str().to_owned())));
+    }
     Ok(re.captures(text).and_then(|captures| captures.get(group))
         .map_or(Value::Null, |value| Value::Text(value.as_str().into())))
 }
@@ -38,6 +42,10 @@ mod tests {
             Value::Text("order-123".into()), Value::Text("order-([0-9]+)".into()),
             Value::Integer(1),
         ]).unwrap(), Value::Text("123".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("order-123".into()), Value::Text("order-([0-9]+)".into()),
+            Value::Integer(0),
+        ]).unwrap(), Value::Text("order-123".into()));
         assert_eq!(evaluate(&[
             Value::Text("missing".into()), Value::Text("[0-9]+".into()),
         ]).unwrap(), Value::Null);
