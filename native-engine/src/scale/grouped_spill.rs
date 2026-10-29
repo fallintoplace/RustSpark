@@ -41,6 +41,7 @@ impl Drop for GroupFiles {
 enum State {
     Count(i64),
     Sum(Option<Value>),
+    Avg { sum: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
 }
@@ -51,7 +52,7 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Sum(_) => Ok(State::Sum(None)),
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
-        AggregateOp::Avg(_) => Err(Error::Unsupported("spill AVG is not implemented".into())),
+        AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
     }
 }
@@ -60,8 +61,8 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
     let value = match op {
         AggregateOp::CountAll => Value::Integer(1),
         AggregateOp::Count(expr) | AggregateOp::Sum(expr) |
-        AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
-        AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
+        AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
+        AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
         AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
     };
     if value.is_null() { return Ok(()); }
@@ -85,6 +86,19 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
                 return Err(Error::Execution("SUM overflow".into()));
             }
             *total = Some(next);
+        }
+        State::Avg { sum, count } => {
+            let number = match value {
+                Value::Integer(number) => number as f64,
+                Value::Float(number) => number,
+                _ => return Err(Error::Type("AVG requires numeric values".into())),
+            };
+            let next = *sum + number;
+            if !next.is_finite() { return Err(Error::Execution("AVG overflow".into())); }
+            let next_count = count.checked_add(1)
+                .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
+            *sum = next;
+            *count = next_count;
         }
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
@@ -114,7 +128,10 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 _ => return Err(Error::Type("SUM requires numeric input".into())),
             },
             AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(input)?,
-            AggregateOp::Avg(_) => return Err(Error::Unsupported("spill AVG is not implemented".into())),
+            AggregateOp::Avg(expr) => match expr.output_type(input)? {
+                DataType::Integer | DataType::Float => DataType::Float,
+                _ => return Err(Error::Type("AVG requires numeric input".into())),
+            },
             AggregateOp::CountDistinct(_) => return Err(Error::Unsupported("spill COUNT DISTINCT is not implemented".into())),
         };
         fields.push(Field::new(&item.alias, ty, true));
@@ -156,6 +173,11 @@ fn aggregate_shard(
         for state in states {
             key.push(match state {
                 State::Count(value) => Value::Integer(value),
+                State::Avg { sum, count } => if count == 0 {
+                    Value::Null
+                } else {
+                    Value::Float(sum / count as f64)
+                },
                 State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
             });
         }
@@ -218,18 +240,36 @@ mod tests {
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn native_spill_rejects_unsupported_avg() {
+    fn native_spill_avg_across_batches_and_null_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-spill-avg-{}-{}", std::process::id(), TEST_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
         let schema = Schema::new(vec![
             Field::new("g", DataType::Integer, false),
             Field::new("n", DataType::Integer, true),
         ]).unwrap();
-        let error = grouped_aggregate(
-            Vec::<Result<Batch>>::new(), schema,
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let b = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Integer(6)],
+            vec![Value::Integer(1), Value::Null],
+        ]).unwrap();
+        let result = grouped_aggregate([Ok(a), Ok(b)], schema,
             &[("g".into(), "g".into())],
             &[AggregateItem::new(AggregateOp::Avg(Expr::Column("n".into())), "avg")],
-            Path::new("."), 2, 10, 2, &QueryControl::default(),
-        ).unwrap_err();
-        assert!(error.to_string().contains("spill AVG is not implemented"));
+            &dir, 4, 10, 2, &QueryControl::default()).unwrap();
+        let mut rows = Vec::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
+        }
+        assert!(rows.contains(&vec![Value::Integer(1), Value::Float(4.0)]));
+        assert!(rows.contains(&vec![Value::Integer(2), Value::Null]));
+        drop(result);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
