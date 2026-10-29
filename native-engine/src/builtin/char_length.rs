@@ -16,7 +16,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(length))
 }
 
+
+fn word_count_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Integer)
+}
+fn word_count(args: &[Value]) -> Result<Value> {
+    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let count = i64::try_from(input.split_whitespace().count())
+        .map_err(|_| Error::Execution("WORD_COUNT overflow".into()))?;
+    Ok(Value::Integer(count))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "word_count", min_args: 1, max_args: 1, result_type: word_count_type, call: word_count },
     Function { name: "char_length", min_args: 1, max_args: 1, result_type: output, call: evaluate },
     Function { name: "character_length", min_args: 1, max_args: 1, result_type: output, call: evaluate },
 ];
@@ -31,5 +44,18 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text(String::new())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod word_count_extension_tests {
+    use super::*;
+    #[test]
+    fn covers_null_and_boundary_values() {
+        assert!(crate::builtin::supports("word_count"));
+        assert_eq!(word_count(&[Value::Text(" one\t two \n three ".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(word_count(&[Value::Text("".into())]).unwrap(), Value::Integer(0));
+        assert_eq!(word_count(&[Value::Text("東京\u{00A0}é".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
     }
 }
