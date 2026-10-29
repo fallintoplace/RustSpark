@@ -11,7 +11,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     regex_support::check_input(text)?;
     let pattern = regex_support::compile(pattern)?;
     let Some(matched) = pattern.find(text) else { return Ok(Value::Integer(0)) };
-    let position = text[..matched.start()].chars().count().checked_add(1)
+    let prefix = &text[..matched.start()];
+    let chars = if prefix.is_ascii() { prefix.len() } else { prefix.chars().count() };
+    let position = chars.checked_add(1)
         .and_then(|n| i64::try_from(n).ok())
         .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
     Ok(Value::Integer(position))
@@ -26,6 +28,8 @@ mod tests {
     #[test]
     fn returns_unicode_character_offset_or_zero() {
         assert_eq!(evaluate(&[Value::Text("café-34".into()), Value::Text("[0-9]+".into())]).unwrap(), Value::Integer(6));
+        assert_eq!(evaluate(&[Value::Text(format!("{}99", "a".repeat(1000))),
+            Value::Text("[0-9]+".into())]).unwrap(), Value::Integer(1001));
         assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Text("[0-9]+".into())]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
         assert!(evaluate(&[Value::Text("abc".into()), Value::Text("(".into())]).is_err());
