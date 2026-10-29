@@ -88,6 +88,14 @@ fn hamming_distance(args: &[Value]) -> Result<Value> {
     if left.len() > 1_000_000 || right.len() > 1_000_000 {
         return Err(Error::Execution("HAMMING_DISTANCE input exceeds 1 MiB budget".into()));
     }
+    if left.is_ascii() && right.is_ascii() {
+        if left.len() != right.len() {
+            return Err(Error::Type("HAMMING_DISTANCE requires equal-length strings".into()));
+        }
+        let mismatches = left.bytes().zip(right.bytes())
+            .filter(|(a, b)| a != b).count();
+        return Ok(Value::Integer(mismatches as i64));
+    }
     let mut left = left.chars();
     let mut right = right.chars();
     let mut distance = 0_i64;
@@ -161,5 +169,18 @@ mod hamming_distance_extension_tests {
         assert_eq!(hamming_distance(&[Value::Text("é🙂".into()), Value::Text("é界".into())]).unwrap(), Value::Integer(1));
         assert!(hamming_distance(&[Value::Text("ab".into()), Value::Text("a".into())]).is_err());
         assert_eq!(hamming_distance(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod hamming_ascii_fast_path_tests {
+    use super::*;
+    #[test]
+    fn long_ascii_input_and_unicode_fallback() {
+        let left = format!("{}x", "a".repeat(100_000));
+        let right = format!("{}y", "a".repeat(100_000));
+        assert_eq!(hamming_distance(&[Value::Text(left), Value::Text(right)]).unwrap(), Value::Integer(1));
+        assert!(hamming_distance(&[Value::Text("a".into()), Value::Text("ab".into())]).is_err());
+        assert_eq!(hamming_distance(&[Value::Text("é".into()), Value::Text("🙂".into())]).unwrap(), Value::Integer(1));
     }
 }
