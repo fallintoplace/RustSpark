@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     batch::Batch,
     scalar::Value,
-    schema::{Field, Schema},
+    schema::{DataType, Field, Schema},
     Error,
     Result,
 };
@@ -24,6 +24,14 @@ fn joinable(key: &Value) -> bool {
     !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
 }
 
+fn normalize_key(value: &Value, numeric_widen: bool) -> Result<Value> {
+    if numeric_widen && matches!(value, Value::Integer(_)) {
+        value.cast_to(DataType::Float)
+    } else {
+        Ok(value.clone())
+    }
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
@@ -33,19 +41,24 @@ pub fn hash_join(
 ) -> Result<Batch> {
     let left_column = left.schema().column(left_key)?;
     let right_column = right.schema().column(right_key)?;
-    if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
-        return Err(Error::Type("join key types must match".into()));
-    }
+    let left_type = left.schema().field(left_column)?.data_type;
+    let right_type = right.schema().field(right_column)?.data_type;
+    let numeric_widen = match (left_type, right_type) {
+        (a, b) if a == b => false,
+        (DataType::Integer, DataType::Float)
+        | (DataType::Float, DataType::Integer) => true,
+        _ => return Err(Error::Type("join key types must match or be numeric".into())),
+    };
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
         let mut keys = HashSet::new();
         for row in 0..right.num_rows() {
-            let key = right.value(row, right_column)?;
-            if joinable(key) { keys.insert(key.clone()); }
+            let key = normalize_key(right.value(row, right_column)?, numeric_widen)?;
+            if joinable(&key) { keys.insert(key); }
         }
         let mut indices = Vec::new();
         for row in 0..left.num_rows() {
-            let key = left.value(row, left_column)?;
-            let found = joinable(key) && keys.contains(key);
+            let key = normalize_key(left.value(row, left_column)?, numeric_widen)?;
+            let found = joinable(&key) && keys.contains(&key);
             if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
                 if indices.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
@@ -80,16 +93,16 @@ pub fn hash_join(
     }
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
     for row in 0..right.num_rows() {
-        let key = right.value(row, right_column)?;
-        if joinable(key) {
-            right_hash.entry(key.clone()).or_default().push(row);
+        let key = normalize_key(right.value(row, right_column)?, numeric_widen)?;
+        if joinable(&key) {
+            right_hash.entry(key).or_default().push(row);
         }
     }
     let mut output = Vec::new();
     let mut matched_right = vec![false; right.num_rows()];
     for left_row in 0..left.num_rows() {
-        let key = left.value(left_row, left_column)?;
-        let right_rows = if joinable(key) { right_hash.get(key) } else { None };
+        let key = normalize_key(left.value(left_row, left_column)?, numeric_widen)?;
+        let right_rows = if joinable(&key) { right_hash.get(&key) } else { None };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
                 matched_right[right_row] = true;
