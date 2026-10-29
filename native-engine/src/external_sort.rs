@@ -71,15 +71,7 @@ fn compare_runs(left: &Run, right: &Run, keys: &[SortKey]) -> Result<Ordering> {
     for key in keys {
         let x = key.expression.evaluate(a, left.position)?;
         let y = key.expression.evaluate(b, right.position)?;
-        let order = match (x.is_null(), y.is_null()) {
-            (true, true) => Ordering::Equal,
-            (true, false) => if key.nulls_first { Ordering::Less } else { Ordering::Greater },
-            (false, true) => if key.nulls_first { Ordering::Greater } else { Ordering::Less },
-            (false, false) => {
-                let result = x.sql_compare(&y).ok().flatten().unwrap_or(Ordering::Equal);
-                if key.descending { result.reverse() } else { result }
-            }
-        };
+        let order = crate::sort::compare_values(&x, &y, key.descending, key.nulls_first);
         if order != Ordering::Equal { return Ok(order); }
     }
     Ok(Ordering::Equal)

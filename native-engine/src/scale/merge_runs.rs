@@ -49,15 +49,7 @@ struct Key {
 }
 
 fn compare_value(a: &Value, b: &Value, key: &Key) -> Ordering {
-    match (a.is_null(), b.is_null()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => if key.nulls_first { Ordering::Less } else { Ordering::Greater },
-        (false, true) => if key.nulls_first { Ordering::Greater } else { Ordering::Less },
-        (false, false) => {
-            let order = a.sql_compare(b).ok().flatten().unwrap_or(Ordering::Equal);
-            if key.descending { order.reverse() } else { order }
-        }
-    }
+    crate::sort::compare_values(a, b, key.descending, key.nulls_first)
 }
 
 pub struct RunMerger {
