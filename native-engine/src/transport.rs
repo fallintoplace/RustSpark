@@ -102,3 +102,40 @@ mod tests {
         assert!(read_frame(&mut bytes.as_slice(), 8).is_err());
     }
 }
+
+ 
+/// Decode a sequence of checksummed exchange frames under an aggregate payload budget.
+pub fn read_frames(
+    input: &mut impl Read,
+    max_frame_bytes: usize,
+    max_total_bytes: usize,
+) -> Result<Vec<Frame>> {
+    let mut frames = Vec::new();
+    let mut total = 0_usize;
+    while let Some(frame) = read_frame(input, max_frame_bytes)? {
+        total = total.checked_add(frame.payload.len())
+            .filter(|used| *used <= max_total_bytes)
+            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
+#[cfg(test)]
+mod exchange_stream_feature_tests {
+    use super::*;
+
+    #[test]
+    fn enforces_total_payload_budget_over_many_valid_frames() {
+        let mut wire = Vec::new();
+        for task in 0..3 {
+            write_frame(&mut wire, &Frame {
+                stage: 1, task, attempt: 0, payload: vec![42; 4]
+            }, 8).unwrap();
+        }
+        assert_eq!(read_frames(&mut wire.as_slice(), 8, 12).unwrap().len(), 3);
+        assert!(read_frames(&mut wire.as_slice(), 8, 11).is_err());
+        assert!(read_frames(&mut wire.as_slice(), 3, 20).is_err());
+    }
+}
+
