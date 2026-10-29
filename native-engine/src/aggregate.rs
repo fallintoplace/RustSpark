@@ -14,8 +14,11 @@ pub enum AggregateOp {
     CountAll,
     Count(Expr),
     CountDistinct(Expr),
+    CountDistinctTuple(Vec<Expr>),
     Sum(Expr),
+    SumDistinct(Expr),
     Avg(Expr),
+    AvgDistinct(Expr),
     Min(Expr),
     Max(Expr),
     Filtered { op: Box<AggregateOp>, predicate: Expr },
@@ -39,14 +42,18 @@ impl AggregateItem {
         match &self.op {
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
                 Ok(DataType::Integer),
-            AggregateOp::Sum(expr) => {
+            AggregateOp::CountDistinctTuple(expressions) => {
+                for expr in expressions { expr.output_type(schema)?; }
+                Ok(DataType::Integer)
+            },
+            AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
                     DataType::Integer | DataType::Float => Ok(kind),
                     _ => Err(Error::Type("SUM requires a numeric column".into())),
                 }
             }
-            AggregateOp::Avg(expr) => {
+            AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) => {
                 match expr.output_type(schema)? {
                     DataType::Integer | DataType::Float => Ok(DataType::Float),
                     _ => Err(Error::Type("AVG requires a numeric column".into())),
@@ -68,6 +75,8 @@ impl AggregateItem {
 enum State {
     Count(i64),
     CountDistinct(HashSet<Value>),
+    CountDistinctTuples(HashSet<Vec<Value>>),
+    Distinct { keys: HashSet<Value>, inner: Box<State> },
     Sum(Option<Value>),
     Avg { sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
@@ -79,8 +88,17 @@ impl State {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
             AggregateOp::CountDistinct(_) => Self::CountDistinct(HashSet::new()),
+            AggregateOp::CountDistinctTuple(_) => Self::CountDistinctTuples(HashSet::new()),
             AggregateOp::Sum(_) => Self::Sum(None),
+            AggregateOp::SumDistinct(expr) => Self::Distinct {
+                keys: HashSet::new(),
+                inner: Box::new(Self::new(&AggregateOp::Sum(expr.clone()))),
+            },
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
+            AggregateOp::AvgDistinct(expr) => Self::Distinct {
+                keys: HashSet::new(),
+                inner: Box::new(Self::new(&AggregateOp::Avg(expr.clone()))),
+            },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
             AggregateOp::Filtered { op, .. } => Self::new(op),
@@ -94,8 +112,44 @@ impl State {
             }
             return self.update(op, batch, row);
         }
+        if let AggregateOp::CountDistinctTuple(expressions) = op {
+            let Self::CountDistinctTuples(keys) = self else {
+                return Err(Error::Execution("invalid composite DISTINCT state".into()));
+            };
+            let mut tuple = Vec::with_capacity(expressions.len());
+            for expression in expressions {
+                let value = expression.evaluate(batch, row)?;
+                if value.is_null() { return Ok(()); }
+                tuple.push(value);
+            }
+            if keys.len() >= 65_536 && !keys.contains(&tuple) {
+                return Err(Error::Execution("COUNT DISTINCT tuple limit exceeded".into()));
+            }
+            keys.insert(tuple);
+            return Ok(());
+        }
+        if matches!(op, AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_)) {
+            let Self::Distinct { keys, inner } = self else {
+                return Err(Error::Execution("invalid DISTINCT aggregate state".into()));
+            };
+            let (expr, base) = match op {
+                AggregateOp::SumDistinct(expr) => (expr, AggregateOp::Sum(expr.clone())),
+                AggregateOp::AvgDistinct(expr) => (expr, AggregateOp::Avg(expr.clone())),
+                _ => unreachable!(),
+            };
+            let value = expr.evaluate(batch, row)?;
+            if value.is_null() { return Ok(()); }
+            if !keys.contains(&value) && keys.len() >= 65_536 {
+                return Err(Error::Execution("SUM/AVG DISTINCT key limit exceeded".into()));
+            }
+            if keys.insert(value) { inner.update(&base, batch, row)?; }
+            return Ok(());
+        }
         let value = match op {
             AggregateOp::CountAll => Value::Integer(1),
+            AggregateOp::CountDistinctTuple(_) => unreachable!("tuple state handled above"),
+            AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
+                unreachable!("distinct aggregate handled above"),
             AggregateOp::Filtered { .. } => unreachable!("filtered op handled before evaluation"),
             AggregateOp::Count(expr)
             | AggregateOp::CountDistinct(expr)
@@ -162,6 +216,8 @@ impl State {
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
             Self::Max(maximum) => update_extreme(maximum, value, false)?,
+            Self::Distinct { .. } | Self::CountDistinctTuples(_) =>
+                unreachable!("DISTINCT was handled before updating"),
         }
         Ok(())
     }
@@ -169,6 +225,10 @@ impl State {
     fn finish(self) -> Result<Value> {
         Ok(match self {
             Self::Count(value) => Value::Integer(value),
+            Self::CountDistinctTuples(keys) => Value::Integer(
+                i64::try_from(keys.len()).map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
+            ),
+            Self::Distinct { inner, .. } => inner.finish()?,
             Self::CountDistinct(values) => Value::Integer(
                 i64::try_from(values.len())
                     .map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
@@ -223,7 +283,7 @@ pub fn aggregate_with_max_groups(
             other => other,
         };
         let nullable = !matches!(base_op,
-            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) | AggregateOp::CountDistinctTuple(_));
         fields.push(Field::new(&item.alias, item.output_type(batch.schema())?, nullable));
     }
     let schema = Schema::new(fields)?;
