@@ -41,6 +41,15 @@ class ReportTests(unittest.TestCase):
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, "JSON objects"):
                 report.render({"results": [row]})
 
+    def test_report_shows_relative_tail_amplification(self):
+        output = report.render({"results": [
+            {"id": 1, "status": "ok", "median_ms": 2.0, "p95_ms": 5.0},
+            {"id": 2, "status": "error", "error": "query unsupported"},
+        ]})
+        self.assertIn("Tail amplification", output)
+        self.assertIn("| 01 | ok | 2.000 | 5.000 | 2.50x |", output)
+        self.assertIn("| 02 | error | - | - | - |", output)
+
 
 if __name__ == "__main__":
     unittest.main()

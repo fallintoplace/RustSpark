@@ -27,12 +27,13 @@ def render_query_row(row):
         p95 = checked_time(row.get("p95_ms"), "p95")
         if p95 + 0.001 < median:
             raise ValueError(f"p95 smaller than median in query {row['id']}")
-        cells = [f"{median:.3f}", f"{p95:.3f}"]
+        cells = [f"{median:.3f}", f"{p95:.3f}",
+                 f"{p95 / median:.2f}x" if median > 0 else "-"]
     elif status == "error":
-        cells = ["-", "-"]
+        cells = ["-", "-", "-"]
     else:
         raise ValueError(f"Unknown query status: {status}")
-    return f"| {row['id']:02} | {status} | {cells[0]} | {cells[1]} |"
+    return f"| {row['id']:02} | {status} | {cells[0]} | {cells[1]} | {cells[2]} |"
 
 
 def append_latency_concentration(lines, ok, results):
@@ -67,8 +68,8 @@ def render(report):
         f"**Coverage:** {len(ok)}/{len(results)} queries successful",
         f"**Complete 22-query run:** {'yes' if len(ok) == 22 and len(results) == 22 else 'no'}",
         f"**Metric:** {markdown_inline(report.get('metric', 'cold process wall-clock latency'))}", "",
-        "| Query | Status | Median (ms) | p95 (ms) |",
-        "| ---: | --- | ---: | ---: |",
+        "| Query | Status | Median (ms) | p95 (ms) | Tail amplification |",
+        "| ---: | --- | ---: | ---: | ---: |",
     ]
     for row in sorted(results, key=lambda item: item["id"]):
         lines.append(render_query_row(row))
