@@ -25,13 +25,23 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len().checked_add(replacement.len()).is_none_or(|n| n > 16 * 1024 * 1024) {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
-    let characters = text.chars().collect::<Vec<_>>();
-    let index = usize::try_from(start - 1).unwrap_or(usize::MAX).min(characters.len());
-    let end = index.saturating_add(count).min(characters.len());
-    let mut result = String::new();
-    result.extend(characters[..index].iter().copied());
+    let start_char = usize::try_from(start - 1).unwrap_or(usize::MAX);
+    let end_char = start_char.saturating_add(count);
+    let mut start_byte = None;
+    let mut end_byte = None;
+    for (character, (offset, _)) in text.char_indices().enumerate() {
+        if character == start_char { start_byte = Some(offset); }
+        if character == end_char {
+            end_byte = Some(offset);
+            break;
+        }
+    }
+    let start_byte = start_byte.unwrap_or(text.len());
+    let end_byte = end_byte.unwrap_or(text.len());
+    let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
+    result.push_str(&text[..start_byte]);
     result.push_str(replacement);
-    result.extend(characters[end..].iter().copied());
+    result.push_str(&text[end_byte..]);
     Ok(Value::Text(result))
 }
 
