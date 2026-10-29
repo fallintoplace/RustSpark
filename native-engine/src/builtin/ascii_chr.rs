@@ -14,7 +14,12 @@ fn ascii(args: &[Value]) -> Result<Value> {
     let byte = match &args[0] {
         Value::Null => return Ok(Value::Null),
         Value::Text(text) => text.as_bytes().first().copied().unwrap_or(0),
-        Value::Integer(number) => number.to_string().as_bytes()[0],
+        Value::Integer(number) if *number < 0 => b'-',
+        Value::Integer(number) => {
+            let mut digits = *number as u64;
+            while digits >= 10 { digits /= 10; }
+            b'0' + digits as u8
+        },
         Value::Float(number) => number.to_string().as_bytes()[0],
         _ => return Err(Error::Type("ASCII requires text or numeric input".into())),
     };
@@ -46,5 +51,18 @@ mod tests {
         assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));
         assert_eq!(ascii(&[Value::Integer(-42)]).unwrap(), Value::Integer(45));
         assert_eq!(ascii(&[Value::Float(3.14)]).unwrap(), Value::Integer(51));
+    }
+}
+
+#[cfg(test)]
+mod ascii_integer_no_alloc_tests {
+    use super::*;
+    #[test]
+    fn first_decimal_byte_handles_extreme_integers() {
+        for (n, expected) in [(0, 48), (9, 57), (10, 49), (98765, 57),
+                              (i64::MAX, 57), (-1, 45), (i64::MIN, 45)] {
+            assert_eq!(ascii(&[Value::Integer(n)]).unwrap(), Value::Integer(expected));
+        }
+        assert_eq!(ascii(&[Value::Null]).unwrap(), Value::Null);
     }
 }
