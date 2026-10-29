@@ -435,6 +435,26 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("POSITION")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let needle = self.expression(4)?;
+                if self.take_word("IN") {
+                    let haystack = self.expression(0)?;
+                    self.expect_symbol(')')?;
+                    Ok(Expr::Call { name: "locate".into(), args: vec![needle, haystack] })
+                } else {
+                    self.expect_symbol(',')?;
+                    let haystack = self.expression(0)?;
+                    let mut args = vec![needle, haystack];
+                    if self.take_symbol(',') {
+                        args.push(self.expression(0)?);
+                    }
+                    self.expect_symbol(')')?;
+                    Ok(Expr::Call { name: "locate".into(), args })
+                }
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
