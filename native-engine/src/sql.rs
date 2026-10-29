@@ -388,12 +388,48 @@ impl Parser {
                 Some(WindowKind::Rank),
             Some(Token::Word(name)) if name.eq_ignore_ascii_case("DENSE_RANK") =>
                 Some(WindowKind::DenseRank),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("LAG") =>
+                Some(WindowKind::Lag),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("LEAD") =>
+                Some(WindowKind::Lead),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("NTILE") =>
+                Some(WindowKind::Ntile),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("PERCENT_RANK") =>
+                Some(WindowKind::PercentRank),
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("CUME_DIST") =>
+                Some(WindowKind::CumeDist),
             _ => None,
         };
         let Some(kind) = kind else { return Ok(None) };
         self.next();
         self.expect_symbol('(')?;
-        self.expect_symbol(')')?;
+        let mut buckets = None;
+        let (argument, offset, default) = if kind == WindowKind::Ntile {
+            let count = self.usize_literal()?;
+            if count == 0 || count > 1_000_000 {
+                return Err(Error::Parse("NTILE requires 1 to 1000000 buckets".into()));
+            }
+            buckets = Some(count);
+            self.expect_symbol(')')?;
+            (None, 0, None)
+        } else if matches!(kind, WindowKind::Lag | WindowKind::Lead) {
+            let argument = Some(self.expression(0)?);
+            let offset = if self.take_symbol(',') {
+                let offset = self.usize_literal()?;
+                if offset > 1_000_000 {
+                    return Err(Error::Parse("LAG/LEAD offset exceeds 1000000".into()));
+                }
+                offset
+            } else { 1 };
+            let default = if self.take_symbol(',') {
+                Some(self.expression(0)?)
+            } else { None };
+            self.expect_symbol(')')?;
+            (argument, offset, default)
+        } else {
+            self.expect_symbol(')')?;
+            (None, 0, None)
+        };
         self.expect_word("OVER")?;
         self.expect_symbol('(')?;
         let mut partition_by = Vec::new();
@@ -430,10 +466,15 @@ impl Parser {
             WindowKind::RowNumber => "row_number",
             WindowKind::Rank => "rank",
             WindowKind::DenseRank => "dense_rank",
+            WindowKind::Lag => "lag",
+            WindowKind::Lead => "lead",
+            WindowKind::Ntile => "ntile",
+            WindowKind::PercentRank => "percent_rank",
+            WindowKind::CumeDist => "cume_dist",
         };
         let alias = self.select_alias(default.into())?;
         Ok(Some(SelectItem::Window(WindowSpec {
-            kind, partition_by, order_by, alias,
+            kind, partition_by, order_by, alias, argument, offset, default, buckets,
         })))
     }
 
