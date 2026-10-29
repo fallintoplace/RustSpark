@@ -25,3 +25,6 @@ results use RustSpark's Arrow stream instead.
 ```sh
 cd integrations/pandas && python3 -m unittest -v test_query_dataframe.py
 ```
+
+To query a persistent RustSpark database rather than supplying a file,
+pass `database_dir="/path/to/rustspark-database"`.

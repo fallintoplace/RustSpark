@@ -8,7 +8,8 @@ import tempfile
 
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | None = None, parquet: str | None = None,
-                  max_rows: int = 100_000, query_timeout: int | None = None) -> list[str]:
+                  max_rows: int = 100_000, query_timeout: int | None = None,
+                  database_dir: str | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be empty")
     if csv is not None and parquet is not None:
@@ -19,6 +20,8 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
         binary, "--sql", sql, "--output-arrow", str(output),
         "--max-rows", str(max_rows),
     ]
+    if database_dir is not None:
+        command.extend(["--database-dir", str(database_dir)])
     if csv is not None:
         command.extend(["--csv", csv])
     if parquet is not None:
@@ -32,7 +35,8 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
 def query_dataframe(sql: str, *, binary: str = "rustspark",
                     csv: str | None = None, parquet: str | None = None,
-                    max_rows: int = 100_000, query_timeout: int | None = None):
+                    max_rows: int = 100_000, query_timeout: int | None = None,
+                    database_dir: str | None = None):
     """Load a bounded SQL result as pandas, preserving Arrow logical types.
 
     A DataFrame resides fully in Python memory. Prefer streaming for large data.
@@ -44,6 +48,7 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
         command = build_command(
             sql, output, binary=binary, csv=csv, parquet=parquet,
             max_rows=max_rows, query_timeout=query_timeout,
+            database_dir=database_dir,
         )
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode:
