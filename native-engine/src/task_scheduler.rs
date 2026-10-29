@@ -77,6 +77,38 @@ impl TaskScheduler {
         Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
     }
 
+    /// Acquire up to `max_tasks` leases in one bounded scan.
+    ///
+    /// Unlike repeated calls to `lease`, batch admission traverses the task
+    /// map only once while also recycling expired attempts.
+    pub fn lease_many(
+        &mut self, worker: u64, now: Instant, ttl: Duration, max_tasks: usize,
+    ) -> Result<Vec<Lease>> {
+        if ttl.is_zero() {
+            return Err(Error::Execution("task lease duration must be positive".into()));
+        }
+        let until = now.checked_add(ttl)
+            .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
+        let mut leases = Vec::new();
+        for (&id, task) in &mut self.tasks {
+            if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
+                task.status = if task.attempts >= self.max_attempts {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Queued
+                };
+            }
+            if leases.len() < max_tasks && task.status == TaskStatus::Queued {
+                task.attempts += 1;
+                task.status = TaskStatus::Leased {
+                    worker, attempt: task.attempts, until,
+                };
+                leases.push(Lease { task: id, worker, attempt: task.attempts });
+            }
+        }
+        Ok(leases)
+    }
+
     /// Extend an active attempt without reviving a stale or expired lease.
     pub fn renew(&mut self, lease: &Lease, now: Instant, ttl: Duration) -> Result<bool> {
         if ttl.is_zero() {
@@ -282,5 +314,33 @@ mod consolidated_heartbeat_regressions {
         invalid = lease.clone();
         invalid.attempt += 1;
         assert!(!queue.renew(&invalid, now, Duration::from_secs(2)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod batched_task_lease_tests {
+    use super::*;
+
+    #[test]
+    fn leases_in_id_order_and_retries_expired_tasks_in_one_scan() {
+        let now = Instant::now();
+        let ttl = Duration::from_millis(100);
+        let mut scheduler = TaskScheduler::new([3, 1, 2], 2).unwrap();
+        assert_eq!(scheduler.lease_many(9, now, ttl, 2).unwrap(), vec![
+            Lease { task: 1, worker: 9, attempt: 1 },
+            Lease { task: 2, worker: 9, attempt: 1 },
+        ]);
+        assert_eq!(scheduler.counts(), TaskCounts {
+            queued: 1, leased: 2, done: 0, failed: 0,
+        });
+        let later = now.checked_add(ttl).unwrap();
+        let retries = scheduler.lease_many(5, later, ttl, 3).unwrap();
+        assert_eq!(retries.iter().map(|lease| (lease.task, lease.attempt)).collect::<Vec<_>>(),
+            vec![(1, 2), (2, 2), (3, 1)]);
+        assert!(!scheduler.finish_at(
+            &Lease { task: 1, worker: 9, attempt: 1 }, true, later,
+        ));
+        assert_eq!(scheduler.lease_many(6, later, ttl, 0).unwrap().len(), 0);
+        assert!(scheduler.lease_many(6, later, Duration::ZERO, 1).is_err());
     }
 }
