@@ -26,11 +26,19 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if size >= target { return Ok(Value::Text(text.chars().take(target).collect())); }
     if pad.is_empty() { return Err(Error::Execution("LPAD/RPAD cannot extend with empty pattern".into())); }
     let pad_chars = pad.chars().collect::<Vec<_>>();
-    let mut extra = String::new();
-    for i in 0..(target - size) {
-        extra.push(pad_chars[i % pad_chars.len()]);
+    let missing = target - size;
+    let complete = missing / pad_chars.len();
+    let partial = missing % pad_chars.len();
+    let additional_bytes = complete.saturating_mul(pad.len()).saturating_add(
+        pad_chars.iter().take(partial).map(|ch| ch.len_utf8()).sum::<usize>()
+    );
+    let mut output = String::with_capacity(text.len().saturating_add(additional_bytes));
+    if !left { output.push_str(text); }
+    for index in 0..missing {
+        output.push(pad_chars[index % pad_chars.len()]);
     }
-    Ok(Value::Text(if left { format!("{extra}{text}") } else { format!("{text}{extra}") }))
+    if left { output.push_str(text); }
+    Ok(Value::Text(output))
 }
 fn lpad(args: &[Value]) -> Result<Value> { pad(args, true) }
 fn rpad(args: &[Value]) -> Result<Value> { pad(args, false) }
