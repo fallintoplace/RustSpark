@@ -487,36 +487,67 @@ impl Parser {
             plan = plan.filter(self.expression(0)?);
         }
 
-        let mut group_columns = Vec::new();
+
+        let mut group_expressions = Vec::new();
         if self.take_word("GROUP") {
             self.expect_word("BY")?;
             if self.take_word("ALL") {
+                // Spark GROUP BY ALL derives keys from non-aggregate output expressions.
                 for item in &select {
-                    if let SelectItem::Scalar(Selection { expression: Expr::Column(name), .. }) = item {
-                        if !group_columns.iter().any(|column: &String| column.eq_ignore_ascii_case(name)) {
-                            group_columns.push(name.clone());
+                    if let SelectItem::Scalar(Selection { expression, .. }) = item {
+                        if !matches!(expression, Expr::Literal(_)) {
+                            group_expressions.push(expression.clone());
                         }
-                    } else if matches!(item, SelectItem::Scalar(_)) {
-                        return Err(Error::Unsupported("GROUP BY ALL requires selected grouping columns".into()));
                     }
-                }
-                if group_columns.is_empty() {
-                    return Err(Error::Unsupported("GROUP BY ALL needs a selected grouping column".into()));
                 }
             } else {
                 loop {
-                    group_columns.push(self.identifier()?);
+                    group_expressions.push(self.expression(0)?);
                     if !self.take_symbol(',') { break; }
                 }
             }
         }
+        let mut group_by = Vec::<(Expr, String)>::new();
+        for (index, expression) in group_expressions.into_iter().enumerate() {
+            // Spark accepts GROUP BY 1 and GROUP BY projected_alias.
+            let expression = match expression {
+                Expr::Literal(Value::Integer(position)) => {
+                    let idx = usize::try_from(position).ok().and_then(|n| n.checked_sub(1))
+                        .ok_or_else(|| Error::Parse("GROUP BY position starts at one".into()))?;
+                    let Some(SelectItem::Scalar(item)) = select.get(idx) else {
+                        return Err(Error::Parse("GROUP BY position must select a scalar expression".into()));
+                    };
+                    item.expression.clone()
+                }
+                Expr::Column(name) => {
+                    select.iter().find_map(|item| match item {
+                        SelectItem::Scalar(selection) if selection.alias.eq_ignore_ascii_case(&name) =>
+                            Some(selection.expression.clone()),
+                        _ => None,
+                    }).unwrap_or(Expr::Column(name))
+                }
+                other => other,
+            };
+            if group_by.iter().any(|(known, _)| known == &expression) {
+                continue;
+            }
+            let alias = match &expression {
+                Expr::Column(name) => name.clone(),
+                other => select.iter().find_map(|item| match item {
+                    SelectItem::Scalar(selection) if &selection.expression == other =>
+                        Some(selection.alias.clone()),
+                    _ => None,
+                }).unwrap_or_else(|| format!("__group_{}", index + 1)),
+            };
+            group_by.push((expression, alias));
+        }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
-        let grouped = has_aggregates || !group_columns.is_empty();
+        let grouped = has_aggregates || !group_by.is_empty();
         let star = select.iter().any(|entry| matches!(entry, SelectItem::Star));
-        if star && (select.len() > 1 || has_aggregates || !group_columns.is_empty()) {
+        if star && (select.len() > 1 || has_aggregates || !group_by.is_empty()) {
             return Err(Error::Unsupported("SELECT * cannot mix with other expressions or GROUP BY".into()));
         }
-        if has_aggregates || !group_columns.is_empty() {
+        if has_aggregates || !group_by.is_empty() {
             let mut aggregates = Vec::new();
             let mut selections = Vec::new();
             for item in select {
@@ -526,24 +557,22 @@ impl Parser {
                         aggregates.push(item);
                     }
                     SelectItem::Scalar(item) => {
-                        if let Expr::Column(ref name) = item.expression {
-                            if !group_columns.iter().any(|group| name.eq_ignore_ascii_case(group)) {
-                                return Err(Error::Parse(format!("column {name} must appear in GROUP BY")));
-                            }
-                        } else if !matches!(item.expression, Expr::Literal(_)) {
-                            return Err(Error::Unsupported("grouped expressions must be columns or literals".into()));
-                        }
-                        selections.push(item);
+                        // Project the computed grouped key from the aggregate result.
+                        // Other expressions must be evaluable from grouped columns.
+                        let expression = if let Some((_, alias)) = group_by.iter()
+                            .find(|(key, _)| key == &item.expression) {
+                            Expr::Column(alias.clone())
+                        } else {
+                            item.expression
+                        };
+                        selections.push(Selection::new(expression, item.alias));
                     }
                     SelectItem::Star => unreachable!(),
                 }
             }
             plan = Plan::Aggregate {
                 input: Box::new(plan),
-                group_by: group_columns
-                    .into_iter()
-                    .map(|name| (Expr::Column(name.clone()), name))
-                    .collect(),
+                group_by,
                 aggregates,
             };
             plan = plan.project(selections);
