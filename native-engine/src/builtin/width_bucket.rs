@@ -28,7 +28,37 @@ fn width_bucket(args: &[Value]) -> Result<Value> {
         };
     Ok(Value::Integer(slot))
 }
+
+fn clamp_type(types: &[DataType]) -> Result<DataType> {
+    if types.len() == 3
+        && types.iter().all(|kind| *kind == types[0])
+        && matches!(types[0], DataType::Integer | DataType::Float)
+    {
+        Ok(types[0])
+    } else {
+        Err(Error::Type("CLAMP expects three numbers of the same type".into()))
+    }
+}
+fn clamp(args: &[Value]) -> Result<Value> {
+    if args.iter().any(Value::is_null) { return Ok(Value::Null); }
+    match (&args[0], &args[1], &args[2]) {
+        (Value::Integer(value), Value::Integer(lower), Value::Integer(upper)) => {
+            if lower > upper { return Err(Error::Execution("CLAMP bounds are reversed".into())); }
+            Ok(Value::Integer((*value).clamp(*lower, *upper)))
+        }
+        (Value::Float(value), Value::Float(lower), Value::Float(upper)) => {
+            if !value.is_finite() || !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(Error::Execution("CLAMP requires finite increasing bounds".into()));
+            }
+            Ok(Value::Float((*value).clamp(*lower, *upper)))
+        }
+        _ => Err(Error::Type("CLAMP expects three numbers of the same type".into())),
+    }
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "clamp", min_args: 3, max_args: 3, result_type: clamp_type, call: clamp },
+
     Function { name: "width_bucket", min_args: 4, max_args: 4, result_type: output, call: width_bucket },
 ];
 #[cfg(test)]
@@ -44,5 +74,19 @@ mod tests {
         assert_eq!(bounds(45.0), Value::Integer(5));
         assert_eq!(bounds(100.0), Value::Integer(11));
         assert!(width_bucket(&[Value::Integer(2), Value::Integer(10), Value::Integer(0), Value::Integer(10)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod clamp_extension_tests {
+    use super::*;
+    #[test]
+    fn checks_numeric_extremes_and_nulls() {
+        assert!(crate::builtin::supports("clamp"));
+        assert_eq!(clamp(&[Value::Integer(i64::MAX), Value::Integer(1), Value::Integer(i64::MAX - 1)]).unwrap(), Value::Integer(i64::MAX - 1));
+        assert_eq!(clamp(&[Value::Integer(-5), Value::Integer(0), Value::Integer(10)]).unwrap(), Value::Integer(0));
+        assert_eq!(clamp(&[Value::Float(1.5), Value::Float(0.0), Value::Float(1.0)]).unwrap(), Value::Float(1.0));
+        assert!(clamp(&[Value::Integer(1), Value::Integer(5), Value::Integer(0)]).is_err());
+        assert_eq!(clamp(&[Value::Null, Value::Integer(0), Value::Integer(1)]).unwrap(), Value::Null);
     }
 }
