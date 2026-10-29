@@ -46,7 +46,31 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()))?))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
+
+fn hamming_distance_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Integer)
+}
+fn hamming_distance(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left.len() > 1_000_000 || right.len() > 1_000_000 {
+        return Err(Error::Execution("HAMMING_DISTANCE input exceeds 1 MiB budget".into()));
+    }
+    let mut left = left.chars();
+    let mut right = right.chars();
+    let mut distance = 0_i64;
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ok(Value::Integer(distance)),
+            (Some(a), Some(b)) => { if a != b { distance += 1; } }
+            _ => return Err(Error::Type("HAMMING_DISTANCE requires equal-length strings".into())),
+        }
+    }
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "hamming_distance", min_args: 2, max_args: 2, result_type: hamming_distance_type, call: hamming_distance },Function {
     name: "levenshtein", min_args: 2, max_args: 3,
     result_type: output, call: evaluate,
 }];
@@ -82,5 +106,18 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("a".into()), Value::Text("b".into()), Value::Null])
             .unwrap(), Value::Null);
         assert!(output(&[DataType::Text, DataType::Text, DataType::Text]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hamming_distance_extension_tests {
+    use super::*;
+    #[test]
+    fn preserves_unicode_and_null_semantics() {
+        assert!(crate::builtin::supports("hamming_distance"));
+        assert_eq!(hamming_distance(&[Value::Text("karolin".into()), Value::Text("kathrin".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(hamming_distance(&[Value::Text("é🙂".into()), Value::Text("é界".into())]).unwrap(), Value::Integer(1));
+        assert!(hamming_distance(&[Value::Text("ab".into()), Value::Text("a".into())]).is_err());
+        assert_eq!(hamming_distance(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
     }
 }
