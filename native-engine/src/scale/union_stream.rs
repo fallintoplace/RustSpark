@@ -179,6 +179,9 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 }
             }
             if !selected.is_empty() {
+                if selected.len() == batch.num_rows() {
+                    return Some(Ok(batch));
+                }
                 return Some(batch.take(&selected));
             }
         }
