@@ -288,16 +288,14 @@ fn infer(
                 let kind = match &item.op {
                     AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
                         crate::schema::DataType::Integer,
-                    AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
-                        return Err(Error::Unsupported(
-                            "spilled SUM/AVG DISTINCT requires distinct aggregation state".into()
-                        )),
-                    AggregateOp::Avg(expr) => match expr.output_type(&source)? {
+                    AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) =>
+                        match expr.output_type(&source)? {
                         crate::schema::DataType::Integer | crate::schema::DataType::Float =>
                             crate::schema::DataType::Float,
                         _ => return Err(Error::Type("AVG requires numeric input".into())),
                     },
-                    AggregateOp::Sum(expr) => match expr.output_type(&source)? {
+                    AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) =>
+                        match expr.output_type(&source)? {
                         crate::schema::DataType::Integer => crate::schema::DataType::Integer,
                         crate::schema::DataType::Float => crate::schema::DataType::Float,
                         _ => return Err(Error::Type("SUM requires numeric input".into())),

@@ -45,7 +45,9 @@ enum State {
     Count(i64),
     CountDistinct { keys: HashSet<Value>, bytes: usize },
     Sum(Option<Value>),
+    SumDistinct { keys: HashSet<Value>, bytes: usize, total: Option<Value> },
     Avg { sum: f64, count: i64 },
+    AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
 }
@@ -58,9 +60,63 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Max(_) => Ok(State::Max(None)),
         AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
-        AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
-            Err(Error::Unsupported("spilled SUM/AVG DISTINCT not implemented".into())),
+        AggregateOp::SumDistinct(_) => Ok(State::SumDistinct {
+            keys: HashSet::new(), bytes: 0, total: None,
+        }),
+        AggregateOp::AvgDistinct(_) => Ok(State::AvgDistinct {
+            keys: HashSet::new(), bytes: 0, sum: 0.0, count: 0,
+        }),
     }
+}
+
+/// Distinct state is bounded by both key count and estimated memory bytes.
+fn insert_distinct(
+    keys: &mut HashSet<Value>, bytes: &mut usize, value: &Value
+) -> Result<bool> {
+    if keys.contains(value) { return Ok(false); }
+    if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
+        return Err(Error::Execution("spill DISTINCT key limit exceeded".into()));
+    }
+    let footprint = std::mem::size_of::<Value>().saturating_add(64)
+        .saturating_add(match value { Value::Text(text) => text.len(), _ => 0 });
+    let next = bytes.checked_add(footprint)
+        .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
+        .ok_or_else(|| Error::Execution("spill DISTINCT byte limit exceeded".into()))?;
+    keys.insert(value.clone());
+    *bytes = next;
+    Ok(true)
+}
+
+fn add_sum(total: &mut Option<Value>, value: &Value) -> Result<()> {
+    let next = match (total.as_ref(), value) {
+        (None, Value::Integer(_) | Value::Float(_)) => value.clone(),
+        (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(
+            a.checked_add(*b).ok_or_else(|| Error::Execution("SUM overflow".into()))?),
+        (Some(Value::Float(a)), Value::Float(b)) => Value::Float(*a + *b),
+        (Some(Value::Float(a)), Value::Integer(b)) => Value::Float(*a + *b as f64),
+        (Some(Value::Integer(a)), Value::Float(b)) => Value::Float(*a as f64 + *b),
+        _ => return Err(Error::Type("SUM requires numeric values".into())),
+    };
+    if matches!(next, Value::Float(v) if !v.is_finite()) {
+        return Err(Error::Execution("SUM overflow".into()));
+    }
+    *total = Some(next);
+    Ok(())
+}
+
+fn add_avg(sum: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
+    let number = match value {
+        Value::Integer(number) => *number as f64,
+        Value::Float(number) => *number,
+        _ => return Err(Error::Type("AVG requires numeric values".into())),
+    };
+    let next = *sum + number;
+    if !next.is_finite() { return Err(Error::Execution("AVG overflow".into())); }
+    let next_count = count.checked_add(1)
+        .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
+    *sum = next;
+    *count = next_count;
+    Ok(())
 }
 
 fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
@@ -68,9 +124,8 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         AggregateOp::CountAll => Value::Integer(1),
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
-        AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
-        AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
-            return Err(Error::Unsupported("spilled SUM/AVG DISTINCT not implemented".into())),
+        AggregateOp::Max(expr) | AggregateOp::SumDistinct(expr) |
+        AggregateOp::AvgDistinct(expr) => expr.evaluate(batch, row)?,
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -80,45 +135,15 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
                 .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
         }
         State::CountDistinct { keys, bytes } => {
-            if keys.contains(&value) { return Ok(()); }
-            if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
-                return Err(Error::Execution("spill COUNT DISTINCT key limit exceeded".into()));
-            }
-            let footprint = std::mem::size_of::<Value>().saturating_add(64)
-                .saturating_add(match &value { Value::Text(text) => text.len(), _ => 0 });
-            let next = bytes.checked_add(footprint)
-                .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
-                .ok_or_else(|| Error::Execution("spill COUNT DISTINCT byte limit exceeded".into()))?;
-            keys.insert(value);
-            *bytes = next;
+            insert_distinct(keys, bytes, &value)?;
         }
-        State::Sum(total) => {
-            let next = match (total.as_ref(), &value) {
-                (None, Value::Integer(_) | Value::Float(_)) => value.clone(),
-                (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(
-                    a.checked_add(*b).ok_or_else(|| Error::Execution("SUM overflow".into()))?),
-                (Some(Value::Float(a)), Value::Float(b)) => Value::Float(*a + *b),
-                (Some(Value::Float(a)), Value::Integer(b)) => Value::Float(*a + *b as f64),
-                (Some(Value::Integer(a)), Value::Float(b)) => Value::Float(*a as f64 + *b),
-                _ => return Err(Error::Type("SUM requires numeric values".into())),
-            };
-            if matches!(next, Value::Float(v) if !v.is_finite()) {
-                return Err(Error::Execution("SUM overflow".into()));
-            }
-            *total = Some(next);
+        State::Sum(total) => add_sum(total, &value)?,
+        State::SumDistinct { keys, bytes, total } => {
+            if insert_distinct(keys, bytes, &value)? { add_sum(total, &value)?; }
         }
-        State::Avg { sum, count } => {
-            let number = match value {
-                Value::Integer(number) => number as f64,
-                Value::Float(number) => number,
-                _ => return Err(Error::Type("AVG requires numeric values".into())),
-            };
-            let next = *sum + number;
-            if !next.is_finite() { return Err(Error::Execution("AVG overflow".into())); }
-            let next_count = count.checked_add(1)
-                .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
-            *sum = next;
-            *count = next_count;
+        State::Avg { sum, count } => add_avg(sum, count, &value)?,
+        State::AvgDistinct { keys, bytes, sum, count } => {
+            if insert_distinct(keys, bytes, &value)? { add_avg(sum, count, &value)?; }
         }
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
@@ -142,15 +167,14 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
     for item in items {
         let ty = match &item.op {
             AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) => DataType::Integer,
-            AggregateOp::SumDistinct(_) | AggregateOp::AvgDistinct(_) =>
-                return Err(Error::Unsupported("spilled SUM/AVG DISTINCT not implemented".into())),
-            AggregateOp::Sum(expr) => match expr.output_type(input)? {
+            AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) =>
+                match expr.output_type(input)? {
                 DataType::Integer => DataType::Integer,
                 DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("SUM requires numeric input".into())),
             },
             AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(input)?,
-            AggregateOp::Avg(expr) => match expr.output_type(input)? {
+            AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) => match expr.output_type(input)? {
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
             },
@@ -196,11 +220,13 @@ fn aggregate_shard(
             key.push(match state {
                 State::Count(value) => Value::Integer(value),
                 State::CountDistinct { keys, .. } => Value::Integer(keys.len() as i64),
-                State::Avg { sum, count } => if count == 0 {
+                State::AvgDistinct { sum, count, .. } | State::Avg { sum, count } =>
+                    if count == 0 {
                     Value::Null
                 } else {
                     Value::Float(sum / count as f64)
                 },
+                State::SumDistinct { total: v, .. } |
                 State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
             });
         }
