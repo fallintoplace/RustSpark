@@ -65,6 +65,7 @@ mod substring_index;
 mod elt;
 mod soundex;
 mod luhn_check;
+mod quote;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -150,6 +151,7 @@ const MODULES: &[&[Function]] = &[
     &elt::FUNCTIONS,
     &soundex::FUNCTIONS,
     &luhn_check::FUNCTIONS,
+    &quote::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
