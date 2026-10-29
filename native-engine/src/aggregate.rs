@@ -192,6 +192,7 @@ impl State {
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
             Self::Max(maximum) => update_extreme(maximum, value, false)?,
+            Self::Distinct { .. } => unreachable!("DISTINCT was handled before updating"),
         }
         Ok(())
     }
