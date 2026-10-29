@@ -22,7 +22,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else {
         replacement.chars().count()
     };
-    if text.len().checked_add(replacement.len()).is_none_or(|n| n > 16 * 1024 * 1024) {
+    if text.len() > 16 * 1024 * 1024 || replacement.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
@@ -30,7 +30,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_or(text.len(), |(byte, _)| byte);
     let end = text[begin..].char_indices().nth(count)
         .map_or(text.len(), |(byte, _)| begin + byte);
-    let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
+    let result_size = begin.checked_add(replacement.len())
+        .and_then(|size| size.checked_add(text.len() - end))
+        .ok_or_else(|| Error::Execution("OVERLAY output size overflow".into()))?;
+    if result_size > 16 * 1024 * 1024 {
+        return Err(Error::Execution("OVERLAY output exceeds native 16 MiB budget".into()));
+    }
+    let mut result = String::with_capacity(result_size);
     result.push_str(&text[..begin]);
     result.push_str(replacement);
     result.push_str(&text[end..]);
@@ -116,5 +122,21 @@ mod common_suffix_extension_tests {
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod overlay_actual_output_budget_tests {
+    use super::*;
+    #[test]
+    fn replacements_at_exact_output_limit_are_allowed() {
+        let input = Value::Text("x".repeat(16 * 1024 * 1024));
+        let result = evaluate(&[input.clone(), Value::Text("Y".into()),
+            Value::Integer(1), Value::Integer(1)]).unwrap();
+        let Value::Text(text) = result else { panic!("OVERLAY must return text"); };
+        assert_eq!(text.len(), 16 * 1024 * 1024);
+        assert!(text.starts_with('Y'));
+        assert!(evaluate(&[input, Value::Text("YZ".into()),
+            Value::Integer(1), Value::Integer(1)]).is_err());
     }
 }
