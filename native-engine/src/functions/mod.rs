@@ -37,6 +37,8 @@ mod zeroifnull;
 
 mod least;
 
+mod greatest;
+
 mod width_bucket;
 
 mod bit_count;
@@ -129,6 +131,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "NULLIFZERO" => nullifzero::output_type(args, schema),
         "ZEROIFNULL" => zeroifnull::output_type(args, schema),
         "LEAST" => least::output_type(args, schema),
+        "GREATEST" => greatest::output_type(args, schema),
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
         "BIT_COUNT" => bit_count::output_type(args, schema),
         "BIT_GET" => bit_get::output_type(args, schema),
@@ -163,6 +166,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "NULLIFZERO" => nullifzero::eval(args, batch, row),
         "ZEROIFNULL" => zeroifnull::eval(args, batch, row),
         "LEAST" => least::eval(args, batch, row),
+        "GREATEST" => greatest::eval(args, batch, row),
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
         "BIT_COUNT" => bit_count::eval(args, batch, row),
         "BIT_GET" => bit_get::eval(args, batch, row),
