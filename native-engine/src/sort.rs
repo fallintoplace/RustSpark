@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crate::{
     batch::Batch,
@@ -55,24 +55,34 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
-    let mut decorated = Vec::with_capacity(batch.num_rows());
-    for row in 0..batch.num_rows() {
-        let values = keys
-            .iter()
-            .map(|key| key.expression.evaluate(batch, row))
-            .collect::<Result<Vec<_>>>()?;
-        decorated.push((row, values));
+    let mut values: Vec<Cow<'_, [Value]>> = Vec::with_capacity(keys.len());
+    for key in keys {
+        match &key.expression {
+            Expr::Column(name) => {
+                let index = batch.schema().column(name)?;
+                values.push(Cow::Borrowed(batch.column(index)?));
+            }
+            expression => {
+                let computed = (0..batch.num_rows())
+                    .map(|row| expression.evaluate(batch, row))
+                    .collect::<Result<Vec<_>>>()?;
+                values.push(Cow::Owned(computed));
+            }
+        }
     }
-    decorated.sort_by(|(_, left), (_, right)| {
-        for ((a, b), key) in left.iter().zip(right).zip(keys) {
-            let comparison = compare_values(a, b, key.descending, key.nulls_first);
+    let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+    indices.sort_by(|&a, &b| {
+        for (values, key) in values.iter().zip(keys) {
+            let comparison = compare_values(
+                &values[a], &values[b], key.descending, key.nulls_first,
+            );
             if comparison != Ordering::Equal {
                 return comparison;
             }
         }
         Ordering::Equal
     });
-    batch.take(&decorated.into_iter().map(|(row, _)| row).collect::<Vec<_>>())
+    batch.take(&indices)
 }
 
 #[cfg(test)]
