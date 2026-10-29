@@ -48,8 +48,13 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
         .map(|_| Vec::with_capacity(batch.num_rows()))
         .collect();
     for (column, selection) in columns.iter_mut().zip(selections) {
-        for row in 0..batch.num_rows() {
-            column.push(selection.expression.evaluate(batch, row)?);
+        if let Expr::Column(name) = &selection.expression {
+            let index = batch.schema().column(name)?;
+            column.extend_from_slice(batch.column(index)?);
+        } else {
+            for row in 0..batch.num_rows() {
+                column.push(selection.expression.evaluate(batch, row)?);
+            }
         }
     }
     Batch::new_with_row_count(schema, columns, batch.num_rows())
