@@ -25,13 +25,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len().checked_add(replacement.len()).is_none_or(|n| n > 16 * 1024 * 1024) {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
-    let characters = text.chars().collect::<Vec<_>>();
-    let index = usize::try_from(start - 1).unwrap_or(usize::MAX).min(characters.len());
-    let end = index.saturating_add(count).min(characters.len());
-    let mut result = String::new();
-    result.extend(characters[..index].iter().copied());
+    let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
+    let begin = text.char_indices().nth(index)
+        .map_or(text.len(), |(byte, _)| byte);
+    let end = text[begin..].char_indices().nth(count)
+        .map_or(text.len(), |(byte, _)| begin + byte);
+    let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
+    result.push_str(&text[..begin]);
     result.push_str(replacement);
-    result.extend(characters[end..].iter().copied());
+    result.push_str(&text[end..]);
     Ok(Value::Text(result))
 }
 
@@ -55,5 +57,25 @@ mod tests {
         assert!(evaluate(&[
             Value::Text("abc".into()), Value::Text("z".into()), Value::Integer(0),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod overlay_utf8_slice_perf_tests {
+    use super::*;
+
+    #[test]
+    fn slices_unicode_boundaries_and_keeps_out_of_range_appends() {
+        assert_eq!(evaluate(&[
+            Value::Text("A🙂éZ".into()), Value::Text("!".into()),
+            Value::Integer(2), Value::Integer(2),
+        ]).unwrap(), Value::Text("A!Z".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("abc".into()), Value::Text("!".into()), Value::Integer(99),
+        ]).unwrap(), Value::Text("abc!".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("é".into()), Value::Text("X".into()),
+            Value::Integer(1), Value::Integer(0),
+        ]).unwrap(), Value::Text("Xé".into()));
     }
 }
