@@ -87,6 +87,9 @@ mod tests {
 /// Keep only OFFSET + LIMIT candidates, preserving stable ties.
 pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize) -> Result<Batch> {
     if count == 0 {
+        for key in keys {
+            key.expression.output_type(batch.schema())?;
+        }
         return batch.take(&[]);
     }
     let required = offset.checked_add(count)
@@ -129,6 +132,21 @@ mod topk_key_preflight_regression {
         assert!(top_k(&input, &[missing.clone()], 0).is_err());
         assert!(top_k(&input, &[missing], 1).is_err());
         assert_eq!(top_k(&input, &[SortKey::ascending(Expr::Column("id".into()))], 0)
+            .unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod topk_offset_key_preflight_regression {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field, Schema}};
+    #[test]
+    fn zero_count_still_validates_order_by_keys() {
+        let input = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        assert!(top_k_offset(&input, &[SortKey::ascending(Expr::Column("missing".into()))], 2, 0).is_err());
+        assert_eq!(top_k_offset(&input, &[SortKey::ascending(Expr::Column("id".into()))], 2, 0)
             .unwrap().num_rows(), 0);
     }
 }
