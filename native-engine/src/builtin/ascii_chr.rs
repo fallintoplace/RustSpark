@@ -14,7 +14,13 @@ fn ascii(args: &[Value]) -> Result<Value> {
     let byte = match &args[0] {
         Value::Null => return Ok(Value::Null),
         Value::Text(text) => text.as_bytes().first().copied().unwrap_or(0),
-        Value::Integer(number) => number.to_string().as_bytes()[0],
+        Value::Integer(number) => {
+            if *number < 0 { b'-' } else {
+                let mut positive = *number as u64;
+                while positive >= 10 { positive /= 10; }
+                b'0' + positive as u8
+            }
+        },
         Value::Float(number) => number.to_string().as_bytes()[0],
         _ => return Err(Error::Type("ASCII requires text or numeric input".into())),
     };
@@ -46,5 +52,18 @@ mod tests {
         assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));
         assert_eq!(ascii(&[Value::Integer(-42)]).unwrap(), Value::Integer(45));
         assert_eq!(ascii(&[Value::Float(3.14)]).unwrap(), Value::Integer(51));
+    }
+}
+
+#[cfg(test)]
+mod integer_ascii_first_byte_tests {
+    use super::*;
+    #[test]
+    fn numeric_bounds_and_zero_keep_original_decimal_prefix() {
+        assert_eq!(ascii(&[Value::Integer(0)]).unwrap(), Value::Integer(48));
+        assert_eq!(ascii(&[Value::Integer(i64::MAX)]).unwrap(), Value::Integer(57));
+        assert_eq!(ascii(&[Value::Integer(i64::MIN)]).unwrap(), Value::Integer(45));
+        assert_eq!(ascii(&[Value::Integer(10_000)]).unwrap(), Value::Integer(49));
+        assert_eq!(ascii(&[Value::Null]).unwrap(), Value::Null);
     }
 }
