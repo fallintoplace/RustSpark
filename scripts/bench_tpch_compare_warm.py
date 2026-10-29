@@ -56,7 +56,18 @@ def verified_ids(report):
     return set(matched)
 
 
+def check_matching_samples(rustspark, duckdb):
+    for field, minimum in (("warmup", 0), ("repeat", 1)):
+        first, second = rustspark.get(field), duckdb.get(field)
+        if first is None and second is None:
+            continue
+        if (type(first) is not int or type(second) is not int
+                or first < minimum or first != second):
+            raise ValueError(f"Warm TPC-H {field} differs between runs")
+
+
 def compare(rustspark, duckdb, verified):
+    check_matching_samples(rustspark, duckdb)
     verified_ids(verified)
     rs, dd = checked_medians(rustspark), checked_medians(duckdb)
     if rs.keys() != dd.keys():
