@@ -33,3 +33,7 @@ streaming for large datasets. Persistent databases remain single-writer.
 ```sh
 cd integrations/go && go test ./...
 ```
+
+Large JSON rows can exceed available RAM even with a row limit. Set
+`MaxOutputBytes` in `Options` to cap stdout buffering (default: 64 MiB).
+Exceeding the cap stops the command with an error before decoding JSON.
