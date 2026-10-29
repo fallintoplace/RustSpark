@@ -56,7 +56,29 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        let token = if character.is_ascii_alphabetic() || character == '_' {
+        let token = if matches!(character, 'r' | 'R')
+            && matches!(chars.peek().copied(), Some('\'' | '"')) {
+            let quote = chars.next().expect("peeked raw string delimiter");
+            let mut value = String::new();
+            let mut closed = false;
+            while let Some(next) = chars.next() {
+                if next == quote {
+                    if chars.peek() == Some(&quote) {
+                        value.push(quote);
+                        chars.next();
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    value.push(next);
+                }
+            }
+            if !closed {
+                return Err(Error::Parse("unterminated raw SQL string".into()));
+            }
+            Token::Text(value)
+        } else if character.is_ascii_alphabetic() || character == '_' {
             let mut value = character.to_string();
             while let Some(next) = chars.peek() {
                 if next.is_ascii_alphanumeric() || *next == '_' {
@@ -203,5 +225,32 @@ mod consolidated_lexer_regressions {
         for query in ["SELECT . FROM t", "SELECT 1e FROM t", "SELECT 1e+ FROM t"] {
             assert!(tokenize(query).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod spark_raw_string_literal_tests {
+    use super::*;
+
+    #[test]
+    fn raw_regex_literals_keep_backslashes_and_quotes() {
+        let tokens = tokenize("SELECT r'\\d+', R\"\\w+\", r'can''t' FROM t").unwrap();
+        assert_eq!(tokens[1], Token::Text("\\d+".into()));
+        assert_eq!(tokens[3], Token::Text("\\w+".into()));
+        assert_eq!(tokens[5], Token::Text("can't".into()));
+        assert!(tokenize("SELECT r'unclosed").is_err());
+    }
+
+    #[test]
+    fn raw_string_sql_functions_keep_regex_metacharacters() {
+        use crate::{batch::Batch, catalog::Catalog, executor, scalar::Value,
+            schema::{DataType, Field, Schema}, sql};
+        let schema = Schema::new(vec![Field::new("txt", DataType::Text, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema,
+            vec![vec![Value::Text("abc123".into())]]).unwrap()).unwrap();
+        let plan = sql::parse_sql("SELECT REGEXP_EXTRACT(txt, r'\\d+') AS digits FROM t").unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("123".into())]]);
     }
 }
