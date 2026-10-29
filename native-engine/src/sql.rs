@@ -22,11 +22,12 @@ enum SelectItem {
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    nesting_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, index: 0 }
+        Self { tokens, index: 0, nesting_depth: 0 }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -523,6 +524,69 @@ impl Parser {
         })
     }
 
+
+
+    fn column_alias_list(&mut self) -> Result<Option<Vec<String>>> {
+        if !self.take_symbol('(') {
+            return Ok(None);
+        }
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.identifier()?);
+            if columns.len() > 1024 {
+                return Err(Error::Parse("derived table has too many column aliases".into()));
+            }
+            if !self.take_symbol(',') { break; }
+        }
+        self.expect_symbol(')')?;
+        Ok(Some(columns))
+    }
+
+    fn table_source(&mut self) -> Result<Plan> {
+        if !self.take_symbol('(') {
+            return self.named_source();
+        }
+        if self.peek_word("VALUES") {
+            let (rows, types) = self.values_source()?;
+            self.expect_symbol(')')?;
+            self.take_word("AS");
+            let alias = self.identifier()?;
+            let names = self.column_alias_list()?.unwrap_or_else(
+                || (1..=types.len()).map(|index| format!("col{index}")).collect()
+            );
+            if names.len() != types.len() {
+                return Err(Error::Parse("VALUES alias column count mismatch".into()));
+            }
+            let fields = names.into_iter().zip(types).enumerate()
+                .map(|(column, (name, data_type))| {
+                    let nullable = rows.iter().any(|row| row[column].is_null());
+                    crate::schema::Field::new(name, data_type, nullable)
+                }).collect();
+            return Ok(Plan::Alias {
+                input: Box::new(Plan::Values { schema: crate::schema::Schema::new(fields)?, rows }),
+                alias,
+            });
+        }
+        if !self.peek_word("SELECT") {
+            return Err(Error::Unsupported("expected SELECT or VALUES in derived table".into()));
+        }
+        if self.nesting_depth >= 64 {
+            return Err(Error::Parse("derived table nesting exceeds 64 levels".into()));
+        }
+        self.nesting_depth += 1;
+        let inner = self.set_query()?;
+        let inner = self.finish_query(inner)?;
+        self.nesting_depth -= 1;
+        self.expect_symbol(')')?;
+        self.take_word("AS");
+        let alias = self.identifier()?;
+        let inner = match self.column_alias_list()? {
+            Some(columns) => Plan::Rename { input: Box::new(inner), columns },
+            None => inner,
+        };
+        Ok(Plan::Alias { input: Box::new(inner), alias })
+    }
+
     fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
@@ -534,37 +598,7 @@ impl Parser {
             }
         }
         let has_from = self.take_word("FROM");
-        let mut plan = if has_from {
-            if self.take_symbol('(') {
-                let (rows, types) = self.values_source()?;
-                self.expect_symbol(')')?;
-                // A derived VALUES table needs an alias for its column names.
-                self.take_word("AS");
-                self.identifier()?;
-                let names = if self.take_symbol('(') {
-                    let mut columns = Vec::new();
-                    loop {
-                        columns.push(self.identifier()?);
-                        if !self.take_symbol(',') { break; }
-                    }
-                    self.expect_symbol(')')?;
-                    columns
-                } else {
-                    (1..=types.len()).map(|index| format!("col{index}")).collect()
-                };
-                if names.len() != types.len() {
-                    return Err(Error::Parse("VALUES alias column count mismatch".into()));
-                }
-                let fields = names.into_iter().zip(types).enumerate()
-                    .map(|(column, (name, data_type))| {
-                        let nullable = rows.iter().any(|row| row[column].is_null());
-                        crate::schema::Field::new(name, data_type, nullable)
-                    }).collect();
-                Plan::Values { schema: crate::schema::Schema::new(fields)?, rows }
-            } else {
-                self.named_source()?
-            }
-        } else { Plan::OneRow };
+        let mut plan = if has_from { self.table_source()? } else { Plan::OneRow };
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
@@ -595,7 +629,7 @@ impl Parser {
                 None
             };
             let Some(kind) = kind else { break };
-            let right = self.named_source()?;
+            let right = self.table_source()?;
             self.expect_word("ON")?;
             let left_key = self.qualified_identifier()?;
             if self.next() != Some(Token::Operator("=".into())) {
@@ -710,6 +744,27 @@ impl Parser {
         Ok(plan)
     }
 
+
+    fn set_query(&mut self) -> Result<Plan> {
+        let mut plan = self.select_with_intersections()?;
+        loop {
+            if self.take_word("UNION") {
+                let all = self.take_word("ALL");
+                if !all { self.take_word("DISTINCT"); }
+                let right = self.select_with_intersections()?;
+                plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
+                if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
+            } else if self.take_word("EXCEPT") {
+                self.take_word("DISTINCT");
+                let right = self.select_with_intersections()?;
+                plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
+            } else {
+                break;
+            }
+        }
+        Ok(plan)
+    }
+
     fn finish_query(&mut self, mut plan: Plan) -> Result<Plan> {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
@@ -801,22 +856,7 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
-    let mut plan = parser.select_with_intersections()?;
-    loop {
-        if parser.take_word("UNION") {
-            let all = parser.take_word("ALL");
-            if !all { parser.take_word("DISTINCT"); }
-            let right = parser.select_with_intersections()?;
-            plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
-            if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
-        } else if parser.take_word("EXCEPT") {
-            parser.take_word("DISTINCT");
-            let right = parser.select_with_intersections()?;
-            plan = Plan::Except { left: Box::new(plan), right: Box::new(right) };
-        } else {
-            break;
-        }
-    }
+    let plan = parser.set_query()?;
     let plan = parser.finish_query(plan)?;
     parser.take_symbol(';');
     if parser.peek().is_some() {

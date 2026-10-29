@@ -84,6 +84,17 @@ impl Batch {
             .ok_or_else(|| Error::Execution(format!("row index out of bounds: {row}")))
     }
 
+    /// Rename a derived relation by position without changing its values.
+    pub fn rename_columns(&self, names: &[String]) -> Result<Self> {
+        if names.len() != self.schema.len() {
+            return Err(Error::Schema("derived table column alias count mismatch".into()));
+        }
+        let fields = self.schema.fields().iter().zip(names).map(|(field, name)| {
+            crate::schema::Field::new(name, field.data_type, field.nullable)
+        }).collect();
+        Self::new_with_row_count(Schema::new(fields)?, self.columns.clone(), self.rows)
+    }
+
     /// Qualify all field names without changing data types or row cardinality.
     pub fn qualify(&self, alias: &str) -> Result<Self> {
         let schema = Schema::new(self.schema.fields().iter().map(|field| {
