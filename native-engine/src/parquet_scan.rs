@@ -72,3 +72,59 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+ 
+/// A Parquet scan cursor that stops after a global row limit.
+pub struct LimitedParquetScan {
+    inner: ParquetScan,
+    remaining: usize,
+}
+
+pub fn scan_limited(path: impl AsRef<Path>, batch_size: usize, max_rows: usize) -> Result<LimitedParquetScan> {
+    Ok(LimitedParquetScan { inner: scan(path, batch_size)?, remaining: max_rows })
+}
+
+impl Iterator for LimitedParquetScan {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 { return None; }
+        let item = self.inner.next()?;
+        match item {
+            Ok(batch) => {
+                let keep = self.remaining.min(batch.num_rows());
+                self.remaining -= keep;
+                Some(batch.take(&(0..keep).collect::<Vec<_>>()))
+            }
+            Err(error) => {
+                self.remaining = 0;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod limited_parquet_feature_tests {
+    use super::*;
+    use crate::{batch::Batch, scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn limits_rows_even_when_arrow_batches_are_larger() {
+        let path = std::env::temp_dir().join(format!("native-parquet-limited-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..10).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&input).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let parts = scan_limited(&path, 4, 6).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).sum::<usize>(), 6);
+        assert_eq!(scan_limited(&path, 4, 0).unwrap().count(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
