@@ -139,7 +139,13 @@ fn infer(
             }
             Ok(schema)
         }
-        Plan::Sort { input, .. } |
+        Plan::Sort { input, keys } => {
+            let schema = child(input)?;
+            for key in keys {
+                key.expression.output_type(&schema)?;
+            }
+            Ok(schema)
+        }
         Plan::Limit { input, .. } |
         Plan::Distinct { input } => child(input),
         Plan::Project { input, selections } => {
@@ -243,6 +249,20 @@ mod tests {
     use crate::{scalar::Value, schema::{DataType, Field}, sql};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn rejects_invalid_stream_order_keys_before_reading_sources() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", "unused.csv", schema, 64).unwrap();
+        let bad = Plan::Sort {
+            input: Box::new(Plan::scan("t")),
+            keys: vec![crate::sort::SortKey::ascending(
+                crate::expr::Expr::Column("missing".into())
+            )],
+        };
+        assert!(output_schema(&bad, &catalog, &StreamOptions::default()).is_err());
+    }
 
     #[test]
     fn rejects_invalid_stream_filters_before_opening_sources() {
