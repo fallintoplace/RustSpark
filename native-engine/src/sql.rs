@@ -84,9 +84,11 @@ impl Parser {
     }
 
     fn next(&mut self) -> Option<Token> {
-        let token = self.peek()?.clone();
+        // Parsing only advances: move owned identifier and literal tokens
+        // instead of cloning their heap-allocated strings on every consume.
+        let token = self.tokens.get_mut(self.index)?;
         self.index += 1;
-        Some(token)
+        Some(std::mem::replace(token, Token::Symbol('\0')))
     }
 
     fn peek_word(&self, word: &str) -> bool {
@@ -1396,5 +1398,22 @@ mod consolidated_sql_numeric_regressions {
             vec![Value::Float(0.5), Value::Float(200.0), Value::Integer(i64::MIN)]);
         assert!(parse_sql("SELECT 1e309 FROM t").is_err());
         assert!(parse_sql("SELECT -9223372036854775809 FROM t").is_err());
+    }
+}
+
+#[cfg(test)]
+mod parser_token_move_perf_tests {
+    use super::*;
+    #[test]
+    fn consumes_owned_tokens_without_changing_lookahead() {
+        let tokens = tokenize("SELECT 'café' FROM sales").unwrap();
+        let mut parser = Parser::new(tokens);
+        assert_eq!(parser.next(), Some(Token::Word("SELECT".into())));
+        assert_eq!(parser.peek(), Some(&Token::Text("café".into())));
+        assert_eq!(parser.next(), Some(Token::Text("café".into())));
+        assert_eq!(parser.next(), Some(Token::Word("FROM".into())));
+        assert_eq!(parser.next(), Some(Token::Word("sales".into())));
+        assert_eq!(parser.next(), None);
+        assert!(parse_sql("SELECT city FROM sales").is_ok());
     }
 }
