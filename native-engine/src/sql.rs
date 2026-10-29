@@ -6,7 +6,7 @@ use crate::{
     plan::Plan,
     project::Selection,
     scalar::Value,
-    schema::DataType,
+    schema::{DataType, Field, Schema},
     sort::SortKey,
     Error,
     Result,
@@ -426,6 +426,93 @@ impl Parser {
         Ok(SelectItem::Scalar(Selection::new(expr, alias)))
     }
 
+    /// Spark's VALUES inline table. Rows are constant-folded under a strict
+    /// cardinality budget instead of being registered in the global catalog.
+    fn inline_values(&mut self) -> Result<Plan> {
+        const MAX_INLINE_ROWS: usize = 10_000;
+        const MAX_INLINE_COLUMNS: usize = 128;
+        let one = crate::batch::Batch::from_rows(Schema::new(vec![])?, vec![vec![]])?;
+        let mut rows = Vec::<Vec<Value>>::new();
+        let mut width = None;
+        loop {
+            self.expect_symbol('(')?;
+            let mut row = Vec::new();
+            loop {
+                if row.len() == MAX_INLINE_COLUMNS {
+                    return Err(Error::Execution("VALUES exceeds 128 columns".into()));
+                }
+                let expression = self.expression(0)?;
+                row.push(expression.evaluate(&one, 0)?);
+                if !self.take_symbol(',') { break; }
+            }
+            self.expect_symbol(')')?;
+            if width.is_some_and(|expected| expected != row.len()) {
+                return Err(Error::Schema("VALUES rows have different column counts".into()));
+            }
+            width = Some(row.len());
+            if rows.len() >= MAX_INLINE_ROWS {
+                return Err(Error::Execution("VALUES exceeds 10000 rows".into()));
+            }
+            rows.push(row);
+            if !self.take_symbol(',') { break; }
+        }
+        let width = width.expect("parsed nonempty inline rows");
+        let alias = self.take_word("AS") || matches!(self.peek(),
+            Some(Token::Word(word)) if ![
+                "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH",
+                "UNION", "INTERSECT", "EXCEPT", "JOIN", "INNER", "LEFT",
+                "RIGHT", "FULL", "CROSS", "ON",
+            ].iter().any(|keyword| word.eq_ignore_ascii_case(keyword)));
+        let mut names = (0..width).map(|n| format!("col{}", n + 1)).collect::<Vec<_>>();
+        if alias {
+            self.identifier()?;
+            if self.take_symbol('(') {
+                names.clear();
+                loop {
+                    names.push(self.identifier()?);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+                if names.len() != width {
+                    return Err(Error::Schema("VALUES alias column count mismatch".into()));
+                }
+            }
+        }
+        let mut kinds = vec![None::<DataType>; width];
+        let mut nullable = vec![false; width];
+        for row in &rows {
+            for (index, value) in row.iter().enumerate() {
+                let next = match value {
+                    Value::Null => { nullable[index] = true; continue; },
+                    Value::Boolean(_) => DataType::Boolean,
+                    Value::Integer(_) => DataType::Integer,
+                    Value::Float(_) => DataType::Float,
+                    Value::Text(_) => DataType::Text,
+                };
+                kinds[index] = Some(match kinds[index] {
+                    None => next,
+                    Some(previous) if previous == next => next,
+                    Some(DataType::Integer) if next == DataType::Float => DataType::Float,
+                    Some(DataType::Float) if next == DataType::Integer => DataType::Float,
+                    _ => return Err(Error::Type("VALUES columns have incompatible types".into())),
+                });
+            }
+        }
+        for row in &mut rows {
+            for (index, value) in row.iter_mut().enumerate() {
+                if kinds[index] == Some(DataType::Float) {
+                    if let Value::Integer(number) = value {
+                        *value = Value::Float(*number as f64);
+                    }
+                }
+            }
+        }
+        let fields = names.into_iter().enumerate().map(|(index, name)|
+            Field::new(name, kinds[index].unwrap_or(DataType::Text), nullable[index])
+        ).collect();
+        Ok(Plan::Values { schema: Schema::new(fields)?, rows })
+    }
+
     fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
@@ -441,7 +528,11 @@ impl Parser {
             }
         }
         let mut plan = if self.take_word("FROM") {
-            Plan::scan(self.identifier()?)
+            if self.take_word("VALUES") {
+                self.inline_values()?
+            } else {
+                Plan::scan(self.identifier()?)
+            }
         } else {
             // Spark permits source-free constant SELECTs. This is one empty row,
             // not a hidden catalog name that could collide with user tables.
