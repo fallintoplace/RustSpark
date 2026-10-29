@@ -56,6 +56,7 @@ mod bit_length;
 mod lcase;
 mod ucase;
 mod initcap;
+mod space;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -132,6 +133,7 @@ const MODULES: &[&[Function]] = &[
     &lcase::FUNCTIONS,
     &ucase::FUNCTIONS,
     &initcap::FUNCTIONS,
+    &space::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
