@@ -270,6 +270,11 @@ fn cot(args: &[Value]) -> Result<Value> {
     super::finite(1.0 / value.tan())
 }
 
+fn sec(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
+    super::finite(1.0 / value.cos())
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -292,6 +297,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "elt", min_args: 2, max_args: 128, result_type: elt_type, call: elt },
     Function { name: "signum", min_args: 1, max_args: 1, result_type: number_float_type, call: signum },
     Function { name: "cot", min_args: 1, max_args: 1, result_type: number_float_type, call: cot },
+    Function { name: "sec", min_args: 1, max_args: 1, result_type: number_float_type, call: sec },
     // PARITY_FUNCTIONS
 ];
 
@@ -449,6 +455,12 @@ mod tests {
         let Value::Float(actual) = sql_result("cot(1)").unwrap() else { panic!("expected float") };
         assert!((actual - 0.6420926159343306).abs() < 1e-12);
         assert_eq!(cot(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_sec_matches_reciprocal_cosine() {
+        assert_eq!(sql_result("sec(0)").unwrap(), Value::Float(1.0));
+        assert_eq!(sec(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
