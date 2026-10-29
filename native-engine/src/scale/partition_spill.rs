@@ -118,7 +118,7 @@ mod tests {
                 ids.extend(batch.rows().unwrap().into_iter().map(|row| row[0].clone()));
             }
             assert_ne!(ids.iter().filter(|x| **x == Value::Integer(1)).count(), 1);
-            assert_eq!(ids, expected[index].column(0).unwrap(), "in-memory and spilled hash partitions must agree");
+            assert_eq!(ids.as_slice(), expected[index].column(0).unwrap(), "in-memory and spilled hash partitions must agree");
             seen += ids.len();
         }
         assert_eq!(seen, 4);
