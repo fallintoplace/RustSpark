@@ -106,10 +106,12 @@ class RustSpark:
                 if not isinstance(table, str) or not IDENTIFIER.fullmatch(table):
                     raise ValueError(f"Invalid table name: {table!r}")
                 command.extend([f"--{flag}", f"{table}={os.fspath(path)}"])
-        for name, typed_value in (named_params or {}).items():
+        if len(named_params or {}) > 64:
+            raise ValueError("Too many SQL parameters")
+        for name, typed_value in sorted((named_params or {}).items()):
             if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
                 raise ValueError(f"Invalid SQL parameter name: {name!r}")
-            if not isinstance(typed_value, str) or ":" not in typed_value:
+            if not isinstance(typed_value, str) or ":" not in typed_value or len(typed_value) > 8192:
                 raise ValueError(f"Use type:value for parameter {name!r}")
             command.extend(["--named-param", f"{name}={typed_value}"])
         if max_rows is not None:
