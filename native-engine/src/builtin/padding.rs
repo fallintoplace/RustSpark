@@ -22,8 +22,12 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         let Some(value) = super::string(&args[2])? else { return Ok(Value::Null) };
         value
     } else { " " };
-    let size = text.chars().count();
-    if size >= target { return Ok(Value::Text(text.chars().take(target).collect())); }
+    let ascii = text.is_ascii();
+    let size = if ascii { text.len() } else { text.chars().count() };
+    if size >= target {
+        if ascii { return Ok(Value::Text(text[..target].to_owned())); }
+        return Ok(Value::Text(text.chars().take(target).collect()));
+    }
     if pad.is_empty() { return Err(Error::Execution("LPAD/RPAD cannot extend with empty pattern".into())); }
     let pad_chars = pad.chars().collect::<Vec<_>>();
     let mut result = String::with_capacity(
@@ -68,5 +72,16 @@ mod single_buffer_pad_perf_tests {
         assert_eq!(rpad(&[
             Value::Text("é".into()), Value::Integer(6), Value::Text("🙂a".into())
         ]).unwrap(), Value::Text("é🙂a🙂a🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_padding_slice_perf_tests {
+    use super::*;
+    #[test]
+    fn truncates_ascii_without_changing_unicode_boundaries() {
+        assert_eq!(lpad(&[Value::Text("abcdef".into()), Value::Integer(3)]).unwrap(), Value::Text("abc".into()));
+        assert_eq!(rpad(&[Value::Text("abcdef".into()), Value::Integer(6)]).unwrap(), Value::Text("abcdef".into()));
+        assert_eq!(lpad(&[Value::Text("é🙂x".into()), Value::Integer(2)]).unwrap(), Value::Text("é🙂".into()));
     }
 }
