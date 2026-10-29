@@ -48,9 +48,12 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
-    let length = text.chars().count();
-    if offset > length { return Ok(Value::Integer(0)); }
-    let start = text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index);
+    let Some(start) = text.char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+        .nth(offset) else {
+        return Ok(Value::Integer(0));
+    };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
     let characters = text[start..start + found].chars().count();
     let position = offset.checked_add(characters).and_then(|n| n.checked_add(1))
@@ -119,5 +122,21 @@ mod split_part_boundary_perf_tests {
         assert_eq!(split_part(&[value.clone(), delim.clone(), Value::Integer(1)]).unwrap(), Value::Text("α".into()));
         assert_eq!(split_part(&[value, delim, Value::Integer(-1)]).unwrap(), Value::Text("γ".into()));
         assert_eq!(split_part(&[Value::Text("text".into()), Value::Text("|".into()), Value::Integer(-1)]).unwrap(), Value::Text("text".into()));
+    }
+}
+
+#[cfg(test)]
+mod locate_offset_fast_path_tests {
+    use super::*;
+    #[test]
+    fn empty_needle_at_last_unicode_boundary() {
+        let empty = Value::Text(String::new());
+        let text = Value::Text("aé".into());
+        assert_eq!(locate(&[empty.clone(), text.clone(), Value::Integer(3)]).unwrap(),
+            Value::Integer(3));
+        assert_eq!(locate(&[empty.clone(), text.clone(), Value::Integer(4)]).unwrap(),
+            Value::Integer(0));
+        assert_eq!(locate(&[empty, text, Value::Integer(1)]).unwrap(),
+            Value::Integer(1));
     }
 }
