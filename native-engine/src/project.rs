@@ -38,8 +38,8 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
         .iter()
         .map(|_| Vec::with_capacity(batch.num_rows()))
         .collect();
-    for row in 0..batch.num_rows() {
-        for (column, selection) in columns.iter_mut().zip(selections) {
+    for (column, selection) in columns.iter_mut().zip(selections) {
+        for row in 0..batch.num_rows() {
             column.push(selection.expression.evaluate(batch, row)?);
         }
     }
