@@ -212,6 +212,12 @@ fn lower(
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            for key in keys {
+                let crate::expr::Expr::Column(name) = &key.expression else {
+                    return Err(Error::Unsupported("external sort requires column keys".into()));
+                };
+                schema.column(name)?;
+            }
             let runs = write_sorted_runs(
                 child(input)?, schema.clone(), keys, &options.scratch_directory,
                 options.sort_run_rows, control
@@ -449,5 +455,21 @@ mod union_inference_engine_tests {
         };
         let inferred = output_schema(&plan, &catalog, &StreamOptions::default()).unwrap();
         assert_eq!(inferred.fields(), &[Field::new("id", DataType::Integer, true)]);
+    }
+}
+
+#[cfg(test)]
+mod consolidated_external_sort_preflight_tests {
+    use super::*;
+    use crate::{expr::Expr, sort::SortKey, schema::{DataType, Field}};
+    #[test]
+    fn unsupported_sort_expressions_fail_before_opening_source_files() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", "missing.csv", schema, 64).unwrap();
+        let plan = Plan::Sort { input: Box::new(Plan::scan("t")),
+            keys: vec![SortKey::ascending(Expr::Literal(Value::Integer(1)))] };
+        let result = execute(&plan, &catalog, &StreamOptions::default(), QueryControl::default());
+        assert!(matches!(result, Err(Error::Unsupported(_))));
     }
 }
