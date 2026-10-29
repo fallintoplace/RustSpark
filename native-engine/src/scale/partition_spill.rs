@@ -86,18 +86,22 @@ impl PartitionWriter {
         if batch.schema() != &owned.schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
         let mut dense: Option<Vec<Vec<usize>>> = None;
+        let mut sparse: Option<std::collections::HashMap<usize, Vec<usize>>> = None;
         let mut start = 0;
         while start < batch.num_rows() {
             control.check()?;
             let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
             if writers.len() > (end - start).saturating_mul(4) {
-                let mut sparse = std::collections::HashMap::<usize, Vec<usize>>::new();
+                let groups = sparse.get_or_insert_with(std::collections::HashMap::new);
+                for rows in groups.values_mut() { rows.clear(); }
                 for row in start..end {
                     let index = bucket(batch, row, &self.key_columns, writers.len())?;
-                    sparse.entry(index).or_default().push(row);
+                    groups.entry(index).or_default().push(row);
                 }
-                for (index, rows) in sparse {
-                    write_shard(writers, &owned.paths, &owned.schema, index, batch, &rows)?;
+                for (&index, rows) in groups.iter() {
+                    if !rows.is_empty() {
+                        write_shard(writers, &owned.paths, &owned.schema, index, batch, rows)?;
+                    }
                 }
             } else {
                 let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
@@ -309,5 +313,37 @@ mod lazy_partition_writer_tests {
         assert_eq!(observed, batch.rows().unwrap());
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sparse_group_reuse_tests {
+    use super::*;
+    use std::{fs, io::BufReader, sync::atomic::{AtomicU64, Ordering}};
+    use super::super::spill::SpillReader;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn multiple_small_chunks_preserve_sparse_partition_rows() {
+        let dir = std::env::temp_dir().join(format!("rustspark-sparse-{}-{}",
+            std::process::id(), NEXT_ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..23)
+            .map(|n| vec![Value::Integer(n % 5)]).collect()).unwrap();
+        let expected = crate::hash_partition::partition(&batch, &["id"], 16).unwrap();
+        let mut writer = PartitionWriter::new(&dir, schema, &["id"], 16, 2).unwrap();
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        let files = writer.finish().unwrap();
+        for (index, path) in files.paths().iter().enumerate() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 4).unwrap();
+            let mut values = Vec::new();
+            while let Some(part) = reader.next_batch().unwrap() {
+                values.extend_from_slice(part.column(0).unwrap());
+            }
+            assert_eq!(values.as_slice(), expected[index].column(0).unwrap());
+        }
+        drop(files);
+        fs::remove_dir(&dir).unwrap();
     }
 }
