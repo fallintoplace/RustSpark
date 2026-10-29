@@ -29,6 +29,7 @@ mod nan_semantics;
 mod padding;
 mod ascii_chr;
 mod hex_utf8;
+mod base64_utf8;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -80,6 +81,7 @@ const MODULES: &[&[Function]] = &[
     &padding::FUNCTIONS,
     &ascii_chr::FUNCTIONS,
     &hex_utf8::FUNCTIONS,
+    &base64_utf8::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
