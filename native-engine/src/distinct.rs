@@ -103,7 +103,7 @@ mod distinct_on_feature_tests {
                  vec![Value::Integer(2)], vec![Value::Integer(3)]],
         ).unwrap();
         assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
-            "execution error: DISTINCT key limit exceeded");
+            "execution: DISTINCT key limit exceeded");
         assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
     }
 }
