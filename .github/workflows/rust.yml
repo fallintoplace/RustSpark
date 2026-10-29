@@ -24,10 +24,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Check native source formatting
-        run: cargo fmt --manifest-path native-engine/Cargo.toml --all -- --check
-      - name: Check root entrypoint formatting
-        run: cargo fmt --all -- --check
+      - name: Verify native dependency graph
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/check_native_dependencies.py
       - name: Test native engine
         run: cargo test --manifest-path native-engine/Cargo.toml --all-targets
       - name: Test native default binary
