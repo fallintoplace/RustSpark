@@ -94,6 +94,13 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if !matches!(args[0].output_type(schema)?, DataType::Integer | DataType::Float) { return Err(Error::Type("LN requires numeric input".into())); }
             Ok(DataType::Float)
         },
+        "STARTSWITH" => {
+            if args.len() != 2 { return Err(Error::Parse("STARTSWITH requires two arguments".into())); }
+            for arg in args {
+                if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("STARTSWITH requires text".into())); }
+            }
+            Ok(DataType::Boolean)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -207,6 +214,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Null] => Ok(Value::Null),
             [Value::Integer(_) | Value::Float(_)] => Err(Error::Execution("LN requires positive input".into())),
             _ => Err(Error::Type("LN requires numeric input".into())),
+        },
+        "STARTSWITH" => match args {
+            [Value::Text(value), Value::Text(prefix)] => Ok(Value::Boolean(value.starts_with(prefix))),
+            [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
+            _ => Err(Error::Type("STARTSWITH requires text".into())),
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
