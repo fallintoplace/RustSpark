@@ -26,7 +26,9 @@ cargo run --manifest-path native-engine/Cargo.toml -- \
 - Typed batches, expressions, native SQL parsing, logical plans and execution
 - Filtering, projection, aggregation, sorting, DISTINCT and LIMIT/OFFSET
 - Equality-based INNER and LEFT JOIN, plus UNION ALL
-- CSV ingestion and bounded streaming for simple scan/filter/project queries
+- Native multi-table CSV/Parquet CLI input, CSV/JSON Lines results, and bounded
+  streaming for simple scan/filter/project CSV queries
+- Native JSON extraction, regular expressions and Unicode text functions
 - External sorting and disk spill in the `rustspark-stream` CLI
 - Arrow record batch conversion and bounded Parquet scan as **library modules**
 - Query cancellation, deadlines, scheduling and other experimental scale modules
@@ -40,8 +42,8 @@ cargo run --manifest-path native-engine/Cargo.toml --bin rustspark-stream -- \
 ```
 
 This is experimental. SQL support and CLI input formats are narrower than the
-retired implementation: no equivalent persistent SQL database, multi-table CLI,
-distributed execution, JSON CLI or general Parquet SQL CLI yet.
+retired implementation: no equivalent persistent SQL database, distributed
+execution, JSON input or general streaming Parquet SQL CLI yet.
 
 ## Checks
 

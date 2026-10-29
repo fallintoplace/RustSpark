@@ -7,7 +7,7 @@ description = "DataFusion-free experimental query engine for RustSpark"
 license = "Apache-2.0"
 publish = false
 
-# Independent from the root RustSpark crate and its DataFusion dependency.
+# Independent native RustSpark engine with no DataFusion or Ballista dependency.
 [workspace]
 
 [dependencies]
