@@ -24,6 +24,39 @@ fn joinable(key: &Value) -> bool {
     !key.is_null()
 }
 
+
+/// Cartesian product with an output bound before materialization.
+/// This is a separate SQL operator from an equality hash join.
+pub fn cross_join(left: &Batch, right: &Batch) -> Result<Batch> {
+    let count = left.num_rows().checked_mul(right.num_rows())
+        .ok_or_else(|| Error::Execution("CROSS JOIN output cardinality overflow".into()))?;
+    if count > MAX_JOIN_ROWS {
+        return Err(Error::Execution("CROSS JOIN output exceeds safety limit".into()));
+    }
+    let mut used: HashSet<String> = left.schema().fields().iter()
+        .map(|field| field.name.to_ascii_lowercase()).collect();
+    let mut fields = left.schema().fields().to_vec();
+    for field in right.schema().fields() {
+        let mut name = field.name.clone();
+        while used.contains(&name.to_ascii_lowercase()) {
+            name = format!("right_{name}");
+        }
+        used.insert(name.to_ascii_lowercase());
+        fields.push(Field::new(name, field.data_type, field.nullable));
+    }
+    let schema = Schema::new(fields)?;
+    let mut rows = Vec::with_capacity(count);
+    for l in 0..left.num_rows() {
+        let prefix = left.row(l)?;
+        for r in 0..right.num_rows() {
+            let mut row = prefix.clone();
+            row.extend(right.row(r)?);
+            rows.push(row);
+        }
+    }
+    Batch::from_rows(schema, rows)
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
