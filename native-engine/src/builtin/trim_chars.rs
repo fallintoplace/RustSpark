@@ -9,13 +9,27 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
         let Some(characters) = super::string(&args[1])? else { return Ok(Value::Null); };
         Some(characters)
     } else { None };
+    let ascii_set = characters
+        .filter(|chars| chars.len() >= 8 && chars.is_ascii())
+        .map(|chars| {
+            let mut lookup = [false; 128];
+            for byte in chars.bytes() { lookup[byte as usize] = true; }
+            lookup
+        });
+    let contains = |ch: char| {
+        if let Some(lookup) = &ascii_set {
+            ch.is_ascii() && lookup[ch as usize]
+        } else {
+            characters.is_some_and(|chars| chars.contains(ch))
+        }
+    };
     let value = match characters {
-        Some(chars) if left && right =>
-            text.trim_matches(|ch| chars.contains(ch)),
-        Some(chars) if left =>
-            text.trim_start_matches(|ch| chars.contains(ch)),
-        Some(chars) if right =>
-            text.trim_end_matches(|ch| chars.contains(ch)),
+        Some(_) if left && right =>
+            text.trim_matches(contains),
+        Some(_) if left =>
+            text.trim_start_matches(contains),
+        Some(_) if right =>
+            text.trim_end_matches(contains),
         None if left && right => text.trim_matches(' '),
         None if left => text.trim_start_matches(' '),
         None if right => text.trim_end_matches(' '),
@@ -46,5 +60,24 @@ mod tests {
         assert_eq!(btrim(&[Value::Text(" \t x\n ".into())]).unwrap(), Value::Text("\t x\n".into()));
         assert_eq!(ltrim(&[Value::Text("\t  x".into())]).unwrap(), Value::Text("\t  x".into()));
         assert_eq!(rtrim(&[Value::Text("x  \n".into())]).unwrap(), Value::Text("x  \n".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_trim_lookup_perf_tests {
+    use super::*;
+
+    #[test]
+    fn wide_ascii_sets_keep_unicode_and_trim_boundaries() {
+        let chars = Value::Text("0123456789abcdef".into());
+        assert_eq!(btrim(&[
+            Value::Text("a0🙂middle🙂0f".into()), chars.clone(),
+        ]).unwrap(), Value::Text("🙂middle🙂".into()));
+        assert_eq!(ltrim(&[
+            Value::Text("ff🙂ff".into()), chars,
+        ]).unwrap(), Value::Text("🙂ff".into()));
+        assert_eq!(btrim(&[
+            Value::Text("ééhelloé".into()), Value::Text("é".into()),
+        ]).unwrap(), Value::Text("hello".into()));
     }
 }
