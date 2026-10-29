@@ -50,10 +50,7 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         self.stopped = true;
                         return Some(Err(Error::Schema("UNION ALL input schemas differ".into())));
                     }
-                    let rebased = (0..self.schema.len())
-                        .map(|index| batch.column(index).map(|values| values.to_vec()))
-                        .collect::<Result<Vec<_>>>()
-                        .and_then(|columns| Batch::new(self.schema.clone(), columns));
+                    let rebased = batch.into_schema(self.schema.clone());
                     match rebased {
                         Ok(batch) if batch.num_rows() == 0 => continue,
                         Ok(batch) => return Some(Ok(batch)),
@@ -257,5 +254,33 @@ mod consolidated_empty_union_skip_tests {
             schema, QueryControl::default()).collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].row(0).unwrap(), vec![Value::Integer(5)]);
+    }
+}
+
+#[cfg(test)]
+mod owned_union_rebase_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn rebases_text_batches_and_keeps_zero_column_cardinality() {
+        let source = Schema::new(vec![Field::new("origin", DataType::Text, false)]).unwrap();
+        let result_schema = Schema::new(vec![Field::new("name", DataType::Text, true)]).unwrap();
+        let data = Batch::from_rows(source, vec![
+            vec![Value::Text("東京".into())],
+            vec![Value::Text("Berlin".into())],
+        ]).unwrap();
+        let parts = UnionAllStream::new(
+            [Ok(data)].into_iter(), std::iter::empty(), result_schema.clone(),
+            QueryControl::default(),
+        ).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].schema(), &result_schema);
+        assert_eq!(parts[0].num_rows(), 2);
+        assert_eq!(parts[0].row(0).unwrap(), vec![Value::Text("東京".into())]);
+
+        let zero = Schema::new(vec![]).unwrap();
+        let empty_width = Batch::new_with_row_count(zero.clone(), vec![], 3).unwrap();
+        assert_eq!(empty_width.into_schema(zero).unwrap().num_rows(), 3);
     }
 }
