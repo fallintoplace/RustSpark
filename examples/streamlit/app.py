@@ -11,19 +11,22 @@ import tempfile
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 
-def query_csv(binary: str, csv_bytes: bytes, sql: str, max_rows: int = 1000):
+def query_csv(binary: str, csv_bytes: bytes, sql: str, max_rows: int = 1000,
+              *, source_format: str = "csv"):
     if not csv_bytes or len(csv_bytes) > MAX_UPLOAD_BYTES:
         raise ValueError("Upload must be between 1 byte and 32 MiB")
     if not sql.strip():
         raise ValueError("SQL is required")
     if not 1 <= max_rows <= 1000:
         raise ValueError("Result row limit must be between 1 and 1000")
+    if source_format not in ("csv", "json"):
+        raise ValueError("Upload format must be csv or json")
     with tempfile.TemporaryDirectory(prefix="rustspark-ui-") as directory:
-        input_file = Path(directory) / "input.csv"
+        input_file = Path(directory) / f"input.{source_format}"
         input_file.write_bytes(csv_bytes)
         completed = subprocess.run(
             [
-                binary, "--csv", str(input_file), "--sql", sql,
+                binary, f"--{source_format}", str(input_file), "--sql", sql,
                 "--stdout-format", "json-array", "--max-rows", str(max_rows),
                 "--query-timeout", "20",
             ],
@@ -55,7 +58,7 @@ def main():
     st.title("RustSpark CSV Explorer")
     st.caption("Local proof of concept. Not a public multi-user SQL service.")
     binary = st.text_input("RustSpark binary", "target/release/rustspark")
-    uploaded = st.file_uploader("CSV input (max 32 MiB)", type=["csv"])
+    uploaded = st.file_uploader("CSV or JSON input (max 32 MiB)", type=["csv", "json"])
     sql = st.text_area(
         "SQL over table `data`",
         "SELECT * FROM data LIMIT 10",
@@ -67,7 +70,9 @@ def main():
             st.warning("Select a CSV file first")
             return
         try:
-            rows = query_csv(binary, uploaded.getvalue(), sql, max_rows)
+            source_format = uploaded.name.rsplit(".", 1)[-1].lower()
+            rows = query_csv(binary, uploaded.getvalue(), sql, max_rows,
+                             source_format=source_format)
         except (ValueError, RuntimeError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as error:
             st.error(str(error))
             return

@@ -29,6 +29,18 @@ class StreamlitExampleTests(unittest.TestCase):
         output = list(csv.DictReader(io.StringIO(as_csv(rows))))
         self.assertEqual(output, [{"city": "New York, NY", "sales": "2"}])
 
+    @patch("app.subprocess.run")
+    def test_json_upload_selects_native_json_source(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, '[{"id":1}]', "")
+        rows = query_csv("rustspark", b'{"id":1}\\n', "SELECT * FROM data",
+                         source_format="json")
+        self.assertEqual(rows, [{"id": 1}])
+        argv = run.call_args.args[0]
+        self.assertIn("--json", argv)
+        self.assertTrue(argv[argv.index("--json") + 1].endswith(".json"))
+        with self.assertRaisesRegex(ValueError, "format"):
+            query_csv("rustspark", b"x", "SELECT 1", source_format="parquet")
+
 
 if __name__ == "__main__":
     unittest.main()
