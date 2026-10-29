@@ -76,16 +76,36 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     }
     let first = input.first().ok_or_else(|| Error::Schema("partition input needs a schema".into()))?;
     let schema = first.schema();
-    let mut buckets: Vec<Vec<Batch>> = vec![Vec::new(); partitions];
+    let key_columns = keys.iter().map(|key| schema.column(key)).collect::<Result<Vec<_>>>()?;
     for batch in input {
         if batch.schema() != schema {
             return Err(Error::Schema("partition input schemas differ".into()));
         }
-        for (bucket, part) in partition(batch, keys, partitions)?.into_iter().enumerate() {
-            buckets[bucket].push(part);
+    }
+
+    // Keep only row coordinates until all source batches have been partitioned.
+    let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
+    for (batch_index, batch) in input.iter().enumerate() {
+        for row in 0..batch.num_rows() {
+            let mut hasher = PartitionHasher::default();
+            for &column in &key_columns {
+                batch.value(row, column)?.hash(&mut hasher);
+            }
+            let bucket = (hasher.finish() % partitions as u64) as usize;
+            buckets[bucket].push((batch_index, row));
         }
     }
-    buckets.iter().map(|pieces| crate::batch_chunks::concatenate(pieces)).collect()
+    buckets.into_iter().map(|entries| {
+        let count = entries.len();
+        let mut columns = (0..schema.len()).map(|_| Vec::with_capacity(count))
+            .collect::<Vec<_>>();
+        for (batch_index, row) in entries {
+            for (index, column) in columns.iter_mut().enumerate() {
+                column.push(input[batch_index].value(row, index)?.clone());
+            }
+        }
+        Batch::new_with_row_count(schema.clone(), columns, count)
+    }).collect()
 }
 
 #[cfg(test)]
@@ -126,5 +146,35 @@ mod partition_allocation_tests {
         assert!(partition(&batch, &["id"], usize::MAX).is_err());
         assert!(partition_batches(&[batch.clone()], &["id"], usize::MAX).is_err());
         assert!(partition_batches(&[batch], &["id"], 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_multi_batch_partition_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn direct_partition_matches_individual_source_partitions() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let inputs = (0..6).map(|part| {
+            Batch::from_rows(schema.clone(), (0..27).map(|n| vec![
+                if n % 9 == 0 { Value::Null } else { Value::Integer(n % 7) },
+                Value::Text(format!("{part}:{n}:{}", "x".repeat(120))),
+            ]).collect()).unwrap()
+        }).collect::<Vec<_>>();
+        for count in [1, 2, 7, 16] {
+            let combined = partition_batches(&inputs, &["id"], count).unwrap();
+            let reference = (0..count).map(|bucket| {
+                inputs.iter().flat_map(|input| partition(input, &["id"], count).unwrap()[bucket].rows().unwrap())
+                    .collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+            for (batch, expected) in combined.iter().zip(reference) {
+                assert_eq!(batch.rows().unwrap(), expected);
+            }
+        }
     }
 }
