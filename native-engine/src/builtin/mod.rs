@@ -67,6 +67,7 @@ mod soundex;
 mod luhn_check;
 mod quote;
 mod regexp_instr;
+mod regexp_substr;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -154,6 +155,7 @@ const MODULES: &[&[Function]] = &[
     &luhn_check::FUNCTIONS,
     &quote::FUNCTIONS,
     &regexp_instr::FUNCTIONS,
+    &regexp_substr::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
