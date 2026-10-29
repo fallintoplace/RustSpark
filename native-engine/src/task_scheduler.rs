@@ -106,7 +106,7 @@ impl TaskScheduler {
     pub fn counts(&self) -> TaskCounts {
         let mut counts = TaskCounts::default();
         for task in self.tasks.values() {
-            match task.status {
+            match &task.status {
                 TaskStatus::Queued => counts.queued += 1,
                 TaskStatus::Leased { .. } => counts.leased += 1,
                 TaskStatus::Done => counts.done += 1,
