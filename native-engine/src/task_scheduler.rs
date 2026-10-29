@@ -57,7 +57,7 @@ impl TaskScheduler {
         }
         let until = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
-        let mut candidate = None;
+        let mut lease = None;
         for (&id, task) in &mut self.tasks {
             if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
                 task.status = if task.attempts >= self.max_attempts {
@@ -66,15 +66,13 @@ impl TaskScheduler {
                     TaskStatus::Queued
                 };
             }
-            if candidate.is_none() && task.status == TaskStatus::Queued {
-                candidate = Some(id);
+            if lease.is_none() && task.status == TaskStatus::Queued {
+                task.attempts += 1;
+                task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
+                lease = Some(Lease { task: id, worker, attempt: task.attempts });
             }
         }
-        let Some(id) = candidate else { return Ok(None); };
-        let task = self.tasks.get_mut(&id).expect("queued task exists");
-        task.attempts += 1;
-        task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
-        Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
+        Ok(lease)
     }
 
     /// Extend an active attempt without reviving a stale or expired lease.
@@ -282,5 +280,23 @@ mod consolidated_heartbeat_regressions {
         invalid = lease.clone();
         invalid.attempt += 1;
         assert!(!queue.renew(&invalid, now, Duration::from_secs(2)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod scheduler_single_pass_lease_tests {
+    use super::*;
+    #[test]
+    fn expires_other_leases_while_claiming_lowest_queued_task() {
+        let start = Instant::now();
+        let mut scheduler = TaskScheduler::new([10, 20, 30], 2).unwrap();
+        let first = scheduler.lease(1, start, Duration::from_secs(1)).unwrap().unwrap();
+        let second = scheduler.lease(2, start, Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!((first.task, second.task), (10, 20));
+        let next = scheduler.lease(3, start + Duration::from_secs(2), Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(next.task, 10);
+        assert_eq!(next.attempt, 2);
+        assert_eq!(scheduler.status(20), Some(&TaskStatus::Queued));
+        assert!(!scheduler.finish_at(&first, true, start + Duration::from_secs(2)));
     }
 }
