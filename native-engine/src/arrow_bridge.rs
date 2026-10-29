@@ -82,6 +82,54 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             other => return Err(Error::Unsupported(format!("unsupported Arrow type: {other}"))),
         };
         fields.push(Field::new(field.name(), data_type, field.is_nullable()));
+        // Decode common arrays with a single downcast per column rather than per row.
+        let common: Option<Vec<Value>> = match field.data_type() {
+            ArrowType::Boolean => {
+                let values = array.as_any().downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| Error::Type("invalid Boolean Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Boolean(values.value(row)) }
+                }).collect())
+            }
+            ArrowType::Int64 => {
+                let values = array.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| Error::Type("invalid Int64 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(values.value(row)) }
+                }).collect())
+            }
+            ArrowType::Float64 => {
+                let values = array.as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| Error::Type("invalid Float64 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Float(values.value(row)) }
+                }).collect())
+            }
+            ArrowType::Utf8 => {
+                let values = array.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| Error::Type("invalid Utf8 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Text(values.value(row).into()) }
+                }).collect())
+            }
+            ArrowType::LargeUtf8 => {
+                let values = array.as_any().downcast_ref::<LargeStringArray>()
+                    .ok_or_else(|| Error::Type("invalid LargeUtf8 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Text(values.value(row).into()) }
+                }).collect())
+            }
+            _ => None,
+        };
+        if let Some(values) = common {
+            columns.push(values);
+            continue;
+        }
         let mut values = Vec::with_capacity(input.num_rows());
         for row in 0..input.num_rows() {
             if array.is_null(row) {
@@ -173,5 +221,27 @@ mod arrow_narrow_integer_tests {
         ]);
         assert_eq!(decoded.row(1).unwrap(), vec![Value::Null; 5]);
         assert_eq!(from_arrow(&to_arrow(&decoded).unwrap()).unwrap(), decoded);
+    }
+}
+
+#[cfg(test)]
+mod arrow_column_dispatch_perf_tests {
+    use super::*;
+
+    #[test]
+    fn common_typed_columns_decode_nulls_and_unicode() {
+        let record = RecordBatch::try_from_iter(vec![
+            ("flag", Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])) as ArrayRef),
+            ("id", Arc::new(Int64Array::from(vec![Some(i64::MAX), None, Some(-7)])) as ArrayRef),
+            ("score", Arc::new(Float64Array::from(vec![Some(-0.0), None, Some(f64::NAN)])) as ArrayRef),
+            ("label", Arc::new(StringArray::from(vec![Some("é🙂"), None, Some("")])) as ArrayRef),
+        ]).unwrap();
+        let decoded = from_arrow(&record).unwrap();
+        assert_eq!(decoded.num_rows(), 3);
+        assert_eq!(decoded.value(0, 0).unwrap(), &Value::Boolean(true));
+        assert_eq!(decoded.value(1, 1).unwrap(), &Value::Null);
+        assert_eq!(decoded.value(0, 2).unwrap(), &Value::Float(-0.0));
+        assert!(matches!(decoded.value(2, 2).unwrap(), Value::Float(x) if x.is_nan()));
+        assert_eq!(decoded.value(0, 3).unwrap(), &Value::Text("é🙂".into()));
     }
 }
