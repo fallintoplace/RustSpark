@@ -17,6 +17,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if max_distance < 0 { return Ok(Value::Integer(-1)); }
         Some(usize::try_from(max_distance).unwrap_or(usize::MAX))
     } else { None };
+    // Identical inputs have distance zero regardless of size. Avoid two
+    // Unicode buffers and the dynamic-programming setup for this hot case.
+    if first == second {
+        return Ok(Value::Integer(0));
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     // Removing identical edges does not change the edit distance.
@@ -161,5 +166,21 @@ mod hamming_distance_extension_tests {
         assert_eq!(hamming_distance(&[Value::Text("é🙂".into()), Value::Text("é界".into())]).unwrap(), Value::Integer(1));
         assert!(hamming_distance(&[Value::Text("ab".into()), Value::Text("a".into())]).is_err());
         assert_eq!(hamming_distance(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod equal_levenshtein_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn large_identical_unicode_inputs_avoid_edit_distance_work() {
+        let input = Value::Text("é🙂".repeat(25_000));
+        assert_eq!(evaluate(&[input.clone(), input.clone()]).unwrap(), Value::Integer(0));
+        assert_eq!(evaluate(&[input.clone(), input.clone(), Value::Integer(0)]).unwrap(),
+            Value::Integer(0));
+        assert_eq!(evaluate(&[input.clone(), input.clone(), Value::Integer(-1)]).unwrap(),
+            Value::Integer(-1));
+        assert_eq!(evaluate(&[input.clone(), input, Value::Null]).unwrap(), Value::Null);
     }
 }
