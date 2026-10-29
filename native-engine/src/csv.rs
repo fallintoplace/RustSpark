@@ -109,19 +109,26 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
 }
 
 fn kind(values: &[Vec<String>], column: usize) -> DataType {
-    let nonempty = || values.iter().map(|row| row[column].as_str())
-        .filter(|value| !value.is_empty());
-    if nonempty().next().is_none() {
-        DataType::Text
-    } else if nonempty().all(|value| value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")) {
-        DataType::Boolean
-    } else if nonempty().all(|value| value.parse::<i64>().is_ok()) {
-        DataType::Integer
-    } else if nonempty().all(|value| value.parse::<f64>().is_ok_and(f64::is_finite)) {
-        DataType::Float
-    } else {
-        DataType::Text
+    let mut nonempty = false;
+    let mut boolean = true;
+    let mut integer = true;
+    let mut float = true;
+    for row in values {
+        let value = row[column].as_str();
+        if value.is_empty() { continue; }
+        nonempty = true;
+        if boolean {
+            boolean = value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false");
+        }
+        if integer { integer = value.parse::<i64>().is_ok(); }
+        if float { float = value.parse::<f64>().is_ok_and(f64::is_finite); }
+        if !boolean && !integer && !float { return DataType::Text; }
     }
+    if !nonempty { DataType::Text }
+    else if boolean { DataType::Boolean }
+    else if integer { DataType::Integer }
+    else if float { DataType::Float }
+    else { DataType::Text }
 }
 
 pub fn from_csv_str(input: &str) -> Result<Batch> {
@@ -320,5 +327,18 @@ mod in_memory_csv_byte_limit_tests {
     fn direct_csv_parse_rejects_oversized_input_before_allocating_rows() {
         let oversized = "a".repeat(MAX_CSV_BYTES as usize + 1);
         assert!(parse_records(&oversized).is_err());
+    }
+}
+
+#[cfg(test)]
+mod csv_inference_single_pass_perf_tests {
+    use super::*;
+    #[test]
+    fn retains_type_precedence_for_nulls_numbers_and_nonfinite_values() {
+        assert_eq!(from_csv_str("v\n\n").unwrap().schema().field(0).unwrap().data_type, DataType::Text);
+        assert_eq!(from_csv_str("v\ntrue\nfalse\n").unwrap().schema().field(0).unwrap().data_type, DataType::Boolean);
+        assert_eq!(from_csv_str("v\n1\n-8\n").unwrap().schema().field(0).unwrap().data_type, DataType::Integer);
+        assert_eq!(from_csv_str("v\n1\n2.5\n").unwrap().schema().field(0).unwrap().data_type, DataType::Float);
+        assert_eq!(from_csv_str("v\n1\nNaN\n").unwrap().schema().field(0).unwrap().data_type, DataType::Text);
     }
 }
