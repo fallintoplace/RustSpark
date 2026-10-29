@@ -21,7 +21,7 @@ impl DictionaryColumn {
         if batch.num_rows() > max_rows {
             return Err(Error::Execution("dictionary row limit exceeded".into()));
         }
-        let mut seen = HashMap::<String, u32>::new();
+        let mut seen = HashMap::<&str, u32>::new();
         let mut dictionary = Vec::new();
         let mut indices = Vec::with_capacity(batch.num_rows());
         let mut bytes = 0usize;
@@ -29,7 +29,7 @@ impl DictionaryColumn {
             match value {
                 Value::Null => indices.push(None),
                 Value::Text(text) => {
-                    let id = if let Some(id) = seen.get(text) {
+                    let id = if let Some(id) = seen.get(text.as_str()) {
                         *id
                     } else {
                         if dictionary.len() >= max_distinct {
@@ -41,7 +41,7 @@ impl DictionaryColumn {
                         let id = u32::try_from(dictionary.len())
                             .map_err(|_| Error::Execution("dictionary ID overflow".into()))?;
                         dictionary.push(text.clone());
-                        seen.insert(text.clone(), id);
+                        seen.insert(text.as_str(), id);
                         id
                     };
                     indices.push(Some(id));
@@ -212,5 +212,27 @@ mod bounded_dictionary_decode_tests {
         assert!(dictionary.decode_with_budget(overhead + 7).is_err());
         assert_eq!(dictionary.decode_with_budget(overhead + 8).unwrap(),
             vec![Value::Text("aaaa".into()), Value::Text("aaaa".into())]);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_dictionary_interning_perf_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn long_duplicate_strings_and_nulls_round_trip() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap();
+        let alpha = "alpha-".repeat(256);
+        let beta = "beta-".repeat(256);
+        let values = vec![
+            Value::Text(alpha.clone()), Value::Text(beta),
+            Value::Text(alpha.clone()), Value::Null,
+            Value::Text(alpha),
+        ];
+        let batch = Batch::from_rows(schema, values.iter().cloned().map(|value| vec![value]).collect()).unwrap();
+        let coded = DictionaryColumn::from_batch(&batch, "s", 2, 4096, 5).unwrap();
+        assert_eq!(coded.distinct_count(), 2);
+        assert_eq!(coded.decode().unwrap(), values);
     }
 }
