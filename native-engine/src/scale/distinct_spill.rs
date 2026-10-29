@@ -63,12 +63,10 @@ where I: IntoIterator<Item = Result<Batch>>
         let mut seen: HashSet<Vec<Value>> = HashSet::new();
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
-            for row in batch.rows()? {
-                if !seen.contains(&row) {
-                    if seen.len() >= max_unique_rows_per_partition {
-                        return Err(Error::Execution("DISTINCT partition exceeds state budget".into()));
-                    }
-                    seen.insert(row);
+            for index in 0..batch.num_rows() {
+                let row = batch.row(index)?;
+                if seen.insert(row) && seen.len() > max_unique_rows_per_partition {
+                    return Err(Error::Execution("DISTINCT partition exceeds state budget".into()));
                 }
             }
         }
