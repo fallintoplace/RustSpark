@@ -71,6 +71,12 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Text)
         },
+        "ROUND" => {
+            if args.is_empty() || args.len() > 2 { return Err(Error::Parse("ROUND requires one or two arguments".into())); }
+            if !matches!(args[0].output_type(schema)?, DataType::Integer | DataType::Float) { return Err(Error::Type("ROUND requires numeric input".into())); }
+            if args.len() == 2 && args[1].output_type(schema)? != DataType::Integer { return Err(Error::Type("ROUND precision must be integer".into())); }
+            Ok(DataType::Float)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -139,6 +145,25 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] => Ok(Value::Text(text.replace(pattern.as_str(), replacement))),
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("REPLACE requires three text arguments".into())),
+        },
+        "ROUND" => {
+            if args.is_empty() || args.len() > 2 { return Err(Error::Parse("ROUND requires one or two arguments".into())); }
+            let digits = match args.get(1) {
+                None => 0,
+                Some(Value::Integer(n)) if (-15..=15).contains(n) => *n as i32,
+                Some(Value::Null) => return Ok(Value::Null),
+                _ => return Err(Error::Execution("ROUND precision must be between -15 and 15".into())),
+            };
+            let number = match &args[0] {
+                Value::Integer(n) => *n as f64,
+                Value::Float(n) => *n,
+                Value::Null => return Ok(Value::Null),
+                _ => return Err(Error::Type("ROUND requires numeric input".into())),
+            };
+            let scale = 10_f64.powi(digits);
+            let value = (number * scale).round() / scale;
+            if !value.is_finite() { return Err(Error::Execution("ROUND produced a non-finite value".into())); }
+            Ok(Value::Float(value))
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
