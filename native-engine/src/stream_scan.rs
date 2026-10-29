@@ -81,11 +81,12 @@ impl Iterator for ScanCursor<'_> {
             return None;
         }
         let output = self.columns.iter().map(|&column| {
-            selected.iter()
-                .map(|&row| self.source.value(row, column).cloned())
-                .collect::<Result<Vec<Value>>>()
+            let values = self.source.column(column)?;
+            Ok(selected.iter().map(|&row| values[row].clone()).collect::<Vec<Value>>())
         }).collect::<Result<Vec<_>>>()
-            .and_then(|columns| Batch::new(self.output_schema.clone(), columns));
+            .and_then(|columns| Batch::new_with_row_count(
+                self.output_schema.clone(), columns, selected.len(),
+            ));
         if output.is_err() { self.failed = true; }
         Some(output)
     }
