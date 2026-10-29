@@ -50,6 +50,13 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args[0].output_type(schema)? != DataType::Text { return Err(Error::Type("TRIM requires text".into())); }
             Ok(DataType::Text)
         },
+        "CONCAT" => {
+            if args.len() < 2 { return Err(Error::Parse("CONCAT requires at least two arguments".into())); }
+            for arg in args {
+                if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("CONCAT requires text".into())); }
+            }
+            Ok(DataType::Text)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -86,6 +93,18 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [Value::Text(value)] => Ok(Value::Text(value.trim().to_string())),
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("TRIM requires text".into())),
+        },
+        "CONCAT" => {
+            if args.len() < 2 { return Err(Error::Parse("CONCAT requires at least two arguments".into())); }
+            let mut text = String::new();
+            for value in args {
+                match value {
+                    Value::Text(part) => text.push_str(part),
+                    Value::Null => return Ok(Value::Null),
+                    _ => return Err(Error::Type("CONCAT requires text".into())),
+                }
+            }
+            Ok(Value::Text(text))
         },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
