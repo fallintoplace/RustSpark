@@ -69,6 +69,20 @@ impl Batch {
         Ok(Self { schema, columns, rows: row_count })
     }
 
+    pub fn into_widened_schema(mut self, schema: Schema) -> Result<Self> {
+        if schema.len() != self.schema.len() {
+            return Err(Error::Schema("batch schema width mismatch".into()));
+        }
+        for (old, new) in self.schema.fields().iter().zip(schema.fields()) {
+            if old.name != new.name || old.data_type != new.data_type ||
+                (old.nullable && !new.nullable) {
+                return Err(Error::Schema("cannot narrow or change batch field schema".into()));
+            }
+        }
+        self.schema = schema;
+        Ok(self)
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
@@ -285,5 +299,25 @@ mod row_transpose_one_pass_tests {
         assert!(Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)]]).is_err());
         let good = Batch::from_rows(schema, vec![vec![Value::Integer(1), Value::Null]]).unwrap();
         assert_eq!(good.row(0).unwrap(), vec![Value::Integer(1), Value::Null]);
+    }
+}
+
+#[cfg(test)]
+mod schema_widen_without_copy_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn only_nullability_widening_is_allowed_and_data_is_unchanged() {
+        let required = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let nullable = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(required.clone(), vec![vec![Value::Integer(7)], vec![Value::Integer(9)]]).unwrap();
+        assert_eq!(batch.clone().into_widened_schema(nullable.clone()).unwrap().rows().unwrap(), batch.rows().unwrap());
+        assert_eq!(batch.clone().into_widened_schema(nullable.clone()).unwrap().schema(), &nullable);
+        assert!(batch.clone().into_widened_schema(Schema::new(vec![Field::new("id", DataType::Text, true)]).unwrap()).is_err());
+        assert!(batch.clone().into_widened_schema(Schema::new(vec![Field::new("other", DataType::Integer, true)]).unwrap()).is_err());
+        let with_null = Batch::from_rows(nullable, vec![vec![Value::Null]]).unwrap();
+        assert!(with_null.into_widened_schema(required).is_err());
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
+        assert_eq!(zero.into_widened_schema(Schema::new(vec![]).unwrap()).unwrap().num_rows(), 5);
     }
 }

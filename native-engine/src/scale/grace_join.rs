@@ -135,9 +135,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                     if output_chunk.num_rows() != 0 {
                         if outer_build {
                             // The FULL/RIGHT output schema marks padded fields nullable.
-                            let aligned = Batch::from_rows(
-                                result_schema.clone(), output_chunk.rows()?
-                            )?;
+                            let aligned = output_chunk.into_widened_schema(result_schema.clone())?;
                             writer.write_batch(&aligned)?;
                         } else {
                             writer.write_batch(&output_chunk)?;
