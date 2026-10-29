@@ -30,6 +30,9 @@ fn json_depth_type(types: &[DataType]) -> Result<DataType> {
 fn json_depth(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let document = json_path::parse(text)?;
+    if !matches!(&document, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
+        return Ok(Value::Integer(1));
+    }
     let mut nodes = vec![(&document, 1_i64)];
     let mut maximum = 0_i64;
     while let Some((node, depth)) = nodes.pop() {
@@ -75,6 +78,20 @@ mod json_depth_extension_tests {
         assert_eq!(json_depth(&[Value::Text(r#"{"a":[{"b":1}]}"#.into())]).unwrap(), Value::Integer(4));
         assert_eq!(json_depth(&[Value::Text("{}".into())]).unwrap(), Value::Integer(1));
         assert_eq!(json_depth(&[Value::Text("null".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod scalar_json_depth_fast_path_tests {
+    use super::*;
+    #[test]
+    fn assigns_depth_one_to_scalars_and_empty_containers() {
+        for text in ["null", "true", "false", "17", "\"hello\""] {
+            assert_eq!(json_depth(&[Value::Text(text.into())]).unwrap(), Value::Integer(1));
+        }
+        assert_eq!(json_depth(&[Value::Text("[]".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(json_depth(&[Value::Text("[1,[2]]".into())]).unwrap(), Value::Integer(3));
         assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
     }
 }
