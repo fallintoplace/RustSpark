@@ -67,18 +67,30 @@ impl PartitionWriter {
             .ok_or_else(|| Error::Execution("writer finalized".into()))?.schema;
         if batch.schema() != schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
-        let mut groups = vec![Vec::new(); writers.len()];
+        let mut dense: Option<Vec<Vec<usize>>> = None;
         let mut start = 0;
         while start < batch.num_rows() {
             control.check()?;
             let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
-            for group in &mut groups { group.clear(); }
-            for row in start..end {
-                let index = bucket(batch, row, &self.key_columns, writers.len())?;
-                groups[index].push(row);
-            }
-            for (writer, rows) in writers.iter_mut().zip(&groups) {
-                if !rows.is_empty() { writer.write_batch(&batch.take(rows)?)?; }
+            if writers.len() > (end - start).saturating_mul(4) {
+                let mut sparse = std::collections::HashMap::<usize, Vec<usize>>::new();
+                for row in start..end {
+                    let index = bucket(batch, row, &self.key_columns, writers.len())?;
+                    sparse.entry(index).or_default().push(row);
+                }
+                for (index, rows) in sparse {
+                    writers[index].write_batch(&batch.take(&rows)?)?;
+                }
+            } else {
+                let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
+                for group in groups.iter_mut() { group.clear(); }
+                for row in start..end {
+                    let index = bucket(batch, row, &self.key_columns, writers.len())?;
+                    groups[index].push(row);
+                }
+                for (writer, rows) in writers.iter_mut().zip(groups.iter()) {
+                    if !rows.is_empty() { writer.write_batch(&batch.take(rows)?)?; }
+                }
             }
             start = end;
         }
@@ -182,5 +194,36 @@ mod reused_partition_bucket_perf_tests {
         }
         drop(files);
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sparse_partition_writer_tests {
+    use super::*;
+    use super::super::spill::SpillReader;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::{fs, io::BufReader, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn sparse_writer_preserves_per_shard_row_order() {
+        let dir = std::env::temp_dir().join(format!("native-sparse-part-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let data = Batch::from_rows(schema.clone(), (0..29).map(|n| vec![
+            if n % 5 == 0 { Value::Null } else { Value::Integer(n % 7) }
+        ]).collect()).unwrap();
+        let mut writer = PartitionWriter::new(&dir, schema, &["key"], 64, 4).unwrap();
+        writer.write_batch(&data, &QueryControl::default()).unwrap();
+        let files = writer.finish().unwrap();
+        let expected = crate::hash_partition::partition(&data, &["key"], 64).unwrap();
+        for (file, wanted) in files.paths().iter().zip(&expected) {
+            let mut reader = SpillReader::new(BufReader::new(File::open(file).unwrap()), 4).unwrap();
+            let mut rows = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
+            assert_eq!(rows, wanted.rows().unwrap());
+        }
+        drop(files);
+        fs::remove_dir(dir).unwrap();
     }
 }
