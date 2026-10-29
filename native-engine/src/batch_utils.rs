@@ -4,7 +4,7 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     if rows_per_batch == 0 {
         return Err(Error::Execution("batch size must be positive".into()));
     }
-    let mut chunks = Vec::new();
+    let mut chunks = Vec::with_capacity(batch.num_rows().div_ceil(rows_per_batch));
     let mut start = 0;
     while start < batch.num_rows() {
         let end = start.saturating_add(rows_per_batch).min(batch.num_rows());
@@ -19,9 +19,21 @@ pub fn concat(
     batches: impl IntoIterator<Item = Batch>,
     max_rows: usize,
 ) -> Result<Batch> {
+    let mut inputs = batches.into_iter();
+    if inputs.size_hint() == (1, Some(1)) {
+        if let Some(batch) = inputs.next() {
+            if batch.schema() != schema {
+                return Err(Error::Schema("cannot concatenate different batch schemas".into()));
+            }
+            if batch.num_rows() > max_rows {
+                return Err(Error::Execution("batch collection row limit exceeded".into()));
+            }
+            return Ok(batch);
+        }
+    }
     let mut total = 0usize;
     let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
-    for batch in batches {
+    for batch in inputs {
         if batch.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
@@ -104,5 +116,39 @@ mod split_contiguous_perf_tests {
         let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
         let data = Batch::from_rows(schema, vec![vec![Value::Null], vec![Value::Integer(1)]]).unwrap();
         assert_eq!(split(&data, 1).unwrap()[1].rows().unwrap(), vec![vec![Value::Integer(1)]]);
+    }
+}
+
+#[cfg(test)]
+mod preallocated_batch_split_tests {
+    use super::*;
+    #[test]
+    fn preserves_empty_and_nondivisible_batch_splits() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "n", crate::schema::DataType::Integer, false)]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        assert!(split(&empty, 10).unwrap().is_empty());
+        let populated = Batch::from_rows(schema,
+            (0..13).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let chunks = split(&populated, 5).unwrap();
+        assert_eq!(chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [5, 5, 3]);
+    }
+}
+
+#[cfg(test)]
+mod single_owned_batch_concat_tests {
+    use super::*;
+    #[test]
+    fn one_batch_keeps_values_schema_and_budget_checks() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "text", crate::schema::DataType::Text, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("café".into())], vec![Value::Null]
+        ]).unwrap();
+        assert_eq!(concat(&schema, [first.clone()], 2).unwrap(), first);
+        assert!(concat(&schema, [first.clone()], 1).is_err());
+        let other_schema = Schema::new(vec![crate::schema::Field::new(
+            "different", crate::schema::DataType::Text, true)]).unwrap();
+        assert!(concat(&other_schema, [first], 5).is_err());
     }
 }
