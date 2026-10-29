@@ -51,6 +51,8 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
         if let Expr::Column(name) = &selection.expression {
             let index = batch.schema().column(name)?;
             column.extend_from_slice(batch.column(index)?);
+        } else if let Expr::Literal(value) = &selection.expression {
+            column.resize(batch.num_rows(), value.clone());
         } else {
             for row in 0..batch.num_rows() {
                 column.push(selection.expression.evaluate(batch, row)?);
@@ -192,5 +194,31 @@ mod direct_column_projection_perf_tests {
         assert!(project(&input, &[Selection::new(
             Expr::Column("unknown".into()), "missing"
         )]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod projection_fast_paths_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn direct_columns_and_literals_match_scalar_evaluation() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("name", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("a".into())], vec![Value::Null]],
+        ).unwrap();
+        let selections = [
+            Selection::new(Expr::Column("name".into()), "first"),
+            Selection::new(Expr::Column("NAME".into()), "again"),
+            Selection::new(Expr::Literal(Value::Integer(7)), "constant"),
+            Selection::new(Expr::Literal(Value::Null), "missing"),
+        ];
+        let projected = project(&input, &selections).unwrap();
+        assert_eq!(projected.rows().unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Text("a".into()), Value::Integer(7), Value::Null],
+            vec![Value::Null, Value::Null, Value::Integer(7), Value::Null],
+        ]);
+        assert_eq!(project(&Batch::empty(input.schema().clone()), &selections).unwrap().num_rows(), 0);
     }
 }
