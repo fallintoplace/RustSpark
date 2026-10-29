@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import bench_jsonl as benchmark
 
@@ -28,6 +29,16 @@ class JSONLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 benchmark.write_jsonl(Path(tmp) / "data", 0)
+
+    def test_selects_one_workload_without_running_other_queries(self):
+        with patch.object(benchmark, "measure", return_value={"median_ms": 1.0}) as measured:
+            report = benchmark.benchmark("rustspark", rows=4, repeat=1, warmup=0,
+                                         workloads=["scan_count"])
+        self.assertEqual([item["name"] for item in report["workloads"]], ["scan_count"])
+        self.assertEqual(measured.call_count, 1)
+        for invalid in ([], ["unknown"], ["scan_count", "scan_count"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "workloads"):
+                benchmark.benchmark("rustspark", rows=4, workloads=invalid)
 
 
 if __name__ == "__main__":
