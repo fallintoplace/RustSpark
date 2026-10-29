@@ -143,7 +143,10 @@ impl Batch {
         if start > end || end > self.num_rows() {
             return Err(Error::Execution("invalid batch row slice".into()));
         }
-        self.take(&(start..end).collect::<Vec<_>>())
+        let columns = self.columns.iter()
+            .map(|column| column[start..end].to_vec())
+            .collect();
+        Self::new(self.schema.clone(), columns)
     }
 }
 
@@ -167,3 +170,21 @@ mod batch_slicing_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod batch_slice_edge_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn empty_slices_keep_field_types_and_nullability() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("name", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("first".into())], vec![Value::Null]],
+        ).unwrap();
+        let output = input.slice_rows(2, 2).unwrap();
+        assert_eq!(output.num_rows(), 0);
+        assert_eq!(output.schema(), input.schema());
+        assert_eq!(input.slice_rows(1, 2).unwrap().row(0).unwrap(), vec![Value::Null]);
+    }
+}
