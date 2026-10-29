@@ -32,15 +32,21 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         }
         if character == '/' && chars.peek() == Some(&'*') {
             let _ = chars.next();
-            let mut closed = false;
+            let mut depth = 1usize;
             while let Some(next) = chars.next() {
-                if next == '*' && chars.peek() == Some(&'/') {
+                if next == '/' && chars.peek() == Some(&'*') {
                     let _ = chars.next();
-                    closed = true;
-                    break;
+                    depth += 1;
+                    if depth > 128 {
+                        return Err(Error::Parse("SQL block comment nesting limit exceeded".into()));
+                    }
+                } else if next == '*' && chars.peek() == Some(&'/') {
+                    let _ = chars.next();
+                    depth -= 1;
+                    if depth == 0 { break; }
                 }
             }
-            if !closed {
+            if depth != 0 {
                 return Err(Error::Parse("unterminated block comment".into()));
             }
             continue;
@@ -143,5 +149,19 @@ mod tests {
     fn unterminated_quotes_and_comments_are_errors() {
         assert!(tokenize("SELECT 'open").is_err());
         assert!(tokenize("/* unclosed").is_err());
+    }
+}
+
+#[cfg(test)]
+mod nested_sql_comments_regression {
+    use super::*;
+    #[test]
+    fn nested_comments_do_not_leak_sql_tokens() {
+        assert_eq!(tokenize("SELECT 1 /* outer /* inner */ tail */ FROM data").unwrap(),
+            vec![Token::Word("SELECT".into()), Token::Number("1".into()),
+                 Token::Word("FROM".into()), Token::Word("data".into())]);
+        assert!(tokenize("SELECT 1 /* outer /* inner */").is_err());
+        let deeply_nested = format!("{}{}", "/*".repeat(129), "*/".repeat(129));
+        assert!(tokenize(&deeply_nested).is_err());
     }
 }
