@@ -53,7 +53,7 @@ impl<R: BufRead> CsvRows<R> {
                 bytes.push(byte);
                 consumed += 1;
                 if byte == b'"' { quoted = !quoted; }
-                if byte == b'\n' && !quoted {
+                if (byte == b'\n' || byte == b'\r') && !quoted {
                     complete = true;
                     break;
                 }
@@ -161,5 +161,27 @@ mod tests {
         assert!(CsvRows::new(Cursor::new("wrong\n1\n"), schema.clone(), 100).is_err());
         let mut rows = CsvRows::new(Cursor::new("id\n1234567890\n"), schema, 5).unwrap();
         assert!(rows.next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod cr_only_csv_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::io::Cursor;
+
+    #[test]
+    fn scans_cr_only_records_without_splitting_quoted_carriage_returns() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, false),
+        ]).unwrap();
+        let input = "id,text\r1,\"a\rb\"\r2,ok\r";
+        let rows = CsvRows::new(Cursor::new(input), schema, 1024).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(1), Value::Text("a\rb".into())],
+            vec![Value::Integer(2), Value::Text("ok".into())],
+        ]);
     }
 }
