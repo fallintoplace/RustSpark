@@ -1,6 +1,12 @@
 import unittest
+import io
+import subprocess
+import sys
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
-from stream import build_command
+from stream import build_command, iter_arrow_batches
 
 
 class ArrowStreamCommandTests(unittest.TestCase):
@@ -31,6 +37,46 @@ class ArrowStreamCommandTests(unittest.TestCase):
         for name in ("bad-name", "a b", "1bad", "é"):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "table name"):
                 build_command("SELECT 1", json_tables={name: "data.json"})
+
+
+    def test_database_directory_is_forwarded_without_shell(self):
+        args = build_command("SELECT * FROM events", database_dir=Path("/tmp/data set"))
+        self.assertEqual(args[args.index("--database-dir") + 1], "/tmp/data set")
+
+    def test_integer_limits_are_checked_before_launch(self):
+        for invalid in (True, 1.5, float("nan"), -1):
+            with self.subTest(max_rows=invalid), self.assertRaisesRegex(ValueError, "max_rows"):
+                build_command("SELECT 1", max_rows=invalid)
+        for invalid in (False, 1.5, float("inf"), -1):
+            with self.subTest(query_timeout=invalid), self.assertRaisesRegex(ValueError, "query_timeout"):
+                build_command("SELECT 1", query_timeout=invalid)
+        self.assertIn("0", build_command("SELECT 1", max_rows=0))
+
+    def test_spooled_stderr_does_not_deadlock_and_keeps_error_tail(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO()
+
+            def poll(self):
+                return 1
+
+            def wait(self, timeout=None):
+                return 1
+
+        def start(command, *, stdout, stderr):
+            self.assertEqual(stdout, subprocess.PIPE)
+            self.assertNotEqual(stderr, subprocess.PIPE)
+            self.assertEqual(command[command.index("--database-dir") + 1], "/tmp/my db")
+            stderr.write(b"ignored log" * 2000 + b"FINAL ERROR")
+            stderr.flush()
+            return FakeProcess()
+
+        arrow = SimpleNamespace(ipc=SimpleNamespace(open_stream=lambda stream: nullcontext([])))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", side_effect=start
+        ):
+            with self.assertRaisesRegex(RuntimeError, "FINAL ERROR"):
+                list(iter_arrow_batches("SELECT 1", database_dir="/tmp/my db"))
 
 
 if __name__ == "__main__":

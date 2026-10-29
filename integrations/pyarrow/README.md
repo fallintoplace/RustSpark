@@ -36,3 +36,5 @@ For joins across multiple local inputs, provide named maps such as
 `parquet_tables={"orders": "orders.parquet"}`. Use the corresponding
 SQL table names in the query. Named inputs cannot be mixed with
 unnamed `csv`, `parquet` or `json_input` paths.
+
+Pass `database_dir="/path/to/db"` to stream registered tables without a file source. `max_rows` must be a nonnegative integer and `query_timeout` a positive integer. Child-process stderr is spooled to temporary disk storage while Arrow stdout streams, preventing a full diagnostic pipe from blocking the query. Only the trailing 8 KiB of diagnostics is read on failures.
