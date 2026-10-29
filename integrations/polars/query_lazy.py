@@ -28,7 +28,8 @@ def _add_named_tables(command: list[str], flag: str,
         command.extend([flag, f"{name}={file_path}"])
 
 
-def build_command(sql: str, output: Path, *, binary: str = "rustspark",
+def build_command(sql: str | None, output: Path, *, binary: str = "rustspark",
+                  sql_file: str | Path | None = None,
                   csv: str | Path | None = None,
                   parquet: str | Path | None = None,
                   json_input: str | Path | None = None,
@@ -37,8 +38,11 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   max_rows: int | None = None,
                   csv_tables: Mapping[str, str | Path] | None = None,
                   parquet_tables: Mapping[str, str | Path] | None = None) -> list[str]:
-    if not sql.strip():
-        raise ValueError("SQL cannot be blank")
+    if sql_file is None:
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError("Provide a nonempty SQL string or sql_file")
+    elif (sql is not None and (not isinstance(sql, str) or sql.strip())) or not isinstance(os.fspath(sql_file), str) or not os.fspath(sql_file):
+        raise ValueError("Provide exactly one inline SQL statement or sql_file")
     if sum(source is not None for source in (csv, parquet, json_input)) > 1:
         raise ValueError("Use only one unnamed file source")
     if any(source is not None for source in (csv, parquet, json_input)) and (csv_tables or parquet_tables):
@@ -48,7 +52,12 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     if max_rows is not None and (type(max_rows) is not int or max_rows < 1):
         raise ValueError("max_rows must be a positive integer")
 
-    command = [binary, "--sql", sql, "--output-arrow", str(output)]
+    command = [binary]
+    if sql_file is None:
+        command.extend(["--sql", sql])
+    else:
+        command.extend(["--sql-file", os.fspath(sql_file)])
+    command.extend(["--output-arrow", str(output)])
     if database_dir is not None:
         command.extend(["--database-dir", os.fspath(database_dir)])
     for flag, source in (("--csv", csv), ("--parquet", parquet), ("--json", json_input)):
@@ -64,7 +73,8 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
 
 @contextmanager
-def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
+def rustspark_lazy_frame(sql: str | None, *, binary: str = "rustspark",
+                         sql_file: str | Path | None = None,
                          csv: str | Path | None = None,
                          parquet: str | Path | None = None,
                          json_input: str | Path | None = None,
@@ -89,7 +99,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
     with tempfile.TemporaryDirectory(dir=temp_dir, prefix="rustspark-polars-") as directory:
         result = Path(directory) / "result.arrow"
         command = build_command(
-            sql, result, binary=binary, csv=csv, parquet=parquet,
+            sql, result, binary=binary, sql_file=sql_file, csv=csv, parquet=parquet,
             json_input=json_input, query_timeout=query_timeout,
             database_dir=database_dir, max_rows=max_rows,
             csv_tables=csv_tables, parquet_tables=parquet_tables,
