@@ -14,7 +14,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if !digit.is_ascii_digit() { return Ok(Value::Boolean(false)); }
         let mut n = u32::from(digit - b'0');
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        checksum = (checksum + n) % 10;
+        checksum += n;
+        if checksum >= 10 { checksum -= 10; }
     }
     Ok(Value::Boolean(checksum == 0))
 }
@@ -35,5 +36,23 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("0".repeat(100_000))]).unwrap(),
             Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod luhn_incremental_checksum_tests {
+    use super::*;
+
+    #[test]
+    fn matches_reference_modulo_algorithm_for_mixed_digits() {
+        for n in 0..1_000_u32 {
+            let text = format!("{n:04}");
+            let reference = text.bytes().rev().enumerate().fold(0_u32, |sum, (index, digit)| {
+                let mut value = u32::from(digit - b'0');
+                if index % 2 == 1 { value *= 2; if value > 9 { value -= 9; } }
+                (sum + value) % 10
+            }) == 0;
+            assert_eq!(evaluate(&[Value::Text(text)]).unwrap(), Value::Boolean(reference));
+        }
     }
 }
