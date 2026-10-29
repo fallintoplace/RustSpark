@@ -19,6 +19,8 @@ mod try_divide;
 
 mod try_add;
 
+mod try_subtract;
+
 pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> Result<()> {
     if (min..=max).contains(&args.len()) {
         Ok(())
@@ -92,6 +94,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "MOD" => modulo::output_type(args, schema),
         "TRY_DIVIDE" => try_divide::output_type(args, schema),
         "TRY_ADD" => try_add::output_type(args, schema),
+        "TRY_SUBTRACT" => try_subtract::output_type(args, schema),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -107,6 +110,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "MOD" => modulo::eval(args, batch, row),
         "TRY_DIVIDE" => try_divide::eval(args, batch, row),
         "TRY_ADD" => try_add::eval(args, batch, row),
+        "TRY_SUBTRACT" => try_subtract::eval(args, batch, row),
         _ => Err(Error::Unsupported(format!("unknown native scalar function: {name}"))),
     }
 }
@@ -186,6 +190,13 @@ mod tests {
         assert_eq!(run("SELECT TRY_ADD(x, 2) FROM t").unwrap()[0], vec![Value::Null]);
         assert_eq!(run("SELECT TRY_ADD(x, 2) FROM t").unwrap()[1], vec![Value::Integer(7)]);
         assert_eq!(run("SELECT TRY_ADD(9223372036854775807, 1) FROM t").unwrap()[0], vec![Value::Null]);
+    }
+
+    #[test]
+    fn try_subtract_handles_overflow_and_nulls() {
+        assert_eq!(run("SELECT TRY_SUBTRACT(x, 2) FROM t").unwrap()[0], vec![Value::Null]);
+        assert_eq!(run("SELECT TRY_SUBTRACT(x, 2) FROM t").unwrap()[1], vec![Value::Integer(3)]);
+        assert_eq!(run("SELECT TRY_SUBTRACT(-9223372036854775807, 2) FROM t").unwrap()[0], vec![Value::Null]);
     }
 
     #[test]
