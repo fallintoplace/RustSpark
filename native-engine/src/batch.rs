@@ -143,7 +143,10 @@ impl Batch {
         if start > end || end > self.num_rows() {
             return Err(Error::Execution("invalid batch row slice".into()));
         }
-        self.take(&(start..end).collect::<Vec<_>>())
+        let columns = self.columns.iter()
+            .map(|column| column[start..end].to_vec())
+            .collect();
+        Self::new(self.schema.clone(), columns)
     }
 }
 
