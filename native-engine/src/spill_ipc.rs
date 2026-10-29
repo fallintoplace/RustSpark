@@ -104,7 +104,7 @@ mod tests {
 mod malformed_ipc_reader_tests {
     use super::*;
     use std::sync::Arc;
-    use arrow_array::{ArrayRef, UInt64Array};
+    use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 
     #[test]
     fn unrepresentable_arrow_integer_terminates_spill_iteration() {
