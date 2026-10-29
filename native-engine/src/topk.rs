@@ -34,6 +34,9 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take(&[]); }
+    if keys.is_empty() {
+        return batch.slice_rows(0, k.min(batch.num_rows()));
+    }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
@@ -123,3 +126,21 @@ mod topk_offset_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod unordered_topk_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn unordered_topk_keeps_input_prefix() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap(),
+            (0..6).map(|n| vec![Value::Integer(n)]).collect()
+        ).unwrap();
+        assert_eq!(top_k(&batch, &[], 2).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(0)], vec![Value::Integer(1)]]);
+        assert_eq!(top_k(&batch, &[], 100).unwrap(), batch);
+        assert_eq!(top_k(&batch, &[], 0).unwrap().num_rows(), 0);
+    }
+}
