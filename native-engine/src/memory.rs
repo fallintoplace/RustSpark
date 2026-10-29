@@ -81,6 +81,7 @@ impl Reservation {
     }
 
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
+        if new_bytes == self.bytes { return Ok(()); }
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
             self.pool.charge(extra)?;
@@ -203,5 +204,20 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod unchanged_memory_resize_tests {
+    use super::*;
+    #[test]
+    fn unchanged_reservation_does_not_change_pool_usage() {
+        let pool = MemoryPool::new(4);
+        let mut reservation = pool.reserve(4).unwrap();
+        for _ in 0..1024 { reservation.resize(4).unwrap(); }
+        assert_eq!(reservation.bytes(), 4);
+        assert_eq!(pool.used(), 4);
+        drop(reservation);
+        assert_eq!(pool.used(), 0);
     }
 }
