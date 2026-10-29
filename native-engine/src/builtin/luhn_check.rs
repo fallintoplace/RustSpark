@@ -14,7 +14,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if !digit.is_ascii_digit() { return Ok(Value::Boolean(false)); }
         let mut n = u32::from(digit - b'0');
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        checksum = (checksum + n) % 10;
+        // The running checksum is in 0..10 and a digit contributes at most 9.
+        // One conditional subtraction is equivalent to modulo 10.
+        checksum += n;
+        if checksum >= 10 { checksum -= 10; }
     }
     Ok(Value::Boolean(checksum == 0))
 }
@@ -35,5 +38,21 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("0".repeat(100_000))]).unwrap(),
             Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod luhn_long_checksum_fast_path_tests {
+    use super::*;
+    #[test]
+    fn preserves_checksums_across_large_inputs() {
+        assert_eq!(evaluate(&[Value::Text("0".repeat(1_000_000))]).unwrap(),
+            Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Text(format!("{}1", "0".repeat(100_000)))]).unwrap(),
+            Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("79927398713".into())]).unwrap(),
+            Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Text("79927398714".into())]).unwrap(),
+            Value::Boolean(false));
     }
 }
