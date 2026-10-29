@@ -19,14 +19,22 @@ fn base64(args: &[Value]) -> Result<Value> {
     }
     Ok(Value::Text(output))
 }
+const REVERSE_DIGITS: [u8; 256] = {
+    let mut table = [u8::MAX; 256];
+    let mut index = 0;
+    while index < DIGITS.len() {
+        table[DIGITS[index] as usize] = index as u8;
+        index += 1;
+    }
+    table
+};
+
 fn digit(c: u8) -> Result<u8> {
-    match c {
-        b'A'..=b'Z' => Ok(c - b'A'),
-        b'a'..=b'z' => Ok(c - b'a' + 26),
-        b'0'..=b'9' => Ok(c - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err(Error::Parse("invalid BASE64 character".into())),
+    let decoded = REVERSE_DIGITS[c as usize];
+    if decoded == u8::MAX {
+        Err(Error::Parse("invalid BASE64 character".into()))
+    } else {
+        Ok(decoded)
     }
 }
 fn unbase64_utf8(args: &[Value]) -> Result<Value> {
@@ -73,5 +81,20 @@ mod tests {
         assert!(unbase64_utf8(&[Value::Text("aGVsbG8==".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("////".into())]).is_err());
         assert_eq!(base64(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod base64_reverse_table_perf_tests {
+    use super::*;
+
+    #[test]
+    fn alphabet_table_and_padding_round_trip_utf8() {
+        assert_eq!(unbase64_utf8(&[Value::Text("8J+Zgg==".into())]).unwrap(),
+            Value::Text("🙂".into()));
+        assert_eq!(unbase64_utf8(&[base64(&[Value::Text("abcXYZ+/".into())]).unwrap()]).unwrap(),
+            Value::Text("abcXYZ+/".into()));
+        assert!(unbase64_utf8(&[Value::Text("!!!!".into())]).is_err());
+        assert!(unbase64_utf8(&[Value::Text("____".into())]).is_err());
     }
 }
