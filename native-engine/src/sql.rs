@@ -179,13 +179,22 @@ impl Parser {
             if min_precedence <= 3 {
                 let negate = self.peek_word("NOT")
                     && matches!(self.tokens.get(self.index + 1),
-                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("LIKE"));
-                if self.peek_word("LIKE") || negate {
+                        Some(Token::Word(word)) if
+                            word.eq_ignore_ascii_case("LIKE") || word.eq_ignore_ascii_case("ILIKE"));
+                if self.peek_word("LIKE") || self.peek_word("ILIKE") || negate {
                     if negate { self.next(); }
-                    self.expect_word("LIKE")?;
+                    let insensitive = self.take_word("ILIKE");
+                    if !insensitive { self.expect_word("LIKE")?; }
+                    let pattern = self.expression(4)?;
+                    let (value, pattern) = if insensitive {
+                        (
+                            Expr::Call { name: "lower".into(), args: vec![left] },
+                            Expr::Call { name: "lower".into(), args: vec![pattern] },
+                        )
+                    } else { (left, pattern) };
                     let expr = Expr::Like {
-                        value: Box::new(left),
-                        pattern: Box::new(self.expression(4)?),
+                        value: Box::new(value),
+                        pattern: Box::new(pattern),
                     };
                     left = if negate { Expr::Not(Box::new(expr)) } else { expr };
                     continue;
@@ -641,6 +650,23 @@ mod tests {
             )
             .unwrap();
         catalog
+    }
+
+    #[test]
+    fn ilike_and_not_ilike_are_native_unicode_aware_predicates() {
+        let rows = execute(
+            &parse_sql("SELECT city FROM sales WHERE city ILIKE 'bER%'").unwrap(),
+            &sales(),
+        ).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text("Berlin".into())],
+            vec![Value::Text("Berlin".into())],
+        ]);
+        let rows = execute(
+            &parse_sql("SELECT city FROM sales WHERE city NOT ILIKE 'bER%'").unwrap(),
+            &sales(),
+        ).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("Paris".into())]]);
     }
 
     #[test]
