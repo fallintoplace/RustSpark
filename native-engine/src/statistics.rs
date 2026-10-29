@@ -126,12 +126,15 @@ impl ColumnStatistics {
         let mut combined = Self::default();
         let mut expected_type = None;
         for batch in batches {
-            let field = batch.schema().field(batch.schema().column(name)?)?;
+            let column = batch.schema().column(name)?;
+            let field = batch.schema().field(column)?;
             if expected_type.is_some_and(|kind| kind != field.data_type) {
                 return Err(Error::Type("statistics batches disagree on column type".into()));
             }
             expected_type = Some(field.data_type);
-            combined.merge(&Self::from_batch(batch, name)?)?;
+            for value in batch.column(column)? {
+                combined.observe(value)?;
+            }
         }
         Ok(combined)
     }
@@ -208,5 +211,21 @@ mod merged_statistics_atomicity_consolidation_tests {
         let before = first.clone();
         assert!(first.merge(&other).is_err());
         assert_eq!(first, before);
+    }
+}
+
+#[cfg(test)]
+mod direct_multibatch_stats_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    #[test]
+    fn direct_accumulation_matches_sequential_merge() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap();
+        let batches = (0..100).map(|n| Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(n)], vec![Value::Null], vec![Value::Integer(-n)]
+        ]).unwrap()).collect::<Vec<_>>();
+        let mut merged = ColumnStatistics::default();
+        for batch in &batches { merged.merge(&ColumnStatistics::from_batch(batch, "x").unwrap()).unwrap(); }
+        assert_eq!(ColumnStatistics::from_batches(&batches, "x").unwrap(), merged);
     }
 }
