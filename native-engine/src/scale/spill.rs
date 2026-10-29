@@ -93,6 +93,21 @@ impl<W: Write> SpillWriter<W> {
         if batch.num_rows().checked_mul(self.schema.len()).is_none_or(|cells| cells > MAX_CELLS) {
             return Err(Error::Execution("spill batch exceeds cell limit".into()));
         }
+        // Validate the complete payload before emitting the batch length.
+        // A failed write must not leave an incomplete batch in the spill stream.
+        let mut text_bytes = 0usize;
+        for column in 0..self.schema.len() {
+            for value in batch.column(column)? {
+                if let Value::Text(text) = value {
+                    if text.len() > MAX_TEXT_BYTES {
+                        return Err(Error::Execution("spill text value too long".into()));
+                    }
+                    text_bytes = text_bytes.checked_add(text.len())
+                        .filter(|bytes| *bytes <= MAX_BATCH_BYTES)
+                        .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+                }
+            }
+        }
         write_u32(&mut self.output, batch.num_rows())?;
         for row in 0..batch.num_rows() {
             for column in 0..self.schema.len() {
@@ -270,5 +285,25 @@ mod spill_byte_preflight_tests {
         assert!(error.to_string().contains("spill batch exceeds byte limit"));
         assert_eq!(already_used, MAX_BATCH_BYTES - 1);
         assert_eq!(input.position(), 4);
+    }
+}
+
+#[cfg(test)]
+mod spill_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_text_does_not_corrupt_the_writer_stream() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, false)
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(MAX_TEXT_BYTES + 1))]
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        assert!(writer.write_batch(&batch).is_err());
+        let after = writer.finish().unwrap();
+        let empty = SpillWriter::new(Vec::new(), schema).unwrap().finish().unwrap();
+        assert_eq!(after, empty);
     }
 }
