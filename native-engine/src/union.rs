@@ -1,6 +1,6 @@
 use crate::{
     batch::Batch,
-    schema::{Field, Schema},
+    schema::{DataType, Field, Schema},
     Error,
     Result,
 };
@@ -11,12 +11,15 @@ fn compatible_union_schema(left: &Batch, right: &Batch) -> Result<Schema> {
     }
     let mut fields = Vec::new();
     for (a, b) in left.schema().fields().iter().zip(right.schema().fields()) {
-        if a.data_type != b.data_type {
-            return Err(Error::Type(format!("UNION type mismatch in column {}", a.name)));
-        }
+        let data_type = match (a.data_type, b.data_type) {
+            (DataType::Integer, DataType::Float)
+            | (DataType::Float, DataType::Integer) => DataType::Float,
+            (a, b) if a == b => a,
+            _ => return Err(Error::Type(format!("UNION type mismatch in column {}", a.name))),
+        };
         fields.push(Field::new(
             &a.name,
-            a.data_type,
+            data_type,
             a.nullable || b.nullable,
         ));
     }
@@ -32,8 +35,18 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
     let mut columns = Vec::with_capacity(schema.len());
     for column in 0..schema.len() {
         let mut values = Vec::with_capacity(count);
-        values.extend_from_slice(left.column(column)?);
-        values.extend_from_slice(right.column(column)?);
+        let target = schema.field(column)?.data_type;
+        for side in [left, right] {
+            for value in side.column(column)? {
+                // Widen only numeric mismatches, preserving NULLs and exact
+                // integer values when no coercion is needed.
+                if target == DataType::Float && matches!(value, crate::scalar::Value::Integer(_)) {
+                    values.push(value.cast_to(target)?);
+                } else {
+                    values.push(value.clone());
+                }
+            }
+        }
         columns.push(values);
     }
     Batch::new_with_row_count(schema, columns, count)
@@ -73,7 +86,12 @@ pub fn union_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let mut rows = Vec::new();
     for input in [left, right] {
         for index in 0..input.num_rows() {
-            let row = input.row(index)?;
+            let mut row = input.row(index)?;
+            for (value, field) in row.iter_mut().zip(schema.fields()) {
+                if field.data_type == DataType::Float && matches!(value, crate::scalar::Value::Integer(_)) {
+                    *value = value.cast_to(DataType::Float)?;
+                }
+            }
             if seen.insert(row.clone()) {
                 rows.push(row);
             }
