@@ -26,10 +26,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
-    let begin = text.char_indices().nth(index)
-        .map_or(text.len(), |(byte, _)| byte);
-    let end = text[begin..].char_indices().nth(count)
-        .map_or(text.len(), |(byte, _)| begin + byte);
+    let begin = if text.is_ascii() {
+        index.min(text.len())
+    } else {
+        text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
+    };
+    let end = if text.is_ascii() {
+        begin.saturating_add(count).min(text.len())
+    } else {
+        text[begin..].char_indices().nth(count)
+            .map_or(text.len(), |(byte, _)| begin + byte)
+    };
     let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
     result.push_str(&text[..begin]);
     result.push_str(replacement);
@@ -116,5 +123,21 @@ mod common_suffix_extension_tests {
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod overlay_ascii_direct_offset_tests {
+    use super::*;
+    #[test]
+    fn inserts_replaces_and_appends_without_changing_unicode() {
+        let args = |text: &str, start: i64, len: i64| evaluate(&[
+            Value::Text(text.into()), Value::Text("X".into()),
+            Value::Integer(start), Value::Integer(len)
+        ]).unwrap();
+        assert_eq!(args("abcdef", 3, 2), Value::Text("abXef".into()));
+        assert_eq!(args("abc", 4, 0), Value::Text("abcX".into()));
+        assert_eq!(args("abc", 1000, i64::MAX), Value::Text("abcX".into()));
+        assert_eq!(args("a🙂b", 2, 1), Value::Text("aXb".into()));
     }
 }
