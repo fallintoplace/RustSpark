@@ -33,28 +33,35 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
                 let mut end = quote.len_utf8();
                 let mut escaped = false;
                 let mut closed = false;
-                let mut key = String::new();
+                // Keep the common unescaped quoted key as a borrowed UTF-8
+                // slice. Decode into an owned String only after a backslash.
+                let mut key = None::<String>;
                 for character in rest[end..].chars() {
                     end += character.len_utf8();
                     if escaped {
                         if character != quote && character != '\\' {
                             return Err(Error::Parse("unsupported JSON path escape".into()));
                         }
-                        key.push(character);
+                        key.as_mut().expect("escaped key buffer").push(character);
                         escaped = false;
                     } else if character == '\\' {
+                        if key.is_none() {
+                            key = Some(rest[quote.len_utf8()..end - character.len_utf8()].to_owned());
+                        }
                         escaped = true;
                     } else if character == quote {
                         closed = true;
                         break;
-                    } else {
-                        key.push(character);
+                    } else if let Some(decoded) = key.as_mut() {
+                        decoded.push(character);
                     }
                 }
                 if !closed || !rest[end..].starts_with(']') {
                     return Err(Error::Parse("unterminated quoted JSON path key".into()));
                 }
-                node = node.and_then(|value| value.get(key.as_str()));
+                let borrowed = &rest[quote.len_utf8()..end - quote.len_utf8()];
+                let key = key.as_deref().unwrap_or(borrowed);
+                node = node.and_then(|value| value.get(key));
                 tail = &rest[end + 1..];
                 continue;
             }
@@ -110,5 +117,31 @@ mod ascii_json_path_perf_tests {
         assert_eq!(lookup(Some(&doc), "$.rows[200]").unwrap(), None);
         assert!(lookup(Some(&doc), "$.rows[2x]").is_err());
         assert!(lookup(Some(&doc), "$.café").is_err());
+    }
+}
+
+#[cfg(test)]
+mod quoted_json_path_borrowing_tests {
+    use super::*;
+
+    #[test]
+    fn handles_borrowed_unicode_keys_and_escaped_segments() {
+        let doc = serde_json::json!({
+            "root": {
+                "long.key": 12,
+                "東京é": true,
+                "quote\"key": 34,
+                "slash\\name": 56
+            }
+        });
+        assert_eq!(lookup(Some(&doc), r#"$.root['long.key']"#).unwrap(),
+            Some(&serde_json::json!(12)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["東京é"]"#).unwrap(),
+            Some(&serde_json::json!(true)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["quote\"key"]"#).unwrap(),
+            Some(&serde_json::json!(34)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["slash\\name"]"#).unwrap(),
+            Some(&serde_json::json!(56)));
+        assert!(lookup(Some(&doc), r#"$.root["bad\nescape"]"#).is_err());
     }
 }
