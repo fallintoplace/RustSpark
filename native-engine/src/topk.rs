@@ -1,6 +1,6 @@
 //! Top-K selection using O(k) candidate memory instead of a full sort.
 use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
-use crate::{batch::Batch, scalar::Value, sort::SortKey, Result};
+use crate::{batch::Batch, expr::Expr, scalar::Value, sort::SortKey, Result};
 
 #[derive(Clone, Debug)]
 struct Candidate {
@@ -41,10 +41,21 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         return batch.slice_rows(0, k.min(batch.num_rows()));
     }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
+    let key_columns = keys.iter().map(|key| match &key.expression {
+        Expr::Column(name) => {
+            let index = batch.schema().column(name)?;
+            Ok(Some(batch.column(index)?))
+        }
+        _ => Ok(None),
+    }).collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
-        let values = keys.iter().map(|key| key.expression.evaluate(batch, row))
-            .collect::<Result<Vec<_>>>()?;
+        let values = keys.iter().zip(&key_columns).map(|(key, column)| {
+            match column {
+                Some(values) => Ok(values[row].clone()),
+                None => key.expression.evaluate(batch, row),
+            }
+        }).collect::<Result<Vec<_>>>()?;
         let candidate = Candidate { row, values, options: Arc::clone(&options) };
         if heap.len() < k {
             heap.push(candidate);
