@@ -224,6 +224,7 @@ pub fn execute(
         !(2..=64).contains(&options.merge_fan_in) || options.max_plan_depth == 0 {
         return Err(Error::Execution("invalid streaming executor settings".into()));
     }
+    control.check()?;
     output_schema(plan, catalog, options)?;
     lower(plan, catalog, options, &control, 0)
 }
@@ -234,6 +235,17 @@ mod tests {
     use crate::{scalar::Value, schema::{DataType, Field}, sql};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn cancelled_streams_fail_before_inference_or_catalog_lookup() {
+        let control = QueryControl::default();
+        control.cancel();
+        let result = execute(
+            &Plan::scan("unknown"), &FileCatalog::new(),
+            &StreamOptions::default(), control,
+        );
+        assert!(matches!(result, Err(Error::Execution(message)) if message.contains("cancelled")));
+    }
 
     #[test]
     fn order_by_uses_multiple_spill_merge_passes() {
