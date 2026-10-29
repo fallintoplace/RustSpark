@@ -57,7 +57,8 @@ impl TaskScheduler {
         }
         let until = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
-        for task in self.tasks.values_mut() {
+        let mut candidate = None;
+        for (&id, task) in &mut self.tasks {
             if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
                 task.status = if task.attempts >= self.max_attempts {
                     TaskStatus::Failed
@@ -65,15 +66,15 @@ impl TaskScheduler {
                     TaskStatus::Queued
                 };
             }
-        }
-        for (&id, task) in &mut self.tasks {
-            if task.status == TaskStatus::Queued {
-                task.attempts += 1;
-                task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
-                return Ok(Some(Lease { task: id, worker, attempt: task.attempts }));
+            if candidate.is_none() && task.status == TaskStatus::Queued {
+                candidate = Some(id);
             }
         }
-        Ok(None)
+        let Some(id) = candidate else { return Ok(None); };
+        let task = self.tasks.get_mut(&id).expect("queued task exists");
+        task.attempts += 1;
+        task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
+        Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
     }
 
     /// Extend an active attempt without reviving a stale or expired lease.
