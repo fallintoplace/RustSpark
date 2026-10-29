@@ -25,10 +25,14 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
         .num_rows()
         .checked_add(right.num_rows())
         .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
-    let mut rows = Vec::with_capacity(count);
-    rows.extend(left.rows()?);
-    rows.extend(right.rows()?);
-    Batch::from_rows(schema, rows)
+    let mut columns = Vec::with_capacity(schema.len());
+    for index in 0..schema.len() {
+        let mut values = Vec::with_capacity(count);
+        values.extend_from_slice(left.column(index)?);
+        values.extend_from_slice(right.column(index)?);
+        columns.push(values);
+    }
+    Batch::new(schema, columns)
 }
 
 #[cfg(test)]
@@ -83,3 +87,30 @@ mod union_distinct_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod union_columnar_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn concatenation_keeps_row_order_and_nullability() {
+        let lhs = Batch::from_rows(Schema::new(vec![
+            Field::new("x", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("a".into())],
+        ]).unwrap();
+        let rhs = Batch::from_rows(Schema::new(vec![
+            Field::new("y", DataType::Integer, true),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Null, Value::Text("b".into())],
+        ]).unwrap();
+        let result = union_all(&lhs, &rhs).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.row(1).unwrap()[0], Value::Null);
+        assert!(result.schema().field(0).unwrap().nullable);
+        assert_eq!(result.schema().field(0).unwrap().name, "x");
+    }
+}
