@@ -8,15 +8,15 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return Ok(Value::Boolean(false));
-    }
-    let sum: u32 = text.bytes().rev().enumerate().map(|(index, digit)| {
+    if text.is_empty() { return Ok(Value::Boolean(false)); }
+    let mut checksum = 0_u32;
+    for (index, digit) in text.bytes().rev().enumerate() {
+        if !digit.is_ascii_digit() { return Ok(Value::Boolean(false)); }
         let mut n = u32::from(digit - b'0');
         if index % 2 == 1 { n *= 2; if n > 9 { n -= 9; } }
-        n
-    }).sum();
-    Ok(Value::Boolean(sum % 10 == 0))
+        checksum = (checksum + n) % 10;
+    }
+    Ok(Value::Boolean(checksum == 0))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -31,6 +31,9 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("79927398713".into())]).unwrap(), Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Text("79927398714".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(evaluate(&[Value::Text("7x".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("1234x678".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Text("0".repeat(100_000))]).unwrap(),
+            Value::Boolean(true));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
