@@ -58,8 +58,9 @@ pub struct RunMerger {
     keys: Vec<Key>,
     output_batch_rows: usize,
     control: QueryControl,
-    primed: bool,
-    refill_run: Option<usize>,
+    // Indices of active runs, ordered as a stable min-heap by current key.
+    heap: Vec<usize>,
+    heap_ready: bool,
     stopped: bool,
 }
 
@@ -99,39 +100,64 @@ impl RunMerger {
         }
         Ok(Self {
             runs, schema, keys: selected, output_batch_rows, control,
-            primed: false, refill_run: None, stopped: false
+            heap: Vec::new(), heap_ready: false, stopped: false
         })
     }
 
-    fn less(&self, a: &[Value], b: &[Value]) -> bool {
+    fn compare_rows(&self, a: &[Value], b: &[Value]) -> Ordering {
         for key in &self.keys {
             let ord = compare_value(&a[key.column], &b[key.column], key);
-            if ord != Ordering::Equal { return ord == Ordering::Less; }
+            if ord != Ordering::Equal { return ord; }
         }
-        false
+        Ordering::Equal
+    }
+
+    fn less_run(&self, a: usize, b: usize) -> bool {
+        let left = self.runs[a].peek().expect("active run has a row");
+        let right = self.runs[b].peek().expect("active run has a row");
+        match self.compare_rows(left, right) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => a < b, // Preserve original run-order tie handling.
+        }
+    }
+
+    fn sift_down(&mut self, mut root: usize) {
+        let len = self.heap.len();
+        loop {
+            let left = root * 2 + 1;
+            if left >= len { break; }
+            let right = left + 1;
+            let mut smallest = left;
+            if right < len && self.less_run(self.heap[right], self.heap[left]) {
+                smallest = right;
+            }
+            if !self.less_run(self.heap[smallest], self.heap[root]) { break; }
+            self.heap.swap(root, smallest);
+            root = smallest;
+        }
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
         self.control.check()?;
-        if !self.primed {
+        if !self.heap_ready {
             for run in &mut self.runs { run.fill()?; }
-            self.primed = true;
-        } else if let Some(index) = self.refill_run.take() {
-            self.runs[index].fill()?;
-        }
-        let mut best = None;
-        for (index, run) in self.runs.iter().enumerate() {
-            if let Some(row) = run.peek() {
-                if best.is_none_or(|old: usize| self.less(row, self.runs[old].peek().unwrap())) {
-                    best = Some(index);
-                }
+            self.heap = (0..self.runs.len())
+                .filter(|&index| self.runs[index].peek().is_some()).collect();
+            for parent in (0..self.heap.len() / 2).rev() {
+                self.sift_down(parent);
             }
+            self.heap_ready = true;
         }
-        let Some(index) = best else { return Ok(None); };
+        let Some(&index) = self.heap.first() else { return Ok(None); };
         let selected = &mut self.runs[index];
         let row = std::mem::take(&mut selected.rows[selected.position]);
         selected.position += 1;
-        self.refill_run = Some(index);
+        selected.fill()?;
+        if selected.peek().is_none() {
+            self.heap.swap_remove(0);
+        }
+        if !self.heap.is_empty() { self.sift_down(0); }
         Ok(Some(row))
     }
 }
@@ -242,5 +268,39 @@ mod selective_spill_refill_perf_tests {
         assert_eq!(actual, crate::sort::sort(&input, &keys).unwrap().rows().unwrap());
         drop(runs);
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod heap_merge_many_runs_tests {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn merges_forty_eight_runs_with_ties_and_small_io_batches() {
+        let dir = std::env::temp_dir().join(format!("native-heap-merge-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false), Field::new("id", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..192).rev().map(|n|
+            vec![Value::Integer(n % 17), Value::Integer(n)]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let runs = write_sorted_runs([Ok(batch)], schema.clone(), &keys, &dir, 4,
+            &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 48);
+        let merged = RunMerger::new(runs.files(), schema, &keys, 3, 7,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 192);
+        assert!(rows.windows(2).all(|pair| matches!(
+            (&pair[0][0], &pair[1][0]),
+            (Value::Integer(a), Value::Integer(b)) if a <= b
+        )));
+        let mut ids = rows.into_iter().map(|r| match r[1] { Value::Integer(n) => n, _ => unreachable!() }).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..192).collect::<Vec<_>>());
+        drop(runs);
+        fs::remove_dir(dir).unwrap();
     }
 }
