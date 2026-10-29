@@ -24,7 +24,18 @@ fn word_count_type(types: &[DataType]) -> Result<DataType> {
 }
 fn word_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let count = i64::try_from(input.split_whitespace().count())
+    let words = if input.is_ascii() {
+        let mut count = 0_usize;
+        let mut in_word = false;
+        for &byte in input.as_bytes() {
+            if byte.is_ascii_whitespace() { in_word = false; }
+            else if !in_word { count += 1; in_word = true; }
+        }
+        count
+    } else {
+        input.split_whitespace().count()
+    };
+    let count = i64::try_from(words)
         .map_err(|_| Error::Execution("WORD_COUNT overflow".into()))?;
     Ok(Value::Integer(count))
 }
@@ -59,6 +70,19 @@ mod word_count_extension_tests {
         assert_eq!(word_count(&[Value::Text(" one\t two \n three ".into())]).unwrap(), Value::Integer(3));
         assert_eq!(word_count(&[Value::Text("".into())]).unwrap(), Value::Integer(0));
         assert_eq!(word_count(&[Value::Text("東京\u{00A0}é".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod word_count_ascii_fast_path_tests {
+    use super::*;
+    #[test]
+    fn ascii_word_boundaries_and_unicode_fallback() {
+        let input = Value::Text(format!("  {}  end ", "word\t".repeat(1000)));
+        assert_eq!(word_count(&[input]).unwrap(), Value::Integer(1001));
+        assert_eq!(word_count(&[Value::Text("a\nb\r\tc\u{000c}d".into())]).unwrap(), Value::Integer(4));
+        assert_eq!(word_count(&[Value::Text("東京\u{2003}é".into())]).unwrap(), Value::Integer(2));
         assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
     }
 }
