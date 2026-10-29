@@ -63,7 +63,7 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("FF".into()), Value::Integer(16), Value::Integer(10)]).unwrap(), Value::Text("255".into()));
         assert_eq!(evaluate(&[Value::Integer(-10), Value::Integer(16), Value::Integer(-10)]).unwrap(), Value::Text("-16".into()));
         assert_eq!(evaluate(&[Value::Text("-1".into()), Value::Integer(10), Value::Integer(16)]).unwrap(), Value::Text("FFFFFFFFFFFFFFFF".into()));
-        assert_eq!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err(), true);
+        assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
     }
 }
