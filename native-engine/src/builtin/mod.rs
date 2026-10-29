@@ -48,6 +48,7 @@ mod trim_chars;
 mod repeat_text;
 mod translate_text;
 mod left_right;
+mod overlay_text;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -116,6 +117,7 @@ const MODULES: &[&[Function]] = &[
     &repeat_text::FUNCTIONS,
     &translate_text::FUNCTIONS,
     &left_right::FUNCTIONS,
+    &overlay_text::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
