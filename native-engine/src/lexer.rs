@@ -24,7 +24,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         if character == '-' && chars.peek() == Some(&'-') {
             let _ = chars.next();
             for next in chars.by_ref() {
-                if next == '\n' {
+                if next == '\n' || next == '\r' {
                     break;
                 }
             }
@@ -163,5 +163,21 @@ mod nested_sql_comments_regression {
         assert!(tokenize("SELECT 1 /* outer /* inner */").is_err());
         let deeply_nested = format!("{}{}", "/*".repeat(129), "*/".repeat(129));
         assert!(tokenize(&deeply_nested).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cr_line_comment_regression {
+    use super::*;
+    #[test]
+    fn carriage_return_terminates_line_comments() {
+        assert_eq!(tokenize("SELECT 1 -- comment\rFROM sales").unwrap(), vec![
+            Token::Word("SELECT".into()), Token::Number("1".into()),
+            Token::Word("FROM".into()), Token::Word("sales".into())
+        ]);
+        assert_eq!(tokenize("SELECT 1 -- comment\r\nFROM sales").unwrap(), vec![
+            Token::Word("SELECT".into()), Token::Number("1".into()),
+            Token::Word("FROM".into()), Token::Word("sales".into())
+        ]);
     }
 }
