@@ -19,7 +19,7 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
     let mut tail = &path[1..];
     while !tail.is_empty() {
         if let Some(rest) = tail.strip_prefix('.') {
-            let end = rest.find(['.', '[']).unwrap_or(rest.len());
+            let end = rest.find(|character: char| character == '.' || character == '[').unwrap_or(rest.len());
             let key = &rest[..end];
             if key.is_empty() || !key.bytes().all(|byte|
                 byte.is_ascii_alphanumeric() || byte == b'_') {
