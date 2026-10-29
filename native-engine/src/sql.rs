@@ -84,6 +84,23 @@ impl Parser {
         }
     }
 
+    fn select_alias(&mut self, default: String) -> Result<String> {
+        if self.take_word("AS") {
+            return self.identifier();
+        }
+        const RESERVED: &[&str] = &[
+            "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET",
+            "FETCH", "UNION", "EXCEPT", "INTERSECT", "JOIN", "INNER",
+            "LEFT", "RIGHT", "FULL", "CROSS", "NULLS", "ASC", "DESC",
+        ];
+        if let Some(Token::Word(word)) = self.peek() {
+            if !RESERVED.iter().any(|keyword| word.eq_ignore_ascii_case(keyword)) {
+                return self.identifier();
+            }
+        }
+        Ok(default)
+    }
+
     fn usize_literal(&mut self) -> Result<usize> {
         match self.next() {
             Some(Token::Number(value)) if value.chars().all(|ch| ch.is_ascii_digit()) => {
@@ -391,11 +408,7 @@ impl Parser {
                 }
             };
             self.expect_symbol(')')?;
-            let alias = if self.take_word("AS") {
-                self.identifier()?
-            } else {
-                function.to_ascii_lowercase()
-            };
+            let alias = self.select_alias(function.to_ascii_lowercase())?;
             return Ok(SelectItem::Aggregate(AggregateItem::new(op, alias)));
         }
         let expr = self.expression(0)?;
@@ -403,11 +416,7 @@ impl Parser {
             Expr::Column(name) => name.clone(),
             _ => format!("expr_{}", index + 1),
         };
-        let alias = if self.take_word("AS") {
-            self.identifier()?
-        } else {
-            default_alias
-        };
+        let alias = self.select_alias(default_alias)?;
         Ok(SelectItem::Scalar(Selection::new(expr, alias)))
     }
 
@@ -802,6 +811,17 @@ mod tests {
         ).unwrap(), &sales()).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("Berlin".into()), Value::Integer(3)]]);
         assert!(parse_sql("SELECT city FROM sales ORDER BY 0").is_err());
+    }
+
+    #[test]
+    fn implicit_aliases_keep_select_and_aggregate_names() {
+        let rows = execute(&parse_sql(
+            "SELECT city location, amount revenue FROM sales LIMIT 1"
+        ).unwrap(), &sales()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("Berlin".into()), Value::Integer(2)]]);
+        let count = execute(&parse_sql("SELECT COUNT(*) total FROM sales").unwrap(), &sales())
+            .unwrap().rows().unwrap();
+        assert_eq!(count, vec![vec![Value::Integer(3)]]);
     }
 
     #[test]
