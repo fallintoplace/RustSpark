@@ -134,9 +134,8 @@ impl<W: Write> SpillWriter<W> {
                         self.output.write_all(&value.to_bits().to_le_bytes())?;
                     }
                     Value::Text(value) => {
-                        if value.len() > MAX_TEXT_BYTES {
-                            return Err(Error::Execution("spill text value too long".into()));
-                        }
+                        // Every string length and the total batch byte budget
+                        // were validated before emitting the row-count header.
                         self.output.write_all(&[5])?;
                         write_u32(&mut self.output, value.len())?;
                         self.output.write_all(value.as_bytes())?;
@@ -373,6 +372,31 @@ mod spill_window_write_tests {
         let right = reader.next_batch().unwrap().unwrap();
         assert_eq!(left, batch.slice_rows(2, 5).unwrap());
         assert_eq!(right, batch.slice_rows(7, 11).unwrap());
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod spill_text_preflight_single_check_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn multi_row_text_windows_roundtrip_after_preflight() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".repeat(1024))],
+            vec![Value::Null],
+            vec![Value::Text("xyz".repeat(4096))],
+            vec![Value::Text(String::new())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch_range(&source, 1, 4).unwrap();
+        let bytes = writer.finish().unwrap();
+        let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), source.slice_rows(1, 4).unwrap());
         assert!(reader.next_batch().unwrap().is_none());
     }
 }
