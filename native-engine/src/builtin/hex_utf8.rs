@@ -27,6 +27,15 @@ fn hex(args: &[Value]) -> Result<Value> {
     }
     Ok(Value::Text(output))
 }
+fn decode_hex_digit(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(Error::Parse("invalid hexadecimal digit".into())),
+    }
+}
+
 fn unhex_utf8(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     if text.len() % 2 != 0 || text.len() > MAX_INPUT_BYTES * 2 {
@@ -34,10 +43,9 @@ fn unhex_utf8(args: &[Value]) -> Result<Value> {
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);
     for pair in text.as_bytes().chunks_exact(2) {
-        let digits = std::str::from_utf8(pair)
-            .map_err(|_| Error::Parse("UNHEX_UTF8 requires ASCII hex".into()))?;
-        bytes.push(u8::from_str_radix(digits, 16)
-            .map_err(|_| Error::Parse("invalid hexadecimal digit".into()))?);
+        let upper = decode_hex_digit(pair[0])?;
+        let lower = decode_hex_digit(pair[1])?;
+        bytes.push((upper << 4) | lower);
     }
     let decoded = String::from_utf8(bytes)
         .map_err(|_| Error::Type("UNHEX_UTF8 decoded bytes are not valid UTF-8".into()))?;
@@ -58,5 +66,19 @@ mod tests {
         assert_eq!(hex(&[Value::Integer(255)]).unwrap(), Value::Text("FF".into()));
         assert!(unhex_utf8(&[Value::Text("FF".into())]).is_err());
         assert!(unhex_utf8(&[Value::Text("A".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod unhex_byte_decode_perf_tests {
+    use super::*;
+    #[test]
+    fn decodes_mixed_case_hex_and_rejects_invalid_bytes() {
+        assert_eq!(unhex_utf8(&[Value::Text("48656c6c6F".into())]).unwrap(),
+            Value::Text("Hello".into()));
+        assert_eq!(unhex_utf8(&[Value::Text("".into())]).unwrap(),
+            Value::Text("".into()));
+        assert!(unhex_utf8(&[Value::Text("00GG".into())]).is_err());
+        assert!(unhex_utf8(&[Value::Text("c3a9".into())]).is_ok());
     }
 }
