@@ -30,3 +30,9 @@ not a remote client or server.
 ```sh
 cd integrations/pyarrow && python3 -m unittest -v test_stream.py
 ```
+
+For joins across multiple local inputs, provide named maps such as
+`csv_tables={"users": "users.csv"}` and
+`parquet_tables={"orders": "orders.parquet"}`. Use the corresponding
+SQL table names in the query. Named inputs cannot be mixed with
+unnamed `csv`, `parquet` or `json_input` paths.
