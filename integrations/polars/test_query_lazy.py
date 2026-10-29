@@ -69,6 +69,18 @@ class PolarsCommandTests(unittest.TestCase):
                 with rustspark_lazy_frame("SELECT 1", process_timeout=3):
                     pass
 
+    def test_typed_sql_parameters_are_bound_not_interpolated(self):
+        command = build_command("SELECT * FROM data WHERE id > $min", Path("out.arrow"),
+                                named_params={"zeta": "int64:2", "alpha": "int64:1"})
+        self.assertIn("alpha=int64:1", command)
+        self.assertLess(command.index("alpha=int64:1"), command.index("zeta=int64:2"))
+        self.assertIn("$min", command[command.index("--sql") + 1])
+        for value in ({"bad-name": "int64:1"}, {"valid": "oops"},
+                      {"valid": "utf8:" + "x" * 8192}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                build_command("SELECT 1", Path("out.arrow"), named_params=value)
+
+
 
 if __name__ == "__main__":
     unittest.main()
