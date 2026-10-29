@@ -10,6 +10,7 @@ from typing import Iterator
 def build_command(
     sql: str, *,
     binary: str = "rustspark",
+    database_dir: str | Path | None = None,
     csv: str | Path | None = None,
     parquet: str | Path | None = None,
     json_input: str | Path | None = None,
@@ -26,6 +27,8 @@ def build_command(
     if query_timeout is not None and query_timeout <= 0:
         raise ValueError("query_timeout must be positive")
     command = [binary, "--sql", sql, "--stdout-format", "arrow"]
+    if database_dir is not None:
+        command.extend(["--database-dir", os.fspath(database_dir)])
     for format_name, path in selected:
         if path is not None:
             command.extend([f"--{format_name}", os.fspath(path)])
@@ -53,7 +56,7 @@ def iter_arrow_batches(
     import pyarrow as pa  # Optional dependency, not needed for RustSpark itself.
 
     command = build_command(
-        sql, binary=binary, csv=csv, parquet=parquet, json_input=json_input,
+        sql, binary=binary, database_dir=database_dir, csv=csv, parquet=parquet, json_input=json_input,
         max_rows=max_rows, query_timeout=query_timeout,
     )
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

@@ -19,6 +19,10 @@ class ArrowStreamCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", query_timeout=0)
 
+    def test_accepts_persistent_database_directory(self):
+        command = build_command("SELECT * FROM events", database_dir=Path("/tmp/data set"))
+        self.assertEqual(command[command.index("--database-dir") + 1], "/tmp/data set")
+
 
 if __name__ == "__main__":
     unittest.main()
