@@ -34,6 +34,7 @@ def build_command(
     csv_tables: dict[str, str | Path] | None = None,
     parquet_tables: dict[str, str | Path] | None = None,
     json_tables: dict[str, str | Path] | None = None,
+    named_params: dict[str, str] | None = None,
 ) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL must not be empty")
@@ -57,6 +58,16 @@ def build_command(
     add_named_inputs(command, "--csv-table", csv_tables)
     add_named_inputs(command, "--parquet-table", parquet_tables)
     add_named_inputs(command, "--json-table", json_tables)
+    if named_params:
+        if len(named_params) > 64:
+            raise ValueError("Too many SQL parameters")
+        for name in sorted(named_params):
+            value = named_params[name]
+            if not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None:
+                raise ValueError("Invalid SQL parameter name")
+            if not isinstance(value, str) or ":" not in value or len(value) > 8192:
+                raise ValueError("SQL parameters must be bounded typed values")
+            command.extend(["--named-param", f"{name}={value}"])
     if max_rows is not None:
         command.extend(["--max-rows", str(max_rows)])
     if query_timeout is not None:
@@ -76,6 +87,7 @@ def iter_arrow_batches(
     csv_tables: dict[str, str | Path] | None = None,
     parquet_tables: dict[str, str | Path] | None = None,
     json_tables: dict[str, str | Path] | None = None,
+    named_params: dict[str, str] | None = None,
 ) -> Iterator[object]:
     """Yield pyarrow.RecordBatch values from Arrow IPC stdout.
 
@@ -89,6 +101,7 @@ def iter_arrow_batches(
         csv=csv, parquet=parquet, json_input=json_input,
         max_rows=max_rows, query_timeout=query_timeout,
         csv_tables=csv_tables, parquet_tables=parquet_tables, json_tables=json_tables,
+        named_params=named_params,
     )
     # Spool stderr to disk so verbose diagnostics cannot block the Arrow stream.
     with tempfile.TemporaryFile() as error_log:
