@@ -111,7 +111,9 @@ where L: IntoIterator<Item = Result<Batch>>,
         let mut build_keys = HashSet::new();
         if outer_build {
             for key in build.column(right_index)? {
-                if !key.is_null() { build_keys.insert(key.clone()); }
+                if !key.is_null() && !matches!(key, Value::Float(v) if v.is_nan()) {
+                    build_keys.insert(key.clone());
+                }
             }
         }
         let mut matched_keys = HashSet::new();
@@ -126,7 +128,9 @@ where L: IntoIterator<Item = Result<Batch>>,
                 let piece = piece?;
                 if outer_build {
                     for key in piece.column(left_index)? {
-                        if !key.is_null() && build_keys.contains(key) {
+                        if !key.is_null() &&
+                            !matches!(key, Value::Float(v) if v.is_nan()) &&
+                            build_keys.contains(key) {
                             matched_keys.insert(key.clone());
                         }
                     }

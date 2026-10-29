@@ -363,11 +363,8 @@ fn lower(
             child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
         ))),
         Plan::Join { left, right, left_key, right_key, kind } => {
-            if matches!(kind, JoinKind::Right | JoinKind::Full) {
-                return Err(Error::Unsupported(
-                    "streaming RIGHT/FULL join requires partition-wide unmatched row tracking".into()
-                ));
-            }
+            // Partitioned grace_join already tracks matched build keys across
+            // all probe batches. Do not downgrade RIGHT/FULL to an inner join.
             let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
             let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
             let files = grace_join(
