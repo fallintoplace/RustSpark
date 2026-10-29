@@ -18,23 +18,36 @@ impl BloomFilter {
         Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes })
     }
 
-    fn bit(&self, key: &Value, seed: u32) -> usize {
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        seed.hash(&mut hash);
-        key.hash(&mut hash);
-        (hash.finish() % self.bits as u64) as usize
+    fn hash_pair(&self, key: &Value) -> (u64, u64) {
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut first);
+        let step = if self.hashes > 1 {
+            let mut second = std::collections::hash_map::DefaultHasher::new();
+            1_u8.hash(&mut second);
+            key.hash(&mut second);
+            second.finish() | 1
+        } else {
+            0
+        };
+        (first.finish(), step)
+    }
+
+    fn probe(&self, first: u64, step: u64, seed: u32) -> usize {
+        (first.wrapping_add(u64::from(seed).wrapping_mul(step)) % self.bits as u64) as usize
     }
 
     pub fn insert(&mut self, key: &Value) {
+        let (first, step) = self.hash_pair(key);
         for seed in 0..self.hashes {
-            let bit = self.bit(key, seed);
+            let bit = self.probe(first, step, seed);
             self.words[bit / 64] |= 1_u64 << (bit % 64);
         }
     }
 
     pub fn might_contain(&self, key: &Value) -> bool {
+        let (first, step) = self.hash_pair(key);
         (0..self.hashes).all(|seed| {
-            let bit = self.bit(key, seed);
+            let bit = self.probe(first, step, seed);
             (self.words[bit / 64] & (1_u64 << (bit % 64))) != 0
         })
     }
