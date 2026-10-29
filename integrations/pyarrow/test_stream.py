@@ -19,6 +19,15 @@ class ArrowStreamCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", query_timeout=0)
 
+    def test_rejects_non_integer_limits_before_process_launch(self):
+        for bad in (True, 1.5, float("nan"), -1):
+            with self.subTest(max_rows=bad), self.assertRaisesRegex(ValueError, "max_rows"):
+                build_command("SELECT 1", max_rows=bad)
+        for bad in (False, 1.5, float("inf"), -1):
+            with self.subTest(query_timeout=bad), self.assertRaisesRegex(ValueError, "query_timeout"):
+                build_command("SELECT 1", query_timeout=bad)
+        self.assertIn("0", build_command("SELECT 1", max_rows=0))
+
 
 if __name__ == "__main__":
     unittest.main()
