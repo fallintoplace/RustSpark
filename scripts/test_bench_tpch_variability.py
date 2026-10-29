@@ -50,6 +50,17 @@ class VariabilityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 variation.inspect(report([1, 1, 1]), value)
 
+    def test_optional_robust_noise_threshold(self):
+        sample = report([10, 10, 10, 12, 12, 12])
+        permissive = variation.inspect(sample, threshold=1.0)
+        self.assertEqual(permissive["unstable_queries"], [])
+        constrained = variation.inspect(sample, threshold=1.0, max_relative_mad=0.05)
+        self.assertEqual(constrained["unstable_queries"], [1])
+        self.assertGreater(constrained["results"][0]["relative_median_absolute_deviation"], 0.05)
+        for invalid in (True, -1, float("nan")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "Relative MAD"):
+                variation.inspect(sample, max_relative_mad=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()
