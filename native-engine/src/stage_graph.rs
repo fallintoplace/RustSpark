@@ -13,6 +13,7 @@ pub struct Stage {
 pub struct StageGraph {
     stages: Vec<Stage>,
     order: Vec<u64>,
+    order_indices: Vec<usize>,
 }
 
 impl StageGraph {
@@ -54,8 +55,10 @@ impl StageGraph {
             }
         }
         let mut order = Vec::with_capacity(stages.len());
+        let mut order_indices = Vec::with_capacity(stages.len());
         while let Some(position) = ready.pop_front() {
             order.push(stages[position].id);
+            order_indices.push(position);
             for &successor in &successors[position] {
                 indegree[successor] -= 1;
                 if indegree[successor] == 0 {
@@ -66,7 +69,7 @@ impl StageGraph {
         if order.len() != stages.len() {
             return Err(Error::Execution("execution stage graph contains a cycle".into()));
         }
-        Ok(Self { stages, order })
+        Ok(Self { stages, order, order_indices })
     }
 
     pub fn topological_order(&self) -> &[u64] {
@@ -74,12 +77,11 @@ impl StageGraph {
     }
 
     pub fn ready(&self, completed: &HashSet<u64>) -> Vec<u64> {
-        let by_id: HashMap<u64, &Stage> = self.stages.iter()
-            .map(|stage| (stage.id, stage)).collect();
-        self.order.iter().copied().filter(|id| {
-            let stage = by_id[id];
-            !completed.contains(id) &&
-                stage.dependencies.iter().all(|dependency| completed.contains(dependency))
+        self.order_indices.iter().filter_map(|&index| {
+            let stage = &self.stages[index];
+            (!completed.contains(&stage.id) &&
+                stage.dependencies.iter().all(|dependency| completed.contains(dependency)))
+                .then_some(stage.id)
         }).collect()
     }
 
