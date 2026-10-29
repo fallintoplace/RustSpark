@@ -62,8 +62,16 @@ def parse_query_rows(text: str) -> list[dict]:
             raise ValueError("Nonfinite SQL JSON number")
         return parsed
 
-    rows = json.loads(text, parse_constant=reject_nonfinite,
-                      parse_float=parse_finite_float)
+    def unique_fields(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError(f"Duplicate SQL result key: {key}")
+            fields[key] = value
+        return fields
+
+    rows = json.loads(text, object_pairs_hook=unique_fields,
+                      parse_constant=reject_nonfinite, parse_float=parse_finite_float)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL template results must be an array of row objects")
     return rows
