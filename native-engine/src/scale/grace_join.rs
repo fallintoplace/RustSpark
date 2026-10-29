@@ -41,15 +41,19 @@ fn load_build(
     if reader.schema() != schema {
         return Err(Error::Schema("join build schema mismatch".into()));
     }
-    let mut rows = Vec::new();
+    let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
+    let mut rows = 0usize;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
-        if rows.len().checked_add(batch.num_rows()).is_none_or(|n| n > max_rows) {
-            return Err(Error::Execution("join build partition exceeds row budget".into()));
+        let next = rows.checked_add(batch.num_rows())
+            .filter(|total| *total <= max_rows)
+            .ok_or_else(|| Error::Execution("join build partition exceeds row budget".into()))?;
+        for (column, output) in columns.iter_mut().enumerate() {
+            output.extend_from_slice(batch.column(column)?);
         }
-        rows.extend(batch.rows()?);
+        rows = next;
     }
-    Batch::from_rows(schema.clone(), rows)
+    Batch::new_with_row_count(schema.clone(), columns, rows)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,5 +329,32 @@ mod borrowed_spill_outer_keys_perf_tests {
         assert_eq!(rows.len(), 8);
         drop(output);
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod columnar_build_load_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    #[test]
+    fn reads_nullable_text_builds_and_enforces_budget() {
+        let dir = std::env::temp_dir().join(format!("native-column-build-{}-{}",
+            std::process::id(), ID.fetch_add(1, AtomicOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("build.rspill");
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, true)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![vec![Value::Text("hello".into())], vec![Value::Null]]).unwrap();
+        let b = Batch::from_rows(schema.clone(), vec![vec![Value::Text("world".into())]]).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        writer.write_batch(&a).unwrap();
+        writer.write_batch(&b).unwrap();
+        writer.finish().unwrap();
+        let loaded = load_build(&path, &schema, 3, 3, &QueryControl::default()).unwrap();
+        assert_eq!(loaded.rows().unwrap(), vec![vec![Value::Text("hello".into())], vec![Value::Null], vec![Value::Text("world".into())]]);
+        assert!(load_build(&path, &schema, 2, 3, &QueryControl::default()).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
