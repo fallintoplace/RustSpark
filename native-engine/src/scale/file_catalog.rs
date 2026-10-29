@@ -47,13 +47,16 @@ impl FileCatalog {
         if schema.is_empty() || max_record_bytes == 0 {
             return Err(Error::Schema("CSV source requires a schema and byte limit".into()));
         }
-        if self.tables.contains_key(key.as_ref()) {
-            return Err(Error::Schema(format!("file-backed table already exists: {name}")));
+        match self.tables.entry(key.into_owned()) {
+            std::collections::hash_map::Entry::Occupied(_) =>
+                Err(Error::Schema(format!("file-backed table already exists: {name}"))),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(CsvTable {
+                    path: path.as_ref().to_path_buf(), schema, max_record_bytes
+                });
+                Ok(())
+            }
         }
-        self.tables.insert(key.into_owned(), CsvTable {
-            path: path.as_ref().to_path_buf(), schema, max_record_bytes
-        });
-        Ok(())
     }
 
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
@@ -159,5 +162,19 @@ mod borrowed_file_catalog_key_perf_tests {
         catalog.register_csv("SALES", "unused.csv", schema, 100).unwrap();
         assert!(catalog.get("sales").is_ok());
         assert!(catalog.get("Sales").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod file_catalog_entry_admission_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn duplicate_case_folded_name_does_not_replace_existing_source() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("Events", "original.csv", schema.clone(), 1024).unwrap();
+        assert!(catalog.register_csv("events", "replacement.csv", schema, 1024).is_err());
+        assert_eq!(catalog.get("EVENTS").unwrap().path(), Path::new("original.csv"));
     }
 }
