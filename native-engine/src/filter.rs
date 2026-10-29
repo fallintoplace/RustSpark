@@ -2,13 +2,7 @@ use crate::{batch::Batch, expr::Expr, Result};
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
-    let mut keep = Vec::new();
-    for row in 0..batch.num_rows() {
-        if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
-            keep.push(row);
-        }
-    }
-    batch.take(&keep)
+    batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
 }
 
 #[cfg(test)]
@@ -76,3 +70,21 @@ mod bounded_filter_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod vectorized_filter_integration_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn default_filter_uses_sql_null_semantics_for_integer_comparisons() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(3)], vec![Value::Integer(9)]],
+        ).unwrap();
+        let expr = Expr::binary(Expr::Column("n".into()),
+            crate::expr::BinaryOp::Greater, Expr::Literal(Value::Integer(3)));
+        assert_eq!(filter(&input, &expr).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(9)]]);
+    }
+}
