@@ -109,6 +109,7 @@ mod tests {
 
 /// Reserve a group of operator allocations in a single atomic admission.
 pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Reservation>> {
+    if requests.is_empty() { return Ok(Vec::new()); }
     let total = requests.iter().try_fold(0usize, |sum, &bytes| {
         sum.checked_add(bytes)
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
@@ -134,6 +135,21 @@ mod grouped_scale_memory_tests {
         let allocations = reserve_many(&budget, &[30, 20]).unwrap();
         assert_eq!(budget.used(), 50);
         drop(allocations);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod empty_scale_reserve_many_tests {
+    use super::*;
+    #[test]
+    fn empty_group_does_not_reserve_bytes_under_saturation() {
+        let budget = MemoryBudget::new(1).unwrap();
+        let held = budget.reserve(1).unwrap();
+        let empty = reserve_many(&budget, &[]).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(budget.used(), 1);
+        drop(held);
         assert_eq!(budget.used(), 0);
     }
 }
