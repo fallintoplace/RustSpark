@@ -38,6 +38,8 @@ class WarmTpchTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "ok")
         self.assertEqual(results[0]["samples_ms"], [1.25, 1.25])
         self.assertEqual(results[0]["result_rows"], 1)
+        self.assertEqual(results[0]["p99_ms"], 1.25)
+        self.assertGreaterEqual(results[0]["p99_ms"], results[0]["p95_ms"])
 
     def test_rejects_query_errors_missing_timers_and_boundaries(self):
         requests = self.requests()
