@@ -46,10 +46,16 @@ def complete_query_rows(report):
 def summarize(report):
     entries = complete_query_rows(report)
     medians = checked_medians(entries)
+    total = math.fsum(medians)
+    slowest = sorted(entries, key=lambda row: (-row["median_ms"], row["id"]))[:3]
     return {
         "queries_executed": 22,
         "metric": "sum and geometric mean of per-query cold CLI median wall times, not TPC throughput",
-        "sum_median_ms": round(math.fsum(medians), 3),
+        "sum_median_ms": round(total, 3),
+        "top_latency_queries": [row["id"] for row in slowest],
+        "top_three_latency_percent": round(
+            math.fsum(row["median_ms"] for row in slowest) * 100 / total, 2,
+        ),
         "geometric_mean_ms": round(math.exp(math.fsum(math.log(value) for value in medians) / 22), 3),
         "slowest_query": max(entries, key=lambda row: row["median_ms"])["id"],
         "fastest_query": min(entries, key=lambda row: row["median_ms"])["id"],
