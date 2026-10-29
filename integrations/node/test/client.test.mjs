@@ -32,3 +32,13 @@ test("reports process exit and invalid output", () => {
   assert.throws(() => new RustSpark({ runner: () => ({ status: 0, stdout: "{}" }) }).query("x"), RustSparkError);
   assert.throws(() => new RustSpark({ runner: () => ({ error: Error("ENOENT") }) }).query("x"), /ENOENT/);
 });
+
+
+test("rejects non-finite numbers inside nested SQL JSON results", () => {
+  for (const stdout of ['[{"n":1e999}]', '[{"nested":[-1e999]}]']) {
+    const client = new RustSpark({ runner: () => ({ status: 0, stdout }) });
+    assert.throws(() => client.query("SELECT 1"), RustSparkError);
+  }
+  const ok = new RustSpark({ runner: () => ({ status: 0, stdout: '[{"n":1.5}]' }) });
+  assert.deepEqual(ok.query("SELECT 1"), [{ n: 1.5 }]);
+});
