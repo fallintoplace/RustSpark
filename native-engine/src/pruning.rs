@@ -100,3 +100,45 @@ mod tests {
         assert!(can_skip(&all_null, "x", &expr(BinaryOp::Equal, 5)));
     }
 }
+
+ 
+/// Conservative pruning across column statistics and boolean predicates.
+/// Missing statistics never cause a data partition to be discarded.
+pub fn can_skip_columns(
+    stats: &std::collections::HashMap<String, ColumnStatistics>,
+    predicate: &Expr,
+) -> bool {
+    match predicate {
+        Expr::Binary { left, op: BinaryOp::And, right } =>
+            can_skip_columns(stats, left) || can_skip_columns(stats, right),
+        Expr::Binary { left, op: BinaryOp::Or, right } =>
+            can_skip_columns(stats, left) && can_skip_columns(stats, right),
+        _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
+    }
+}
+
+#[cfg(test)]
+mod compound_pruning_feature_tests {
+    use super::*;
+
+    #[test]
+    fn impossible_disjunctions_prune_but_missing_stats_do_not() {
+        let summary = ColumnStatistics {
+            rows: 10, nulls: 0, min: Some(Value::Integer(10)),
+            max: Some(Value::Integer(20)),
+        };
+        let stats = std::collections::HashMap::from([
+            ("x".to_owned(), summary.clone()),
+            ("y".to_owned(), summary),
+        ]);
+        let greater = |name: &str, n| Expr::binary(Expr::Column(name.into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(n)));
+        let impossible = Expr::binary(greater("x", 50), BinaryOp::Or, greater("y", 100));
+        assert!(can_skip_columns(&stats, &impossible));
+        let possibly_matching = Expr::binary(greater("x", 50), BinaryOp::Or, greater("z", 1));
+        assert!(!can_skip_columns(&stats, &possibly_matching));
+        let and = Expr::binary(greater("x", 50), BinaryOp::And, greater("z", 1));
+        assert!(can_skip_columns(&stats, &and));
+    }
+}
+
