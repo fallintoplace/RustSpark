@@ -69,13 +69,14 @@ struct Parser {
     ctes: std::collections::HashMap<String, Plan>,
     active_cte: Option<String>,
     subquery_depth: usize,
+    expression_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens, index: 0, ctes: std::collections::HashMap::new(),
-            active_cte: None, subquery_depth: 0,
+            active_cte: None, subquery_depth: 0, expression_depth: 0,
         }
     }
 
@@ -179,6 +180,17 @@ impl Parser {
     }
 
     fn expression(&mut self, min_precedence: u8) -> Result<Expr> {
+        const MAX_DEPTH: usize = 256;
+        if self.expression_depth >= MAX_DEPTH {
+            return Err(Error::Parse("SQL expression nesting exceeds 256 levels".into()));
+        }
+        self.expression_depth += 1;
+        let result = self.parse_expression(min_precedence);
+        self.expression_depth -= 1;
+        result
+    }
+
+    fn parse_expression(&mut self, min_precedence: u8) -> Result<Expr> {
         let mut left = self.prefix()?;
         loop {
             if min_precedence <= 3 && self.peek() == Some(&Token::Operator("<=>".into())) {
@@ -1396,5 +1408,28 @@ mod consolidated_sql_numeric_regressions {
             vec![Value::Float(0.5), Value::Float(200.0), Value::Integer(i64::MIN)]);
         assert!(parse_sql("SELECT 1e309 FROM t").is_err());
         assert!(parse_sql("SELECT -9223372036854775809 FROM t").is_err());
+    }
+}
+
+#[cfg(test)]
+mod spark_expression_depth_safety_tests {
+    use super::*;
+
+    #[test]
+    fn deeply_nested_parentheses_fail_without_stack_overflow() {
+        let deep = format!("SELECT {}1{} FROM t",
+            "(".repeat(400), ")".repeat(400));
+        let error = parse_sql(&deep).unwrap_err().to_string();
+        assert!(error.contains("nesting"), "{error}");
+        let shallow = format!("SELECT {}1{} FROM t",
+            "(".repeat(16), ")".repeat(16));
+        assert!(parse_sql(&shallow).is_ok());
+    }
+
+    #[test]
+    fn nested_boolean_functions_share_expression_depth_budget() {
+        let deep = format!("SELECT {}TRUE{} FROM t",
+            "NOT (".repeat(350), ")".repeat(350));
+        assert!(parse_sql(&deep).is_err());
     }
 }
