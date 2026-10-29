@@ -22,11 +22,17 @@ enum SelectItem {
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    // Query-local CTEs are substituted as logical subplans, never registered
+    // globally in Catalog. Keep names case-insensitive like native schemas.
+    ctes: std::collections::HashMap<String, Plan>,
+    active_cte: Option<String>,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, index: 0 }
+        Self {
+            tokens, index: 0, ctes: std::collections::HashMap::new(), active_cte: None,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -437,7 +443,7 @@ impl Parser {
             }
         }
         self.expect_word("FROM")?;
-        let mut plan = Plan::scan(self.identifier()?);
+        let mut plan = self.scan_or_cte(self.identifier()?)?;
         loop {
             let kind = if self.take_word("JOIN") {
                 Some(JoinKind::Inner)
@@ -477,7 +483,7 @@ impl Parser {
             let right_key = self.identifier()?;
             plan = Plan::Join {
                 left: Box::new(plan),
-                right: Box::new(Plan::scan(right)),
+                right: Box::new(self.scan_or_cte(right)?),
                 left_key,
                 right_key,
                 kind,
@@ -568,6 +574,65 @@ impl Parser {
         }
 
         Ok(plan)
+    }
+
+
+    fn scan_or_cte(&self, name: String) -> Result<Plan> {
+        let normalized = name.to_ascii_lowercase();
+        if self.active_cte.as_ref() == Some(&normalized) {
+            return Err(Error::Unsupported("recursive CTE references are not supported".into()));
+        }
+        Ok(self.ctes.get(&normalized).cloned().unwrap_or_else(|| Plan::scan(name)))
+    }
+
+    fn parse_ctes(&mut self) -> Result<()> {
+        if !self.take_word("WITH") { return Ok(()); }
+        if self.take_word("RECURSIVE") {
+            return Err(Error::Unsupported("recursive CTE execution is not supported".into()));
+        }
+        loop {
+            if self.ctes.len() >= 16 {
+                return Err(Error::Parse("WITH exceeds 16 named relations".into()));
+            }
+            let name = self.identifier()?;
+            let normalized = name.to_ascii_lowercase();
+            if self.ctes.contains_key(&normalized) {
+                return Err(Error::Parse(format!("duplicate CTE: {name}")));
+            }
+            let mut renamed_columns = Vec::new();
+            if self.take_symbol('(') {
+                loop {
+                    renamed_columns.push(self.identifier()?);
+                    if !self.take_symbol(',') { break; }
+                }
+                self.expect_symbol(')')?;
+            }
+            self.expect_word("AS")?;
+            self.expect_symbol('(')?;
+            self.active_cte = Some(normalized.clone());
+            let mut plan = self.select_with_intersections()?;
+            plan = self.finish_query(plan)?;
+            self.expect_symbol(')')?;
+            self.active_cte = None;
+            if !renamed_columns.is_empty() {
+                let original = match &plan {
+                    Plan::Project { selections, .. } => selections.iter()
+                        .map(|selection| selection.alias.clone()).collect::<Vec<_>>(),
+                    _ => return Err(Error::Unsupported(
+                        "CTE column renaming requires explicit SELECT columns".into())),
+                };
+                if renamed_columns.len() != original.len() {
+                    return Err(Error::Parse("CTE alias count differs from result width".into()));
+                }
+                let renames = original.iter().zip(renamed_columns).map(|(source, alias)|
+                    Selection::new(Expr::Column(source.clone()), alias)
+                ).collect();
+                plan = plan.project(renames);
+            }
+            self.ctes.insert(normalized, plan);
+            if !self.take_symbol(',') { break; }
+        }
+        Ok(())
     }
 
     fn select_with_intersections(&mut self) -> Result<Plan> {
@@ -671,6 +736,7 @@ impl Parser {
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
+    parser.parse_ctes()?;
     let mut plan = parser.select_with_intersections()?;
     loop {
         if parser.take_word("UNION") {
