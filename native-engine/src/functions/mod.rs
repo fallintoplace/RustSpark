@@ -204,6 +204,15 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
             if crate::builtin::supports(name) {
                 crate::builtin::evaluate(name, args, batch, row)
             } else {
+                // Most remaining SQL builtins have at most three arguments.
+                // Avoid an allocation for each row in that common path.
+                if args.len() <= 4 {
+                    let mut values: [Value; 4] = std::array::from_fn(|_| Value::Null);
+                    for (slot, arg) in values.iter_mut().zip(args) {
+                        *slot = arg.evaluate(batch, row)?;
+                    }
+                    return crate::builtin_extra::evaluate(name, &values[..args.len()]);
+                }
                 let values = args.iter().map(|arg| arg.evaluate(batch, row))
                     .collect::<Result<Vec<_>>>()?;
                 crate::builtin_extra::evaluate(name, &values)
@@ -243,6 +252,16 @@ mod tests {
         ];
         catalog.register("t", crate::batch::Batch::from_rows(schema, rows)?)?;
         executor::execute(&sql::parse_sql(query)?, &catalog)?.rows()
+    }
+
+    #[test]
+    fn builtin_extra_evaluates_small_and_large_arity_calls() {
+        assert_eq!(run("SELECT UPPER(name) FROM t").unwrap()[0][0],
+            Value::Text("BERLIN".into()));
+        assert_eq!(run("SELECT CONCAT(name, '-', name) FROM t").unwrap()[0][0],
+            Value::Text("Berlin-Berlin".into()));
+        assert_eq!(run("SELECT CONCAT(name, '-', name, '-', name) FROM t").unwrap()[0][0],
+            Value::Text("Berlin-Berlin-Berlin".into()));
     }
 
     #[test]
