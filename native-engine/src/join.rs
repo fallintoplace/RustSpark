@@ -20,6 +20,10 @@ pub enum JoinKind {
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
 
+fn joinable(key: &Value) -> bool {
+    !key.is_null() && !matches!(key, Value::Float(value) if value.is_nan())
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
@@ -36,12 +40,12 @@ pub fn hash_join(
         let mut keys = HashSet::new();
         for row in 0..right.num_rows() {
             let key = right.value(row, right_column)?;
-            if !key.is_null() { keys.insert(key.clone()); }
+            if joinable(key) { keys.insert(key.clone()); }
         }
         let mut indices = Vec::new();
         for row in 0..left.num_rows() {
             let key = left.value(row, left_column)?;
-            let found = !key.is_null() && keys.contains(key);
+            let found = joinable(key) && keys.contains(key);
             if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
                 if indices.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
@@ -74,7 +78,7 @@ pub fn hash_join(
     let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
     for row in 0..right.num_rows() {
         let key = right.value(row, right_column)?;
-        if !key.is_null() {
+        if joinable(key) {
             right_hash.entry(key.clone()).or_default().push(row);
         }
     }
@@ -82,7 +86,7 @@ pub fn hash_join(
     let mut matched_right = vec![false; right.num_rows()];
     for left_row in 0..left.num_rows() {
         let key = left.value(left_row, left_column)?;
-        let right_rows = if key.is_null() { None } else { right_hash.get(key) };
+        let right_rows = if joinable(key) { right_hash.get(key) } else { None };
         if let Some(right_rows) = right_rows {
             for &right_row in right_rows {
                 matched_right[right_row] = true;
@@ -167,5 +171,26 @@ mod tests {
             vec![Value::Integer(2), Value::Null],
         ]);
         assert_eq!(result.schema().column("right_id").unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod nan_join_key_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn nan_keys_do_not_match_in_inner_semi_or_left_joins() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(f64::NAN)], vec![Value::Float(1.0)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Float(f64::NAN)], vec![Value::Float(1.0)],
+        ]).unwrap();
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Inner).unwrap().num_rows(), 1);
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Semi).unwrap().num_rows(), 1);
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Anti).unwrap().num_rows(), 1);
+        assert_eq!(hash_join(&left, &right, "n", "n", JoinKind::Left).unwrap().num_rows(), 2);
     }
 }
