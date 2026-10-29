@@ -21,6 +21,7 @@ mod bitwise;
 mod bitshift;
 mod bit_count;
 mod width_bucket;
+mod factorial;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -64,6 +65,7 @@ const MODULES: &[&[Function]] = &[
     &bitshift::FUNCTIONS,
     &bit_count::FUNCTIONS,
     &width_bucket::FUNCTIONS,
+    &factorial::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
