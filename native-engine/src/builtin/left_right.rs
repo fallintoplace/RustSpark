@@ -24,6 +24,12 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
     let result = if count == 0 {
         ""
+    } else if text.is_ascii() {
+        if from_right {
+            &text[text.len().saturating_sub(count)..]
+        } else {
+            &text[..text.len().min(count)]
+        }
     } else if from_right {
         let start = text.char_indices().rev().nth(count - 1)
             .map_or(0, |(byte, _)| byte);
@@ -140,5 +146,21 @@ mod common_prefix_extension_tests {
         assert_eq!(common_prefix(&[Value::Text("café-one".into()), Value::Text("café-two".into())]).unwrap(), Value::Text("café-".into()));
         assert_eq!(common_prefix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_left_right_slices_tests {
+    use super::*;
+    #[test]
+    fn handles_huge_ascii_widths_and_unicode_boundaries() {
+        let source = Value::Text("0123456789".repeat(4096));
+        assert_eq!(left(&[source.clone(), Value::Integer(2)]).unwrap(),
+            Value::Text("01".into()));
+        assert_eq!(right(&[source.clone(), Value::Integer(2)]).unwrap(),
+            Value::Text("89".into()));
+        assert_eq!(left(&[source.clone(), Value::Integer(i64::MAX)]).unwrap(), source);
+        assert_eq!(right(&[Value::Text("é🙂z".into()), Value::Integer(2)]).unwrap(),
+            Value::Text("🙂z".into()));
     }
 }
