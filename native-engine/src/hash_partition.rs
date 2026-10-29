@@ -27,11 +27,13 @@ pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<
     }
     let indices = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
+    let columns = indices.iter().map(|&index| batch.column(index))
+        .collect::<Result<Vec<_>>>()?;
     let mut groups = vec![Vec::new(); partitions];
     for row in 0..batch.num_rows() {
         let mut hasher = PartitionHasher::default();
-        for &column in &indices {
-            batch.value(row, column)?.hash(&mut hasher);
+        for column in &columns {
+            column[row].hash(&mut hasher);
         }
         let bucket = (hasher.finish() % partitions as u64) as usize;
         groups[bucket].push(row);
@@ -126,5 +128,26 @@ mod partition_allocation_tests {
         assert!(partition(&batch, &["id"], usize::MAX).is_err());
         assert!(partition_batches(&[batch.clone()], &["id"], usize::MAX).is_err());
         assert!(partition_batches(&[batch], &["id"], 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod partition_bound_column_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn multiple_key_columns_and_nulls_remain_partition_stable() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Integer, true), Field::new("b", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("x".into())],
+            vec![Value::Null, Value::Text("y".into())],
+            vec![Value::Integer(1), Value::Text("x".into())],
+        ]).unwrap();
+        for parts in [1, 2, 8, 31] {
+            let result = partition(&batch, &["a", "b"], parts).unwrap();
+            assert_eq!(result.iter().map(Batch::num_rows).sum::<usize>(), 3);
+            assert!(result.iter().any(|part| part.num_rows() >= 2));
+        }
     }
 }
