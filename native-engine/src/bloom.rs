@@ -18,23 +18,31 @@ impl BloomFilter {
         Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes })
     }
 
-    fn bit(&self, key: &Value, seed: u32) -> usize {
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        seed.hash(&mut hash);
-        key.hash(&mut hash);
-        (hash.finish() % self.bits as u64) as usize
+    fn key_hashes(key: &Value) -> (u64, u64) {
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut first);
+        let mut second = std::collections::hash_map::DefaultHasher::new();
+        1_u8.hash(&mut second);
+        key.hash(&mut second);
+        (first.finish(), second.finish() | 1)
+    }
+
+    fn bit(&self, first: u64, second: u64, probe: u32) -> usize {
+        (first.wrapping_add(u64::from(probe).wrapping_mul(second)) % self.bits as u64) as usize
     }
 
     pub fn insert(&mut self, key: &Value) {
+        let (first, second) = Self::key_hashes(key);
         for seed in 0..self.hashes {
-            let bit = self.bit(key, seed);
+            let bit = self.bit(first, second, seed);
             self.words[bit / 64] |= 1_u64 << (bit % 64);
         }
     }
 
     pub fn might_contain(&self, key: &Value) -> bool {
+        let (first, second) = Self::key_hashes(key);
         (0..self.hashes).all(|seed| {
-            let bit = self.bit(key, seed);
+            let bit = self.bit(first, second, seed);
             (self.words[bit / 64] & (1_u64 << (bit % 64))) != 0
         })
     }
@@ -126,5 +134,22 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_double_hash_tests {
+    use super::*;
+
+    #[test]
+    fn non_power_of_two_filters_never_drop_inserted_text_or_float_keys() {
+        for probes in [1, 2, 5, 16] {
+            let mut filter = BloomFilter::new(1009, probes).unwrap();
+            let keys = (0..200).map(|n| Value::Text(format!("long-key-{n:04}"))).collect::<Vec<_>>();
+            for value in &keys { filter.insert(value); }
+            filter.insert(&Value::Float(-0.0));
+            for value in &keys { assert!(filter.might_contain(value)); }
+            assert!(filter.might_contain(&Value::Float(0.0)));
+        }
     }
 }
