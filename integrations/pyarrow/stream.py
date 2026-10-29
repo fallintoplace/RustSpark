@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 from typing import Iterator
 
 
@@ -56,26 +57,27 @@ def iter_arrow_batches(
         sql, binary=binary, csv=csv, parquet=parquet, json_input=json_input,
         max_rows=max_rows, query_timeout=query_timeout,
     )
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        assert process.stdout is not None
-        with pa.ipc.open_stream(process.stdout) as reader:
-            for batch in reader:
-                yield batch
-        status = process.wait()
-        if status:
-            assert process.stderr is not None
-            stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-            raise RuntimeError(stderr or f"RustSpark exited with status {status}")
-    finally:
-        if process.poll() is None:
-            process.terminate()
-        if process.stdout:
-            process.stdout.close()
-        if process.stderr:
-            process.stderr.close()
+    # Spooling stderr prevents pipe backpressure from blocking Arrow stdout.
+    with tempfile.TemporaryFile() as error_log:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log)
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            assert process.stdout is not None
+            with pa.ipc.open_stream(process.stdout) as reader:
+                for batch in reader:
+                    yield batch
+            status = process.wait()
+            if status:
+                error_log.seek(0, os.SEEK_END)
+                error_log.seek(max(0, error_log.tell() - 8192))
+                stderr = error_log.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(stderr or f"RustSpark exited with status {status}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            if process.stdout:
+                process.stdout.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
