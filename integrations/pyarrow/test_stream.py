@@ -78,6 +78,14 @@ class ArrowStreamCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "FINAL ERROR"):
                 list(iter_arrow_batches("SELECT 1", database_dir="/tmp/my db"))
 
+    def test_named_paths_must_be_nonempty_unicode_strings(self):
+        for invalid in ("", b"/tmp/events.json"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "paths"):
+                build_command("SELECT 1", json_tables={"events": invalid})
+        self.assertIn("events=/tmp/café.json",
+                      build_command("SELECT 1", json_tables={"events": "/tmp/café.json"}))
+
+
 
 if __name__ == "__main__":
     unittest.main()
