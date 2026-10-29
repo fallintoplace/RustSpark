@@ -64,6 +64,7 @@ mod find_in_set;
 mod substring_index;
 mod elt;
 mod soundex;
+mod luhn_check;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -148,6 +149,7 @@ const MODULES: &[&[Function]] = &[
     &substring_index::FUNCTIONS,
     &elt::FUNCTIONS,
     &soundex::FUNCTIONS,
+    &luhn_check::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
