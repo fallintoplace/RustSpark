@@ -81,7 +81,8 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
-    for row in left.rows()? {
+    for index in 0..left.num_rows() {
+        let row = left.row(index)?;
         if !right_rows.contains(&row) && emitted.insert(row.clone()) {
             rows.push(row);
         }
