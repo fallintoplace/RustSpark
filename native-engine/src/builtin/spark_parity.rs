@@ -209,6 +209,33 @@ fn luhn_check(args: &[Value]) -> Result<Value> {
     Ok(Value::Boolean(sum % 10 == 0))
 }
 
+fn soundex_digit(ch: char) -> char {
+    match ch.to_ascii_uppercase() {
+        'B' | 'F' | 'P' | 'V' => '1',
+        'C' | 'G' | 'J' | 'K' | 'Q' | 'S' | 'X' | 'Z' => '2',
+        'D' | 'T' => '3',
+        'L' => '4',
+        'M' | 'N' => '5',
+        'R' => '6',
+        _ => '0',
+    }
+}
+fn soundex(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let mut letters = text.chars().filter(|ch| ch.is_ascii_alphabetic());
+    let Some(first) = letters.next() else { return Ok(Value::Text(text.to_owned())); };
+    let mut result = String::from(first.to_ascii_uppercase());
+    let mut previous = soundex_digit(first);
+    for letter in letters {
+        let code = soundex_digit(letter);
+        if code != '0' && code != previous { result.push(code); }
+        if !matches!(letter.to_ascii_uppercase(), 'H' | 'W') { previous = code; }
+        if result.len() == 4 { break; }
+    }
+    while result.len() < 4 { result.push('0'); }
+    Ok(Value::Text(result))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -227,6 +254,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "position", min_args: 2, max_args: 3, result_type: position_type, call: position },
     Function { name: "substr", min_args: 2, max_args: 3, result_type: substr_type, call: substr },
     Function { name: "luhn_check", min_args: 1, max_args: 1, result_type: luhn_type, call: luhn_check },
+    Function { name: "soundex", min_args: 1, max_args: 1, result_type: text_text_type, call: soundex },
     // PARITY_FUNCTIONS
 ];
 
@@ -355,6 +383,13 @@ mod tests {
         assert_eq!(sql_result("luhn_check('79927398714')").unwrap(), Value::Boolean(false));
         assert_eq!(sql_result("luhn_check('not digits')").unwrap(), Value::Boolean(false));
         assert_eq!(luhn_check(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_soundex_encodes_english_names() {
+        assert_eq!(sql_result("soundex('Miller')").unwrap(), Value::Text("M460".into()));
+        assert_eq!(sql_result("soundex('Robert')").unwrap(), Value::Text("R163".into()));
+        assert_eq!(soundex(&[Value::Null]).unwrap(), Value::Null);
     }
 
     // PARITY_TESTS
