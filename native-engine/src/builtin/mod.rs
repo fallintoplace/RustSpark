@@ -57,6 +57,7 @@ mod lcase;
 mod ucase;
 mod initcap;
 mod space;
+mod substring_index;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -134,6 +135,7 @@ const MODULES: &[&[Function]] = &[
     &ucase::FUNCTIONS,
     &initcap::FUNCTIONS,
     &space::FUNCTIONS,
+    &substring_index::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
