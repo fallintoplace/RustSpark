@@ -10,6 +10,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
     let Some(count) = super::integer(&args[2])? else { return Ok(Value::Null) };
     if count == 0 || delimiter.is_empty() { return Ok(Value::Text(String::new())); }
+    if count == 1 {
+        return Ok(Value::Text(text.split_once(delimiter).map_or(text, |(head, _)| head).to_owned()));
+    }
+    if count == -1 {
+        return Ok(Value::Text(text.rsplit_once(delimiter).map_or(text, |(_, tail)| tail).to_owned()));
+    }
     let index = usize::try_from(count.unsigned_abs() - 1).ok();
     let result = match index {
         None => text,
@@ -50,6 +56,10 @@ mod tests {
         assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(2)]).unwrap(), Value::Text("a.é".into()));
         assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(-2)]).unwrap(), Value::Text("é.c".into()));
         assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(0)]).unwrap(), Value::Text("".into()));
+        assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(1)]).unwrap(), Value::Text("a".into()));
+        assert_eq!(evaluate(&[text.clone(), delim.clone(), Value::Integer(-1)]).unwrap(), Value::Text("c".into()));
+        assert_eq!(evaluate(&[Value::Text("aébéé".into()),
+            Value::Text("é".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
         assert_eq!(evaluate(&[text, delim, Value::Integer(i64::MIN)]).unwrap(), Value::Text("a.é.c".into()));
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into()), Value::Integer(1)]).unwrap(), Value::Null);
     }
