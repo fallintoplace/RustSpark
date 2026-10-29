@@ -178,6 +178,7 @@ const MODULES: &[&[Function]] = &[
     &cot::FUNCTIONS,
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
+    &sha1_digest::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
