@@ -14,9 +14,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
     let mut output = String::with_capacity(capacity);
     output.push('\'');
-    for ch in text.chars() {
-        if ch == '\'' { output.push('\\'); }
-        output.push(ch);
+    let mut parts = text.split('\'');
+    if let Some(first) = parts.next() {
+        output.push_str(first);
+        for part in parts {
+            output.push('\\');
+            output.push('\'');
+            output.push_str(part);
+        }
     }
     output.push('\'');
     Ok(Value::Text(output))
@@ -74,5 +79,20 @@ mod json_quote_extension_tests {
         assert_eq!(json_quote(&[Value::Text("".into())]).unwrap(), Value::Text("\"\"".into()));
         assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
         assert!(json_quote(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod quote_slice_escaping_tests {
+    use super::*;
+    #[test]
+    fn escapes_many_quotes_without_changing_multibyte_text() {
+        let text = "é'🙂'東京".repeat(512);
+        let quoted = evaluate(&[Value::Text(text.clone())]).unwrap();
+        let Value::Text(quoted) = quoted else { panic!("text"); };
+        assert_eq!(quoted.matches("\\'").count(), 1024);
+        assert!(quoted.starts_with("'é\\'🙂"));
+        assert!(quoted.ends_with("東京'"));
+        assert_eq!(evaluate(&[Value::Text("".into())]).unwrap(), Value::Text("''".into()));
     }
 }
