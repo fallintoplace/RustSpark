@@ -35,6 +35,7 @@ pub enum Expr {
     },
     Not(Box<Expr>),
     IsNull(Box<Expr>),
+    Cast { expr: Box<Expr>, data_type: DataType },
 }
 
 impl Expr {
@@ -56,6 +57,7 @@ impl Expr {
                 Value::Float(_) => DataType::Float,
             }),
             Self::Not(_) | Self::IsNull(_) => Ok(DataType::Boolean),
+            Self::Cast { data_type, .. } => Ok(*data_type),
             Self::Binary { left, op, right } => match op {
                 BinaryOp::Equal
                 | BinaryOp::NotEqual
@@ -90,6 +92,7 @@ impl Expr {
                 None => Value::Null,
             }),
             Self::IsNull(expr) => Ok(Value::Boolean(expr.evaluate(batch, row)?.is_null())),
+            Self::Cast { expr, data_type } => expr.evaluate(batch, row)?.cast_to(*data_type),
             Self::Binary { left, op, right } => {
                 let left = left.evaluate(batch, row)?;
                 let right = right.evaluate(batch, row)?;
