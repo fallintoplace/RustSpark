@@ -218,7 +218,11 @@ impl<R: BufRead> Iterator for CsvStream<R> {
         if rows.is_empty() {
             None
         } else {
-            Some(Batch::from_rows(self.schema.clone(), rows))
+            let result = Batch::from_rows(self.schema.clone(), rows);
+            if result.is_err() {
+                self.exhausted = true;
+            }
+            Some(result)
         }
     }
 }
@@ -248,6 +252,16 @@ mod tests {
         let mut stream = CsvStream::new(Cursor::new(b"a,b\n1\n"), 1, 100).unwrap();
         assert!(stream.next().unwrap().is_err());
     }
+    #[test]
+    fn schema_failure_is_terminal_for_typed_streams() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut stream = CsvStream::new_typed(
+            Cursor::new(b"id\n\n7\n"), 1, 64, schema,
+        ).unwrap();
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
+    }
+
     #[test]
     fn typed_scan_preserves_integer_and_float_values() {
         let schema = Schema::new(vec![
