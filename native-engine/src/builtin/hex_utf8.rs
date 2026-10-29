@@ -27,12 +27,28 @@ fn hex(args: &[Value]) -> Result<Value> {
     }
     Ok(Value::Text(String::from_utf8(output).expect("HEX produces ASCII digits")))
 }
+const HEX_REVERSE: [u8; 256] = {
+    let mut table = [u8::MAX; 256];
+    let mut n = 0;
+    while n < 10 {
+        table[b'0' as usize + n] = n as u8;
+        n += 1;
+    }
+    n = 0;
+    while n < 6 {
+        table[b'A' as usize + n] = n as u8 + 10;
+        table[b'a' as usize + n] = n as u8 + 10;
+        n += 1;
+    }
+    table
+};
+
 fn decode_hex_digit(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::Parse("invalid hexadecimal digit".into())),
+    let digit = HEX_REVERSE[usize::from(byte)];
+    if digit == u8::MAX {
+        Err(Error::Parse("invalid hexadecimal digit".into()))
+    } else {
+        Ok(digit)
     }
 }
 
@@ -94,5 +110,22 @@ mod hex_byte_buffer_perf_tests {
         let input = Value::Text("x".repeat(1024));
         let encoded = hex(&[input.clone()]).unwrap();
         assert_eq!(unhex_utf8(&[encoded]).unwrap(), input);
+    }
+}
+
+#[cfg(test)]
+mod exhaustive_hex_nibble_tests {
+    use super::*;
+    #[test]
+    fn rejects_every_non_hex_byte_and_accepts_both_cases() {
+        for byte in 0_u8..=u8::MAX {
+            let expected = match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            };
+            assert_eq!(decode_hex_digit(byte).ok(), expected);
+        }
     }
 }
