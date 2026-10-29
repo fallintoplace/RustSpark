@@ -9,6 +9,7 @@ mod floor_ceil;
 mod round;
 mod roots;
 mod power;
+mod exponential;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,7 @@ const MODULES: &[&[Function]] = &[
     &round::FUNCTIONS,
     &roots::FUNCTIONS,
     &power::FUNCTIONS,
+    &exponential::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
