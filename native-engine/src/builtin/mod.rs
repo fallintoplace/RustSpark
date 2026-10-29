@@ -56,6 +56,7 @@ mod initcap;
 mod octet_length;
 mod bit_length;
 mod char_length;
+mod len;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -132,6 +133,7 @@ const MODULES: &[&[Function]] = &[
     &octet_length::FUNCTIONS,
     &bit_length::FUNCTIONS,
     &char_length::FUNCTIONS,
+    &len::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
