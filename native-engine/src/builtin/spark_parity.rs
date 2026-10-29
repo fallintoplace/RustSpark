@@ -387,6 +387,19 @@ fn try_url_decode(args: &[Value]) -> Result<Value> {
     Ok(decode_form(text).map(Value::Text).unwrap_or(Value::Null))
 }
 
+fn two_text_text_type(types: &[DataType]) -> Result<DataType> {
+    if types == [DataType::Text, DataType::Text] { Ok(DataType::Text) }
+    else { Err(Error::Type("function requires two text arguments".into())) }
+}
+fn regexp_substr(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
+    super::regex_support::check_input(text)?;
+    let regex = super::regex_support::compile(pattern)?;
+    Ok(regex.find(text).map(|matched| Value::Text(matched.as_str().to_owned()))
+        .unwrap_or(Value::Null))
+}
+
 // PARITY_IMPL
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -418,6 +431,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "url_encode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_encode },
     Function { name: "url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: url_decode },
     Function { name: "try_url_decode", min_args: 1, max_args: 1, result_type: text_text_type, call: try_url_decode },
+    Function { name: "regexp_substr", min_args: 2, max_args: 2, result_type: two_text_text_type, call: regexp_substr },
     // PARITY_FUNCTIONS
 ];
 
@@ -640,6 +654,14 @@ mod tests {
         assert_eq!(sql_result("try_url_decode('a+b%2Bc')").unwrap(), Value::Text("a b+c".into()));
         assert_eq!(sql_result("try_url_decode('%ZZ')").unwrap(), Value::Null);
         assert_eq!(try_url_decode(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn spark_regexp_substr_returns_first_match() {
+        assert_eq!(sql_result("regexp_substr('abc123xyz', '[0-9]+')").unwrap(),
+            Value::Text("123".into()));
+        assert_eq!(sql_result("regexp_substr('abc', '[0-9]+')").unwrap(), Value::Null);
+        assert!(sql_result("regexp_substr('abc', '[')").is_err());
     }
 
     // PARITY_TESTS
