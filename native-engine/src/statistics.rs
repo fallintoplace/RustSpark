@@ -58,24 +58,32 @@ impl ColumnStatistics {
         if nulls > rows {
             return Err(Error::Execution("invalid NULL count".into()));
         }
+        let mut min = self.min.clone();
+        let mut max = self.max.clone();
         if let Some(value) = &other.min {
-            if self.min.as_ref().is_none_or(|current| {
-                matches!(value.sql_compare(current), Ok(Some(Ordering::Less)))
-            }) {
-                self.min = Some(value.clone());
+            if min.as_ref().is_none_or(|current|
+                matches!(value.sql_compare(current), Ok(Some(Ordering::Less)))) {
+                // Check compatible types even when the new candidate is not smaller.
+                min = Some(value.clone());
+            } else if let Some(current) = &min {
+                value.sql_compare(current)?;
             }
         }
         if let Some(value) = &other.max {
-            if self.max.as_ref().is_none_or(|current| {
-                matches!(value.sql_compare(current), Ok(Some(Ordering::Greater)))
-            }) {
-                self.max = Some(value.clone());
+            if max.as_ref().is_none_or(|current|
+                matches!(value.sql_compare(current), Ok(Some(Ordering::Greater)))) {
+                max = Some(value.clone());
+            } else if let Some(current) = &max {
+                value.sql_compare(current)?;
             }
         }
         self.rows = rows;
         self.nulls = nulls;
+        self.min = min;
+        self.max = max;
         Ok(())
     }
+
 }
 
 #[cfg(test)]
@@ -140,3 +148,21 @@ mod multi_batch_statistics_feature_tests {
     }
 }
 
+
+#[cfg(test)]
+mod merge_validation_tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_extrema_do_not_commit_partial_merges() {
+        let mut left = ColumnStatistics {
+            rows: 1, nulls: 0, min: Some(Value::Integer(4)), max: Some(Value::Integer(4)),
+        };
+        let right = ColumnStatistics {
+            rows: 1, nulls: 0, min: Some(Value::Text("x".into())), max: Some(Value::Text("x".into())),
+        };
+        let original = left.clone();
+        assert!(left.merge(&right).is_err());
+        assert_eq!(left, original);
+    }
+}
