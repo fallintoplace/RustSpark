@@ -121,11 +121,11 @@ pub fn hash_join(
     if kind == JoinKind::Inner && (left.num_rows() == 0 || right.num_rows() == 0) {
         return Ok(Batch::empty(schema));
     }
-    let mut right_hash: HashMap<Value, Vec<usize>> = HashMap::new();
+    let mut right_hash: HashMap<&Value, Vec<usize>> = HashMap::new();
     for row in 0..right.num_rows() {
         let key = &right_keys[row];
         if joinable(key) {
-            right_hash.entry(key.clone()).or_default().push(row);
+            right_hash.entry(key).or_default().push(row);
         }
     }
     let mut output = Vec::new();
@@ -136,7 +136,7 @@ pub fn hash_join(
     };
     for left_row in 0..left.num_rows() {
         let key = &left_keys[left_row];
-        let right_rows = if joinable(key) { right_hash.get(key) } else { None };
+        let right_rows = if joinable(key) { right_hash.get(&key) } else { None };
         if let Some(right_rows) = right_rows {
             let mut left_values = left.row(left_row)?;
             for (match_index, &right_row) in right_rows.iter().enumerate() {
@@ -292,5 +292,24 @@ mod borrowed_semi_join_keys_tests {
             vec![vec![Value::Text(long.clone())], vec![Value::Text(long.clone())]]);
         assert_eq!(hash_join(&left, &right, "k", "k", JoinKind::Anti).unwrap().rows().unwrap(),
             vec![vec![Value::Null], vec![Value::Text("other".into())]]);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_join_key_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn repeated_long_text_build_keys_match_and_keep_outer_rows() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let key = Value::Text("large-shared-key".repeat(128));
+        let left = Batch::from_rows(schema.clone(), vec![vec![key.clone()], vec![Value::Null]]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![key.clone()], vec![key], vec![Value::Null]]).unwrap();
+        let inner = hash_join(&left, &right, "key", "key", JoinKind::Inner).unwrap();
+        assert_eq!(inner.num_rows(), 2);
+        let outer = hash_join(&left, &right, "key", "key", JoinKind::Left).unwrap();
+        assert_eq!(outer.num_rows(), 3);
+        assert_eq!(outer.row(2).unwrap(), vec![Value::Null, Value::Null]);
     }
 }
