@@ -43,12 +43,14 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
     }
     let len = u32::try_from(frame.payload.len())
         .map_err(|_| Error::Execution("exchange frame exceeds wire length".into()))?;
-    output.write_all(MAGIC)?;
-    output.write_all(&frame.stage.to_le_bytes())?;
-    output.write_all(&frame.task.to_le_bytes())?;
-    output.write_all(&frame.attempt.to_le_bytes())?;
-    output.write_all(&len.to_le_bytes())?;
-    output.write_all(&checksum(&frame.payload).to_le_bytes())?;
+    let mut header = [0u8; 32];
+    header[..4].copy_from_slice(MAGIC);
+    header[4..12].copy_from_slice(&frame.stage.to_le_bytes());
+    header[12..20].copy_from_slice(&frame.task.to_le_bytes());
+    header[20..24].copy_from_slice(&frame.attempt.to_le_bytes());
+    header[24..28].copy_from_slice(&len.to_le_bytes());
+    header[28..32].copy_from_slice(&checksum(&frame.payload).to_le_bytes());
+    output.write_all(&header)?;
     output.write_all(&frame.payload)?;
     Ok(())
 }
@@ -209,5 +211,28 @@ mod transport_crc32_perf_tests {
         assert_eq!(checksum(b""), 0);
         assert_eq!(checksum(b"123456789"), 0xcbf4_3926);
         assert_eq!(checksum(b"RustSpark"), checksum(b"RustSpark"));
+    }
+}
+
+#[cfg(test)]
+mod exchange_header_write_coalescing_tests {
+    use super::*;
+    struct CountingWriter { bytes: Vec<u8>, calls: usize }
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    #[test]
+    fn nonempty_frame_emits_one_header_and_one_payload_write() {
+        let frame = Frame { stage: u64::MAX, task: 17, attempt: 3, payload: vec![5; 4096] };
+        let mut writer = CountingWriter { bytes: Vec::new(), calls: 0 };
+        write_frame(&mut writer, &frame, 4096).unwrap();
+        assert_eq!(writer.calls, 2);
+        assert_eq!(writer.bytes.len(), 32 + 4096);
+        assert_eq!(read_frame(&mut writer.bytes.as_slice(), 4096).unwrap(), Some(frame));
     }
 }
