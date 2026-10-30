@@ -14,6 +14,15 @@ class DataFrameCommandTests(unittest.TestCase):
         self.assertIn("--output-arrow", args)
         self.assertEqual(args[args.index("--max-rows") + 1], "25")
 
+    def test_typed_parameter_budget_counts_utf8_bytes(self):
+        invalid = "utf8:" + "é" * 4094
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            build_command("SELECT 1", Path("out.arrow"), named_params={"p": invalid})
+        at_limit = "utf8:" + "é" * 4093 + "x"
+        self.assertEqual(len(at_limit.encode("utf-8")), 8192)
+        command = build_command("SELECT 1", Path("out.arrow"), named_params={"p": at_limit})
+        self.assertIn(f"p={at_limit}", command)
+
     def test_refuses_unbounded_and_conflicting_options(self):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), max_rows=0)
