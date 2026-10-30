@@ -30,6 +30,33 @@ pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
     })
 }
 
+/// Row-group metadata for native scan work partitioning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParquetRowGroupSummary {
+    pub index: usize,
+    pub rows: u64,
+    pub compressed_bytes: u64,
+    pub uncompressed_bytes: u64,
+}
+
+/// Inspect row-group work units without reading the row data.
+pub fn row_group_summaries(path: impl AsRef<Path>) -> Result<Vec<ParquetRowGroupSummary>> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    builder.metadata().row_groups().iter().enumerate().map(|(index, group)| {
+        Ok(ParquetRowGroupSummary {
+            index,
+            rows: u64::try_from(group.num_rows())
+                .map_err(|_| Error::Execution("negative Parquet row-group count".into()))?,
+            compressed_bytes: u64::try_from(group.compressed_size())
+                .map_err(|_| Error::Execution("negative Parquet compressed size".into()))?,
+            uncompressed_bytes: u64::try_from(group.total_byte_size())
+                .map_err(|_| Error::Execution("negative Parquet uncompressed size".into()))?,
+        })
+    }).collect()
+}
+
 pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
@@ -376,6 +403,36 @@ mod parquet_native_offset_limit_pushdown_tests {
         assert_eq!(scan_window(&path, 3, 0, 0).unwrap().count(), 0);
         assert_eq!(scan_window(&path, 3, 100, 5).unwrap().count(), 0);
         assert!(scan_window(&path, 3, usize::MAX, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_parquet_row_group_summary_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn summarizes_each_row_group_without_decoding_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-group-summary-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), (0..5).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let props = WriterProperties::builder().set_max_row_group_size(2).build();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            arrow.schema(), Some(props)).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let groups = row_group_summaries(&path).unwrap();
+        assert_eq!(groups.iter().map(|g| g.rows).collect::<Vec<_>>(), [2, 2, 1]);
+        assert_eq!(groups.iter().map(|g| g.index).collect::<Vec<_>>(), [0, 1, 2]);
+        assert!(groups.iter().all(|g| g.compressed_bytes > 0 && g.uncompressed_bytes > 0));
         std::fs::remove_file(path).unwrap();
     }
 }
