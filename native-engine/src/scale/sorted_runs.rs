@@ -43,6 +43,9 @@ where I: IntoIterator<Item = Result<Batch>>
     if keys.is_empty() {
         return Err(Error::Execution("external sort needs at least one key".into()));
     }
+    if max_rows_per_run.checked_mul(schema.len()).is_none_or(|cells| cells > 4_000_000) {
+        return Err(Error::Execution("sort run exceeds spill cell budget".into()));
+    }
     for key in keys {
         if !matches!(&key.expression, crate::expr::Expr::Column(_)) {
             return Err(Error::Unsupported("external merge requires column sort keys".into()));
@@ -155,5 +158,23 @@ mod sorted_run_key_prevalidation_tests {
         assert!(write_sorted_runs(
             Vec::<Result<Batch>>::new(), schema, &[computed], &directory, 4, &control
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wide_sorted_run_preflight_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+
+    #[test]
+    fn oversized_wide_run_rejects_without_polling_source() {
+        let schema = Schema::new((0..64).map(|n|
+            Field::new(format!("c{n}"), DataType::Integer, false)
+        ).collect()).unwrap();
+        let source = std::iter::repeat_with(|| panic!("must not poll rejected source"));
+        let keys = [SortKey::ascending(Expr::Column("c0".into()))];
+        let result = write_sorted_runs(source, schema, &keys,
+            std::env::temp_dir().as_path(), 65_536, &QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
