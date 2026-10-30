@@ -161,6 +161,35 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 if keep { selected.push(row); }
             }
         }
+    } else if let Expr::InList { needle, choices, negated } = predicate {
+        if let Expr::Column(name) = needle.as_ref() {
+            let index = batch.schema().column(name)?;
+            if batch.schema().field(index)?.data_type == DataType::Text
+                && !choices.is_empty()
+                && choices.iter().all(|choice| matches!(choice,
+                    Expr::Literal(Value::Text(_) | Value::Null)))
+            {
+                let contains_null = choices.iter().any(|choice|
+                    matches!(choice, Expr::Literal(Value::Null)));
+                let literals = choices.iter().filter_map(|choice| match choice {
+                    Expr::Literal(Value::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                }).collect::<std::collections::HashSet<_>>();
+                if !(*negated && contains_null) {
+                    for (row, value) in batch.column(index)?.iter().enumerate() {
+                        if let Value::Text(text) = value {
+                            if literals.contains(text.as_str()) != *negated {
+                                selected.push(row);
+                            }
+                        }
+                    }
+                }
+                return Ok(selected);
+            }
+        }
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
+        }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
@@ -385,5 +414,36 @@ mod null_column_fast_filter_tests {
         }
         assert!(select_indices(&input,
             &Expr::IsNull(Box::new(Expr::Column("missing".into())))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_text_in_list_scan_tests {
+    use super::*;
+    use crate::schema::{Schema, Field, DataType};
+
+    #[test]
+    fn text_membership_matches_scalar_sql_for_unicode_and_nulls() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("city", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text("東京".into())], vec![Value::Null],
+            vec![Value::Text("Paris".into())], vec![Value::Text("Berlin".into())],
+            vec![Value::Text("東京".into())],
+        ]).unwrap();
+        for negated in [false, true] {
+            for null_choice in [false, true] {
+                let mut choices = vec!["東京", "London"].into_iter()
+                    .map(|s| Expr::Literal(Value::Text(s.into()))).collect::<Vec<_>>();
+                if null_choice { choices.push(Expr::Literal(Value::Null)); }
+                let pred = Expr::InList {
+                    needle: Box::new(Expr::Column("city".into())), choices, negated,
+                };
+                let expected = (0..input.num_rows()).filter(|&row|
+                    pred.evaluate(&input, row).unwrap().as_boolean().unwrap() == Some(true)
+                ).collect::<Vec<_>>();
+                assert_eq!(select_indices(&input, &pred).unwrap(), expected);
+            }
+        }
     }
 }
