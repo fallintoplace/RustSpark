@@ -129,6 +129,21 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                         closed = true;
                         break;
                     }
+                } else if next == '\\' && character == '\'' {
+                    // Spark decodes escapes in regular SQL strings. Raw r'...'
+                    // literals are handled by the separate branch above.
+                    let escaped = chars.next()
+                        .ok_or_else(|| Error::Parse("unterminated SQL string escape".into()))?;
+                    match escaped {
+                        '0' => value.push('\0'),
+                        'b' => value.push('\x08'),
+                        'n' => value.push('\n'),
+                        'r' => value.push('\r'),
+                        't' => value.push('\t'),
+                        'Z' => value.push('\x1a'),
+                        '%' | '_' => { value.push('\\'); value.push(escaped); }
+                        other => value.push(other),
+                    }
                 } else {
                     value.push(next);
                 }
@@ -280,5 +295,29 @@ mod lexer_capacity_perf_tests {
         assert_eq!(tokens.first(), Some(&Token::Word("SELECT".into())));
         assert_eq!(tokens.last(), Some(&Token::Word("data".into())));
         assert!(tokens.len() > 500);
+    }
+}
+
+#[cfg(test)]
+mod sql_backslash_literal_tests {
+    use super::*;
+
+    #[test]
+    fn unescapes_standard_spark_strings_but_not_raw_literals() {
+        let tokens = tokenize(r"SELECT 'Don\'t', 'a\\b', '\n', '\%', '\_', '\Z', r'\n'").unwrap();
+        let text = tokens.into_iter().filter_map(|token| match token {
+            Token::Text(value) => Some(value), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(text, vec![
+            "Don't", "a\\b", "\n", "\\%", "\\_", "\x1a", "\\n"
+        ]);
+    }
+
+    #[test]
+    fn rejects_escaped_closing_quotes_without_final_terminator() {
+        assert!(tokenize(r"SELECT 'unfinished\'").is_err());
+        let tokens = tokenize(r#"SELECT "a\b", 'a\b'"#).unwrap();
+        assert_eq!(tokens[1], Token::Word("a\\b".into()));
+        assert_eq!(tokens[3], Token::Text("ab".into()));
     }
 }
