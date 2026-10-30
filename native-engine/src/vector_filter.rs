@@ -175,7 +175,7 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         {
             let index = batch.schema().column(name)?;
             if batch.schema().field(index)?.data_type == DataType::Text
-                && !pattern.contains(['_', '\\'])
+                && !pattern.contains('_') && !pattern.contains('\\')
                 && pattern.matches('%').count() <= 2
                 && (pattern.matches('%').count() == 0
                     || pattern.starts_with('%') || pattern.ends_with('%'))
