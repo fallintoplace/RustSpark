@@ -1,22 +1,20 @@
 name: Native engine
 
 on:
-  pull_request:
-    paths:
-      - 'native-engine/**'
-      - '.github/workflows/native-engine.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'native-engine/**'
-      - '.github/workflows/native-engine.yml'
   workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   native:
+    if: github.ref == 'refs/heads/main'
     name: Build and test native engine
     runs-on: ubuntu-latest
     timeout-minutes: 15

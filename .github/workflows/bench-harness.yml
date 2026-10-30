@@ -1,19 +1,20 @@
 name: SQL benchmark harness
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '47 4 * * 0'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   harness-unit-tests:
+    if: github.ref == 'refs/heads/main'
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }} benchmark harness
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
