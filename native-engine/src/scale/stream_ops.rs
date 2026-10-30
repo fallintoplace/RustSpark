@@ -92,12 +92,14 @@ pub struct LimitStream<I> {
     offset: usize,
     remaining: Option<usize>,
     control: QueryControl,
+    invalid_limit: bool,
     stopped: bool,
 }
 
 impl<I> LimitStream<I> {
     pub fn new(input: I, offset: usize, count: Option<usize>, control: QueryControl) -> Self {
-        Self { input, offset, remaining: count, control, stopped: false }
+        let invalid_limit = count.is_some_and(|n| offset.checked_add(n).is_none());
+        Self { input, offset, remaining: count, control, invalid_limit, stopped: false }
     }
 }
 
@@ -105,7 +107,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.stopped || self.remaining == Some(0) { return None; }
+        if self.stopped { return None; }
+        if self.invalid_limit {
+            self.stopped = true;
+            return Some(Err(crate::Error::Execution("LIMIT + OFFSET overflow".into())));
+        }
+        if self.remaining == Some(0) { return None; }
         loop {
             if let Err(error) = self.control.check() {
                 self.stopped = true;
@@ -266,5 +273,25 @@ mod projection_empty_batch_tests {
         let output = ProjectStream::new([Ok(zero)].into_iter(), vec![],
             QueryControl::default()).next().unwrap().unwrap();
         assert_eq!(output.num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod limit_stream_overflow_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn overflow_returns_terminal_error_without_polling() {
+        let polls = Rc::new(Cell::new(0usize));
+        let observed = Rc::clone(&polls);
+        let source = std::iter::repeat_with(move || {
+            observed.set(observed.get() + 1);
+            Err(crate::Error::Execution("unexpected poll".into()))
+        });
+        let mut stream = LimitStream::new(source, usize::MAX, Some(1), QueryControl::default());
+        assert!(stream.next().unwrap().unwrap_err().to_string().contains("overflow"));
+        assert!(stream.next().is_none());
+        assert_eq!(polls.get(), 0);
     }
 }
