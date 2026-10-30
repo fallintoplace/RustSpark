@@ -118,6 +118,22 @@ pub(crate) fn as_f64(value: &Value) -> Result<f64> {
     }
 }
 
+/// Apply TRY arithmetic with the same NULL and overflow handling for each operator.
+fn try_numeric_binary(
+    args: &[Expr], batch: &Batch, row: usize,
+    integer: fn(i64, i64) -> Option<i64>,
+    float: fn(f64, f64) -> f64,
+) -> Result<Value> {
+    let left = args[0].evaluate(batch, row)?;
+    let right = args[1].evaluate(batch, row)?;
+    if left.is_null() || right.is_null() { return Ok(Value::Null); }
+    if let (Value::Integer(a), Value::Integer(b)) = (&left, &right) {
+        return Ok(integer(*a, *b).map(Value::Integer).unwrap_or(Value::Null));
+    }
+    let result = float(as_f64(&left)?, as_f64(&right)?);
+    Ok(if result.is_finite() { Value::Float(result) } else { Value::Null })
+}
+
 pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::output_type(args, schema),
