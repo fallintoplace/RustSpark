@@ -40,6 +40,13 @@ impl HyperLogLog {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        if other.nonempty == 0 { return; }
+        if self.nonempty == 0 {
+            // Copy a populated sketch into a fresh target in one operation.
+            self.registers.copy_from_slice(&other.registers);
+            self.nonempty = other.nonempty;
+            return;
+        }
         for (dest, source) in self.registers.iter_mut().zip(other.registers) {
             if *dest == 0 && source != 0 { self.nonempty += 1; }
             *dest = (*dest).max(source);
@@ -230,5 +237,26 @@ mod cached_nonempty_register_count_tests {
         assert!(a.nonempty_registers() > 4000);
         a.merge(&b);
         assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&rank| rank != 0).count());
+    }
+}
+
+#[cfg(test)]
+mod hll_empty_merge_shortcuts_tests {
+    use super::*;
+
+    #[test]
+    fn merging_empty_and_populated_sketches_keeps_registers() {
+        let mut populated = HyperLogLog::new();
+        for n in 0..1000 { populated.add(&Value::Integer(n)); }
+        let baseline = populated.clone();
+        let empty = HyperLogLog::new();
+        populated.merge(&empty);
+        assert_eq!(populated, baseline);
+        let mut receiver = HyperLogLog::new();
+        receiver.merge(&baseline);
+        assert_eq!(receiver, baseline);
+        receiver.merge(&baseline);
+        assert_eq!(receiver, baseline);
+        assert_eq!(receiver.nonempty_registers(), baseline.nonempty_registers());
     }
 }
