@@ -99,9 +99,9 @@ fn execute_inner(
         Plan::Filter { input, predicate } => {
             if let Plan::Scan { table } = input.as_ref() {
                 // Avoid cloning the full source table before selecting rows.
-                filter::filter(catalog.get(table)?, predicate)?
+                filter::filter_checked(catalog.get(table)?, predicate, || guard.check())?
             } else {
-                filter::filter(&descend(input)?, predicate)?
+                filter::filter_checked(&descend(input)?, predicate, || guard.check())?
             }
         },
         Plan::Project { input, selections } => {
