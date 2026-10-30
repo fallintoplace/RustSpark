@@ -4,14 +4,7 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     if rows_per_batch == 0 {
         return Err(Error::Execution("batch size must be positive".into()));
     }
-    let mut chunks = Vec::with_capacity(batch.num_rows().div_ceil(rows_per_batch));
-    let mut start = 0;
-    while start < batch.num_rows() {
-        let end = start.saturating_add(rows_per_batch).min(batch.num_rows());
-        chunks.push(batch.slice_rows(start, end)?);
-        start = end;
-    }
-    Ok(chunks)
+    crate::batch_chunks::chunks(batch, rows_per_batch)?.collect()
 }
 
 pub fn concat(
