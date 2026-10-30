@@ -345,6 +345,15 @@ impl FileCatalog {
     /// Restore a registry from validated metadata. Existing source files are
     /// not copied. Parquet files are validated when registered.
     pub fn import_manifest(text: &str) -> Result<Self> {
+        Self::import_manifest_inner(text, None)
+    }
+
+    /// Resolve relative source paths against the manifest's directory.
+    pub fn import_manifest_relative_to(text: &str, directory: &Path) -> Result<Self> {
+        Self::import_manifest_inner(text, Some(directory))
+    }
+
+    fn import_manifest_inner(text: &str, relative_to: Option<&Path>) -> Result<Self> {
         if text.len() > MAX_CATALOG_MANIFEST_BYTES {
             return Err(Error::Execution("catalog manifest exceeds byte budget".into()));
         }
@@ -366,6 +375,10 @@ impl FileCatalog {
             if path.len() > 4096 {
                 return Err(Error::Schema("catalog manifest path too long".into()));
             }
+            let source = match relative_to {
+                Some(base) if !Path::new(path).is_absolute() => base.join(path),
+                _ => PathBuf::from(path),
+            };
             match format {
                 "csv" => {
                     let max = table.get("max_record_bytes")
@@ -385,9 +398,9 @@ impl FileCatalog {
                             .ok_or_else(|| Error::Schema("catalog column nullability missing".into()))?;
                         Ok(crate::schema::Field::new(name, kind, nullable))
                     }).collect::<Result<Vec<_>>>()?;
-                    catalog.register_csv(name, path, Schema::new(fields)?, max)?;
+                    catalog.register_csv(name, &source, Schema::new(fields)?, max)?;
                 }
-                "parquet" => catalog.register_parquet(name, path)?,
+                "parquet" => catalog.register_parquet(name, &source)?,
                 _ => return Err(Error::Schema("unknown catalog manifest table format".into())),
             }
         }
@@ -427,5 +440,39 @@ mod file_catalog_manifest_tests {
         ] {
             assert!(FileCatalog::import_manifest(text).is_err(), "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod relative_manifest_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn resolves_paths_against_manifest_directory_not_process_cwd() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-manifest-path-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(directory.join("data")).unwrap();
+        let csv = directory.join("data/numbers.csv");
+        std::fs::write(&csv, "id\n1\n").unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "tables": [{
+                "name": "numbers", "format": "csv", "path": "data/numbers.csv",
+                "max_record_bytes": 4096,
+                "fields": [{"name": "id", "type": "integer", "nullable": false}]
+            }]
+        }).to_string();
+        let catalog = FileCatalog::import_manifest_relative_to(&manifest, &directory).unwrap();
+        assert_eq!(catalog.get("numbers").unwrap().path(), csv.as_path());
+        let batch = catalog.get("numbers").unwrap().open().unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batch.iter().map(|part| part.num_rows()).sum::<usize>(), 1);
+        let legacy = FileCatalog::import_manifest(&manifest).unwrap();
+        assert_eq!(legacy.get("numbers").unwrap().path(), Path::new("data/numbers.csv"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
