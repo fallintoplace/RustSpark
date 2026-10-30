@@ -22,6 +22,29 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
             if matches!(&**value, Expr::Column(name) if name.eq_ignore_ascii_case(column))) => {
             stats.rows == stats.nulls
         }
+        Expr::InList { needle, choices, negated }
+            if matches!(&**needle, Expr::Column(name) if name.eq_ignore_ascii_case(column)) => {
+            // Every comparison against a NULL input is UNKNOWN.
+            if stats.rows == stats.nulls { return true; }
+            // NOT IN with a NULL choice cannot evaluate to TRUE.
+            if *negated {
+                return choices.iter().any(|choice| matches!(choice, Expr::Literal(Value::Null)));
+            }
+            if !choices.iter().all(|choice| matches!(choice, Expr::Literal(_))) {
+                return false;
+            }
+            let (Some(min), Some(max)) = (&stats.min, &stats.max) else { return false; };
+            choices.iter().all(|choice| match choice {
+                Expr::Literal(Value::Null) => true,
+                Expr::Literal(value) => {
+                    let low = min.sql_compare(value).ok().flatten();
+                    let high = max.sql_compare(value).ok().flatten();
+                    matches!((low, high),
+                        (Some(Ordering::Greater), Some(_)) | (Some(_), Some(Ordering::Less)))
+                }
+                _ => false,
+            })
+        }
         Expr::Binary { left, op: BinaryOp::And, right } => {
             can_skip(stats, column, left) || can_skip(stats, column, right)
         }
@@ -197,5 +220,44 @@ mod constant_false_partition_pruning_tests {
         assert!(can_skip_columns(&empty, &and));
         let or = Expr::binary(true_predicate, BinaryOp::Or, null_predicate);
         assert!(!can_skip_columns(&empty, &or));
+    }
+}
+
+#[cfg(test)]
+mod in_list_statistic_pruning_tests {
+    use super::*;
+
+    fn sample() -> ColumnStatistics {
+        ColumnStatistics {
+            rows: 20, nulls: 3,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(19)),
+        }
+    }
+
+    fn in_list(values: Vec<Value>, negated: bool) -> Expr {
+        Expr::InList {
+            needle: Box::new(Expr::Column("x".into())),
+            choices: values.into_iter().map(Expr::Literal).collect(),
+            negated,
+        }
+    }
+
+    #[test]
+    fn prunes_only_when_every_candidate_is_impossible() {
+        assert!(can_skip(&sample(), "x", &in_list(vec![
+            Value::Integer(1), Value::Integer(25), Value::Null
+        ], false)));
+        assert!(!can_skip(&sample(), "x", &in_list(vec![
+            Value::Integer(1), Value::Integer(15)
+        ], false)));
+        assert!(!can_skip(&sample(), "y", &in_list(vec![Value::Integer(1)], false)));
+        assert!(can_skip(&sample(), "x", &in_list(vec![
+            Value::Integer(11), Value::Null
+        ], true)));
+        assert!(!can_skip(&sample(), "x", &in_list(vec![
+            Value::Integer(11)
+        ], true)));
+        let all_null = ColumnStatistics { rows: 8, nulls: 8, min: None, max: None };
+        assert!(can_skip(&all_null, "x", &in_list(vec![Value::Integer(1)], false)));
     }
 }
