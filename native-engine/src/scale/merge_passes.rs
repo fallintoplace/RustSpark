@@ -54,7 +54,7 @@ pub fn merge_to_fan_in(
             }
             let id = PASS_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("rustspark-merge-{}-{id}.rspill", std::process::id()));
-            let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+            let file = open_private_spill(&path)?;
             result.scratch.push(path.clone());
             let merger = RunMerger::new(
                 group, schema.clone(), keys, io_batch_rows, io_batch_rows, control.clone()
@@ -102,5 +102,36 @@ mod tests {
         assert_eq!(rows, (0..101).map(Value::Integer).collect::<Vec<_>>());
         drop(merged);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+fn open_private_spill(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(all(test, unix))]
+mod private_spill_permissions_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_files_are_not_world_readable() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-private-merge_passes-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = open_private_spill(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }
