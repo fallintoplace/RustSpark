@@ -36,6 +36,8 @@ mod nullifzero;
 
 mod zeroifnull;
 
+mod extrema;
+
 mod least;
 
 mod greatest;
