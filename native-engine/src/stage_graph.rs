@@ -137,6 +137,24 @@ impl StageGraph {
         }).collect()
     }
 
+    /// Enumerate runnable partition tasks in topological order without exceeding
+    /// the caller's scheduling window. Completed stages are not rescheduled.
+    pub fn ready_tasks(&self, completed: &HashSet<u64>, max_tasks: usize) -> Vec<(u64, usize)> {
+        let mut tasks = Vec::new();
+        for &index in &self.order_indices {
+            let stage = &self.stages[index];
+            if completed.contains(&stage.id)
+                || !stage.dependencies.iter().all(|dependency| completed.contains(dependency)) {
+                continue;
+            }
+            for partition in 0..stage.partitions {
+                if tasks.len() == max_tasks { return tasks; }
+                tasks.push((stage.id, partition));
+            }
+        }
+        tasks
+    }
+
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -298,5 +316,25 @@ mod inflight_stage_dispatch_tests {
         assert!(graph.ready_excluding(&HashSet::new(), &HashSet::from([10, 20])).is_empty());
         assert_eq!(graph.ready_excluding(&HashSet::from([10, 20]), &HashSet::new()), [30]);
         assert!(graph.ready_excluding(&HashSet::from([10, 20]), &HashSet::from([30])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bounded_stage_partition_tasks_tests {
+    use super::*;
+
+    #[test]
+    fn enumerates_ready_partition_tasks_in_topological_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 9, dependencies: vec![2], partitions: 3 },
+            Stage { id: 2, dependencies: vec![], partitions: 2 },
+            Stage { id: 4, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_tasks(&HashSet::new(), 3), vec![(2, 0), (2, 1), (4, 0)]);
+        assert_eq!(graph.ready_tasks(&HashSet::new(), 0), vec![]);
+        assert_eq!(graph.ready_tasks(&HashSet::from([2]), 8), vec![
+            (4, 0), (9, 0), (9, 1), (9, 2)
+        ]);
+        assert!(graph.ready_tasks(&HashSet::from([2, 4, 9]), 8).is_empty());
     }
 }
