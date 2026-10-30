@@ -11,6 +11,7 @@ use super::{
     stream_ops::{FilterStream, ProjectStream, LimitStream},
     union_stream::{UnionAllStream, UnionDistinctStream},
     cross_join_stream::CrossJoinStream,
+    set_stream::{SetStream, SetMode, set_schema},
     sorted_runs::write_sorted_runs,
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
@@ -338,6 +339,11 @@ fn infer(
             }).collect::<Result<Vec<_>>>()?;
             Schema::new(fields)
         }
+        Plan::Intersect { left, right } |
+        Plan::IntersectAll { left, right } |
+        Plan::Except { left, right } |
+        Plan::ExceptAll { left, right } =>
+            set_schema(&child(left)?, &child(right)?),
         Plan::UnionAll { left, right } => {
             let left_schema = child(left)?;
             let right_schema = child(right)?;
@@ -474,6 +480,23 @@ fn lower(
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
             Ok(Box::new(SortedOutput { reader, _files: files }))
+        }
+        Plan::Intersect { left, right } |
+        Plan::IntersectAll { left, right } |
+        Plan::Except { left, right } |
+        Plan::ExceptAll { left, right } => {
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            let mode = match plan {
+                Plan::Intersect { .. } => SetMode::IntersectDistinct,
+                Plan::IntersectAll { .. } => SetMode::IntersectAll,
+                Plan::Except { .. } => SetMode::ExceptDistinct,
+                _ => SetMode::ExceptAll,
+            };
+            Ok(Box::new(SetStream::new(
+                child(left)?, child(right)?, left_schema, right_schema, mode,
+                control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
+            )?))
         }
         Plan::UnionAll { left, right } => {
             let schema = infer(plan, catalog, depth, options.max_plan_depth)?;
