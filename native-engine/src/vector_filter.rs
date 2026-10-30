@@ -161,6 +161,35 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 if keep { selected.push(row); }
             }
         }
+    } else if let Expr::InList { needle, choices, negated } = predicate {
+        let literal_values = choices.iter().map(|choice| match choice {
+            Expr::Literal(Value::Integer(value)) => Some(Some(*value)),
+            Expr::Literal(Value::Null) => Some(None),
+            _ => None,
+        }).collect::<Option<Vec<_>>>();
+        if let (Expr::Column(name), Some(literals)) = (needle.as_ref(), literal_values) {
+            let column_index = batch.schema().column(name)?;
+            if batch.schema().field(column_index)?.data_type == DataType::Integer
+                && !literals.is_empty()
+            {
+                let contains_null = literals.iter().any(Option::is_none);
+                let values = literals.into_iter().flatten()
+                    .collect::<std::collections::HashSet<_>>();
+                if !(*negated && contains_null) {
+                    for (row, value) in batch.column(column_index)?.iter().enumerate() {
+                        if let Value::Integer(number) = value {
+                            if values.contains(number) != *negated { selected.push(row); }
+                        }
+                    }
+                }
+                return Ok(selected);
+            }
+        }
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
+                selected.push(row);
+            }
+        }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
@@ -385,5 +414,37 @@ mod null_column_fast_filter_tests {
         }
         assert!(select_indices(&input,
             &Expr::IsNull(Box::new(Expr::Column("missing".into())))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_integer_in_column_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn matches_scalar_in_semantics_for_nulls_and_negation() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(1)],
+                 vec![Value::Integer(2)], vec![Value::Integer(3)],
+                 vec![Value::Integer(5)]],
+        ).unwrap();
+        for negated in [false, true] {
+            for with_null in [false, true] {
+                let mut choices = vec![1, 3, 5, 7].into_iter()
+                    .map(|n| Expr::Literal(Value::Integer(n))).collect::<Vec<_>>();
+                if with_null { choices.push(Expr::Literal(Value::Null)); }
+                let predicate = Expr::InList {
+                    needle: Box::new(Expr::Column("n".into())),
+                    choices,
+                    negated,
+                };
+                let expected = (0..input.num_rows()).filter(|&row|
+                    predicate.evaluate(&input, row).unwrap().as_boolean().unwrap() == Some(true)
+                ).collect::<Vec<_>>();
+                assert_eq!(select_indices(&input, &predicate).unwrap(), expected);
+            }
+        }
     }
 }
