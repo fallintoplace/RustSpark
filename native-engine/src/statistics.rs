@@ -148,9 +148,8 @@ impl ColumnStatistics {
                 return Err(Error::Type("statistics batches disagree on column type".into()));
             }
             expected_type = Some(field.data_type);
-            for value in batch.column(column)? {
-                combined.observe(value)?;
-            }
+            // Reuse the typed per-batch scan, then combine only its extrema.
+            combined.merge(&Self::from_batch(batch, name)?)?;
         }
         Ok(combined)
     }
