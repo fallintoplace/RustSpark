@@ -141,6 +141,65 @@ pub fn scan_window(
     Ok(ParquetScan { inner })
 }
 
+/// Lazily scan a sequence of Parquet files as native batches.
+pub struct ParquetFileScan {
+    paths: std::vec::IntoIter<std::path::PathBuf>,
+    active: Option<ParquetScan>,
+    batch_size: usize,
+    schema: Option<crate::schema::Schema>,
+    stopped: bool,
+}
+
+pub fn scan_files(
+    paths: impl IntoIterator<Item = std::path::PathBuf>, batch_size: usize,
+) -> Result<ParquetFileScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    Ok(ParquetFileScan {
+        paths: paths.into_iter().collect::<Vec<_>>().into_iter(),
+        active: None, batch_size, schema: None, stopped: false,
+    })
+}
+
+impl Iterator for ParquetFileScan {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        loop {
+            if let Some(active) = &mut self.active {
+                match active.next() {
+                    Some(Ok(batch)) => {
+                        if self.schema.as_ref().is_some_and(|schema| schema != batch.schema()) {
+                            self.stopped = true;
+                            return Some(Err(Error::Schema("Parquet input file schemas differ".into())));
+                        }
+                        if self.schema.is_none() { self.schema = Some(batch.schema().clone()); }
+                        return Some(Ok(batch));
+                    }
+                    Some(Err(error)) => {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                    None => { self.active = None; }
+                }
+            }
+            let Some(path) = self.paths.next() else {
+                self.stopped = true;
+                return None;
+            };
+            match scan(&path, self.batch_size) {
+                Ok(scan) => self.active = Some(scan),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
 impl Iterator for ParquetScan {
     type Item = Result<Batch>;
 
@@ -434,5 +493,47 @@ mod native_parquet_row_group_summary_tests {
         assert_eq!(groups.iter().map(|g| g.index).collect::<Vec<_>>(), [0, 1, 2]);
         assert!(groups.iter().all(|g| g.compressed_bytes > 0 && g.uncompressed_bytes > 0));
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_multifile_parquet_scan_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    fn write_file(path: &std::path::Path, field: &str, start: i64) {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new(field, DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(start)], vec![Value::Integer(start + 1)],
+        ]).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn streams_files_in_order_and_rejects_changed_schemas() {
+        let prefix = format!("rustspark-native-many-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos());
+        let paths = (0..3).map(|n| std::env::temp_dir().join(format!("{prefix}-{n}.parquet")))
+            .collect::<Vec<_>>();
+        write_file(&paths[0], "id", 0);
+        write_file(&paths[1], "id", 2);
+        write_file(&paths[2], "other", 4);
+        let result = scan_files(paths[..2].to_vec(), 1).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), (0..4).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+        let mut wrong = scan_files(paths.clone(), 2).unwrap();
+        assert_eq!(wrong.next().unwrap().unwrap().num_rows(), 2);
+        assert_eq!(wrong.next().unwrap().unwrap().num_rows(), 2);
+        assert!(wrong.next().unwrap().is_err());
+        assert!(wrong.next().is_none());
+        assert!(scan_files(paths.clone(), 0).is_err());
+        for path in paths { std::fs::remove_file(path).unwrap(); }
     }
 }
