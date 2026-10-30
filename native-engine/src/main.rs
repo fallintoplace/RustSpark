@@ -315,14 +315,9 @@ fn read_parquet_bounded(path: &Path) -> Result<Batch> {
     Batch::from_rows(schema, rows)
 }
 
-fn run() -> Result<()> {
-    let Some(args) = parse_args(env::args().skip(1))? else {
-        println!("{}", usage());
-        return Ok(());
-    };
-    if args.stream {
-        return run_stream(&args);
-    }
+fn execute_non_stream(args: &Args) -> Result<Batch> {
+    // Reject invalid queries before reading potentially large CSV/Parquet files.
+    let plan = sql::parse_sql(&args.sql)?;
     let mut catalog = Catalog::new();
     if args.sources.is_empty() {
         let data = if let Some(path) = &args.csv {
@@ -344,8 +339,18 @@ fn run() -> Result<()> {
             catalog.register(table, data)?;
         }
     }
-    let plan = sql::parse_sql(&args.sql)?;
-    let batch = executor::execute(&plan, &catalog)?;
+    executor::execute(&plan, &catalog)
+}
+
+fn run() -> Result<()> {
+    let Some(args) = parse_args(env::args().skip(1))? else {
+        println!("{}", usage());
+        return Ok(());
+    };
+    if args.stream {
+        return run_stream(&args);
+    }
+    let batch = execute_non_stream(&args)?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
@@ -367,6 +372,17 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_sql_is_rejected_before_touching_missing_input_files() {
+        let args = [
+            "--csv", "/unlikely-rustspark-missing-input-20261030.csv",
+            "--sql", "SELECT FROM",
+        ];
+        let args = parse_args(args.into_iter().map(String::from)).unwrap().unwrap();
+        let error = execute_non_stream(&args).err().unwrap();
+        assert!(matches!(error, Error::Parse(_)), "{error}");
+    }
 
     #[test]
     fn reject_invalid_cli_combinations() {
