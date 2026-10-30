@@ -33,6 +33,19 @@ func (output *boundedOutput) Write(chunk []byte) (int, error) {
     return output.Buffer.Write(chunk)
 }
 
+const maxDiagnosticBytes = 8 * 1024
+
+// boundedDiagnostic accepts all stderr writes but retains a fixed-size prefix.
+type boundedDiagnostic struct { bytes.Buffer }
+
+func (out *boundedDiagnostic) Write(chunk []byte) (int, error) {
+    n := len(chunk)
+    if available := maxDiagnosticBytes - out.Len(); available > 0 {
+        out.Buffer.Write(chunk[:min(n, available)])
+    }
+    return n, nil
+}
+
 // Client calls an installed RustSpark binary without a shell.
 type Client struct {
     Binary      string
@@ -130,7 +143,7 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     command := exec.CommandContext(ctx, binary, args...)
     output := boundedOutput{limit: opts.MaxOutputBytes}
     if output.limit == 0 { output.limit = 64 * 1024 * 1024 }
-    var stderr bytes.Buffer
+    var stderr boundedDiagnostic
     command.Stdout, command.Stderr = &output, &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return nil, ctx.Err() }
@@ -185,7 +198,7 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     if binary == "" { binary = "rustspark" }
     command := exec.CommandContext(ctx, binary, args...)
     command.Stdout = output
-    var stderr bytes.Buffer
+    var stderr boundedDiagnostic
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return ctx.Err() }
