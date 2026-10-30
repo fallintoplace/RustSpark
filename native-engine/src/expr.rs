@@ -172,25 +172,20 @@ impl Expr {
                     }
                     Ok(DataType::Boolean)
                 },
-                BinaryOp::Divide => {
+                BinaryOp::Divide | BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
-                    if matches!(a, DataType::Integer | DataType::Float)
-                        && matches!(b, DataType::Integer | DataType::Float) {
-                        Ok(DataType::Float)
-                    } else {
-                        Err(Error::Type("division requires numeric operands".into()))
+                    let numeric = |expression: &Expr, kind: DataType| {
+                        matches!(kind, DataType::Integer | DataType::Float)
+                            || matches!(expression, Expr::Literal(Value::Null))
+                    };
+                    if !numeric(left, a) || !numeric(right, b) {
+                        return Err(Error::Type("arithmetic requires numeric operands".into()));
                     }
-                },
-                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    let a = left.output_type(schema)?;
-                    let b = right.output_type(schema)?;
-                    if a == DataType::Float || b == DataType::Float {
+                    if *op == BinaryOp::Divide || a == DataType::Float || b == DataType::Float {
                         Ok(DataType::Float)
-                    } else if a == DataType::Integer && b == DataType::Integer {
-                        Ok(DataType::Integer)
                     } else {
-                        Err(Error::Type("arithmetic requires numeric operands".into()))
+                        Ok(DataType::Integer)
                     }
                 }
             },
@@ -735,6 +730,40 @@ mod cast_expression_planning_validation_tests {
             assert!(make(Expr::Column("absent".into())).output_type(&schema).is_err());
             assert_eq!(make(Expr::Column("s".into())).output_type(&schema).unwrap(),
                 DataType::Integer);
+        }
+    }
+}
+
+#[cfg(test)]
+mod arithmetic_null_and_type_regressions {
+    use super::*;
+
+    #[test]
+    fn rejects_text_even_when_other_operand_is_float() {
+        let schema = Schema::new(vec![]).unwrap();
+        for op in [BinaryOp::Add, BinaryOp::Subtract, BinaryOp::Multiply, BinaryOp::Divide] {
+            for (left, right) in [
+                (Value::Float(1.5), Value::Text("invalid".into())),
+                (Value::Text("invalid".into()), Value::Float(1.5)),
+            ] {
+                let expression = Expr::binary(Expr::Literal(left), op, Expr::Literal(right));
+                assert!(expression.output_type(&schema).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn untyped_null_operands_preserve_arithmetic_type() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        for op in [BinaryOp::Add, BinaryOp::Subtract, BinaryOp::Multiply, BinaryOp::Divide] {
+            let integer = Expr::binary(Expr::Literal(Value::Integer(1)), op, Expr::Literal(Value::Null));
+            assert_eq!(integer.output_type(&schema).unwrap(),
+                if op == BinaryOp::Divide { DataType::Float } else { DataType::Integer });
+            assert_eq!(integer.evaluate(&batch, 0).unwrap(), Value::Null);
+            let float = Expr::binary(Expr::Literal(Value::Null), op, Expr::Literal(Value::Float(2.5)));
+            assert_eq!(float.output_type(&schema).unwrap(), DataType::Float);
+            assert_eq!(float.evaluate(&batch, 0).unwrap(), Value::Null);
         }
     }
 }
