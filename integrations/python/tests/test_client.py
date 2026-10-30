@@ -127,5 +127,16 @@ class RustSparkTests(unittest.TestCase):
 
 
 
+class DeterministicNamedParamsTests(unittest.TestCase):
+    @patch("rustspark_local.subprocess.run")
+    def test_parameter_order_is_stable_and_invalid_types_fail_early(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        RustSpark().query("SELECT 1", named_params={"z": "int64:9", "a": "int64:1"})
+        argv = run.call_args.args[0]
+        self.assertLess(argv.index("a=int64:1"), argv.index("z=int64:9"))
+        with self.assertRaises(ValueError):
+            RustSpark().query("SELECT 1", named_params={1: "int64:1"})
+
+
 if __name__ == "__main__":
     unittest.main()
