@@ -36,7 +36,9 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
                     // columns for a constant-true filter.
                     Ok(batch)
                 } else {
-                    filter::filter(&batch, &self.predicate)
+                    filter::filter_checked(
+                        &batch, &self.predicate, || self.control.check(),
+                    )
                 }
             });
             match result {
@@ -337,5 +339,34 @@ mod fused_stream_operator_eof_tests {
         assert!(limited.next().is_none());
         assert!(limited.next().is_none());
         assert_eq!(limited_polls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod stream_filter_after_pull_cancellation_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn cancellation_after_source_pull_prevents_large_filter_work() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..5000)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let control = QueryControl::default();
+        let after_pull = control.clone();
+        let input = std::iter::once_with(move || {
+            after_pull.cancel();
+            Ok(batch)
+        });
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(0)),
+        );
+        let mut stream = FilterStream::new(input, predicate, control);
+        let error = stream.next().unwrap().unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert!(stream.next().is_none());
     }
 }
