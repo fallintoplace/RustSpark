@@ -329,11 +329,11 @@ mod native_sort_key_cancellation_tests {
         let mut polls = 0;
         let err = sort_checked(&batch, &[key.clone()], || {
             polls += 1;
-            if polls == 3 { Err(crate::Error::Execution("sort cancelled".into())) }
+            if polls == 4 { Err(crate::Error::Execution("sort cancelled".into())) }
             else { Ok(()) }
         }).unwrap_err();
         assert!(err.to_string().contains("cancelled"));
-        assert_eq!(polls, 3);
+        assert_eq!(polls, 4);
         assert_eq!(sort(&batch, &[key]).unwrap().num_rows(), 3000);
     }
 }
