@@ -119,6 +119,12 @@ impl Expr {
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
+                for (condition, _) in branches {
+                    if !matches!(condition, Expr::Literal(Value::Null))
+                        && condition.output_type(schema)? != DataType::Boolean {
+                        return Err(Error::Type("CASE WHEN requires a boolean condition".into()));
+                    }
+                }
                 let mut output = None;
                 for expr in branches.iter().map(|(_, value)| value)
                     .chain(else_expr.iter().map(Box::as_ref))
@@ -589,5 +595,27 @@ mod distinct_comparison_static_type_tests {
             .output_type(&schema).is_err());
         assert!(compare(Expr::Column("missing".into()), Expr::Column("n".into()))
             .output_type(&schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod case_condition_type_checks {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn invalid_case_when_conditions_fail_before_execution() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let invalid = Expr::Case {
+            branches: vec![(Expr::Column("n".into()), Expr::Literal(Value::Integer(1)))],
+            else_expr: None,
+        };
+        assert!(invalid.output_type(&schema).is_err());
+        let valid = Expr::Case {
+            branches: vec![(Expr::Literal(Value::Boolean(true)),
+                Expr::Literal(Value::Integer(1)))],
+            else_expr: None,
+        };
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Integer);
     }
 }
