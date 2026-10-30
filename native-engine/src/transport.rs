@@ -125,20 +125,54 @@ pub fn read_frames_limited(
     max_total_bytes: usize,
     max_frames: usize,
 ) -> Result<Vec<Frame>> {
-    let mut frames = Vec::new();
-    let mut total = 0_usize;
-    while let Some(frame) = read_frame(
-        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
-    )? {
-        if frames.len() >= max_frames {
-            return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
+    FrameStream::new(input, max_frame_bytes, max_total_bytes, max_frames).collect()
+}
+
+
+/// Lazily decode exchange frames without retaining the completed payloads.
+/// A terminal read, corruption, or budget error fuses the iterator.
+pub struct FrameStream<R> {
+    input: R,
+    max_frame_bytes: usize,
+    remaining_bytes: usize,
+    remaining_frames: usize,
+    done: bool,
+}
+
+impl<R: Read> FrameStream<R> {
+    pub fn new(input: R, max_frame_bytes: usize, max_total_bytes: usize, max_frames: usize) -> Self {
+        Self {
+            input, max_frame_bytes, remaining_bytes: max_total_bytes,
+            remaining_frames: max_frames, done: false,
         }
-        total = total.checked_add(frame.payload.len())
-            .filter(|used| *used <= max_total_bytes)
-            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
-        frames.push(frame);
     }
-    Ok(frames)
+}
+
+impl<R: Read> Iterator for FrameStream<R> {
+    type Item = Result<Frame>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done { return None; }
+        if self.remaining_frames == 0 {
+            // Check for trailing frames before allocating another payload.
+            self.done = true;
+            let mut byte = [0u8; 1];
+            return match self.input.read(&mut byte) {
+                Ok(0) => None,
+                Ok(_) => Some(Err(Error::Execution("exchange stream frame count limit exceeded".into()))),
+                Err(error) => Some(Err(error.into())),
+            };
+        }
+        match read_frame(&mut self.input, self.max_frame_bytes.min(self.remaining_bytes)) {
+            Ok(Some(frame)) => {
+                self.remaining_bytes -= frame.payload.len();
+                self.remaining_frames -= 1;
+                Some(Ok(frame))
+            }
+            Ok(None) => { self.done = true; None }
+            Err(error) => { self.done = true; Some(Err(error)) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +279,45 @@ mod exchange_header_read_coalescing_tests {
         assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
         assert_eq!(reader.calls, 3);
         assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod lazy_exchange_stream_tests {
+    use super::*;
+
+    #[test]
+    fn streams_frames_and_reports_terminal_limits() {
+        let mut bytes = Vec::new();
+        for task in 0..3 {
+            write_frame(&mut bytes, &Frame {
+                stage: 1, task, attempt: 1, payload: vec![1; 4],
+            }, 8).unwrap();
+        }
+        let mut stream = FrameStream::new(bytes.as_slice(), 8, 12, 2);
+        assert_eq!(stream.next().unwrap().unwrap().task, 0);
+        assert_eq!(stream.next().unwrap().unwrap().task, 1);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
+
+        let frames = FrameStream::new(bytes.as_slice(), 8, 12, 3)
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(frames.len(), 3);
+        let mut empty = FrameStream::new([].as_slice(), 0, 0, 0);
+        assert!(empty.next().is_none());
+    }
+
+    #[test]
+    fn total_byte_limit_is_checked_before_payload_read() {
+        let mut bytes = Vec::new();
+        for task in 0..2 {
+            write_frame(&mut bytes, &Frame {
+                stage: 1, task, attempt: 0, payload: vec![7; 4],
+            }, 4).unwrap();
+        }
+        let mut stream = FrameStream::new(bytes.as_slice(), 4, 6, 5);
+        assert!(stream.next().unwrap().is_ok());
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }
