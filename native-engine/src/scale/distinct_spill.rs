@@ -13,6 +13,7 @@ use super::{
 };
 
 static DISTINCT_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_DISTINCT_STATE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct DistinctFiles {
     paths: Vec<PathBuf>,
@@ -61,12 +62,20 @@ where I: IntoIterator<Item = Result<Batch>>
             return Err(Error::Schema("DISTINCT partition schema mismatch".into()));
         }
         let mut seen: HashSet<Vec<Value>> = HashSet::new();
+        let mut retained_bytes = 0usize;
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
             for index in 0..batch.num_rows() {
+                if index % 1024 == 0 { control.check()?; }
                 let row = batch.row(index)?;
-                if seen.insert(row) && seen.len() > max_unique_rows_per_partition {
-                    return Err(Error::Execution("DISTINCT partition exceeds state budget".into()));
+                let footprint = super::row_footprint::footprint(row.iter());
+                if seen.insert(row) {
+                    if seen.len() > max_unique_rows_per_partition {
+                        return Err(Error::Execution("DISTINCT partition exceeds state budget".into()));
+                    }
+                    retained_bytes = retained_bytes.checked_add(footprint)
+                        .filter(|&bytes| bytes <= MAX_DISTINCT_STATE_BYTES)
+                        .ok_or_else(|| Error::Execution("DISTINCT partition exceeds memory budget".into()))?;
                 }
             }
         }
@@ -79,7 +88,8 @@ where I: IntoIterator<Item = Result<Batch>>
         result.paths.push(path);
         let mut output = SpillWriter::new(BufWriter::new(file), schema.clone())?;
         let mut pending = Vec::with_capacity(io_batch_rows.min(seen.len()));
-        for row in seen {
+        for (index, row) in seen.into_iter().enumerate() {
+            if index % 1024 == 0 { control.check()?; }
             pending.push(row);
             if pending.len() == io_batch_rows {
                 output.write_batch(&Batch::from_rows(schema.clone(), std::mem::take(&mut pending))?)?;
