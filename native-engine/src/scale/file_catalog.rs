@@ -55,6 +55,10 @@ fn normalized(name: &str) -> Result<Cow<'_, str>> {
 }
 
 impl FileCatalog {
+    fn contains_key(&self, key: &str) -> bool {
+        self.tables.contains_key(key) || self.parquet.contains_key(key)
+    }
+
     pub fn new() -> Self { Self::default() }
 
     pub fn register_csv(
@@ -65,7 +69,7 @@ impl FileCatalog {
         if schema.is_empty() || max_record_bytes == 0 {
             return Err(Error::Schema("CSV source requires a schema and byte limit".into()));
         }
-        if self.tables.contains_key(key.as_ref()) || self.parquet.contains_key(key.as_ref()) {
+        if self.contains_key(key.as_ref()) {
             return Err(Error::Schema(format!("file-backed table already exists: {name}")));
         }
         self.tables.insert(key.into_owned(), CsvTable {
@@ -76,7 +80,7 @@ impl FileCatalog {
 
     pub fn register_parquet(&mut self, name: &str, path: impl AsRef<Path>) -> Result<()> {
         let key = normalized(name)?;
-        if self.tables.contains_key(key.as_ref()) || self.parquet.contains_key(key.as_ref()) {
+        if self.contains_key(key.as_ref()) {
             return Err(Error::Schema(format!("file-backed table already exists: {name}")));
         }
         let path = path.as_ref();
@@ -112,11 +116,11 @@ impl FileCatalog {
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
         let source = normalized(from)?;
         let destination = normalized(to)?;
-        if !self.tables.contains_key(source.as_ref()) && !self.parquet.contains_key(source.as_ref()) {
+        if !self.contains_key(source.as_ref()) {
             return Err(Error::Schema(format!("unknown native file table: {from}")));
         }
         if source == destination { return Ok(()); }
-        if self.tables.contains_key(destination.as_ref()) || self.parquet.contains_key(destination.as_ref()) {
+        if self.contains_key(destination.as_ref()) {
             return Err(Error::Schema(format!("file-backed table already exists: {to}")));
         }
         if let Some(table) = self.tables.remove(source.as_ref()) {
