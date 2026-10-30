@@ -1,8 +1,15 @@
 use super::{float_type, Function};
 use crate::{scalar::Value, Error, Result};
+fn positive_argument(value: &Value) -> Result<Option<f64>> {
+    let Some(x) = super::number(value)? else { return Ok(None) };
+    if x <= 0.0 {
+        return Err(Error::Execution("logarithm requires positive argument".into()));
+    }
+    Ok(Some(x))
+}
+
 fn checked_log(value: &Value, base: Option<f64>) -> Result<Value> {
-    let Some(x) = super::number(value)? else { return Ok(Value::Null) };
-    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    let Some(x) = positive_argument(value)? else { return Ok(Value::Null) };
     let result = match base {
         Some(b) if b > 0.0 && b != 1.0 => x.ln() / b.ln(),
         Some(_) => return Err(Error::Execution("logarithm base must be positive and not one".into())),
@@ -12,13 +19,11 @@ fn checked_log(value: &Value, base: Option<f64>) -> Result<Value> {
 }
 fn ln(args: &[Value]) -> Result<Value> { checked_log(&args[0], None) }
 fn log2(args: &[Value]) -> Result<Value> {
-    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
-    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    let Some(x) = positive_argument(&args[0])? else { return Ok(Value::Null) };
     super::finite(x.log2())
 }
 fn log10(args: &[Value]) -> Result<Value> {
-    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
-    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    let Some(x) = positive_argument(&args[0])? else { return Ok(Value::Null) };
     super::finite(x.log10())
 }
 fn log(args: &[Value]) -> Result<Value> {
