@@ -101,9 +101,16 @@ fn execute_inner(
             let Plan::Sort { input: source, keys } = input.as_ref() else {
                 unreachable!("checked sort plan");
             };
-            let source = execute_inner(source, catalog, options, depth + 2, guard)?;
             guard.check()?;
-            crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            if let Plan::Scan { table } = source.as_ref() {
+                // Scan data is already held by the catalog; Top-K only needs
+                // to allocate the bounded candidate heap and final result.
+                crate::topk::top_k_offset(catalog.get(table)?, keys, *offset, *count)?
+            } else {
+                let source = execute_inner(source, catalog, options, depth + 2, guard)?;
+                guard.check()?;
+                crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            }
         },
         Plan::Limit { input, offset, count } => {
             // A LIMIT over a scan must not materialize and budget the whole input.
@@ -265,5 +272,28 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod topk_catalog_scan_budget_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}, sort::SortKey};
+
+    #[test]
+    fn bounded_topk_reads_large_catalog_sources_without_intermediate_result_rejection() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("sales", Batch::from_rows(schema,
+            (0..100).rev().map(|n| vec![Value::Integer(n)]).collect()).unwrap()).unwrap();
+        let plan = Plan::Sort {
+            input: Box::new(Plan::scan("sales")),
+            keys: vec![SortKey::ascending(Expr::Column("n".into()))],
+        }.limit(10, Some(2));
+        let result = execute_with_options(&plan, &catalog,
+            ExecutionOptions { max_output_rows: 2, ..ExecutionOptions::default() }).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(10)], vec![Value::Integer(11)]
+        ]);
     }
 }
