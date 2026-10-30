@@ -20,12 +20,12 @@ fn hex(args: &[Value]) -> Result<Value> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::Execution("HEX input exceeds byte limit".into()));
     }
-    let mut output = Vec::with_capacity(input.len() * 2);
+    let mut output = String::with_capacity(input.len() * 2);
     for &byte in input {
-        output.push(DIGITS[(byte >> 4) as usize]);
-        output.push(DIGITS[(byte & 15) as usize]);
+        output.push(char::from(DIGITS[(byte >> 4) as usize]));
+        output.push(char::from(DIGITS[(byte & 15) as usize]));
     }
-    Ok(Value::Text(String::from_utf8(output).expect("HEX produces ASCII digits")))
+    Ok(Value::Text(output))
 }
 fn decode_hex_digit(byte: u8) -> Result<u8> {
     match byte {
@@ -117,5 +117,18 @@ mod try_unhex_utf8_extension_tests {
         assert_eq!(try_unhex_utf8(&[Value::Text("FF".into())]).unwrap(), Value::Null);
         assert_eq!(try_unhex_utf8(&[Value::Text("GG".into())]).unwrap(), Value::Null);
         assert_eq!(try_unhex_utf8(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod hex_direct_string_tests {
+    use super::*;
+
+    #[test]
+    fn encodes_unicode_bytes_without_a_utf8_conversion() {
+        assert_eq!(hex(&[Value::Text("é🙂".into())]).unwrap(),
+            Value::Text("C3A9F09F9982".into()));
+        assert_eq!(hex(&[Value::Text(String::new())]).unwrap(),
+            Value::Text(String::new()));
     }
 }
