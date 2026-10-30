@@ -1,72 +1,45 @@
-# RustSpark V1 acceptance
+# RustSpark native release acceptance
 
-RustSpark V1 is an **experimental local SQL engine** built on Apache DataFusion.
-It is not a stable database, Spark API-compatible runtime, or production
-distributed SQL service. The current Cargo package version is `0.1.0`.
-Treat the first public release as an experimental preview, not a promise of
-stable `v1.0.0` semantics.
+RustSpark 0.1.x is an experimental native SQL engine, **not** a production
+persistent database or an Apache Spark-compatible distributed runtime.
+Do not present a passing test as proof of ACID durability or Spark parity.
 
-## Release gates
+## Native preview release gates
 
-- The exact `main` commit to be tagged has completed, successful Rust CI:
-  formatting, Clippy, all Rust tests, Rust 1.95 and Windows. A cancelled or
-  pending run is **not** a passing release gate.
-- The release workflow's Linux and Windows `storage-qualification` tests
-  pass, including `cli_insert_recovery`, `cli_database_lock`,
-  `cli_catalog_recovery`, `cli_database_backup` and `v1_workflows`.
-- Core local CLI workflows work across fresh processes: persistent table
-  create, INSERT, restart, rename and DROP; named CSV joins, typed SQL
-  parameters, Parquet round trips and nonzero exit status on invalid SQL.
-- Storage tests verify that failed writes preserve previously committed data,
-  and that interrupted insert publication recovers on restart at the tested
-  process-exit boundaries. Backup tests verify independent copied Parquet parts.
-- The packaged release binaries complete a backup smoke check: independent
-  snapshots remain queryable after writes and drops to the original database,
-  and invalid backup destinations are rejected.
-- The release workflow builds Linux x86-64, Windows x86-64 and macOS arm64
-  binaries. Each final archive includes the executable, README and LICENSE,
-  matches the checked build output, and passes smoke tests after extraction.
-- The tag matches `Cargo.toml`, is based on the verified `main` commit,
-  and has not been moved after publication.
-- Record measured benchmark results and known Spark SQL differences before
-  publishing comparative performance or compatibility claims. The optional
-  comparison harnesses are not replacements for the core release checks.
+- Validate the exact candidate commit on Linux, Windows, and macOS with the
+  root CLI and standalone `native-engine/Cargo.toml` test suites.
+- Run Clippy for both packages, with warnings denied.
+- Verify that neither active package resolves DataFusion or Ballista.
+- Exercise the packaged **native** CLI across processes with CSV, Parquet,
+  joins, aggregation, and unsupported-SQL rejection.
+- Verify streaming CLI memory limits, cancellation, external sort, and
+  scratch-file cleanup with representative inputs.
+- Record known SQL correctness gaps, results against a reference engine,
+  and the exact revision and workload used for any performance claims.
+- Complete the dependency security audit for both dependency graphs.
+- Review artifact provenance and checksums before publishing any binary.
 
 ## Run local checks
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --all-targets --locked
-cargo test --locked --test v1_workflows
-cargo test --locked --test cli_insert_recovery --test cli_database_lock \
-  --test cli_catalog_recovery --test cli_database_backup
-python3 scripts/quality.py test --suite all
+cargo test --all-targets
+cargo test --manifest-path native-engine/Cargo.toml --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo clippy --manifest-path native-engine/Cargo.toml --all-targets -- -D warnings
+python3 scripts/check_native_dependencies.py
 ```
 
-These tests exercise the actual CLI in separate processes. On GitHub, also
-run the release workflow through `workflow_dispatch` before tagging.
-A local pass does not replace the cross-platform checks or archive smoke tests.
+## Production database gates still missing
 
-## Known limitations to publish
+The default native CLI does not provide a durable SQL data store. A production
+database milestone additionally needs:
 
-- Persistent `INSERT INTO` builds a private replacement and uses a recovery
-  protocol. Tests cover SQL errors, cancellation and process exits at selected
-  commit boundaries. On the next startup, RustSpark validates snapshots and
-  recovers the old or published table where possible.
-- **This is not ACID storage.** Multi-statement transactions, power-loss/fsync
-  durability and recovery from arbitrary file corruption are **not guaranteed**.
-  Do not store irreplaceable data without independent backups.
-- Local persisted operations hold an exclusive filesystem lock for the whole
-  database session, including read-only sessions. Multiple writers are not
-  supported. External writers are not coordinated with this lock.
-- Staged inserts may hard-link existing immutable Parquet parts. Altering these
-  files outside RustSpark can corrupt both the live and staged snapshots.
-  Database backups copy independent files rather than sharing hard links.
-- Ballista-based distributed execution is an optional feasibility integration,
-  not a production scheduler or worker-failure recovery contract.
-- RustSpark uses DataFusion SQL semantics and is **not** a drop-in replacement
-  for Apache Spark SQL or the Spark APIs.
+1. A versioned persistent catalog with schema validation and crash recovery.
+2. Atomic data and metadata commits, restart tests, and documented fsync rules.
+3. Multi-process access control, concurrency semantics, backups, and restore.
+4. Bounded resident memory and scratch space for supported query operators.
+5. Safe service authentication and authorization if network access is added.
+6. Query correctness comparisons and repeatable realistic performance tests.
 
-Include these limits in the release notes. Do not convert passing smoke tests
-into claims of guaranteed durability, compatibility or performance.
+Until those requirements are implemented and qualified, describe RustSpark as
+an experimental analytical query tool rather than a production database.
