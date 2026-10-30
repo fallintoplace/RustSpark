@@ -32,8 +32,9 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
             let result = next.and_then(|batch| {
                 if matches!(&self.predicate,
                     Expr::Literal(crate::scalar::Value::Boolean(true))) {
-                    // The stream already owns the batch. Do not deep-clone all
-                    // columns for a constant-true filter.
+                    // Keep the zero-copy fast path, but still observe
+                    // cancellations that arrive during upstream polling.
+                    self.control.check()?;
                     Ok(batch)
                 } else {
                     filter::filter_checked(
@@ -346,6 +347,25 @@ mod fused_stream_operator_eof_tests {
 mod stream_filter_after_pull_cancellation_tests {
     use super::*;
     use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn cancelled_after_poll_also_stops_the_true_predicate_fast_path() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)]],
+        ).unwrap();
+        let control = QueryControl::default();
+        let in_source = control.clone();
+        let source = std::iter::once_with(move || {
+            in_source.cancel();
+            Ok(batch)
+        });
+        let mut filtered = FilterStream::new(
+            source, Expr::Literal(Value::Boolean(true)), control,
+        );
+        assert!(filtered.next().unwrap().unwrap_err().to_string().contains("cancelled"));
+        assert!(filtered.next().is_none());
+    }
 
     #[test]
     fn cancellation_after_source_pull_prevents_large_filter_work() {
