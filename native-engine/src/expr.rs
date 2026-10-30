@@ -118,7 +118,11 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
+            Self::TryCast { expression, target } | Self::Cast { expression, target } => {
+                // The target type does not make an unknown input column valid.
+                expression.output_type(schema)?;
+                Ok(*target)
+            },
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
                 for (condition, _) in branches {
@@ -709,5 +713,28 @@ mod in_list_static_choice_validation_tests {
             negated: true,
         };
         assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod cast_expression_planning_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_source_columns_for_cast_and_try_cast() {
+        let schema = Schema::new(vec![
+            Field::new("s", DataType::Text, true),
+        ]).unwrap();
+        for try_mode in [false, true] {
+            let make = |inner| if try_mode {
+                Expr::TryCast { expression: Box::new(inner), target: DataType::Integer }
+            } else {
+                Expr::Cast { expression: Box::new(inner), target: DataType::Integer }
+            };
+            assert!(make(Expr::Column("absent".into())).output_type(&schema).is_err());
+            assert_eq!(make(Expr::Column("s".into())).output_type(&schema).unwrap(),
+                DataType::Integer);
+        }
     }
 }
