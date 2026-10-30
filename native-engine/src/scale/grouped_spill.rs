@@ -20,6 +20,7 @@ use super::{
 };
 
 static GROUP_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_GROUP_KEY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct GroupFiles {
@@ -188,11 +189,12 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
 fn aggregate_shard(
     path: &Path, input: &Schema, keys: &[usize],
     items: &[AggregateItem], output: &Schema,
-    max_groups: usize, io_rows: usize, control: &QueryControl,
+    max_groups: usize, max_key_bytes: usize, io_rows: usize, control: &QueryControl,
 ) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != input { return Err(Error::Schema("group shard schema mismatch".into())); }
     let mut groups: HashMap<Vec<Value>, Vec<State>> = HashMap::new();
+    let mut key_bytes = 0usize;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
         for row in 0..batch.num_rows() {
@@ -205,9 +207,20 @@ fn aggregate_shard(
                     if at_capacity {
                         return Err(Error::Execution("group state count exceeds partition budget".into()));
                     }
+                    let key_size = entry.key().iter().try_fold(64usize, |size, value| {
+                        let extra = match value {
+                            Value::Text(text) => text.len(), _ => 0,
+                        };
+                        size.checked_add(std::mem::size_of::<Value>())
+                            .and_then(|n| n.checked_add(extra))
+                    }).ok_or_else(|| Error::Execution("group key size overflow".into()))?;
+                    let next_bytes = key_bytes.checked_add(key_size)
+                        .filter(|bytes| *bytes <= max_key_bytes)
+                        .ok_or_else(|| Error::Execution("group key memory budget exceeded".into()))?;
                     let initial = items.iter()
                         .map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
+                    key_bytes = next_bytes;
                     entry.insert(initial)
                 }
             };
@@ -267,7 +280,7 @@ where I: IntoIterator<Item = Result<Batch>>
         control.check()?;
         let batch = aggregate_shard(
             shard, &schema, &keys, items, &output_schema,
-            max_groups_per_partition, io_batch_rows, control)?;
+            max_groups_per_partition, MAX_GROUP_KEY_BYTES, io_batch_rows, control)?;
         let id = GROUP_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-groups-{}-{id}.rspill", std::process::id()));
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
@@ -443,5 +456,39 @@ mod grouped_spill_window_output_tests {
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grouped_key_byte_budget_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+
+    #[test]
+    fn key_size_budget_rejects_wide_text_groups() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-group-key-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.rspill");
+        let schema = Schema::new(vec![Field::new("g", DataType::Text, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("first".repeat(40))],
+            vec![Value::Text("second".repeat(40))],
+        ]).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        writer.write_batch(&input).unwrap();
+        writer.finish().unwrap();
+        let items = [AggregateItem::new(AggregateOp::CountAll, "count")];
+        let output = output_schema(&schema, &[("g".into(), "g".into())], &items).unwrap();
+        let error = aggregate_shard(&path, &schema, &[0], &items, &output,
+            10, 300, 2, &QueryControl::default()).unwrap_err();
+        assert!(error.to_string().contains("group key memory budget"));
+        let good = aggregate_shard(&path, &schema, &[0], &items, &output,
+            10, 1000, 2, &QueryControl::default()).unwrap();
+        assert_eq!(good.num_rows(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
