@@ -8,6 +8,7 @@ import subprocess
 
 from mcp.server import MCPServer
 from query_templates import list_templates, make_command, parse_query_rows, template_path
+from bounded_backend import run_bounded
 
 mcp = MCPServer("RustSpark SQL templates")
 
@@ -40,11 +41,8 @@ def run_named_query(name: str, parameters: dict[str, str],
     command = make_command(binary, database_dir, path, parameters,
                            max_rows=max_rows, query_timeout=query_timeout)
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True,
-            timeout=30, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
+        result = run_bounded(command, timeout=query_timeout + 10)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         raise RuntimeError("RustSpark query backend unavailable") from error
     if result.returncode:
         raise RuntimeError("RustSpark query did not complete")

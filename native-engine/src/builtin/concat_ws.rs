@@ -5,6 +5,13 @@ fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(separator) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if args.len() == 2 {
+        return match super::string(&args[1])? {
+            Some(value) if value.len() <= 16 * 1024 * 1024 => Ok(Value::Text(value.to_owned())),
+            Some(_) => Err(Error::Execution("CONCAT_WS output exceeds 16 MiB".into())),
+            None => Ok(Value::Text(String::new())),
+        };
+    }
     let mut total = 0usize;
     let mut pieces = 0usize;
     for arg in &args[1..] {
@@ -74,5 +81,22 @@ mod separator_only_concat_ws_tests {
         assert_eq!(evaluate(&[Value::Text(",".into())]).unwrap(), Value::Text(String::new()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(output(&[DataType::Text]).unwrap(), DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod single_value_concat_ws_fast_path_tests {
+    use super::*;
+    #[test]
+    fn handles_one_value_nulls_and_separator_escaping() {
+        assert_eq!(evaluate(&[Value::Text(",".into()),
+            Value::Text("é🙂".into())]).unwrap(), Value::Text("é🙂".into()));
+        assert_eq!(evaluate(&[Value::Text("long separator".into()),
+            Value::Null]).unwrap(), Value::Text("".into()));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("/".into()), Value::Text("a".into()),
+            Value::Text("b".into())]).unwrap(), Value::Text("a/b".into()));
+        assert!(evaluate(&[Value::Text(".".into()),
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }

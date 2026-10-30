@@ -109,7 +109,10 @@ impl PartialGroupSum {
         }
         let mut new_groups = 0usize;
         for (key, state) in &other.groups {
-            if !self.groups.contains_key(key) {
+            // Reuse the lookup for admission and overflow preflight instead of
+            // hashing every incoming group twice.
+            let current = self.groups.get(key);
+            if current.is_none() {
                 new_groups = new_groups.checked_add(1)
                     .ok_or_else(|| Error::Execution("group cardinality overflow".into()))?;
             }
@@ -118,7 +121,7 @@ impl PartialGroupSum {
                 return Err(Error::Execution("merged group cardinality exceeds limit".into()));
             }
             let empty = State::default();
-            let current = self.groups.get(key).unwrap_or(&empty);
+            let current = current.unwrap_or(&empty);
             current.rows.checked_add(state.rows)
                 .ok_or_else(|| Error::Execution("group count overflow".into()))?;
             current.sum.checked_add(state.sum)
@@ -240,5 +243,39 @@ mod consolidated_partial_merge_preflight_tests {
             let now = &first.groups[&key];
             assert_eq!((now.rows, now.sum, now.has_value), (previous.rows, previous.sum, previous.has_value));
         }
+    }
+}
+
+#[cfg(test)]
+mod partial_aggregate_single_lookup_merge_tests {
+    use super::*;
+
+    #[test]
+    fn preflights_new_and_existing_groups_before_merge() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, false),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("a".into()), Value::Integer(7)],
+            vec![Value::Text("b".into()), Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text("a".into()), Value::Integer(5)],
+            vec![Value::Text("c".into()), Value::Integer(-2)],
+        ]).unwrap();
+        let mut first = PartialGroupSum::new("key", "amount", 3);
+        let mut second = PartialGroupSum::new("key", "amount", 3);
+        first.update(&left).unwrap();
+        second.update(&right).unwrap();
+        first.merge(second).unwrap();
+        let result = first.finish().unwrap();
+        let mut rows = result.rows().unwrap();
+        rows.sort_by(|a, b| a[0].sql_compare(&b[0]).unwrap().unwrap());
+        assert_eq!(rows, vec![
+            vec![Value::Text("a".into()), Value::Integer(2), Value::Integer(12)],
+            vec![Value::Text("b".into()), Value::Integer(1), Value::Null],
+            vec![Value::Text("c".into()), Value::Integer(1), Value::Integer(-2)],
+        ]);
     }
 }

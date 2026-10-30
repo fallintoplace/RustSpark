@@ -12,6 +12,7 @@ pub struct CsvRows<R: BufRead> {
     schema: Schema,
     max_record_bytes: usize,
     finished: bool,
+    skip_lf: bool,
 }
 
 impl<R: BufRead> CsvRows<R> {
@@ -19,7 +20,7 @@ impl<R: BufRead> CsvRows<R> {
         if schema.is_empty() || max_record_bytes == 0 {
             return Err(Error::Schema("CSV scan requires a schema and record limit".into()));
         }
-        let mut scan = Self { reader, schema, max_record_bytes, finished: false };
+        let mut scan = Self { reader, schema, max_record_bytes, finished: false, skip_lf: false };
         let header = scan.read_raw_record()?
             .ok_or_else(|| Error::Parse("CSV input has no header".into()))?;
         let parsed = parse_records(header.trim_start_matches('\u{feff}'))?;
@@ -35,6 +36,14 @@ impl<R: BufRead> CsvRows<R> {
     }
 
     fn read_raw_record(&mut self) -> Result<Option<String>> {
+        // The previous record already consumed CR; absorb its optional LF
+        // without producing a blank extra record or allocating a parser row.
+        if self.skip_lf {
+            self.skip_lf = false;
+            if self.reader.fill_buf()?.first() == Some(&b'\n') {
+                self.reader.consume(1);
+            }
+        }
         let mut bytes = Vec::new();
         let mut quoted = false;
         loop {
@@ -53,6 +62,7 @@ impl<R: BufRead> CsvRows<R> {
                 consumed += 1;
                 if byte == b'"' { quoted = !quoted; }
                 if (byte == b'\n' || byte == b'\r') && !quoted {
+                    self.skip_lf = byte == b'\r';
                     complete = true;
                     break;
                 }
@@ -183,5 +193,37 @@ mod cr_only_csv_scan_tests {
             vec![Value::Integer(1), Value::Text("a\rb".into())],
             vec![Value::Integer(2), Value::Text("ok".into())],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod crlf_fast_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn skips_crlf_separator_even_across_tiny_read_buffers() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, false),
+        ]).unwrap();
+        let input = "id,note\r\n1,\"a\r\nb\"\r\n2,plain\r\n3,end\r";
+        let source = BufReader::with_capacity(1, Cursor::new(input.as_bytes()));
+        let rows = CsvRows::new(source, schema, 128).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(1), Value::Text("a\r\nb".into())],
+            vec![Value::Integer(2), Value::Text("plain".into())],
+            vec![Value::Integer(3), Value::Text("end".into())],
+        ]);
+    }
+
+    #[test]
+    fn standalone_cr_does_not_consume_first_byte_of_next_record() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let rows = CsvRows::new(Cursor::new("id\r1\r2\r"), schema, 16).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
     }
 }

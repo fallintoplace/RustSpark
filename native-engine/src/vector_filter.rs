@@ -104,6 +104,21 @@ fn fast_integer_predicate<'a>(
     Ok(None)
 }
 
+fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
+    -> Result<Option<(&'a [Value], bool)>>
+{
+    let (inner, select_null) = match predicate {
+        Expr::IsNull(inner) => (inner.as_ref(), true),
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::IsNull(column) => (column.as_ref(), false),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let Expr::Column(name) = inner else { return Ok(None) };
+    Ok(Some((batch.column(batch.schema().column(name)?)?, select_null)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -149,6 +164,23 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
+        }
+    } else if let Some((column, select_null)) = fast_null_test(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if value.is_null() == select_null { selected.push(row); }
+        }
+    } else if let Expr::Not(inner) = predicate {
+        if let Expr::Column(name) = inner.as_ref() {
+            let index = batch.schema().column(name)?;
+            if batch.schema().field(index)?.data_type == DataType::Boolean {
+                for (row, value) in batch.column(index)?.iter().enumerate() {
+                    if matches!(value, Value::Boolean(false)) { selected.push(row); }
+                }
+                return Ok(selected);
+            }
+        }
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
         }
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -337,5 +369,52 @@ mod reversed_float_fast_path_perf_tests {
                 assert_eq!(select_indices(&batch, &expr).unwrap(), expected);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod null_column_fast_filter_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn null_and_not_null_selection_match_scalar_logic() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap(),
+            vec![
+                vec![Value::Null], vec![Value::Text("é".into())],
+                vec![Value::Text("".into())], vec![Value::Null],
+            ],
+        ).unwrap();
+        let null_check = Expr::IsNull(Box::new(Expr::Column("payload".into())));
+        let not_null_check = Expr::Not(Box::new(null_check.clone()));
+        assert_eq!(select_indices(&input, &null_check).unwrap(), vec![0, 3]);
+        assert_eq!(select_indices(&input, &not_null_check).unwrap(), vec![1, 2]);
+        for predicate in [&null_check, &not_null_check] {
+            let expected = (0..input.num_rows()).filter(|&row|
+                predicate.evaluate(&input, row).unwrap().as_boolean().unwrap() == Some(true)
+            ).collect::<Vec<_>>();
+            assert_eq!(select_indices(&input, predicate).unwrap(), expected);
+        }
+        assert!(select_indices(&input,
+            &Expr::IsNull(Box::new(Expr::Column("missing".into())))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_negated_boolean_scan_tests {
+    use super::*;
+    use crate::schema::{Schema, Field, DataType};
+
+    #[test]
+    fn not_boolean_column_excludes_nulls_without_reordering() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("enabled", DataType::Boolean, true)]).unwrap(),
+            vec![vec![Value::Boolean(true)], vec![Value::Null],
+                 vec![Value::Boolean(false)], vec![Value::Boolean(false)]],
+        ).unwrap();
+        assert_eq!(select_indices(&input,
+            &Expr::Not(Box::new(Expr::Column("enabled".into())))
+        ).unwrap(), [2, 3]);
     }
 }

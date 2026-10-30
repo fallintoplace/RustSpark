@@ -38,8 +38,11 @@ impl AggregateItem {
 
     fn output_type(&self, schema: &Schema) -> Result<DataType> {
         match &self.op {
-            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
-                Ok(DataType::Integer),
+            AggregateOp::CountAll => Ok(DataType::Integer),
+            AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) => {
+                expr.output_type(schema)?;
+                Ok(DataType::Integer)
+            },
             AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
@@ -61,7 +64,7 @@ impl AggregateItem {
 #[derive(Clone)]
 enum State {
     Count(i64),
-    CountDistinct(HashSet<Value>),
+    CountDistinct { seen: HashSet<Value>, bytes: usize },
     Sum(Option<Value>),
     SumDistinct { seen: HashSet<Value>, total: Option<Value> },
     Avg { sum: f64, compensation: f64, count: i64 },
@@ -74,7 +77,7 @@ impl State {
     fn new(op: &AggregateOp) -> Self {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
-            AggregateOp::CountDistinct(_) => Self::CountDistinct(HashSet::new()),
+            AggregateOp::CountDistinct(_) => Self::CountDistinct { seen: HashSet::new(), bytes: 0 },
             AggregateOp::Sum(_) => Self::Sum(None),
             AggregateOp::SumDistinct(_) => Self::SumDistinct { seen: HashSet::new(), total: None },
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
@@ -105,8 +108,23 @@ impl State {
                         .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
                 }
             }
-            Self::CountDistinct(values) => {
-                if !value.is_null() { values.insert(value); }
+            Self::CountDistinct { seen, bytes } => {
+                if !value.is_null() && !seen.contains(&value) {
+                    if seen.len() >= MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP {
+                        return Err(Error::Execution("COUNT DISTINCT key budget exceeded".into()));
+                    }
+                    let footprint = 64usize.saturating_add(std::mem::size_of::<Value>())
+                        .saturating_add(match &value {
+                            Value::Text(text) => text.len(),
+                            _ => 0,
+                        });
+                    let total = bytes.checked_add(footprint)
+                        .filter(|size| *size <= 64 * 1024 * 1024)
+                        .ok_or_else(|| Error::Execution(
+                            "COUNT DISTINCT byte budget exceeded".into()))?;
+                    seen.insert(value);
+                    *bytes = total;
+                }
             }
             Self::Sum(total) => add_sum(total, &value)?,
             Self::SumDistinct { seen, total } => {
@@ -134,8 +152,8 @@ impl State {
     fn finish(self) -> Result<Value> {
         Ok(match self {
             Self::Count(value) => Value::Integer(value),
-            Self::CountDistinct(values) => Value::Integer(
-                i64::try_from(values.len())
+            Self::CountDistinct { seen, .. } => Value::Integer(
+                i64::try_from(seen.len())
                     .map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
             ),
             Self::Avg { sum, compensation, count } =>
@@ -228,6 +246,53 @@ pub fn aggregate(
     items: &[AggregateItem],
 ) -> Result<Batch> {
     aggregate_with_max_groups(batch, group_by, items, 1_000_000)
+}
+
+/// Derive the single-row result schema without scanning an input source.
+pub fn global_output_schema(input: &Schema, items: &[AggregateItem]) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(items.len());
+    for item in items {
+        if let AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) = &item.op {
+            expr.output_type(input)?;
+        }
+        let nullable = !matches!(&item.op,
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
+        fields.push(Field::new(&item.alias, item.output_type(input)?, nullable));
+    }
+    Schema::new(fields)
+}
+
+/// Update native scalar aggregate states incrementally across input batches.
+/// DISTINCT aggregates need a separate bounded spill path and are rejected here.
+pub fn aggregate_global_stream(
+    source: impl Iterator<Item = Result<Batch>>,
+    input_schema: &Schema, items: &[AggregateItem],
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    if items.iter().any(|item| matches!(&item.op,
+        AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
+        AggregateOp::AvgDistinct(_))) {
+        return Err(Error::Unsupported("stream global DISTINCT aggregates require a spill path".into()));
+    }
+    let schema = global_output_schema(input_schema, items)?;
+    let mut states = items.iter().map(|item| State::new(&item.op))
+        .collect::<Vec<_>>();
+    for next in source {
+        check()?;
+        let batch = next?;
+        if batch.schema() != input_schema {
+            return Err(Error::Schema("stream aggregate input schema changed".into()));
+        }
+        for row in 0..batch.num_rows() {
+            if row % 1024 == 0 { check()?; }
+            for (state, item) in states.iter_mut().zip(items) {
+                state.update(&item.op, &batch, row)?;
+            }
+        }
+    }
+    check()?;
+    let row = states.into_iter().map(State::finish).collect::<Result<Vec<_>>>()?;
+    Batch::from_rows(schema, vec![row])
 }
 
 pub fn aggregate_with_max_groups(
@@ -441,5 +506,107 @@ mod bound_group_columns_perf_tests {
             BinaryOp::Add, Expr::Literal(Value::Integer(1)));
         assert_eq!(aggregate_with_max_groups(&batch,
             &[(computed, "key".into())], &[], 2).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod global_stream_native_aggregate_tests {
+    use super::*;
+    #[test]
+    fn combines_batches_and_empty_inputs_without_materializing_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let items = [
+            AggregateItem::new(AggregateOp::CountAll, "total"),
+            AggregateItem::new(AggregateOp::Count(Expr::Column("n".into())), "not_null"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("n".into())), "sum"),
+            AggregateItem::new(AggregateOp::Avg(Expr::Column("n".into())), "avg"),
+        ];
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null],
+        ]).unwrap();
+        let b = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(5)],
+        ]).unwrap();
+        let result = aggregate_global_stream([Ok(a), Ok(b)].into_iter(),
+            &schema, &items, || Ok(())).unwrap();
+        assert_eq!(result.row(0).unwrap(), vec![
+            Value::Integer(4), Value::Integer(3), Value::Integer(9),
+            Value::Float(3.0),
+        ]);
+        let empty = aggregate_global_stream(std::iter::empty(), &schema,
+            &items, || Ok(())).unwrap();
+        assert_eq!(empty.row(0).unwrap(), vec![
+            Value::Integer(0), Value::Integer(0), Value::Null, Value::Null,
+        ]);
+    }
+
+    #[test]
+    fn catches_unknown_count_columns_and_rejects_unbounded_distinct() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        assert!(global_output_schema(&schema, &[AggregateItem::new(
+            AggregateOp::Count(Expr::Column("missing".into())), "n")]).is_err());
+        assert!(aggregate_global_stream(std::iter::empty(), &schema,
+            &[AggregateItem::new(AggregateOp::CountDistinct(
+                Expr::Column("n".into())), "n")], || Ok(())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod count_distinct_budget_regression_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_keys_are_bounded_and_duplicate_nulls_do_not_use_slots() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let data = Batch::from_rows(schema,
+            std::iter::once(vec![Value::Null])
+                .chain((0..65_536).map(|n| vec![Value::Integer(n)]))
+                .collect()).unwrap();
+        let output = aggregate(&data, &[],
+            &[AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("id".into())), "n")]).unwrap();
+        assert_eq!(output.row(0).unwrap(), vec![Value::Integer(65_536)]);
+        let extra = Batch::from_rows(data.schema().clone(),
+            (0..=65_536).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        assert!(aggregate(&extra, &[],
+            &[AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("id".into())), "n")])
+            .is_err());
+    }
+
+    #[test]
+    fn repeated_text_values_count_once_and_nulls_are_ignored() {
+        let schema = Schema::new(vec![Field::new("word", DataType::Text, true)]).unwrap();
+        let data = Batch::from_rows(schema, vec![
+            vec![Value::Text("Berlin".into())],
+            vec![Value::Text("Berlin".into())], vec![Value::Null],
+        ]).unwrap();
+        assert_eq!(aggregate(&data, &[], &[AggregateItem::new(
+            AggregateOp::CountDistinct(Expr::Column("word".into())), "n")]).unwrap().row(0).unwrap(),
+            vec![Value::Integer(1)]);
+    }
+}
+
+#[cfg(test)]
+mod count_argument_preflight_regressions {
+    use super::*;
+
+    #[test]
+    fn count_arguments_are_checked_even_on_empty_input() {
+        let batch = Batch::empty(Schema::new(vec![
+            Field::new("valid", DataType::Text, true)
+        ]).unwrap());
+        for op in [
+            AggregateOp::Count(Expr::Column("missing".into())),
+            AggregateOp::CountDistinct(Expr::Column("missing".into())),
+        ] {
+            assert!(aggregate(&batch, &[], &[AggregateItem::new(op, "count")]).is_err());
+        }
+        for op in [
+            AggregateOp::Count(Expr::Column("valid".into())),
+            AggregateOp::CountDistinct(Expr::Column("valid".into())),
+            AggregateOp::CountAll,
+        ] {
+            assert_eq!(aggregate(&batch, &[], &[AggregateItem::new(op, "count")])
+                .unwrap().row(0).unwrap(), vec![Value::Integer(0)]);
+        }
     }
 }
