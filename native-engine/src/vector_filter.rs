@@ -121,6 +121,14 @@ fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
 
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
+    select_indices_checked(batch, predicate, || Ok(()))
+}
+
+/// Check cancellation while scanning both typed and scalar filter paths.
+pub fn select_indices_checked(
+    batch: &Batch, predicate: &Expr, mut check: impl FnMut() -> Result<()>,
+) -> Result<Vec<usize>> {
+    check()?;
     let kind = predicate.output_type(batch.schema())?;
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("vector filter predicate must be boolean".into()));
@@ -133,6 +141,7 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let mut selected = Vec::new();
     if let Some((column, op, rhs)) = fast_integer_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
+            if row % 1024 == 0 { check()?; }
             if let Value::Integer(lhs) = value {
                 if integer_comparison(op, *lhs, rhs) == Some(true) {
                     selected.push(row);
@@ -141,6 +150,7 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
     } else if let Some((column, op, rhs)) = fast_float_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
+            if row % 1024 == 0 { check()?; }
             if let Value::Float(lhs) = value {
                 let order = if lhs.is_nan() {
                     if rhs.is_nan() { std::cmp::Ordering::Equal } else { std::cmp::Ordering::Greater }
@@ -163,10 +173,12 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
+            if row % 1024 == 0 { check()?; }
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
         }
     } else if let Some((column, select_null)) = fast_null_test(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
+            if row % 1024 == 0 { check()?; }
             if value.is_null() == select_null { selected.push(row); }
         }
     } else if let Expr::Not(inner) = predicate {
@@ -174,27 +186,32 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
             let index = batch.schema().column(name)?;
             if batch.schema().field(index)?.data_type == DataType::Boolean {
                 for (row, value) in batch.column(index)?.iter().enumerate() {
+                    if row % 1024 == 0 { check()?; }
                     if matches!(value, Value::Boolean(false)) { selected.push(row); }
                 }
                 return Ok(selected);
             }
         }
         for row in 0..batch.num_rows() {
+            if row % 1024 == 0 { check()?; }
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
         }
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
+            if row % 1024 == 0 { check()?; }
             if let Value::Text(lhs) = value {
                 if (lhs.as_str() == rhs) == equals { selected.push(row); }
             }
         }
     } else {
         for row in 0..batch.num_rows() {
+            if row % 1024 == 0 { check()?; }
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
                 selected.push(row);
             }
         }
     }
+    check()?;
     Ok(selected)
 }
 
