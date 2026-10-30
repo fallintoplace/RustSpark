@@ -12,13 +12,11 @@ fn checked_log(value: &Value, base: Option<f64>) -> Result<Value> {
 }
 fn ln(args: &[Value]) -> Result<Value> { checked_log(&args[0], None) }
 fn log2(args: &[Value]) -> Result<Value> {
-    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
-    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    let Some(x) = positive_argument(&args[0])? else { return Ok(Value::Null) };
     super::finite(x.log2())
 }
 fn log10(args: &[Value]) -> Result<Value> {
-    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
-    if x <= 0.0 { return Err(Error::Execution("logarithm requires positive argument".into())); }
+    let Some(x) = positive_argument(&args[0])? else { return Ok(Value::Null) };
     super::finite(x.log10())
 }
 fn log(args: &[Value]) -> Result<Value> {
