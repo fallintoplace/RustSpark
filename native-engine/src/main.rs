@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -30,10 +30,11 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    manifest: Option<PathBuf>,
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl] [--manifest FILE]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -46,6 +47,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut manifest = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -99,6 +101,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                     return Err(Error::Parse("duplicate --sql".into()));
                 }
             }
+            "--manifest" => {
+                if manifest.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --manifest".into()));
+                }
+            },
             "--sql-file" => {
                 if sql_file.replace(PathBuf::from(value)).is_some() {
                     return Err(Error::Parse("duplicate --sql-file".into()));
@@ -116,7 +123,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
-    if sources.is_empty() {
+    if manifest.is_some() {
+        if !stream || csv.is_some() || parquet.is_some() || !sources.is_empty() || csv_schema.is_some() {
+            return Err(Error::Parse("--manifest requires --stream and no other sources".into()));
+        }
+    } else if sources.is_empty() {
         if csv.is_some() == parquet.is_some() {
             return Err(Error::Parse("choose --csv, --parquet, or --source".into()));
         }
@@ -134,7 +145,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, manifest }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -240,7 +251,40 @@ fn stream_plan(plan: &Plan) -> Result<StreamPlan> {
     }
 }
 
+
+fn run_manifest_stream(args: &Args, manifest: &Path) -> Result<()> {
+    use rustspark_native::scale::{
+        cancel::QueryControl,
+        file_catalog::FileCatalog,
+        stream_execute::{self, StreamOptions},
+    };
+    const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+    let mut text = String::new();
+    fs::File::open(manifest)?.take(MAX_MANIFEST_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(Error::Execution("catalog manifest exceeds 8 MiB limit".into()));
+    }
+    let catalog = FileCatalog::import_manifest(&text)?;
+    let plan = sql::parse_sql(&args.sql)?;
+    let options = StreamOptions::default();
+    let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
+    let rows = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
+    let stdout = io::stdout();
+    let mut output = io::BufWriter::new(stdout.lock());
+    if !args.jsonl { print_header(&schema, &mut output)?; }
+    for batch in rows {
+        let batch = batch?;
+        if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
+        else { print_csv_rows(&batch, &mut output)?; }
+    }
+    output.flush()?;
+    Ok(())
+}
+
 fn run_stream(args: &Args) -> Result<()> {
+    if let Some(path) = &args.manifest {
+        return run_manifest_stream(args, path);
+    }
     let plan = sql::parse_sql(&args.sql)?;
     let (table, predicate, projection, limit) = stream_plan(&plan)?;
     if !table.eq_ignore_ascii_case(&args.table) {
@@ -430,5 +474,45 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod query_manifest_cli_tests {
+    use super::*;
+    use rustspark_native::scale::{
+        cancel::QueryControl, file_catalog::FileCatalog,
+        stream_execute::{self, StreamOptions},
+    };
+
+    #[test]
+    fn manifest_tables_can_be_queried_after_catalog_restore() {
+        let dir = std::env::temp_dir().join(format!("rustspark-cli-manifest-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let csv = dir.join("numbers.csv");
+        fs::write(&csv, "n\n1\n2\n").unwrap();
+        let path = dir.join("catalog.json");
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("numbers", &csv, Schema::new(vec![
+            Field::new("n", DataType::Integer, false)
+        ]).unwrap(), 4096).unwrap();
+        fs::write(&path, catalog.export_manifest().unwrap()).unwrap();
+        let args = parse_args(vec![
+            "--stream".to_string(), "--manifest".into(), path.to_string_lossy().into_owned(),
+            "--sql".into(), "SELECT n FROM numbers WHERE n >= 2".into()
+        ]).unwrap().unwrap();
+        assert_eq!(args.manifest, Some(path.clone()));
+        let restored = FileCatalog::import_manifest(&fs::read_to_string(&path).unwrap()).unwrap();
+        let plan = sql::parse_sql(&args.sql).unwrap();
+        let rows = stream_execute::execute(&plan, &restored,
+            &StreamOptions::default(), QueryControl::default()).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let values = rows.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(values, vec![vec![Value::Integer(2)]]);
+        assert!(parse_args(["--manifest", "catalog.json", "--sql", "SELECT * FROM numbers"]
+            .into_iter().map(str::to_owned)).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
