@@ -24,6 +24,12 @@ pub struct HyperLogLog {
 }
 
 impl HyperLogLog {
+    fn update_register(register: &mut u8, rank: u8) -> bool {
+        let newly_occupied = *register == 0 && rank != 0;
+        *register = (*register).max(rank);
+        newly_occupied
+    }
+
     pub fn new() -> Self { Self { registers: [0; REGISTERS], nonempty: 0 } }
 
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
@@ -35,8 +41,9 @@ impl HyperLogLog {
         let index = (hash >> (64 - PRECISION)) as usize;
         let rank = ((hash << PRECISION).leading_zeros() + 1)
             .min(65 - PRECISION) as u8;
-        if self.registers[index] == 0 { self.nonempty += 1; }
-        self.registers[index] = self.registers[index].max(rank);
+        if Self::update_register(&mut self.registers[index], rank) {
+            self.nonempty += 1;
+        }
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -48,8 +55,7 @@ impl HyperLogLog {
             return;
         }
         for (dest, source) in self.registers.iter_mut().zip(other.registers.iter().copied()) {
-            if *dest == 0 && source != 0 { self.nonempty += 1; }
-            *dest = (*dest).max(source);
+            if Self::update_register(dest, source) { self.nonempty += 1; }
         }
     }
 
