@@ -172,6 +172,55 @@ mod tests {
 }
 
  
+/// Bounded, incremental reader for native exchange frames.
+pub struct FrameReader<R> {
+    input: R,
+    max_frame_bytes: usize,
+    max_total_bytes: usize,
+    max_frames: usize,
+    bytes_seen: usize,
+    frames_seen: usize,
+    finished: bool,
+}
+
+impl<R: Read> FrameReader<R> {
+    pub fn new(input: R, max_frame_bytes: usize, max_total_bytes: usize, max_frames: usize) -> Self {
+        Self {
+            input, max_frame_bytes, max_total_bytes, max_frames,
+            bytes_seen: 0, frames_seen: 0, finished: false,
+        }
+    }
+}
+
+impl<R: Read> Iterator for FrameReader<R> {
+    type Item = Result<Frame>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished { return None; }
+        let remaining = self.max_total_bytes.saturating_sub(self.bytes_seen);
+        match read_frame(&mut self.input, self.max_frame_bytes.min(remaining)) {
+            Ok(None) => { self.finished = true; None }
+            Err(error) => {
+                self.finished = true;
+                Some(Err(error))
+            }
+            Ok(Some(frame)) => {
+                if self.frames_seen >= self.max_frames {
+                    self.finished = true;
+                    return Some(Err(Error::Execution("exchange stream frame count limit exceeded".into())));
+                }
+                let Some(total) = self.bytes_seen.checked_add(frame.payload.len())
+                    .filter(|&bytes| bytes <= self.max_total_bytes) else {
+                    self.finished = true;
+                    return Some(Err(Error::Execution("exchange stream byte budget exceeded".into())));
+                };
+                self.bytes_seen = total;
+                self.frames_seen += 1;
+                Some(Ok(frame))
+            }
+        }
+    }
+}
+
 /// Decode a sequence of checksummed exchange frames under an aggregate payload budget.
 pub fn read_frames(
     input: &mut impl Read,
@@ -308,6 +357,32 @@ mod exchange_header_read_coalescing_tests {
         assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
         assert_eq!(reader.calls, 3);
         assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_incremental_shuffle_reader_tests {
+    use super::*;
+
+    #[test]
+    fn reads_each_frame_without_materializing_entire_stream() {
+        let frames = (0..3).map(|n| Frame {
+            stage: 5, task: n, attempt: 1, payload: vec![n as u8; 4],
+        }).collect::<Vec<_>>();
+        let mut bytes = Vec::new();
+        for frame in &frames { write_frame(&mut bytes, frame, 4).unwrap(); }
+        let decoded = FrameReader::new(bytes.as_slice(), 4, 12, 3)
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(decoded, frames);
+        let mut bounded = FrameReader::new(bytes.as_slice(), 4, 12, 2);
+        assert_eq!(bounded.next().unwrap().unwrap(), frames[0]);
+        assert_eq!(bounded.next().unwrap().unwrap(), frames[1]);
+        assert!(bounded.next().unwrap().is_err());
+        assert!(bounded.next().is_none());
+        let mut byte_limited = FrameReader::new(bytes.as_slice(), 4, 7, 3);
+        assert!(byte_limited.next().unwrap().is_ok());
+        assert!(byte_limited.next().unwrap().is_err());
+        assert!(byte_limited.next().is_none());
     }
 }
 
