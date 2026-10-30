@@ -67,8 +67,10 @@ impl Expr {
                 let kind = needle.output_type(schema)?;
                 let needle_null = matches!(needle.as_ref(), Expr::Literal(Value::Null));
                 for choice in choices {
-                    if matches!(choice, Expr::Literal(Value::Null)) || needle_null { continue; }
+                    // Even a NULL needle must type-check all referenced
+                    // columns, although evaluation will short-circuit.
                     let other = choice.output_type(schema)?;
+                    if matches!(choice, Expr::Literal(Value::Null)) || needle_null { continue; }
                     if kind != other && !matches!(
                         (kind, other),
                         (DataType::Integer, DataType::Float) | (DataType::Float, DataType::Integer)
@@ -684,5 +686,28 @@ mod binary_comparison_planning_tests {
             assert_eq!(Expr::binary(Expr::Column("count".into()), op,
                 Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
         }
+    }
+}
+
+#[cfg(test)]
+mod in_list_static_choice_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn null_needle_still_requires_valid_choice_columns() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let invalid = Expr::InList {
+            needle: Box::new(Expr::Literal(Value::Null)),
+            choices: vec![Expr::Column("missing".into())],
+            negated: false,
+        };
+        assert!(invalid.output_type(&schema).is_err());
+        let valid = Expr::InList {
+            needle: Box::new(Expr::Literal(Value::Null)),
+            choices: vec![Expr::Column("n".into()), Expr::Literal(Value::Null)],
+            negated: true,
+        };
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
