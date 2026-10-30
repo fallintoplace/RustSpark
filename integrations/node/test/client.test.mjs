@@ -25,6 +25,10 @@ test("rejects conflicting sources and malformed arguments", () => {
   assert.throws(() => client.query("SELECT 1", { csvTables: { "x=y": "a.csv" } }), TypeError);
   assert.throws(() => client.query("SELECT 1", { queryTimeout: 0 }), RangeError);
   assert.throws(() => client.query("SELECT 1", { maxRows: -2 }), RangeError);
+  for (const path of ["", 42, {}, true]) {
+    assert.throws(() => client.query("SELECT 1", { csv: path }), TypeError);
+  }
+  assert.throws(() => client.query("SELECT 1", { parquet: [] }), TypeError);
 });
 
 test("reports process exit and invalid output", () => {
