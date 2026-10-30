@@ -18,6 +18,27 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
     Batch::new_with_row_count(schema, columns, count)
 }
 
+/// Concatenate owned native batches by moving column values instead of
+/// cloning every row. Numeric coercion still uses the shared set-operation path.
+pub fn union_all_owned(left: Batch, right: Batch) -> Result<Batch> {
+    let schema = crate::set_ops::compatible_schema(&left, &right)?;
+    let widen = schema.fields().iter().enumerate().any(|(index, field)| {
+        field.data_type != left.schema().fields()[index].data_type
+            || field.data_type != right.schema().fields()[index].data_type
+    });
+    if widen {
+        return union_all(&left, &right);
+    }
+    let rows = left.num_rows().checked_add(right.num_rows())
+        .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
+    let (_, mut columns, _) = left.into_parts();
+    let (_, other_columns, _) = right.into_parts();
+    for (destination, values) in columns.iter_mut().zip(other_columns) {
+        destination.extend(values);
+    }
+    Batch::new_with_row_count(schema, columns, rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +139,39 @@ mod zero_column_union_consolidation_tests {
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(union_all(&a, &b).unwrap().rows().unwrap(), vec![vec![]; 5]);
         assert_eq!(union_distinct(&a, &b).unwrap().rows().unwrap(), vec![vec![]]);
+    }
+}
+
+#[cfg(test)]
+mod owned_native_union_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn moving_owned_columns_matches_borrowed_union_semantics() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Text, false),
+        ]).unwrap(), vec![vec![Value::Text("large payload".repeat(1024))]]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("b", DataType::Text, true),
+        ]).unwrap(), vec![vec![Value::Null]]).unwrap();
+        assert_eq!(union_all_owned(left.clone(), right.clone()).unwrap(),
+            union_all(&left, &right).unwrap());
+        let empty = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(empty.clone(), vec![], 2).unwrap();
+        let b = Batch::new_with_row_count(empty, vec![], 3).unwrap();
+        assert_eq!(union_all_owned(a, b).unwrap().num_rows(), 5);
+    }
+
+    #[test]
+    fn retains_numeric_type_promotion() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("x", DataType::Integer, false),
+        ]).unwrap(), vec![vec![Value::Integer(1)]]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("y", DataType::Float, false),
+        ]).unwrap(), vec![vec![Value::Float(2.5)]]).unwrap();
+        assert_eq!(union_all_owned(left.clone(), right.clone()).unwrap(),
+            union_all(&left, &right).unwrap());
     }
 }
