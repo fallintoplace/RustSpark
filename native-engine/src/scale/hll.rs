@@ -137,6 +137,21 @@ mod approximate_column_feature_tests {
 }
 
 
+/// Approximate distinct keys over an arbitrary row selection without copying values.
+pub fn approximate_distinct_selected(
+    batch: &crate::batch::Batch, column: &str, selected: &[usize]
+) -> Result<f64> {
+    let index = batch.schema().column(column)?;
+    let values = batch.column(index)?;
+    let mut sketch = HyperLogLog::new();
+    for &row in selected {
+        let value = values.get(row)
+            .ok_or_else(|| Error::Execution("selected HLL row out of bounds".into()))?;
+        sketch.add(value);
+    }
+    Ok(sketch.estimate())
+}
+
 /// Merge distinct-count sketches across compatible input batches.
 pub fn approximate_distinct_batches(
     batches: &[crate::batch::Batch],
@@ -258,5 +273,27 @@ mod hll_empty_merge_shortcuts_tests {
         receiver.merge(&baseline);
         assert_eq!(receiver, baseline);
         assert_eq!(receiver.nonempty_registers(), baseline.nonempty_registers());
+    }
+}
+
+#[cfg(test)]
+mod native_selected_distinct_estimates_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn selected_rows_match_a_materialized_subset_exactly() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("account", DataType::Integer, true)
+        ]).unwrap(), (0..2000).map(|n| vec![if n % 5 == 0 {
+            Value::Null
+        } else { Value::Integer(n % 271) }]).collect()).unwrap();
+        let indices = (0..source.num_rows()).step_by(3).collect::<Vec<_>>();
+        let subset = source.take(&indices).unwrap();
+        assert_eq!(approximate_distinct_selected(&source, "account", &indices).unwrap(),
+            approximate_distinct(&subset, "account").unwrap());
+        assert_eq!(approximate_distinct_selected(&source, "account", &[]).unwrap(), 0.0);
+        assert!(approximate_distinct_selected(&source, "account", &[2001]).is_err());
+        assert!(approximate_distinct_selected(&source, "missing", &[]).is_err());
     }
 }
