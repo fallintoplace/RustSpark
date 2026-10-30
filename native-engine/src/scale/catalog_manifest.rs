@@ -88,6 +88,19 @@ fn canonical_source(path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+struct LimitedManifestWriter { bytes: Vec<u8> }
+
+impl Write for LimitedManifestWriter {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > (MAX_MANIFEST_BYTES as usize).saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("catalog manifest exceeds byte limit"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
     if catalog.list().len() > MAX_TABLES {
         return Err(Error::Execution("catalog table count limit exceeded".into()));
@@ -113,12 +126,10 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
             });
         }
     }
-    let bytes = serde_json::to_vec(&Manifest { version: VERSION, tables })
+    let mut writer = LimitedManifestWriter { bytes: Vec::new() };
+    serde_json::to_writer(&mut writer, &Manifest { version: VERSION, tables })
         .map_err(|err| Error::Execution(format!("encode catalog manifest: {err}")))?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(Error::Execution("catalog manifest exceeds byte limit".into()));
-    }
-    Ok(bytes)
+    Ok(writer.bytes)
 }
 
 struct TempFile(PathBuf);
@@ -233,5 +244,18 @@ mod tests {
         fs::write(&path, vec![b' '; MAX_MANIFEST_BYTES as usize + 1]).unwrap();
         assert!(load(&path).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod limited_manifest_writer_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_output_over_four_megabytes_before_allocation() {
+        let mut writer = LimitedManifestWriter { bytes: Vec::new() };
+        writer.write_all(&vec![b'x'; MAX_MANIFEST_BYTES as usize]).unwrap();
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(writer.bytes.len(), MAX_MANIFEST_BYTES as usize);
     }
 }
