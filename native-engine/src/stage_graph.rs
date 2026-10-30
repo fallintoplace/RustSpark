@@ -77,9 +77,16 @@ impl StageGraph {
     }
 
     pub fn ready(&self, completed: &HashSet<u64>) -> Vec<u64> {
+        self.ready_excluding(completed, &HashSet::new())
+    }
+
+    /// Runnable stages that have not already been dispatched.
+    pub fn ready_excluding(
+        &self, completed: &HashSet<u64>, running: &HashSet<u64>
+    ) -> Vec<u64> {
         self.order_indices.iter().filter_map(|&index| {
             let stage = &self.stages[index];
-            (!completed.contains(&stage.id) &&
+            (!completed.contains(&stage.id) && !running.contains(&stage.id) &&
                 stage.dependencies.iter().all(|dependency| completed.contains(dependency)))
                 .then_some(stage.id)
         }).collect()
@@ -176,5 +183,23 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod inflight_stage_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn running_tasks_are_not_dispatched_again() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 30, dependencies: vec![10, 20], partitions: 3 },
+            Stage { id: 10, dependencies: vec![], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 2 },
+        ]).unwrap();
+        assert_eq!(graph.ready_excluding(&HashSet::new(), &HashSet::from([10])), [20]);
+        assert!(graph.ready_excluding(&HashSet::new(), &HashSet::from([10, 20])).is_empty());
+        assert_eq!(graph.ready_excluding(&HashSet::from([10, 20]), &HashSet::new()), [30]);
+        assert!(graph.ready_excluding(&HashSet::from([10, 20]), &HashSet::from([30])).is_empty());
     }
 }
