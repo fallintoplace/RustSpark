@@ -96,6 +96,32 @@ mod tests {
 }
 
  
+/// Move owned native columns into simple projections and renames.
+/// Duplicate source columns or computed expressions use the borrowed path.
+pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
+    let mut positions = Vec::with_capacity(selections.len());
+    let mut seen = std::collections::HashSet::new();
+    for selection in selections {
+        let Expr::Column(name) = &selection.expression else {
+            return project(&batch, selections);
+        };
+        let position = batch.schema().column(name)?;
+        if !seen.insert(position) { return project(&batch, selections); }
+        positions.push(position);
+    }
+    let fields = selections.iter().zip(&positions).map(|(selection, &position)| {
+        let mut field = batch.schema().field(position)?.clone();
+        field.name = selection.alias.clone();
+        Ok(field)
+    }).collect::<Result<Vec<_>>>()?;
+    let schema = Schema::new(fields)?;
+    let rows = batch.num_rows();
+    let (_, mut sources, _) = batch.into_parts();
+    let columns = positions.into_iter()
+        .map(|position| std::mem::take(&mut sources[position])).collect();
+    Batch::new_with_row_count(schema, columns, rows)
+}
+
 /// Select existing column vectors without evaluating scalar expressions.
 /// Unlike computed projection this preserves source field nullability.
 pub fn project_columns(batch: &Batch, names: &[&str]) -> Result<Batch> {
@@ -220,5 +246,43 @@ mod projection_fast_paths_perf_tests {
             vec![Value::Null, Value::Null, Value::Integer(7), Value::Null],
         ]);
         assert_eq!(project(&Batch::empty(input.schema().clone()), &selections).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_native_projection_tests {
+    use super::*;
+    use crate::{scalar::Value, expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn moves_reordered_text_columns_without_losing_nulls() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Text, true),
+            Field::new("b", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("long".repeat(512)), Value::Integer(5)],
+            vec![Value::Null, Value::Integer(10)],
+        ]).unwrap();
+        let selections = [
+            Selection::new(Expr::Column("b".into()), "number"),
+            Selection::new(Expr::Column("a".into()), "payload"),
+        ];
+        assert_eq!(project_owned(input.clone(), &selections).unwrap(),
+            project(&input, &selections).unwrap());
+        let duplicate = [
+            Selection::new(Expr::Column("a".into()), "first"),
+            Selection::new(Expr::Column("a".into()), "second"),
+        ];
+        assert_eq!(project_owned(input.clone(), &duplicate).unwrap(),
+            project(&input, &duplicate).unwrap());
+        let computed = [Selection::new(Expr::binary(
+            Expr::Column("b".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1))), "next")];
+        assert_eq!(project_owned(input.clone(), &computed).unwrap(),
+            project(&input, &computed).unwrap());
+        assert_eq!(project_owned(input.clone(), &[]).unwrap().num_rows(), input.num_rows());
+        assert!(project_owned(input, &[
+            Selection::new(Expr::Column("missing".into()), "x"),
+        ]).is_err());
     }
 }
