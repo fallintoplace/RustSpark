@@ -1,7 +1,7 @@
 //! Streaming physical execution of the supported native logical-plan subset.
 use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
 use crate::{
-    aggregate::AggregateOp, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
+    aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
     project::Selection, scalar::Value,
     schema::{DataType, Field, Schema}, Error, Result,
 };
@@ -281,7 +281,14 @@ fn infer(
         }
         Plan::Aggregate { input, group_by, aggregates } => {
             if group_by.is_empty() {
-                return Err(Error::Unsupported("streaming global aggregates are not implemented".into()));
+                let schema = child(input)?;
+                if aggregates.iter().any(|item| matches!(&item.op,
+                    AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
+                    AggregateOp::AvgDistinct(_))) {
+                    return Err(Error::Unsupported(
+                        "stream global DISTINCT aggregates require a spill path".into()));
+                }
+                return aggregate::global_output_schema(&schema, aggregates);
             }
             let source = child(input)?;
             let mut fields = Vec::new();
@@ -404,6 +411,12 @@ fn lower(
         }
         Plan::Aggregate { input, group_by, aggregates } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            if group_by.is_empty() {
+                let result = aggregate::aggregate_global_stream(
+                    child(input)?, &schema, aggregates, || control.check(),
+                )?;
+                return Ok(Box::new(std::iter::once(Ok(result))));
+            }
             let mut groups = Vec::with_capacity(group_by.len());
             for (expr, alias) in group_by {
                 let Expr::Column(name) = expr else {
@@ -793,6 +806,34 @@ mod stream_distinct_single_probe_perf_tests {
         let source: BatchStream = Box::new([Ok(overflowing)].into_iter());
         assert!(DistinctOutput::new(source, QueryControl::default(), 1, 4096)
             .next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_global_aggregate_sql_tests {
+    use super::*;
+    use crate::{sql, scalar::Value, schema::{DataType, Field}};
+    use std::fs;
+
+    #[test]
+    fn sql_count_sum_and_avg_across_file_batches() {
+        let path = std::env::temp_dir().join(format!("native-global-agg-{}-{}.csv",
+            std::process::id(), std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, "n\n1\n2\n3\n4\n").unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &path, schema, 128).unwrap();
+        let plan = sql::parse_sql(
+            "SELECT COUNT(*) AS n, SUM(n) AS total, AVG(n) AS average FROM t").unwrap();
+        let options = StreamOptions { batch_rows: 2, ..StreamOptions::default() };
+        let rows = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row(0).unwrap(), vec![
+            Value::Integer(4), Value::Integer(10), Value::Float(2.5),
+        ]);
+        fs::remove_file(path).unwrap();
     }
 }
 
