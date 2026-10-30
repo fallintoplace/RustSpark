@@ -40,12 +40,22 @@ pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
 
 /// Deduplicate with independent key-cardinality and estimated byte budgets.
 pub fn distinct_with_budget(batch: &Batch, max_keys: usize, max_bytes: usize) -> Result<Batch> {
+    distinct_with_budget_checked(batch, max_keys, max_bytes, || Ok(()))
+}
+
+/// Poll a query guard while hashing unique rows from a large in-memory batch.
+pub fn distinct_with_budget_checked(
+    batch: &Batch, max_keys: usize, max_bytes: usize,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     let columns = (0..batch.schema().len())
         .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
     let mut seen = HashMap::<BorrowedRow<'_>, ()>::new();
     let mut used = 0usize;
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
+        if row % 1024 == 0 { check()?; }
         let key = BorrowedRow { columns: &columns, row };
         let at_limit = seen.len() >= max_keys;
         match seen.entry(key) {
@@ -71,6 +81,7 @@ pub fn distinct_with_budget(batch: &Batch, max_keys: usize, max_bytes: usize) ->
             }
         }
     }
+    check()?;
     batch.take(&indices)
 }
 
@@ -246,5 +257,27 @@ mod borrowed_full_row_distinct_tests {
         assert!(distinct_with_budget(&batch, 2, 64 * 1024).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
         assert_eq!(distinct(&zero).unwrap().num_rows(), 1);
+    }
+}
+
+#[cfg(test)]
+mod bounded_distinct_cancelled_scan_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn cancellation_interrupts_large_duplicate_heavy_scans() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..3000)
+            .map(|_| vec![Value::Integer(1)]).collect()).unwrap();
+        let mut polls = 0;
+        let error = distinct_with_budget_checked(&batch, 2, 4096, || {
+            polls += 1;
+            if polls == 4 { Err(crate::Error::Execution("distinct cancelled".into())) }
+            else { Ok(()) }
+        }).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(polls, 4);
+        assert_eq!(distinct(&batch).unwrap().num_rows(), 1);
     }
 }
