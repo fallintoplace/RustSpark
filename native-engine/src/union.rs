@@ -3,11 +3,22 @@ use crate::{batch::Batch, Error, Result};
 use crate::schema::Schema;
 
 pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    union_all_with_max_rows(left, right, usize::MAX)
+}
+
+/// Check the result admission budget before copying either input's rows.
+pub fn union_all_with_max_rows(
+    left: &Batch, right: &Batch, max_rows: usize,
+) -> Result<Batch> {
+    // Schema validation must still run even when the row cap would fail.
     let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
     let count = left
         .num_rows()
         .checked_add(right.num_rows())
         .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
+    if count > max_rows {
+        return Err(Error::Execution("UNION ALL output row limit exceeded".into()));
+    }
     let mut columns = Vec::with_capacity(schema.len());
     for column in 0..schema.len() {
         let mut values = Vec::with_capacity(count);
@@ -118,5 +129,28 @@ mod zero_column_union_consolidation_tests {
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(union_all(&a, &b).unwrap().rows().unwrap(), vec![vec![]; 5]);
         assert_eq!(union_distinct(&a, &b).unwrap().rows().unwrap(), vec![vec![]]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_union_output_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn row_budget_rejects_union_before_building_output() {
+        let schema = Schema::new(vec![
+            Field::new("v", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(3)],
+        ]).unwrap();
+        assert!(union_all_with_max_rows(&left, &right, 2)
+            .unwrap_err().to_string().contains("row limit"));
+        assert_eq!(union_all_with_max_rows(&left, &right, 3).unwrap(),
+            union_all(&left, &right).unwrap());
     }
 }
