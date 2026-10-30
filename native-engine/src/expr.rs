@@ -104,7 +104,18 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::IsDistinctFrom { left, right, .. } => {
+                let l = left.output_type(schema)?;
+                let r = right.output_type(schema)?;
+                if !matches!(left.as_ref(), Self::Literal(Value::Null))
+                    && !matches!(right.as_ref(), Self::Literal(Value::Null))
+                    && l != r
+                    && !matches!((l, r), (DataType::Integer, DataType::Float) |
+                        (DataType::Float, DataType::Integer)) {
+                    return Err(Error::Type("IS DISTINCT FROM requires comparable operands".into()));
+                }
+                Ok(DataType::Boolean)
+            },
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -551,6 +562,32 @@ mod like_expression_type_validation_tests {
         assert_eq!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
             None).output_type(&schema).unwrap(), DataType::Boolean);
         assert!(like(Expr::Column("missing".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod distinct_comparison_static_type_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_compatible_types_and_nullable_literals() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("f", DataType::Float, true),
+            Field::new("t", DataType::Text, true),
+        ]).unwrap();
+        let compare = |left, right| Expr::IsDistinctFrom {
+            left: Box::new(left), right: Box::new(right), negated: false,
+        };
+        assert_eq!(compare(Expr::Column("n".into()), Expr::Column("f".into()))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert_eq!(compare(Expr::Column("n".into()), Expr::Literal(Value::Null))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert!(compare(Expr::Column("n".into()), Expr::Column("t".into()))
+            .output_type(&schema).is_err());
+        assert!(compare(Expr::Column("missing".into()), Expr::Column("n".into()))
             .output_type(&schema).is_err());
     }
 }
