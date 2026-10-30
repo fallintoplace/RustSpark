@@ -75,7 +75,7 @@ where I: IntoIterator<Item = Result<Batch>>
         if seen.is_empty() { continue; }
         let id = DISTINCT_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-distinct-{}-{id}.rspill", std::process::id()));
-        let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+        let file = open_private_spill(&path)?;
         result.paths.push(path);
         let mut output = SpillWriter::new(BufWriter::new(file), schema.clone())?;
         let mut pending = Vec::with_capacity(io_batch_rows.min(seen.len()));
@@ -161,5 +161,36 @@ mod sparse_distinct_result_shards_tests {
         assert!(empty.paths().is_empty());
         drop(empty);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+fn open_private_spill(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(all(test, unix))]
+mod private_spill_permissions_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_files_are_not_world_readable() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-private-distinct_spill-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = open_private_spill(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }
