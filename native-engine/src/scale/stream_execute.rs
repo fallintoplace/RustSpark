@@ -527,6 +527,9 @@ pub fn execute(
         return Err(Error::Execution("invalid streaming executor settings".into()));
     }
     control.check()?;
+    if plan.operator_count() > 4096 {
+        return Err(Error::Execution("streaming query exceeds plan node budget".into()));
+    }
     output_schema(plan, catalog, options)?;
     lower(plan, catalog, options, &control, 0)
 }
@@ -933,5 +936,25 @@ mod direct_union_distinct_lowering_tests {
                 vec![Value::Integer(3)],
             ]);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod streaming_plan_node_budget_tests {
+    use super::*;
+
+    fn wide_plan(level: usize) -> Plan {
+        if level == 0 { return Plan::scan("missing"); }
+        Plan::UnionAll {
+            left: Box::new(wide_plan(level - 1)),
+            right: Box::new(wide_plan(level - 1)),
+        }
+    }
+
+    #[test]
+    fn rejects_branching_trees_before_source_resolution() {
+        let result = execute(&wide_plan(12), &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default());
+        assert!(result.err().unwrap().to_string().contains("node budget"));
     }
 }
