@@ -65,7 +65,11 @@ impl Catalog {
 }
 
 fn normalize(name: &str) -> Result<Cow<'_, str>> {
-    if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
+    if !name.as_bytes().first().is_some_and(|byte|
+        byte.is_ascii_alphabetic() || *byte == b'_'
+    ) || !name.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    ) {
         return Err(Error::Schema("expected a simple nonempty table name".into()));
     }
     if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
@@ -172,5 +176,23 @@ mod borrowed_catalog_key_tests {
         assert!(catalog.get("Sales").is_ok());
         assert!(catalog.get("unknown").is_err());
         assert!(normalize("has space").is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_catalog_identifier_safety_tests {
+    use super::*;
+    #[test]
+    fn rejects_identifiers_sql_cannot_reference() {
+        let mut catalog = Catalog::new();
+        for bad in ["", "1table", "a-b", "a.b", "a\nb", "a\0b", "é"] {
+            assert!(catalog.register(bad, Batch::empty(
+                crate::schema::Schema::new(vec![]).unwrap()
+            )).is_err(), "accepted: {bad:?}");
+        }
+        catalog.register("_events2026", Batch::empty(
+            crate::schema::Schema::new(vec![]).unwrap()
+        )).unwrap();
+        assert!(catalog.get("_EVENTS2026").is_ok());
     }
 }
