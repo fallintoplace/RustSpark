@@ -16,6 +16,16 @@ impl Default for ColumnStatistics {
     }
 }
 
+fn should_replace(
+    current: Option<&Value>, candidate: Option<&Value>, direction: Ordering,
+) -> Result<bool> {
+    match (current, candidate) {
+        (Some(current), Some(value)) => Ok(value.sql_compare(current)? == Some(direction)),
+        (None, Some(_)) => Ok(true),
+        (_, None) => Ok(false),
+    }
+}
+
 impl ColumnStatistics {
     pub fn from_batch(batch: &Batch, name: &str) -> Result<Self> {
         let column = batch.schema().column(name)?;
@@ -57,18 +67,9 @@ impl ColumnStatistics {
         } else {
             self.nulls
         };
-        let mut replace_min = false;
-        let mut replace_max = false;
-        if !value.is_null() {
-            replace_min = match &self.min {
-                Some(current) => matches!(value.sql_compare(current)?, Some(Ordering::Less)),
-                None => true,
-            };
-            replace_max = match &self.max {
-                Some(current) => matches!(value.sql_compare(current)?, Some(Ordering::Greater)),
-                None => true,
-            };
-        }
+        let candidate = (!value.is_null()).then_some(value);
+        let replace_min = should_replace(self.min.as_ref(), candidate, Ordering::Less)?;
+        let replace_max = should_replace(self.max.as_ref(), candidate, Ordering::Greater)?;
         self.rows = rows;
         self.nulls = nulls;
         if replace_min {
@@ -89,18 +90,8 @@ impl ColumnStatistics {
             return Err(Error::Execution("invalid NULL count".into()));
         }
         // Validate both extrema before committing counters or bounds.
-        let replace_min = match (&self.min, &other.min) {
-            (Some(current), Some(value)) =>
-                matches!(value.sql_compare(current)?, Some(Ordering::Less)),
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        let replace_max = match (&self.max, &other.max) {
-            (Some(current), Some(value)) =>
-                matches!(value.sql_compare(current)?, Some(Ordering::Greater)),
-            (None, Some(_)) => true,
-            _ => false,
-        };
+        let replace_min = should_replace(self.min.as_ref(), other.min.as_ref(), Ordering::Less)?;
+        let replace_max = should_replace(self.max.as_ref(), other.max.as_ref(), Ordering::Greater)?;
         self.rows = rows;
         self.nulls = nulls;
         if replace_min {
