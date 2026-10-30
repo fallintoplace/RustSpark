@@ -47,9 +47,17 @@ pub fn scan<'a>(
         .map(|&index| Ok(source.schema().field(index)?.clone()))
         .collect::<Result<Vec<_>>>()?)?;
     let identity_projection = columns.iter().copied().eq(0..source.schema().len());
+    // FALSE and UNKNOWN cannot pass WHERE, regardless of source cardinality.
+    let next_row = if matches!(&predicate,
+        Some(Expr::Literal(Value::Boolean(false) | Value::Null)))
+    {
+        source.num_rows()
+    } else {
+        0
+    };
     Ok(ScanCursor {
         source, predicate, columns, output_schema, identity_projection,
-        target_rows, next_row: 0, failed: false,
+        target_rows, next_row, failed: false,
     })
 }
 
@@ -284,5 +292,25 @@ mod native_window_overflow_tests {
         assert!(scan_window(&source, None, &[], 10, usize::MAX, 1).is_err());
         assert!(scan_window(&source, None, &[], 10, usize::MAX - 1, 2).is_err());
         assert!(scan_window(&source, None, &[], 10, usize::MAX, 0).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod constant_false_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn rejects_all_rows_without_losing_validation() {
+        let source = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..100).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap();
+        for predicate in [Value::Boolean(false), Value::Null] {
+            let mut cursor = scan(&source, Some(Expr::Literal(predicate.clone())), &["n"], 1).unwrap();
+            assert!(cursor.next().is_none());
+            assert!(cursor.next().is_none());
+            assert!(scan(&source, Some(Expr::Literal(predicate)), &["missing"], 1).is_err());
+        }
     }
 }
