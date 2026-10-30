@@ -252,7 +252,7 @@ fn infer(
     }
     let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth);
     match plan {
-        Plan::Scan { table } => Ok(catalog.get(table)?.schema().clone()),
+        Plan::Scan { table } => Ok(catalog.schema(table)?.clone()),
         Plan::Filter { input, predicate } => {
             let schema = child(input)?;
             let kind = predicate.output_type(&schema)?;
@@ -362,6 +362,9 @@ fn lower(
     let child = |plan: &Plan| lower(plan, catalog, options, control, depth + 1);
     match plan {
         Plan::Scan { table } => {
+            if let Some(parquet) = catalog.get_parquet(table)? {
+                return Ok(Box::new(parquet.open(options.batch_rows)?));
+            }
             let source = catalog.get(table)?;
             let reader = source.open()?;
             let batches = RowBatcher::new(reader, source.schema().clone(), options.batch_rows)?;
