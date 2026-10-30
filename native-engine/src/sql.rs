@@ -933,8 +933,9 @@ impl Parser {
                 other => Plan::Sort { input: Box::new(other), keys },
             };
         }
-        let count = if self.take_word("LIMIT") {
-            Some(self.usize_literal()?)
+        let has_limit = self.take_word("LIMIT");
+        let count = if has_limit {
+            if self.take_word("ALL") { None } else { Some(self.usize_literal()?) }
         } else {
             None
         };
@@ -948,7 +949,7 @@ impl Parser {
             0
         };
         let count = if self.take_word("FETCH") {
-            if count.is_some() {
+            if has_limit {
                 return Err(Error::Parse("LIMIT cannot be combined with FETCH".into()));
             }
             if !self.take_word("FIRST") && !self.take_word("NEXT") {
@@ -1468,5 +1469,27 @@ mod parser_token_move_perf_tests {
         assert_eq!(parser.next(), Some(Token::Word("sales".into())));
         assert_eq!(parser.next(), None);
         assert!(parse_sql("SELECT city FROM sales").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod native_limit_all_syntax_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn unlimited_limit_all_still_honors_offset() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let source = Batch::from_rows(schema, (0..5)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("numbers", source.clone()).unwrap();
+        let all = parse_sql("SELECT n FROM numbers LIMIT ALL").unwrap();
+        assert_eq!(executor::execute(&all, &catalog).unwrap(), source);
+        let offset = parse_sql("SELECT n FROM numbers LIMIT ALL OFFSET 3").unwrap();
+        assert_eq!(executor::execute(&offset, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
+        assert!(parse_sql("SELECT n FROM numbers LIMIT ALL FETCH FIRST 1 ROWS ONLY").is_err());
     }
 }
