@@ -3,6 +3,15 @@ use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
 
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
+fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
+    row.iter().fold(base, |used, value| {
+        used.saturating_add(match value {
+            Value::Text(text) => text.len(),
+            _ => 0,
+        })
+    })
+}
+
 pub struct RowBatcher<I> {
     input: I,
     schema: Schema,
@@ -72,12 +81,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
                         self.pending_error = Some(error);
                         break;
                     }
-                    let row_bytes = row.iter().fold(row_width, |used, value| {
-                        used.saturating_add(match value {
-                            Value::Text(text) => text.len(),
-                            _ => 0,
-                        })
-                    });
+                    let row_bytes = estimated_row_bytes(&row, row_width);
                     if row_bytes > self.max_batch_bytes {
                         let error = Error::Execution("row exceeds native batch byte budget".into());
                         if row_count == 0 {
