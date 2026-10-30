@@ -11,9 +11,6 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if needle.len() > haystack.len() || needle.contains(',') {
         return Ok(Value::Integer(0));
     }
-    if !haystack.contains(',') {
-        return Ok(Value::Integer(i64::from(haystack == needle)));
-    }
     let position = haystack.split(',').position(|item| item == needle);
     let position = position.map_or(0, |index| index + 1);
     Ok(Value::Integer(i64::try_from(position)
@@ -55,5 +52,22 @@ mod overlong_find_in_set_tests {
         ]).unwrap(), Value::Integer(0));
         assert_eq!(evaluate(&[Value::Null, Value::Text("x".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod find_in_set_single_pass_tests {
+    use super::*;
+
+    #[test]
+    fn single_and_multiple_fields_preserve_ordinal_positions() {
+        let find = |needle: &str, haystack: &str| evaluate(&[
+            Value::Text(needle.into()), Value::Text(haystack.into()),
+        ]).unwrap();
+        assert_eq!(find("a", "a"), Value::Integer(1));
+        assert_eq!(find("a", "b"), Value::Integer(0));
+        assert_eq!(find("é", "x,é,🙂"), Value::Integer(2));
+        assert_eq!(find("", ""), Value::Integer(1));
+        assert_eq!(find("x,y", "x,y"), Value::Integer(0));
     }
 }
