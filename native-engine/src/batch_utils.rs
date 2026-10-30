@@ -42,8 +42,9 @@ pub fn concat(
         if total > max_rows {
             return Err(Error::Execution("batch collection row limit exceeded".into()));
         }
-        for (index, output) in columns.iter_mut().enumerate() {
-            output.extend_from_slice(batch.column(index)?);
+        let (_, input_columns, _) = batch.into_parts();
+        for (output, values) in columns.iter_mut().zip(input_columns) {
+            output.extend(values);
         }
     }
     Batch::new_with_row_count(schema.clone(), columns, total)
@@ -150,5 +151,27 @@ mod single_owned_batch_concat_tests {
         let other_schema = Schema::new(vec![crate::schema::Field::new(
             "different", crate::schema::DataType::Text, true)]).unwrap();
         assert!(concat(&other_schema, [first], 5).is_err());
+    }
+}
+
+#[cfg(test)]
+mod moved_native_concatenation_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn combines_large_strings_and_nulls_without_changing_row_order() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("first".repeat(1000))],
+            vec![Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("second".repeat(1000))],
+        ]).unwrap();
+        let expected = [first.rows().unwrap(), second.rows().unwrap()].concat();
+        assert_eq!(concat(&schema, [first, second], 3).unwrap().rows().unwrap(), expected);
     }
 }
