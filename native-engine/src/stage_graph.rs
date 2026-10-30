@@ -96,6 +96,28 @@ impl StageGraph {
         }).collect()
     }
 
+    /// Dependency-ready stages ordered by longest remaining downstream chain.
+    pub fn ready_by_critical_path(&self, completed: &HashSet<u64>) -> Vec<u64> {
+        let mut successors = HashMap::<u64, Vec<u64>>::new();
+        for stage in &self.stages {
+            for &dependency in &stage.dependencies {
+                successors.entry(dependency).or_default().push(stage.id);
+            }
+        }
+        let mut depth = HashMap::<u64, usize>::new();
+        for &index in self.order_indices.iter().rev() {
+            let stage = &self.stages[index];
+            let children = successors.get(&stage.id)
+                .into_iter().flat_map(|children| children.iter());
+            let max_child = children.filter_map(|id| depth.get(id).copied())
+                .max().unwrap_or(0);
+            depth.insert(stage.id, max_child + 1);
+        }
+        let mut ready = self.ready(completed);
+        ready.sort_by_key(|id| (std::cmp::Reverse(depth[id]), *id));
+        ready
+    }
+
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -178,6 +200,30 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod native_critical_path_ready_tests {
+    use super::*;
+
+    #[test]
+    fn favors_longest_unblocked_path_with_deterministic_ties() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 50, dependencies: vec![40], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 1 },
+            Stage { id: 40, dependencies: vec![30], partitions: 1 },
+            Stage { id: 30, dependencies: vec![10], partitions: 1 },
+            Stage { id: 10, dependencies: vec![], partitions: 1 },
+            Stage { id: 21, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_by_critical_path(&HashSet::new()), [10, 20, 21]);
+        assert_eq!(graph.ready_by_critical_path(&HashSet::from([10])),
+            [30, 20, 21]);
+        assert_eq!(graph.ready_by_critical_path(&HashSet::from([10, 30, 40])),
+            [20, 21, 50]);
+        assert!(StageGraph::new(vec![]).unwrap()
+            .ready_by_critical_path(&HashSet::new()).is_empty());
     }
 }
 
