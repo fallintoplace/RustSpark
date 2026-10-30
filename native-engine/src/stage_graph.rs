@@ -18,6 +18,11 @@ pub struct StageGraph {
 }
 
 impl StageGraph {
+    fn dependency_ready(stage: &Stage, completed: &HashSet<u64>) -> bool {
+        !completed.contains(&stage.id)
+            && stage.dependencies.iter().all(|dependency| completed.contains(dependency))
+    }
+
     pub fn new(stages: Vec<Stage>) -> Result<Self> {
         if stages.len() > 4096 {
             return Err(Error::Execution("execution graph exceeds 4096 stages".into()));
@@ -90,8 +95,7 @@ impl StageGraph {
     ) -> Vec<u64> {
         self.order_indices.iter().filter_map(|&index| {
             let stage = &self.stages[index];
-            (!completed.contains(&stage.id) && !running.contains(&stage.id) &&
-                stage.dependencies.iter().all(|dependency| completed.contains(dependency)))
+            (Self::dependency_ready(stage, completed) && !running.contains(&stage.id))
                 .then_some(stage.id)
         }).collect()
     }
@@ -126,8 +130,7 @@ impl StageGraph {
         let mut remaining = max_partitions;
         self.order_indices.iter().filter_map(|&index| {
             let stage = &self.stages[index];
-            if completed.contains(&stage.id)
-                || !stage.dependencies.iter().all(|id| completed.contains(id))
+            if !Self::dependency_ready(stage, completed)
                 || stage.partitions > remaining
             {
                 return None;
@@ -143,8 +146,7 @@ impl StageGraph {
         let mut tasks = Vec::new();
         for &index in &self.order_indices {
             let stage = &self.stages[index];
-            if completed.contains(&stage.id)
-                || !stage.dependencies.iter().all(|dependency| completed.contains(dependency)) {
+            if !Self::dependency_ready(stage, completed) {
                 continue;
             }
             for partition in 0..stage.partitions {
