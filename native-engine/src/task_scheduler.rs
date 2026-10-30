@@ -166,6 +166,14 @@ impl TaskScheduler {
     }
 
     /// View a bounded, deterministic list of ready task IDs without leasing.
+    /// Nearest active lease expiry for a coordinator wake-up loop.
+    pub fn next_lease_deadline(&self) -> Option<Instant> {
+        self.tasks.values().filter_map(|task| match &task.status {
+            TaskStatus::Leased { until, .. } => Some(*until),
+            _ => None,
+        }).min()
+    }
+
     pub fn queued_tasks(&self, limit: usize) -> Vec<u64> {
         self.tasks.iter().filter_map(|(&id, task)|
             (task.status == TaskStatus::Queued).then_some(id)
@@ -353,5 +361,25 @@ mod scheduler_ready_task_inspection_tests {
         assert_eq!(scheduler.counts().leased, 1);
         assert!(scheduler.cancel_task(3));
         assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
+    }
+}
+
+#[cfg(test)]
+mod lease_wakeup_tests {
+    use super::*;
+
+    #[test]
+    fn tracks_only_active_lease_deadlines() {
+        let now = Instant::now();
+        let mut tasks = TaskScheduler::new([1, 2], 2).unwrap();
+        assert_eq!(tasks.next_lease_deadline(), None);
+        tasks.lease(3, now, Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(tasks.next_lease_deadline(), Some(now + Duration::from_secs(10)));
+        tasks.lease(4, now, Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(tasks.next_lease_deadline(), Some(now + Duration::from_secs(2)));
+        assert_eq!(tasks.expire_leases(now + Duration::from_secs(3)), 1);
+        assert_eq!(tasks.next_lease_deadline(), Some(now + Duration::from_secs(10)));
+        assert_eq!(tasks.expire_leases(now + Duration::from_secs(11)), 1);
+        assert_eq!(tasks.next_lease_deadline(), None);
     }
 }
