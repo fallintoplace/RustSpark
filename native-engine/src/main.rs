@@ -1,3 +1,5 @@
+use serde::ser::{SerializeMap, Serializer};
+
 use std::{
     env, fs,
     io::{self, BufReader, Write},
@@ -182,23 +184,36 @@ fn print_csv(batch: &Batch, output: &mut impl Write) -> Result<()> {
 
 fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
     for row_index in 0..batch.num_rows() {
-        let row = batch.row(row_index)?;
-        let mut record = serde_json::Map::new();
-        for (field, value) in batch.schema().fields().iter().zip(&row) {
-            let json = match value {
-                Value::Null => serde_json::Value::Null,
-                Value::Boolean(value) => serde_json::Value::Bool(*value),
-                Value::Integer(value) => serde_json::Value::Number((*value).into()),
-                Value::Float(value) => serde_json::Number::from_f64(*value)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| Error::Execution(
+        // Preflight the entire row before writing anything. JSON has no
+        // representation for NaN or infinities, and a later invalid field must
+        // not leave a half-written JSON object in the output stream.
+        for index in 0..batch.schema().len() {
+            if let Value::Float(number) = batch.value(row_index, index)? {
+                if !number.is_finite() {
+                    return Err(Error::Execution(
                         "JSON Lines cannot represent non-finite floating-point values".into()
-                    ))?,
-                Value::Text(value) => serde_json::Value::String(value.clone()),
-            };
-            record.insert(field.name.clone(), json);
+                    ));
+                }
+            }
         }
-        writeln!(output, "{}", serde_json::Value::Object(record))?;
+        {
+            let mut serializer = serde_json::Serializer::new(&mut *output);
+            let mut object = serializer.serialize_map(Some(batch.schema().len()))
+                .map_err(|error| Error::Io(error.to_string()))?;
+            for (index, field) in batch.schema().fields().iter().enumerate() {
+                let value = batch.value(row_index, index)?;
+                let result = match value {
+                    Value::Null => object.serialize_entry(&field.name, &Option::<()>::None),
+                    Value::Boolean(value) => object.serialize_entry(&field.name, value),
+                    Value::Integer(value) => object.serialize_entry(&field.name, value),
+                    Value::Float(value) => object.serialize_entry(&field.name, value),
+                    Value::Text(value) => object.serialize_entry(&field.name, value),
+                };
+                result.map_err(|error| Error::Io(error.to_string()))?;
+            }
+            object.end().map_err(|error| Error::Io(error.to_string()))?;
+        }
+        writeln!(output)?;
     }
     Ok(())
 }
@@ -444,6 +459,33 @@ mod tests {
         let mut bytes = Vec::new();
         print_jsonl_rows(&batch, &mut bytes).unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "{\"value\":1.25}\n");
+    }
+
+    #[test]
+    fn jsonl_serializes_borrowed_columns_without_silent_partial_rows() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("amount", DataType::Float, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂\\\"".into()), Value::Float(1.5)],
+            vec![Value::Null, Value::Float(2.25)],
+        ]).unwrap();
+        let mut output = Vec::new();
+        print_jsonl_rows(&batch, &mut output).unwrap();
+        let records: Vec<serde_json::Value> = String::from_utf8(output).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["payload"], "é🙂\\\"");
+        assert_eq!(records[1]["payload"], serde_json::Value::Null);
+
+        let invalid = Batch::from_rows(schema, vec![
+            vec![Value::Text("already-serialized-first-field".into()),
+                Value::Float(f64::INFINITY)],
+        ]).unwrap();
+        let mut output = Vec::new();
+        assert!(print_jsonl_rows(&invalid, &mut output).is_err());
+        assert!(output.is_empty(), "invalid late floats cannot leave partial JSON rows");
     }
 
     #[test]
