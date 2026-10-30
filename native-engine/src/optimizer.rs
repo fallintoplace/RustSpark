@@ -41,6 +41,22 @@ pub fn optimize(plan: Plan) -> Plan {
             if offset == 0 && count.is_none() {
                 return child;
             }
+            // Projection is row-preserving. Slice first so computed expressions
+            // only run on visible rows, without crossing filters or joins.
+            // Keep invalid LIMIT arithmetic for runtime validation.
+            let child = if count.is_none_or(|limit| offset.checked_add(limit).is_some()) {
+                match child {
+                    Plan::Project { input, selections } => {
+                        return Plan::Project {
+                            input: Box::new(optimize(Plan::Limit { input, offset, count })),
+                            selections,
+                        };
+                    }
+                    child => child,
+                }
+            } else {
+                child
+            };
             if let Plan::Limit {
                 input: grandchild,
                 offset: inner_offset,
@@ -191,5 +207,53 @@ mod native_identity_limit_optimizer_tests {
         assert_eq!(optimize(source.clone().limit(0, Some(0))), source.clone().limit(0, Some(0)));
         let nested = source.clone().limit(0, None).limit(1, Some(2));
         assert_eq!(optimize(nested), source.limit(1, Some(2)));
+    }
+}
+
+#[cfg(test)]
+mod projected_limit_pushdown_tests {
+    use super::*;
+    use crate::{
+        executor::{execute_with_options, ExecutionOptions},
+        expr::BinaryOp,
+        project::Selection,
+        schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn project_limit_executes_only_selected_source_window() {
+        let selection = Selection::new(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)),
+        ), "n_plus_one");
+        let plan = Plan::scan("t").project(vec![selection.clone()]).limit(3, Some(2));
+        assert_eq!(optimize(plan.clone()),
+            Plan::scan("t").limit(3, Some(2)).project(vec![selection]));
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, (0..100)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap()).unwrap();
+        let output = execute_with_options(&plan, &catalog, ExecutionOptions {
+            max_output_rows: 2,
+            ..ExecutionOptions::default()
+        }).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Integer(4)], vec![Value::Integer(5)],
+        ]);
+    }
+
+    #[test]
+    fn does_not_push_a_limit_through_a_filter_or_aggregate() {
+        let filter = Plan::scan("t").filter(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(0)),
+        ))
+            .project(vec![Selection::new(Expr::Column("n".into()), "n")])
+            .limit(0, Some(1));
+        // The projection can move, but LIMIT must remain after WHERE.
+        let plan = optimize(filter);
+        let Plan::Project { input, .. } = plan else { panic!("expected projection"); };
+        let Plan::Limit { input, .. } = *input else { panic!("expected limit"); };
+        assert!(matches!(*input, Plan::Filter { .. }));
     }
 }
