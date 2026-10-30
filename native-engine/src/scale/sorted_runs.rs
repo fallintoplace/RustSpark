@@ -31,12 +31,29 @@ impl Drop for RunSet {
     }
 }
 
+const MAX_SORT_RUN_FILES: usize = 8_192;
+
 pub fn write_sorted_runs<I>(
     input: I, schema: Schema, keys: &[SortKey],
     directory: &Path, max_rows_per_run: usize, control: &QueryControl
 ) -> Result<RunSet>
 where I: IntoIterator<Item = Result<Batch>>
 {
+    write_sorted_runs_bounded(
+        input, schema, keys, directory, max_rows_per_run, MAX_SORT_RUN_FILES, control,
+    )
+}
+
+fn write_sorted_runs_bounded<I>(
+    input: I, schema: Schema, keys: &[SortKey],
+    directory: &Path, max_rows_per_run: usize, max_run_files: usize,
+    control: &QueryControl,
+) -> Result<RunSet>
+where I: IntoIterator<Item = Result<Batch>>
+{
+    if max_run_files == 0 {
+        return Err(Error::Execution("sort run file limit must be positive".into()));
+    }
     if !(1..=65_536).contains(&max_rows_per_run) {
         return Err(Error::Execution("sort run size must be in 1..=65536".into()));
     }
@@ -59,6 +76,11 @@ where I: IntoIterator<Item = Result<Batch>>
         let mut start = 0;
         while start < incoming.num_rows() {
             control.check()?;
+            // Limit scratch-file amplification, even for very small input
+            // chunks. RunSet removes previously created files on error.
+            if runs.files.len() >= max_run_files {
+                return Err(Error::Execution("sort spill run file budget exceeded".into()));
+            }
             let end = start.saturating_add(max_rows_per_run).min(incoming.num_rows());
             let sorted = sort::sort_range(&incoming, keys, start, end)?;
             start = end;
@@ -155,5 +177,33 @@ mod sorted_run_key_prevalidation_tests {
         assert!(write_sorted_runs(
             Vec::<Result<Batch>>::new(), schema, &[computed], &directory, 4, &control
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sort_run_file_admission_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use std::fs;
+
+    #[test]
+    fn oversized_run_fanout_rejects_and_removes_partial_scratch_files() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..3)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-sort-run-budget-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let error = write_sorted_runs_bounded(
+            [Ok(batch)], schema, &[SortKey::ascending(Expr::Column("n".into()))],
+            &dir, 1, 2, &QueryControl::default(),
+        ).err().unwrap();
+        assert!(error.to_string().contains("run file budget"));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
     }
 }
