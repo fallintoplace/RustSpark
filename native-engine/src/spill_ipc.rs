@@ -62,7 +62,16 @@ pub fn spill(dir: impl AsRef<Path>, schema: &Schema, batches: &[Batch]) -> Resul
         "rustspark-spill-{}-{timestamp}-{identifier}.arrow",
         std::process::id()
     ));
-    let output = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    // Spilled batches may contain sensitive query data. Never expose them
+    // to other local users even when the process has a permissive umask.
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let output = options.open(&path)?;
     let temporary = SpillFile { path };
     let arrow_schema = arrow_bridge::to_arrow(&Batch::empty(schema.clone()))?.schema();
     let mut writer = FileWriter::try_new(output, &arrow_schema)
@@ -121,5 +130,20 @@ mod malformed_ipc_reader_tests {
         let mut reader = file.read().unwrap();
         assert!(reader.next().unwrap().is_err());
         assert!(reader.next().is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod spill_file_permissions_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn spill_files_do_not_grant_group_or_other_access() {
+        let schema = Schema::new(vec![Field::new("secret", DataType::Text, true)]).unwrap();
+        let file = spill(std::env::temp_dir(), &schema, &[Batch::empty(schema.clone())]).unwrap();
+        let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "spill file exposes data to other users");
     }
 }
