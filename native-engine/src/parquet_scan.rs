@@ -57,6 +57,35 @@ pub fn row_group_summaries(path: impl AsRef<Path>) -> Result<Vec<ParquetRowGroup
     }).collect()
 }
 
+/// Split Parquet row groups into sequential native scan work units.
+/// Oversized individual row groups remain standalone so no rows are omitted.
+pub fn plan_row_group_tasks(
+    groups: &[ParquetRowGroupSummary], target_bytes: u64, max_groups: usize,
+) -> Result<Vec<Vec<usize>>> {
+    if target_bytes == 0 || max_groups == 0 {
+        return Err(Error::Execution("Parquet task byte and group limits must be positive".into()));
+    }
+    let mut tasks = Vec::new();
+    let mut current = Vec::new();
+    let mut bytes = 0u64;
+    let mut last = None;
+    for group in groups {
+        if last.is_some_and(|prev: usize| group.index <= prev) {
+            return Err(Error::Execution("Parquet row groups must be ordered and unique".into()));
+        }
+        last = Some(group.index);
+        if !current.is_empty() && (current.len() >= max_groups
+            || group.compressed_bytes > target_bytes.saturating_sub(bytes)) {
+            tasks.push(std::mem::take(&mut current));
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(group.compressed_bytes);
+        current.push(group.index);
+    }
+    if !current.is_empty() { tasks.push(current); }
+    Ok(tasks)
+}
+
 pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
@@ -434,5 +463,25 @@ mod native_parquet_row_group_summary_tests {
         assert_eq!(groups.iter().map(|g| g.index).collect::<Vec<_>>(), [0, 1, 2]);
         assert!(groups.iter().all(|g| g.compressed_bytes > 0 && g.uncompressed_bytes > 0));
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_row_group_work_planning_tests {
+    use super::*;
+
+    #[test]
+    fn schedules_byte_bounded_tasks_without_dropping_large_groups() {
+        let groups = [6, 5, 30, 4, 7].into_iter().enumerate().map(|(index, bytes)| {
+            ParquetRowGroupSummary { index, rows: 3, compressed_bytes: bytes, uncompressed_bytes: bytes * 2 }
+        }).collect::<Vec<_>>();
+        assert_eq!(plan_row_group_tasks(&groups, 12, 3).unwrap(),
+            vec![vec![0, 1], vec![2], vec![3, 4]]);
+        assert_eq!(plan_row_group_tasks(&groups, 100, 2).unwrap(),
+            vec![vec![0, 1], vec![2, 3], vec![4]]);
+        assert!(plan_row_group_tasks(&groups, 0, 1).is_err());
+        assert!(plan_row_group_tasks(&groups, 1, 0).is_err());
+        assert!(plan_row_group_tasks(&[groups[1], groups[0]], 20, 2).is_err());
+        assert!(plan_row_group_tasks(&[], 100, 1).unwrap().is_empty());
     }
 }
