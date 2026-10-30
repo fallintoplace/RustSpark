@@ -165,6 +165,10 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
         }
+    } else if let Some((column, select_null)) = fast_null_test(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if value.is_null() == select_null { selected.push(row); }
+        }
     } else if let Expr::Not(inner) = predicate {
         if let Expr::Column(name) = inner.as_ref() {
             let index = batch.schema().column(name)?;
@@ -177,10 +181,6 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
-        }
-    } else if let Some((column, select_null)) = fast_null_test(batch, predicate)? {
-        for (row, value) in column.iter().enumerate() {
-            if value.is_null() == select_null { selected.push(row); }
         }
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
