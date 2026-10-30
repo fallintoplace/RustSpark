@@ -191,7 +191,7 @@ fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
                 Value::Integer(value) => serde_json::Value::Number((*value).into()),
                 Value::Float(value) => serde_json::Number::from_f64(*value)
                     .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                    .ok_or_else(|| Error::Execution("nonfinite float cannot be written as JSONL".into()))?,
                 Value::Text(value) => serde_json::Value::String(value.clone()),
             };
             record.insert(field.name.clone(), json);
@@ -430,5 +430,22 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod nonfinite_jsonl_safety_tests {
+    use super::*;
+    #[test]
+    fn nonfinite_float_does_not_silently_become_null() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Float, true)]).unwrap();
+        let nonfinite = Batch::from_rows(schema.clone(), vec![vec![Value::Float(f64::NAN)]]).unwrap();
+        let mut output = Vec::new();
+        assert!(print_jsonl_rows(&nonfinite, &mut output).unwrap_err()
+            .to_string().contains("nonfinite"));
+        let nullable = Batch::from_rows(schema, vec![vec![Value::Null]]).unwrap();
+        output.clear();
+        print_jsonl_rows(&nullable, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "{\"v\":null}\n");
     }
 }
