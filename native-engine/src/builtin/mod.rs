@@ -82,6 +82,7 @@ mod quote;
 mod cot;
 mod csc;
 mod sec;
+mod md5_digest;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -357,6 +358,7 @@ mod tests {
         assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap()[0], Value::Integer(9));
         assert!(sql::parse_sql("SELECT COALESCE(n,) FROM t").is_err());
         assert!(supports("LeVeNsHtEiN"));
+        assert!(supports("md5"));
         assert!(!supports("no_such_native_function"));
     }
 }
