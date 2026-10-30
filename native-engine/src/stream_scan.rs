@@ -155,6 +155,8 @@ pub fn scan_window<'a>(
     offset: usize,
     count: usize,
 ) -> Result<WindowedScan<'a>> {
+    offset.checked_add(count)
+        .ok_or_else(|| Error::Execution("scan OFFSET + LIMIT overflow".into()))?;
     Ok(WindowedScan {
         inner: scan(source, predicate, projected_columns, target_rows)?,
         skip: offset,
@@ -266,5 +268,19 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod windowed_scan_arithmetic_preflight_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn rejects_offset_limit_overflow_before_polling_scan() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let source = Batch::empty(schema);
+        assert!(scan_window(&source, None, &[], 1, usize::MAX, 2).is_err());
+        assert!(scan_window(&source, None, &[], 1, usize::MAX, 0).is_ok());
     }
 }
