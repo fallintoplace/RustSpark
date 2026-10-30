@@ -65,6 +65,21 @@ fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crat
 
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.len() == 1 {
+        let mut right_values = HashSet::<&Value>::new();
+        for value in right.column(0)? {
+            if right_values.len() >= MAX_DISTINCT_SET_KEYS && !right_values.contains(value) {
+                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            }
+            right_values.insert(value);
+        }
+        let mut emitted = HashSet::<&Value>::new();
+        let mut rows = Vec::new();
+        for (index, value) in left.column(0)?.iter().enumerate() {
+            if right_values.contains(value) && emitted.insert(value) { rows.push(index); }
+        }
+        return left.take(&rows)?.relabel(schema);
+    }
     let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
@@ -79,6 +94,21 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.len() == 1 {
+        let mut right_values = HashSet::<&Value>::new();
+        for value in right.column(0)? {
+            if right_values.len() >= MAX_DISTINCT_SET_KEYS && !right_values.contains(value) {
+                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            }
+            right_values.insert(value);
+        }
+        let mut emitted = HashSet::<&Value>::new();
+        let mut rows = Vec::new();
+        for (index, value) in left.column(0)?.iter().enumerate() {
+            if !right_values.contains(value) && emitted.insert(value) { rows.push(index); }
+        }
+        return left.take(&rows)?.relabel(schema);
+    }
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
@@ -293,6 +323,28 @@ mod bounded_multiset_state_tests {
         ]).unwrap();
         assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 3);
         assert_eq!(except_all(&left, &right).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod native_single_column_set_operator_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn borrowed_keys_preserve_distinct_and_null_semantics() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)],
+            vec![Value::Integer(1)], vec![Value::Integer(3)], vec![Value::Null]
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(2)]
+        ]).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(2)]]);
+        assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]);
     }
 }
 
