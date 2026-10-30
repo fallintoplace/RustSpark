@@ -177,14 +177,18 @@ impl Value {
             (Self::Text(value), DataType::Float) => value.trim().parse::<f64>().ok()
                 .filter(|n| n.is_finite()).map(Self::Float)
                 .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("true") =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
-                Ok(Self::Boolean(false)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "1" =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "0" =>
-                Ok(Self::Boolean(false)),
+            (Self::Text(value), DataType::Boolean) => {
+                let text = value.trim();
+                if text == "1" || ["t", "true", "y", "yes"]
+                    .iter().any(|word| text.eq_ignore_ascii_case(word)) {
+                    Ok(Self::Boolean(true))
+                } else if text == "0" || ["f", "false", "n", "no"]
+                    .iter().any(|word| text.eq_ignore_ascii_case(word)) {
+                    Ok(Self::Boolean(false))
+                } else {
+                    Err(Error::Type("invalid BOOLEAN cast".into()))
+                }
+            },
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
     }
@@ -256,5 +260,26 @@ mod consolidated_native_cast_tests {
         assert_eq!(Value::Float(-0.0).cast_to(DataType::Text).unwrap(), Value::Text("-0.0".into()));
         assert_eq!(Value::Float(1.25).cast_to(DataType::Text).unwrap(), Value::Text("1.25".into()));
         assert_eq!(Value::Integer(1).cast_to(DataType::Text).unwrap(), Value::Text("1".into()));
+    }
+}
+
+#[cfg(test)]
+mod spark_boolean_cast_alias_tests {
+    use super::*;
+    use crate::schema::DataType;
+
+    #[test]
+    fn accepts_case_insensitive_sql_boolean_aliases() {
+        for text in ["true", "TRUE", "t", "T", "yes", "YeS", "y", "Y", "1", " true "] {
+            assert_eq!(Value::Text(text.into()).cast_to(DataType::Boolean).unwrap(),
+                Value::Boolean(true), "{text}");
+        }
+        for text in ["false", "FALSE", "f", "F", "no", "No", "n", "N", "0", "\tno\r"] {
+            assert_eq!(Value::Text(text.into()).cast_to(DataType::Boolean).unwrap(),
+                Value::Boolean(false), "{text}");
+        }
+        for text in ["", "perhaps", "2", "on", "off", "nan"] {
+            assert!(Value::Text(text.into()).cast_to(DataType::Boolean).is_err(), "{text}");
+        }
     }
 }
