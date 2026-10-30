@@ -118,6 +118,25 @@ impl StageGraph {
         ready
     }
 
+    /// Return runnable stages in topology order without exceeding worker capacity.
+    /// A stage is scheduled only when all of its partitions fit the budget.
+    pub fn ready_with_partition_budget(
+        &self, completed: &HashSet<u64>, max_partitions: usize,
+    ) -> Vec<u64> {
+        let mut remaining = max_partitions;
+        self.order_indices.iter().filter_map(|&index| {
+            let stage = &self.stages[index];
+            if completed.contains(&stage.id)
+                || !stage.dependencies.iter().all(|id| completed.contains(id))
+                || stage.partitions > remaining
+            {
+                return None;
+            }
+            remaining -= stage.partitions;
+            Some(stage.id)
+        }).collect()
+    }
+
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -200,6 +219,25 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod partition_budget_ready_tests {
+    use super::*;
+
+    #[test]
+    fn excludes_incomplete_and_oversized_stages_without_starving_smaller_ones() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 4 },
+            Stage { id: 2, dependencies: vec![], partitions: 7 },
+            Stage { id: 3, dependencies: vec![], partitions: 2 },
+            Stage { id: 4, dependencies: vec![1], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_with_partition_budget(&HashSet::new(), 6), [1, 3]);
+        assert_eq!(graph.ready_with_partition_budget(&HashSet::from([1]), 2), [3]);
+        assert_eq!(graph.ready_with_partition_budget(&HashSet::from([1, 3]), 1), [4]);
+        assert!(graph.ready_with_partition_budget(&HashSet::new(), 0).is_empty());
     }
 }
 
