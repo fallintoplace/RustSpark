@@ -12,7 +12,15 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
     }
     if let Some(compiled) = CACHE.with(|cache| {
-        cache.borrow().iter().find(|(key, _)| key == pattern).map(|(_, regex)| regex.clone())
+        let mut cache = cache.borrow_mut();
+        let index = cache.iter().position(|(key, _)| key == pattern)?;
+        if index + 1 == cache.len() {
+            return Some(cache[index].1.clone());
+        }
+        let entry = cache.remove(index);
+        let compiled = entry.1.clone();
+        cache.push(entry);
+        Some(compiled)
     }) {
         return Ok(compiled);
     }
@@ -49,5 +57,23 @@ mod tests {
             assert!(compile(pattern).unwrap().is_match(pattern));
         }
         CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
+    }
+}
+
+#[cfg(test)]
+mod regex_cache_lru_tests {
+    use super::*;
+    #[test]
+    fn recently_used_patterns_survive_capacity_eviction() {
+        for suffix in ["a", "b", "c", "d"] {
+            compile(&format!("rustspark-lru-{suffix}")).unwrap();
+        }
+        compile("rustspark-lru-a").unwrap();
+        compile("rustspark-lru-e").unwrap();
+        CACHE.with(|cache| {
+            let entries = cache.borrow();
+            assert!(entries.iter().any(|(key, _)| key == "rustspark-lru-a"));
+            assert!(!entries.iter().any(|(key, _)| key == "rustspark-lru-b"));
+        });
     }
 }
