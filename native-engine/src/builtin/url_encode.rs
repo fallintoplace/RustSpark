@@ -9,6 +9,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > MAX_OUTPUT_BYTES {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
+    // No escaping or form-space substitution is needed for safe ASCII.
+    if text.bytes().all(|byte| matches!(byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*')) {
+        return Ok(Value::Text(text.to_owned()));
+    }
     let mut output_bytes = 0usize;
     for &byte in text.as_bytes() {
         let emitted = if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ') { 1 } else { 3 };
@@ -58,5 +63,20 @@ mod url_encode_exact_capacity_tests {
         assert_eq!(evaluate(&[Value::Text(input)]).unwrap(), Value::Text("%2F".repeat(8192)));
         assert_eq!(evaluate(&[Value::Text("é 🙂".into())]).unwrap(), Value::Text("%C3%A9+%F0%9F%99%82".into()));
         assert!(evaluate(&[Value::Text("/".repeat(MAX_OUTPUT_BYTES / 3 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod unescaped_ascii_url_fast_path_tests {
+    use super::*;
+    #[test]
+    fn preserves_url_safe_bytes_and_encodes_special_bytes() {
+        assert_eq!(evaluate(&[Value::Text("Aaz09-._*".into())]).unwrap(),
+            Value::Text("Aaz09-._*".into()));
+        assert_eq!(evaluate(&[Value::Text("".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(evaluate(&[Value::Text("a+b c".into())]).unwrap(),
+            Value::Text("a%2Bb+c".into()));
+        assert_eq!(evaluate(&[Value::Text("é".into())]).unwrap(),
+            Value::Text("%C3%A9".into()));
     }
 }
