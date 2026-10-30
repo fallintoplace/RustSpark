@@ -29,6 +29,7 @@ mod tests {
         assert_eq!(evaluate(&[Value::Integer(0), Value::Text("a".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Integer(5), Value::Text("a".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Integer(i64::MAX), Value::Text("a".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Integer(i64::from(u32::MAX) + 1), Value::Text("a".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Integer(i64::MIN), Value::Text("a".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
         assert!(output(&[DataType::Text, DataType::Text]).is_err());
