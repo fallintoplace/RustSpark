@@ -90,7 +90,7 @@ fn execute_inner(
     let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
         Plan::Scan { table } => catalog.get(table)?.clone(),
-        Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
+        Plan::Filter { input, predicate } => filter::filter_owned(descend(input)?, predicate)?,
         Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,
         Plan::Aggregate { input, group_by, aggregates } => {
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
@@ -265,5 +265,27 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod native_owned_execution_filter_tests {
+    use super::*;
+    use crate::{catalog::Catalog, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn filters_owned_batches_using_sql_three_valued_logic() {
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(Schema::new(vec![
+            Field::new("keep", DataType::Boolean, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Boolean(true), Value::Text("large".repeat(512))],
+            vec![Value::Null, Value::Text("unknown".into())],
+            vec![Value::Boolean(false), Value::Null],
+        ]).unwrap()).unwrap();
+        let result = execute(&Plan::scan("t").filter(Expr::Column("keep".into())), &catalog).unwrap();
+        assert_eq!(result.num_rows(), 1);
+        assert_eq!(result.value(0, 0).unwrap(), &Value::Boolean(true));
     }
 }
