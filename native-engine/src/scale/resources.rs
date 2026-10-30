@@ -52,6 +52,15 @@ impl MemoryBudget {
 impl Reservation {
     pub fn bytes(&self) -> usize { self.bytes }
 
+    /// Transfer accounted bytes to another independently releasable guard.
+    pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
+        if bytes > self.bytes {
+            return Err(Error::Execution("cannot split more memory than reserved".into()));
+        }
+        self.bytes -= bytes;
+        Ok(Self { budget: self.budget.clone(), bytes })
+    }
+
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
@@ -114,11 +123,11 @@ pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Res
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
     })?;
     let mut combined = budget.reserve(total)?;
-    let reservations = requests.iter().map(|&bytes| Reservation {
-        budget: budget.clone(), bytes,
-    }).collect();
-    // Transfer the already-charged capacity to independent drop guards.
-    combined.bytes = 0;
+    let mut reservations = Vec::with_capacity(requests.len());
+    for &bytes in requests {
+        reservations.push(combined.split_off(bytes)?);
+    }
+    debug_assert_eq!(combined.bytes(), 0);
     Ok(reservations)
 }
 
@@ -134,6 +143,29 @@ mod grouped_scale_memory_tests {
         let allocations = reserve_many(&budget, &[30, 20]).unwrap();
         assert_eq!(budget.used(), 50);
         drop(allocations);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod split_operator_memory_tests {
+    use super::*;
+
+    #[test]
+    fn transferring_guards_never_changes_total_accounting() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let mut parent = budget.reserve(80).unwrap();
+        let child = parent.split_off(30).unwrap();
+        assert_eq!(budget.used(), 80);
+        assert_eq!(parent.bytes(), 50);
+        assert!(parent.split_off(51).is_err());
+        drop(parent);
+        assert_eq!(budget.used(), 30);
+        drop(child);
+        assert_eq!(budget.used(), 0);
+        let grouped = reserve_many(&budget, &[30, 40]).unwrap();
+        assert_eq!(budget.used(), 70);
+        drop(grouped);
         assert_eq!(budget.used(), 0);
     }
 }
