@@ -19,6 +19,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { None };
     if first == second { return Ok(Value::Integer(0)); }
     if threshold == Some(0) { return Ok(Value::Integer(-1)); }
+    if first.is_empty() || second.is_empty() {
+        let length = if first.is_empty() { second.chars().count() }
+            else { first.chars().count() };
+        if threshold.is_some_and(|limit| length > limit) {
+            return Ok(Value::Integer(-1));
+        }
+        return i64::try_from(length).map(Value::Integer)
+            .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()));
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     // Removing identical edges does not change the edit distance.
@@ -183,5 +192,20 @@ mod distance_fast_path_tests {
         assert_eq!(evaluate(&[Value::Text("same".into()), Value::Text("sane".into()), Value::Integer(0)]).unwrap(), Value::Integer(-1));
         assert_eq!(hamming_distance(&[Value::Text("AABB".into()), Value::Text("ABBA".into())]).unwrap(), Value::Integer(2));
         assert!(hamming_distance(&[Value::Text("A".into()), Value::Text("AB".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod empty_edit_distance_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn counts_unicode_scalars_without_materializing_the_other_input() {
+        let text = Value::Text("é🙂".repeat(1024));
+        let empty = Value::Text(String::new());
+        assert_eq!(evaluate(&[empty.clone(), text.clone()]).unwrap(), Value::Integer(2048));
+        assert_eq!(evaluate(&[text.clone(), empty.clone()]).unwrap(), Value::Integer(2048));
+        assert_eq!(evaluate(&[empty.clone(), text.clone(), Value::Integer(2047)]).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[empty, text, Value::Integer(2048)]).unwrap(), Value::Integer(2048));
     }
 }
