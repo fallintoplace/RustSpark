@@ -28,9 +28,16 @@ fn joinable(key: &Value) -> bool {
 /// Cartesian product with an output bound before materialization.
 /// This is a separate SQL operator from an equality hash join.
 pub fn cross_join(left: &Batch, right: &Batch) -> Result<Batch> {
+    cross_join_with_max_rows(left, right, MAX_JOIN_ROWS)
+}
+
+/// Enforce the query's output limit before allocating the Cartesian product.
+pub fn cross_join_with_max_rows(
+    left: &Batch, right: &Batch, max_output_rows: usize,
+) -> Result<Batch> {
     let count = left.num_rows().checked_mul(right.num_rows())
         .ok_or_else(|| Error::Execution("CROSS JOIN output cardinality overflow".into()))?;
-    if count > MAX_JOIN_ROWS {
+    if count > MAX_JOIN_ROWS.min(max_output_rows) {
         return Err(Error::Execution("CROSS JOIN output exceeds safety limit".into()));
     }
     let mut used: HashSet<String> = left.schema().fields().iter()
@@ -82,6 +89,13 @@ pub fn hash_join(
     }
     let left_keys = left.column(left_column)?;
     let right_keys = right.column(right_column)?;
+    if left.num_rows() > 0 && right.num_rows() > 0
+        && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti) {
+        // Prepared joins build columnar output directly instead of allocating
+        // a row vector for every match. Empty inputs keep the schema-only path.
+        return PreparedHashJoin::new(left.schema().clone(), right, left_key, right_key, kind)?
+            .probe(left);
+    }
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
         let mut keys: HashSet<&Value> = HashSet::with_capacity(right.num_rows());
         for row in 0..right.num_rows() {
@@ -527,6 +541,59 @@ mod prepared_columnar_results_tests {
             let baseline = hash_join(&left, &right, "k", "k", kind).unwrap();
             assert_eq!(actual, baseline);
         }
+    }
+}
+
+#[cfg(test)]
+mod cross_join_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn enforces_query_budget_before_materializing_product() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(),
+            (0..100).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let right = Batch::from_rows(schema,
+            (0..100).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        assert!(cross_join_with_max_rows(&left, &right, 50).is_err());
+        let two = left.slice_rows(0, 2).unwrap();
+        assert_eq!(cross_join_with_max_rows(&two, &two, 4).unwrap().num_rows(), 4);
+        assert!(cross_join_with_max_rows(&two, &two, 3).is_err());
+        let empty = left.slice_rows(0, 0).unwrap();
+        assert_eq!(cross_join_with_max_rows(&empty, &right, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod default_columnar_hash_join_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn nonempty_probe_uses_columnar_engine_for_all_supported_join_kinds() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2), Value::Text("a".repeat(100))],
+            vec![Value::Null, Value::Text("n".into())],
+            vec![Value::Integer(9), Value::Text("missing".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2), Value::Text("x".into())],
+            vec![Value::Integer(2), Value::Text("y".into())],
+            vec![Value::Null, Value::Text("z".into())],
+        ]).unwrap();
+        assert_eq!(hash_join(&left, &right, "key", "key", JoinKind::Inner)
+            .unwrap().num_rows(), 2);
+        assert_eq!(hash_join(&left, &right, "key", "key", JoinKind::Left)
+            .unwrap().num_rows(), 4);
+        assert_eq!(hash_join(&left, &right, "key", "key", JoinKind::Semi)
+            .unwrap().num_rows(), 1);
+        assert_eq!(hash_join(&left, &right, "key", "key", JoinKind::Anti)
+            .unwrap().num_rows(), 2);
     }
 }
 

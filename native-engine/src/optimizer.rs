@@ -38,6 +38,9 @@ pub fn optimize(plan: Plan) -> Plan {
         }
         Plan::Limit { input, offset, count } => {
             let child = optimize(*input);
+            if offset == 0 && count.is_none() {
+                return child;
+            }
             if let Plan::Limit {
                 input: grandchild,
                 offset: inner_offset,
@@ -173,5 +176,20 @@ mod tests {
         let once = Plan::Sort { input: Box::new(Plan::scan("sales")), keys: keys.clone() };
         let twice = Plan::Sort { input: Box::new(once.clone()), keys };
         assert_eq!(optimize(twice), once);
+    }
+}
+
+#[cfg(test)]
+mod native_identity_limit_optimizer_tests {
+    use super::*;
+
+    #[test]
+    fn drops_only_identity_limits_and_preserves_nested_bounds() {
+        let source = Plan::scan("t");
+        assert_eq!(optimize(source.clone().limit(0, None)), source);
+        assert_eq!(optimize(source.clone().limit(2, None)), source.clone().limit(2, None));
+        assert_eq!(optimize(source.clone().limit(0, Some(0))), source.clone().limit(0, Some(0)));
+        let nested = source.clone().limit(0, None).limit(1, Some(2));
+        assert_eq!(optimize(nested), source.limit(1, Some(2)));
     }
 }

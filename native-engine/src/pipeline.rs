@@ -15,6 +15,7 @@ pub struct Pipeline<I> {
     skip: usize,
     remaining: Option<usize>,
     invalid_limit: bool,
+    stopped: bool,
     guard: QueryGuard,
     metrics: Option<QueryMetrics>,
 }
@@ -28,6 +29,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
             skip: 0,
             remaining: None,
             invalid_limit: false,
+            stopped: false,
             guard: QueryGuard::default(),
             metrics: None,
         }
@@ -71,6 +73,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
         if self.invalid_limit {
             self.invalid_limit = false;
             self.remaining = Some(0);
@@ -84,7 +87,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 self.remaining = Some(0);
                 return Some(Err(error));
             }
-            let input = self.source.next()?;
+            let Some(input) = self.source.next() else {
+                // A generic source is not guaranteed to be fused: once a
+                // pipeline reports EOF, never poll its source again.
+                self.stopped = true;
+                return None;
+            };
             let result: Result<Batch> = (|| {
                 let mut batch = input?;
                 if let Some(metrics) = &self.metrics {
@@ -226,5 +234,26 @@ mod consolidated_pipeline_regression_tests {
         let result = Pipeline::new([Ok(sample())].into_iter())
             .with_limit(usize::MAX, Some(2)).next().unwrap();
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod fused_pipeline_eof_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn pipeline_does_not_poll_a_nonfused_source_after_eof() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let source = std::iter::from_fn(move || {
+            let n = observed.fetch_add(1, Ordering::Relaxed);
+            if n == 0 { None::<Result<Batch>> }
+            else { panic!("polled non-fused source after EOF") }
+        });
+        let mut pipeline = Pipeline::new(source);
+        assert!(pipeline.next().is_none());
+        assert!(pipeline.next().is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }
