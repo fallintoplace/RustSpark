@@ -165,6 +165,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
         }
+    } else if let Expr::Not(inner) = predicate {
+        if let Expr::Column(name) = inner.as_ref() {
+            let index = batch.schema().column(name)?;
+            if batch.schema().field(index)?.data_type == DataType::Boolean {
+                for (row, value) in batch.column(index)?.iter().enumerate() {
+                    if matches!(value, Value::Boolean(false)) { selected.push(row); }
+                }
+                return Ok(selected);
+            }
+        }
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
+        }
     } else if let Some((column, select_null)) = fast_null_test(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if value.is_null() == select_null { selected.push(row); }
@@ -385,5 +398,23 @@ mod null_column_fast_filter_tests {
         }
         assert!(select_indices(&input,
             &Expr::IsNull(Box::new(Expr::Column("missing".into())))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_negated_boolean_scan_tests {
+    use super::*;
+    use crate::schema::{Schema, Field, DataType};
+
+    #[test]
+    fn not_boolean_column_excludes_nulls_without_reordering() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("enabled", DataType::Boolean, true)]).unwrap(),
+            vec![vec![Value::Boolean(true)], vec![Value::Null],
+                 vec![Value::Boolean(false)], vec![Value::Boolean(false)]],
+        ).unwrap();
+        assert_eq!(select_indices(&input,
+            &Expr::Not(Box::new(Expr::Column("enabled".into())))
+        ).unwrap(), [2, 3]);
     }
 }
