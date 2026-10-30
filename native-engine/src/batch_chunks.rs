@@ -46,6 +46,11 @@ impl std::iter::FusedIterator for BatchChunks<'_> {}
 
 pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
+    // A single input is already a valid batch. Avoid allocating fresh
+    // column vectors and revalidating every scalar during reconstruction.
+    if batches.len() == 1 {
+        return Ok(first.clone());
+    }
     let schema = first.schema().clone();
     let mut total = 0_usize;
     for batch in batches {
@@ -105,6 +110,23 @@ mod zero_column_concat_consolidation_tests {
         let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(concatenate(&[a, b]).unwrap().rows().unwrap(), vec![vec![]; 5]);
+    }
+}
+
+#[cfg(test)]
+mod singleton_chunk_concatenation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn single_chunk_keeps_nullable_rows_and_zero_column_cardinality() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("é".repeat(1024))], vec![Value::Null],
+        ]).unwrap();
+        assert_eq!(concatenate(&[input.clone()]).unwrap(), input);
+        let empty_width = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
+        assert_eq!(concatenate(&[empty_width.clone()]).unwrap(), empty_width);
     }
 }
 
