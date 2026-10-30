@@ -33,8 +33,8 @@ pub fn merge_to_fan_in(
     source: RunSet, directory: &Path, schema: Schema, keys: &[SortKey],
     fan_in: usize, io_batch_rows: usize, control: &QueryControl
 ) -> Result<MultiPassRuns> {
-    if !(2..=64).contains(&fan_in) || io_batch_rows == 0 {
-        return Err(Error::Execution("external merge fan-in must be 2..=64".into()));
+    if !(2..=64).contains(&fan_in) || !(1..=65_536).contains(&io_batch_rows) {
+        return Err(Error::Execution("external merge requires fan-in 2..=64 and batch rows 1..=65536".into()));
     }
     if source.schema() != &schema {
         return Err(Error::Schema("multi-pass sort schema mismatch".into()));
@@ -102,5 +102,22 @@ mod tests {
         assert_eq!(rows, (0..101).map(Value::Integer).collect::<Vec<_>>());
         drop(merged);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod merge_passes_batch_admission_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}, scale::sorted_runs::write_sorted_runs};
+
+    #[test]
+    fn no_pass_merge_still_rejects_invalid_io_window() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let source = write_sorted_runs(Vec::<Result<crate::batch::Batch>>::new(),
+            schema.clone(), &keys, std::env::temp_dir().as_path(), 4,
+            &QueryControl::default()).unwrap();
+        assert!(merge_to_fan_in(source, std::env::temp_dir().as_path(),
+            schema, &keys, 4, 65_537, &QueryControl::default()).is_err());
     }
 }
