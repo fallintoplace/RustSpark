@@ -15,6 +15,11 @@ class PolarsCommandTests(unittest.TestCase):
         self.assertIn("/tmp/a b.csv", command)
         self.assertIn("--output-arrow", command)
 
+    def test_invalid_sql_types_are_rejected(self):
+        for sql in (None, 1, False, [], ""):
+            with self.subTest(sql=sql), self.assertRaisesRegex(ValueError, "SQL cannot be blank"):
+                build_command(sql, Path("out.arrow"))
+
     def test_rejects_conflicting_sources(self):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")
