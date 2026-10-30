@@ -26,6 +26,22 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 
+struct JsonQuoteWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for JsonQuoteWriter {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("JSON_QUOTE output exceeds byte budget"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 fn json_quote_type(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)
 }
@@ -34,12 +50,10 @@ fn json_quote(args: &[Value]) -> Result<Value> {
     if input.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("JSON_QUOTE input exceeds 16 MiB".into()));
     }
-    let encoded = serde_json::to_string(input)
+    let mut writer = JsonQuoteWriter { bytes: Vec::new(), limit: 16 * 1024 * 1024 };
+    serde_json::to_writer(&mut writer, input)
         .map_err(|error| Error::Execution(format!("JSON_QUOTE failed: {error}")))?;
-    if encoded.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("JSON_QUOTE output exceeds 16 MiB".into()));
-    }
-    Ok(Value::Text(encoded))
+    Ok(Value::Text(String::from_utf8(writer.bytes).expect("serde_json emits UTF-8")))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -92,5 +106,17 @@ mod quote_output_limit_tests {
         assert!(evaluate(&[Value::Text("x".repeat(16 * 1024 * 1024 - 1))]).is_err());
         assert!(evaluate(&[Value::Text("'".repeat(8 * 1024 * 1024))]).is_err());
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod json_quote_writer_budget_tests {
+    use super::*;
+    #[test]
+    fn stops_escaped_strings_at_byte_limit() {
+        let mut writer = JsonQuoteWriter { bytes: Vec::new(), limit: 8 };
+        assert!(serde_json::to_writer(&mut writer, &"\n".repeat(20)).is_err());
+        assert!(writer.bytes.len() <= 8);
+        assert_eq!(json_quote(&[Value::Text("a\nb".into())]).unwrap(), Value::Text("\"a\\nb\"".into()));
     }
 }
