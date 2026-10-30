@@ -6,12 +6,8 @@ thread_local! {
 }
 const CACHE_ENTRIES: usize = 4;
 
-/// Bound the cost of compiling user-supplied regex programs.
-pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
-    if pattern.len() > 4096 {
-        return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
-    }
-    if let Some(compiled) = CACHE.with(|cache| {
+fn lookup_cached(pattern: &str) -> Option<regex::Regex> {
+    CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let index = cache.iter().position(|(key, _)| key == pattern)?;
         if index + 1 == cache.len() {
@@ -21,7 +17,15 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         let compiled = entry.1.clone();
         cache.push(entry);
         Some(compiled)
-    }) {
+    })
+}
+
+/// Bound the cost of compiling user-supplied regex programs.
+pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
+    if pattern.len() > 4096 {
+        return Err(Error::Execution("regular expression exceeds 4096-byte pattern budget".into()));
+    }
+    if let Some(compiled) = lookup_cached(pattern) {
         return Ok(compiled);
     }
     let compiled = regex::RegexBuilder::new(pattern)
