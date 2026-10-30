@@ -63,8 +63,11 @@ export class RustSpark {
     addNamedTables(args, "--csv-table", csvTables);
     addNamedTables(args, "--parquet-table", parquetTables);
     addNamedTables(args, "--json-table", jsonTables);
+    if (Object.keys(namedParams ?? {}).length > 64) {
+      throw new RangeError("Too many typed SQL parameters");
+    }
     for (const [name, value] of Object.entries(namedParams ?? {}).sort(([a], [b]) => a.localeCompare(b, "en"))) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== "string" || !value.includes(":")) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== "string" || !value.includes(":") || value.length > 8192) {
         throw new TypeError(`Invalid typed SQL parameter: ${name}`);
       }
       args.push("--named-param", `${name}=${value}`);

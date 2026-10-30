@@ -75,3 +75,11 @@ test("SQL file and deterministic table and parameter ordering", () => {
   assert.throws(() => client.query("SELECT 1", { sqlFile: "x.sql" }), TypeError);
   assert.throws(() => client.query("", { sqlFile: "" }), TypeError);
 });
+
+test("rejects oversized or excessive named parameters before spawning", () => {
+  const client = new RustSpark({ runner: () => { throw Error("should not run"); } });
+  assert.throws(() => client.query("SELECT 1", { namedParams: { p: "utf8:" + "x".repeat(8192) } }), TypeError);
+  assert.throws(() => client.query("SELECT 1", {
+    namedParams: Object.fromEntries(Array.from({ length: 65 }, (_, index) => ["p" + index, "int64:1"])),
+  }), RangeError);
+});
