@@ -25,6 +25,7 @@ struct Task {
 pub struct TaskScheduler {
     tasks: BTreeMap<u64, Task>,
     max_attempts: u32,
+    counts: TaskCounts,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,6 +34,31 @@ pub struct TaskCounts {
     pub leased: usize,
     pub done: usize,
     pub failed: usize,
+}
+
+impl TaskCounts {
+    fn increment(&mut self, status: &TaskStatus) {
+        match status {
+            TaskStatus::Queued => self.queued += 1,
+            TaskStatus::Leased { .. } => self.leased += 1,
+            TaskStatus::Done => self.done += 1,
+            TaskStatus::Failed => self.failed += 1,
+        }
+    }
+
+    fn decrement(&mut self, status: &TaskStatus) {
+        match status {
+            TaskStatus::Queued => self.queued -= 1,
+            TaskStatus::Leased { .. } => self.leased -= 1,
+            TaskStatus::Done => self.done -= 1,
+            TaskStatus::Failed => self.failed -= 1,
+        }
+    }
+
+    fn transition(&mut self, from: &TaskStatus, to: &TaskStatus) {
+        self.decrement(from);
+        self.increment(to);
+    }
 }
 
 impl TaskScheduler {
@@ -61,7 +87,8 @@ impl TaskScheduler {
                 return Err(Error::Execution("duplicate task ID".into()));
             }
         }
-        Ok(Self { tasks: entries, max_attempts })
+        let counts = TaskCounts { queued: entries.len(), ..TaskCounts::default() };
+        Ok(Self { tasks: entries, max_attempts, counts })
     }
 
     pub fn lease(&mut self, worker: u64, now: Instant, ttl: Duration) -> Result<Option<Lease>> {
@@ -73,11 +100,13 @@ impl TaskScheduler {
         let mut candidate = None;
         for (&id, task) in &mut self.tasks {
             if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
-                task.status = if task.attempts >= self.max_attempts {
+                let next = if task.attempts >= self.max_attempts {
                     TaskStatus::Failed
                 } else {
                     TaskStatus::Queued
                 };
+                self.counts.transition(&task.status, &next);
+                task.status = next;
             }
             if candidate.is_none() && task.status == TaskStatus::Queued {
                 candidate = Some(id);
@@ -86,7 +115,9 @@ impl TaskScheduler {
         let Some(id) = candidate else { return Ok(None); };
         let task = self.tasks.get_mut(&id).expect("queued task exists");
         task.attempts += 1;
-        task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
+        let next = TaskStatus::Leased { worker, attempt: task.attempts, until };
+        self.counts.transition(&task.status, &next);
+        task.status = next;
         Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
     }
 
@@ -96,11 +127,13 @@ impl TaskScheduler {
         let mut expired = 0usize;
         for task in self.tasks.values_mut() {
             if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
-                task.status = if task.attempts >= self.max_attempts {
+                let next = if task.attempts >= self.max_attempts {
                     TaskStatus::Failed
                 } else {
                     TaskStatus::Queued
                 };
+                self.counts.transition(&task.status, &next);
+                task.status = next;
                 expired += 1;
             }
         }
@@ -139,44 +172,38 @@ impl TaskScheduler {
             _ => return false,
         };
         if now >= until {
-            task.status = if task.attempts >= self.max_attempts {
+            let next = if task.attempts >= self.max_attempts {
                 TaskStatus::Failed
             } else {
                 TaskStatus::Queued
             };
+            self.counts.transition(&task.status, &next);
+            task.status = next;
             return false;
         }
-        task.status = if success {
+        let next = if success {
             TaskStatus::Done
         } else if task.attempts >= self.max_attempts {
             TaskStatus::Failed
         } else {
             TaskStatus::Queued
         };
+        self.counts.transition(&task.status, &next);
+        task.status = next;
         true
     }
 
     pub fn cancel_task(&mut self, id: u64) -> bool {
         let Some(task) = self.tasks.get_mut(&id) else { return false; };
         if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
+            self.counts.transition(&task.status, &TaskStatus::Failed);
             task.status = TaskStatus::Failed;
             return true;
         }
         false
     }
 
-    pub fn counts(&self) -> TaskCounts {
-        let mut counts = TaskCounts::default();
-        for task in self.tasks.values() {
-            match &task.status {
-                TaskStatus::Queued => counts.queued += 1,
-                TaskStatus::Leased { .. } => counts.leased += 1,
-                TaskStatus::Done => counts.done += 1,
-                TaskStatus::Failed => counts.failed += 1,
-            }
-        }
-        counts
-    }
+    pub fn counts(&self) -> TaskCounts { self.counts }
 
     /// View a bounded, deterministic list of ready task IDs without leasing.
     pub fn queued_tasks(&self, limit: usize) -> Vec<u64> {
@@ -254,6 +281,7 @@ impl TaskScheduler {
         let mut cancelled = 0;
         for task in self.tasks.values_mut() {
             if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
+                self.counts.transition(&task.status, &TaskStatus::Failed);
                 task.status = TaskStatus::Failed;
                 cancelled += 1;
             }
@@ -381,5 +409,44 @@ mod native_scheduler_admission_limit_tests {
         assert_eq!(queue.counts().queued, 2);
         assert_eq!(queue.lease(9, Instant::now(), Duration::from_secs(5))
             .unwrap().unwrap().task, 1);
+    }
+}
+
+#[cfg(test)]
+mod cached_scheduler_counts_regressions {
+    use super::*;
+
+    fn scan_counts(scheduler: &TaskScheduler) -> TaskCounts {
+        let mut counts = TaskCounts::default();
+        for task in scheduler.tasks.values() {
+            counts.increment(&task.status);
+        }
+        counts
+    }
+
+    #[test]
+    fn cache_matches_statuses_through_retries_completion_and_cancellation() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3, 4], 2).unwrap();
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        let a = scheduler.lease(1, now, Duration::from_secs(1)).unwrap().unwrap();
+        let b = scheduler.lease(2, now, Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        assert!(scheduler.renew(&b, now, Duration::from_secs(10)).unwrap());
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(2)), 1);
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        let retry = scheduler.lease(3, now + Duration::from_secs(2), Duration::from_secs(2))
+            .unwrap().unwrap();
+        assert_eq!(a.task, retry.task);
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        assert!(scheduler.finish_at(&retry, false, now + Duration::from_secs(2)));
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        assert!(scheduler.finish_at(&b, true, now + Duration::from_secs(2)));
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        assert!(scheduler.cancel_task(3));
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
+        scheduler.cancel_pending();
+        assert_eq!(scheduler.counts(), scan_counts(&scheduler));
     }
 }
