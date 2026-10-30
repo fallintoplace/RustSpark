@@ -199,7 +199,7 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         let source = dir.join("events.csv");
         let manifest = dir.join("catalog.json");
-        fs::write(&source, "event\\n7\\n").unwrap();
+        fs::write(&source, "event\n7\n").unwrap();
         let schema = Schema::new(vec![Field::new("event", DataType::Integer, false)]).unwrap();
         let mut catalog = FileCatalog::new();
         catalog.register_csv("Events", &source, schema.clone(), 4096).unwrap();
