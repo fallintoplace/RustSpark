@@ -1529,7 +1529,7 @@ mod escape_and_inlist_rewrite_regressions {
         let like = Expr::Like {
             value: Box::new(Expr::Column("city".into())),
             pattern: Box::new(Expr::Literal(Value::Text("A!%".into()))),
-            escape: Some(Box::new(Expr::Literal(Value::Text("!".into()))),
+            escape: Some(Box::new(Expr::Literal(Value::Text("!".into())))),
         };
         let mut items = Vec::new();
         let rewritten = rewrite_having(like, &groups, &[], &mut items).unwrap();
