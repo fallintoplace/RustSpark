@@ -38,6 +38,10 @@ pub fn optimize(plan: Plan) -> Plan {
         }
         Plan::Limit { input, offset, count } => {
             let child = optimize(*input);
+            // An unbounded, zero-offset LIMIT does not constrain its input.
+            if offset == 0 && count.is_none() {
+                return child;
+            }
             if let Plan::Limit {
                 input: grandchild,
                 offset: inner_offset,
@@ -129,6 +133,14 @@ mod tests {
         executor,
         schema::{DataType, Field, Schema},
     };
+
+    #[test]
+    fn removes_unbounded_zero_offset_limit() {
+        let original = Plan::scan("sales").limit(0, None);
+        assert_eq!(optimize(original), Plan::scan("sales"));
+        let nested = Plan::scan("sales").limit(1, Some(2)).limit(0, None);
+        assert_eq!(optimize(nested), Plan::scan("sales").limit(1, Some(2)));
+    }
 
     #[test]
     fn merges_nested_limits_without_changing_results() {
