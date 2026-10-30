@@ -75,7 +75,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
                 self.stopped = true;
                 return None;
             };
-            match next.and_then(|batch| project::project(&batch, &self.selections)) {
+            match next.and_then(|batch| project::project_owned(batch, &self.selections)) {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
                 Err(error) => {
@@ -266,5 +266,31 @@ mod projection_empty_batch_tests {
         let output = ProjectStream::new([Ok(zero)].into_iter(), vec![],
             QueryControl::default()).next().unwrap().unwrap();
         assert_eq!(output.num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod stream_owned_project_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn reordered_owned_text_columns_match_borrowed_projection() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(5), Value::Text("payload".repeat(512))],
+            vec![Value::Integer(8), Value::Null],
+        ]).unwrap();
+        let selections = vec![
+            Selection::new(Expr::Column("payload".into()), "value"),
+            Selection::new(Expr::Column("id".into()), "key"),
+        ];
+        let expected = project::project(&batch, &selections).unwrap();
+        let actual = ProjectStream::new(
+            std::iter::once(Ok(batch)), selections, QueryControl::default(),
+        ).next().unwrap().unwrap();
+        assert_eq!(actual, expected);
     }
 }
