@@ -29,7 +29,9 @@ export class RustSpark {
     namedParams, sqlFile, maxRows, queryTimeout, processTimeoutMs,
     maxOutputBytes = 64 * 1024 * 1024,
   } = {}) {
-    if (typeof sql !== "string" || (sql.trim() === "") === (sqlFile === undefined)) {
+    const hasInlineSQL = typeof sql === "string" && sql.trim().length > 0;
+    const hasSQLFile = sqlFile !== undefined;
+    if (hasInlineSQL === hasSQLFile || (sql != null && typeof sql !== "string")) {
       throw new TypeError("Provide exactly one nonempty SQL string or sqlFile");
     }
     if (sqlFile !== undefined && (typeof sqlFile !== "string" || sqlFile.trim() === "")) {
