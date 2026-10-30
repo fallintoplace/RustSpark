@@ -446,7 +446,6 @@ mod file_catalog_manifest_tests {
 #[cfg(test)]
 mod relative_manifest_path_tests {
     use super::*;
-    use crate::schema::{DataType, Field};
 
     #[test]
     fn resolves_paths_against_manifest_directory_not_process_cwd() {
@@ -468,9 +467,9 @@ mod relative_manifest_path_tests {
         }).to_string();
         let catalog = FileCatalog::import_manifest_relative_to(&manifest, &directory).unwrap();
         assert_eq!(catalog.get("numbers").unwrap().path(), csv.as_path());
-        let batch = catalog.get("numbers").unwrap().open().unwrap()
+        let rows = catalog.get("numbers").unwrap().open().unwrap()
             .collect::<Result<Vec<_>>>().unwrap();
-        assert_eq!(batch.iter().map(|part| part.num_rows()).sum::<usize>(), 1);
+        assert_eq!(rows, vec![vec![crate::scalar::Value::Integer(1)]]);
         let legacy = FileCatalog::import_manifest(&manifest).unwrap();
         assert_eq!(legacy.get("numbers").unwrap().path(), Path::new("data/numbers.csv"));
         std::fs::remove_dir_all(directory).unwrap();
