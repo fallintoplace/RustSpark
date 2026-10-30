@@ -162,7 +162,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                 let matched = matched_right.as_ref()
                     .and_then(|bits| bits.get(right_row))
                     .ok_or_else(|| Error::Execution("missing outer-join match state".into()))?;
-                if !matched {
+                if !*matched {
                     for output in &mut columns[..left_schema.len()] {
                         output.push(Value::Null);
                     }
