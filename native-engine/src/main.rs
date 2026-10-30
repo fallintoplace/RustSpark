@@ -41,6 +41,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut parquet = None;
     let mut sources = Vec::new();
     let mut table = "data".to_string();
+    let mut table_explicit = false;
     let mut sql = None;
     let mut sql_file = None;
     let mut stream = false;
@@ -88,7 +89,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
                 sources.push((table_name.to_string(), path));
             },
-            "--table" => table = value,
+            "--table" => {
+                if table_explicit { return Err(Error::Parse("duplicate --table".into())); }
+                table_explicit = true;
+                table = value;
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -115,6 +120,18 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
+    }
+    if !sources.is_empty() {
+        // Reject conflicting table registrations before loading any data.
+        let mut seen = std::collections::HashSet::with_capacity(sources.len());
+        for (name, _) in &sources {
+            if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
+                return Err(Error::Schema("expected a simple nonempty table name".into()));
+            }
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(Error::Schema(format!("duplicate --source table: {name}")));
+            }
+        }
     }
     if sources.is_empty() {
         if csv.is_some() == parquet.is_some() {
@@ -382,6 +399,28 @@ mod tests {
         assert!(parse_args(args.into_iter().map(String::from)).unwrap().unwrap().stream);
         let bad = ["--parquet", "data.parquet", "--stream", "--csv-schema", "x:int64", "--sql", "SELECT * FROM data"];
         assert!(parse_args(bad.into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn duplicate_cli_tables_fail_before_reading_sources() {
+        let duplicate_source = [
+            "--source", "Sales=nonexistent.csv",
+            "--source", "SALES=also-nonexistent.parquet",
+            "--sql", "SELECT * FROM sales",
+        ];
+        let error = parse_args(duplicate_source.into_iter().map(String::from))
+            .err().unwrap();
+        assert!(error.to_string().contains("duplicate --source"), "{error}");
+        let repeated_table = [
+            "--csv", "unused.csv", "--table", "first",
+            "--table", "second", "--sql", "SELECT * FROM first",
+        ];
+        assert!(parse_args(repeated_table.into_iter().map(String::from))
+            .err().unwrap().to_string().contains("duplicate --table"));
+        let invalid_name = [
+            "--source", "bad name=unused.csv", "--sql", "SELECT * FROM data",
+        ];
+        assert!(parse_args(invalid_name.into_iter().map(String::from)).is_err());
     }
 
     #[test]
