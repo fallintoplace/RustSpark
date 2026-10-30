@@ -417,7 +417,8 @@ fn lower(
             let schema = infer(source, catalog, depth + 2, options.max_plan_depth)?;
             Ok(Box::new(TopKOutput::new(
                 lower(source, catalog, options, control, depth + 2)?,
-                schema, keys, *offset, *count, options.batch_rows, control.clone(),
+                schema, keys, *offset, *count, options.batch_rows,
+                64 * 1024 * 1024, control.clone(),
             )?))
         }
         Plan::Limit { input, offset, count } =>
