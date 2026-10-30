@@ -18,16 +18,30 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 
+struct JsonPrettyWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+impl std::io::Write for JsonPrettyWriter {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("JSON_PRETTY output exceeds byte limit"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 fn json_pretty_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn json_pretty(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let doc = json_path::parse(text)?;
-    let formatted = serde_json::to_string_pretty(&doc)
+    let mut writer = JsonPrettyWriter { bytes: Vec::new(), limit: 16 * 1024 * 1024 };
+    serde_json::to_writer_pretty(&mut writer, &doc)
         .map_err(|error| Error::Execution(format!("JSON_PRETTY failed: {error}")))?;
-    if formatted.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("JSON_PRETTY output exceeds 16 MiB".into()));
-    }
-    Ok(Value::Text(formatted))
+    Ok(Value::Text(String::from_utf8(writer.bytes)
+        .expect("serde_json produces UTF-8 output")))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -73,5 +87,18 @@ mod json_pretty_extension_tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&formatted).unwrap(), serde_json::json!({"a":[1,2]}));
         assert_eq!(json_pretty(&[Value::Null]).unwrap(), Value::Null);
         assert!(json_pretty(&[Value::Text("{broken".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod json_pretty_writer_budget_tests {
+    use super::*;
+    #[test]
+    fn stops_pretty_serialization_at_configured_limit() {
+        let mut writer = JsonPrettyWriter { bytes: Vec::new(), limit: 4 };
+        assert!(serde_json::to_writer_pretty(&mut writer, &serde_json::json!([1, 2])).is_err());
+        assert!(writer.bytes.len() <= 4);
+        assert_eq!(json_pretty(&[Value::Text("[1,2]".into())]).unwrap(),
+            Value::Text("[\n  1,\n  2\n]".into()));
     }
 }
