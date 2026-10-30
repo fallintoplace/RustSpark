@@ -86,6 +86,22 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
     }
+    if k == 1 && keys.len() == 1 {
+        if let Expr::Column(name) = &keys[0].expression {
+            // For a one-row result the heap, sort options, and candidate
+            // vectors are unnecessary. Scan the borrowed key column once.
+            let column = batch.column(batch.schema().column(name)?)?;
+            let mut best = 0usize;
+            for row in 1..batch.num_rows() {
+                if crate::sort::compare_values(
+                    &column[row], &column[best], keys[0].descending, keys[0].nulls_first,
+                ) == Ordering::Less {
+                    best = row;
+                }
+            }
+            return batch.take(&[best]);
+        }
+    }
     if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
         return top_k_columns(batch, keys, k);
     }
@@ -246,5 +262,35 @@ mod column_topk_perf_tests {
         let computed = [SortKey::ascending(Expr::binary(Expr::Column("n".into()), BinaryOp::Add, Expr::Literal(Value::Integer(1))))];
         assert_eq!(top_k(&numbers, &computed, 2).unwrap(),
             crate::sort::sort(&numbers, &computed).unwrap().slice_rows(0, 2).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod singleton_topk_column_scan_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}, sort};
+
+    #[test]
+    fn one_row_topk_preserves_null_nan_descending_and_stable_ties() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Float, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Float(3.0), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Float(1.0), Value::Integer(3)],
+            vec![Value::Float(1.0), Value::Integer(4)],
+            vec![Value::Float(f64::NAN), Value::Integer(5)],
+        ]).unwrap();
+        for (descending, nulls_first) in [(false, false), (false, true),
+            (true, false), (true, true)] {
+            let keys = [SortKey {
+                expression: Expr::Column("score".into()), descending, nulls_first,
+            }];
+            let expected = sort::sort(&batch, &keys).unwrap();
+            let result = top_k(&batch, &keys, 1).unwrap();
+            assert_eq!(result.num_rows(), 1);
+            assert_eq!(result.value(0, 1).unwrap(), expected.value(0, 1).unwrap());
+        }
     }
 }
