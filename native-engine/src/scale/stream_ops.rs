@@ -25,7 +25,10 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
                 self.stopped = true;
                 return Some(Err(error));
             }
-            let next = self.input.next()?;
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
             let result = next.and_then(|batch| {
                 if matches!(&self.predicate,
                     Expr::Literal(crate::scalar::Value::Boolean(true))) {
@@ -118,7 +121,10 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
                 self.stopped = true;
                 return Some(Err(error));
             }
-            let next = self.input.next()?;
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
             let batch = match next {
                 Ok(batch) => batch,
                 Err(error) => {
@@ -293,5 +299,43 @@ mod limit_stream_overflow_tests {
         assert!(stream.next().unwrap().unwrap_err().to_string().contains("overflow"));
         assert!(stream.next().is_none());
         assert_eq!(polls.get(), 0);
+    }
+}
+
+#[cfg(test)]
+mod fused_stream_operator_eof_tests {
+    use super::*;
+    use crate::{scalar::Value, project::Selection};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    fn once_exhausted(polls: Arc<AtomicUsize>) -> impl Iterator<Item = Result<Batch>> {
+        std::iter::from_fn(move || {
+            let attempt = polls.fetch_add(1, Ordering::Relaxed);
+            if attempt == 0 { None } else { panic!("polled upstream past EOF") }
+        })
+    }
+
+    #[test]
+    fn filter_project_and_limit_never_resume_an_exhausted_source() {
+        let filtered_polls = Arc::new(AtomicUsize::new(0));
+        let mut filtered = FilterStream::new(once_exhausted(Arc::clone(&filtered_polls)),
+            Expr::Literal(Value::Boolean(true)), QueryControl::default());
+        assert!(filtered.next().is_none());
+        assert!(filtered.next().is_none());
+        assert_eq!(filtered_polls.load(Ordering::Relaxed), 1);
+
+        let projected_polls = Arc::new(AtomicUsize::new(0));
+        let mut projected = ProjectStream::new(once_exhausted(Arc::clone(&projected_polls)),
+            Vec::<Selection>::new(), QueryControl::default());
+        assert!(projected.next().is_none());
+        assert!(projected.next().is_none());
+        assert_eq!(projected_polls.load(Ordering::Relaxed), 1);
+
+        let limited_polls = Arc::new(AtomicUsize::new(0));
+        let mut limited = LimitStream::new(once_exhausted(Arc::clone(&limited_polls)),
+            0, Some(5), QueryControl::default());
+        assert!(limited.next().is_none());
+        assert!(limited.next().is_none());
+        assert_eq!(limited_polls.load(Ordering::Relaxed), 1);
     }
 }
