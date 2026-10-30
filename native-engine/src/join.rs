@@ -35,10 +35,41 @@ pub fn cross_join(left: &Batch, right: &Batch) -> Result<Batch> {
 pub fn cross_join_with_max_rows(
     left: &Batch, right: &Batch, max_output_rows: usize,
 ) -> Result<Batch> {
+    cross_join_with_limits(left, right, max_output_rows, usize::MAX)
+}
+
+fn batch_value_bytes(batch: &Batch) -> Result<usize> {
+    let mut bytes = batch.num_rows()
+        .checked_mul(batch.schema().len())
+        .and_then(|cells| cells.checked_mul(std::mem::size_of::<Value>()))
+        .ok_or_else(|| Error::Execution("CROSS JOIN byte estimate overflow".into()))?;
+    for column in 0..batch.schema().len() {
+        for value in batch.column(column)? {
+            if let Value::Text(text) = value {
+                bytes = bytes.checked_add(text.len())
+                    .ok_or_else(|| Error::Execution("CROSS JOIN byte estimate overflow".into()))?;
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// Refuse wide Cartesian products before cloning output values into columns.
+pub fn cross_join_with_limits(
+    left: &Batch, right: &Batch, max_output_rows: usize, max_output_bytes: usize,
+) -> Result<Batch> {
     let count = left.num_rows().checked_mul(right.num_rows())
         .ok_or_else(|| Error::Execution("CROSS JOIN output cardinality overflow".into()))?;
     if count > MAX_JOIN_ROWS.min(max_output_rows) {
         return Err(Error::Execution("CROSS JOIN output exceeds safety limit".into()));
+    }
+    let bytes = batch_value_bytes(left)?.checked_mul(right.num_rows())
+        .and_then(|left_bytes| batch_value_bytes(right).ok()
+            .and_then(|right_bytes| right_bytes.checked_mul(left.num_rows()))
+            .and_then(|right_bytes| left_bytes.checked_add(right_bytes)))
+        .ok_or_else(|| Error::Execution("CROSS JOIN output byte estimate overflow".into()))?;
+    if bytes > max_output_bytes {
+        return Err(Error::Execution("CROSS JOIN output byte budget exceeded".into()));
     }
     let mut used: HashSet<String> = left.schema().fields().iter()
         .map(|field| field.name.to_ascii_lowercase()).collect();
@@ -591,5 +622,29 @@ mod default_columnar_hash_join_tests {
             .unwrap().num_rows(), 1);
         assert_eq!(hash_join(&left, &right, "key", "key", JoinKind::Anti)
             .unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_output_bytes_safety_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn enforces_output_byte_budget_before_expanding_wide_text() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap(), vec![vec![Value::Text("a".repeat(2048))]]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]).unwrap();
+        assert!(cross_join_with_limits(&left, &right, 2, 512)
+            .unwrap_err().to_string().contains("byte budget"));
+        let result = cross_join_with_limits(&left, &right, 2, 8192).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.value(0, 0).unwrap(), &Value::Text("a".repeat(2048)));
     }
 }
