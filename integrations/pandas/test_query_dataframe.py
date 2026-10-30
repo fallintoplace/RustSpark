@@ -69,6 +69,9 @@ class DataFrameCommandTests(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess([], 0, "", "")
             self.assertEqual(query_dataframe("SELECT 1", process_timeout=3), "frame")
             self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            run.side_effect = FileNotFoundError("rustspark")
+            with self.assertRaisesRegex(RuntimeError, "Unable to launch RustSpark"):
+                query_dataframe("SELECT 1", process_timeout=3)
             run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
             with self.assertRaisesRegex(RuntimeError, "process timeout"):
                 query_dataframe("SELECT 1", process_timeout=3)
