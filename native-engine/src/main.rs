@@ -41,6 +41,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut parquet = None;
     let mut sources = Vec::new();
     let mut table = "data".to_string();
+    let mut table_seen = false;
     let mut sql = None;
     let mut sql_file = None;
     let mut stream = false;
@@ -88,7 +89,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
                 sources.push((table_name.to_string(), path));
             },
-            "--table" => table = value,
+            "--table" => {
+                if table_seen { return Err(Error::Parse("duplicate --table".into())); }
+                table_seen = true;
+                table = value;
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -430,5 +435,16 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_native_table_flag_tests {
+    use super::*;
+    #[test]
+    fn refuses_silent_table_alias_override() {
+        let args = ["--csv", "file.csv", "--table", "first", "--table", "second", "--sql", "SELECT * FROM first"];
+        let error = parse_args(args.into_iter().map(str::to_string)).err().unwrap();
+        assert!(error.to_string().contains("duplicate --table"));
     }
 }
