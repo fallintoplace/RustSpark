@@ -11,6 +11,10 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
+    fn bit_position(bit: usize) -> (usize, u64) {
+        (bit / 64, 1_u64 << (bit % 64))
+    }
+
     pub fn new(bits: usize, hashes: u32) -> Result<Self> {
         if bits == 0 || bits > 1 << 29 || !(1..=16).contains(&hashes) {
             return Err(Error::Execution("invalid Bloom filter sizing".into()));
@@ -48,7 +52,8 @@ impl BloomFilter {
         let (first, step) = self.hash_pair(key);
         for seed in 0..self.hashes {
             let bit = self.probe(first, step, seed);
-            self.words[bit / 64] |= 1_u64 << (bit % 64);
+            let (word, mask) = Self::bit_position(bit);
+            self.words[word] |= mask;
         }
     }
 
@@ -56,7 +61,8 @@ impl BloomFilter {
         let (first, step) = self.hash_pair(key);
         (0..self.hashes).all(|seed| {
             let bit = self.probe(first, step, seed);
-            (self.words[bit / 64] & (1_u64 << (bit % 64))) != 0
+            let (word, mask) = Self::bit_position(bit);
+            (self.words[word] & mask) != 0
         })
     }
 
