@@ -30,6 +30,15 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
         } else if let Some(rest) = tail.strip_prefix('[') {
             if rest.starts_with('\'') || rest.starts_with('"') {
                 let quote = rest.chars().next().expect("checked quoted key");
+                // A quoted key without escapes can be borrowed from the path.
+                if let Some(end) = rest[1..].find(quote) {
+                    let key = &rest[1..end + 1];
+                    if !key.contains('\\') && rest[end + 2..].starts_with(']') {
+                        node = node.and_then(|value| value.get(key));
+                        tail = &rest[end + 3..];
+                        continue;
+                    }
+                }
                 let mut end = quote.len_utf8();
                 let mut escaped = false;
                 let mut closed = false;
@@ -110,5 +119,18 @@ mod ascii_json_path_perf_tests {
         assert_eq!(lookup(Some(&doc), "$.rows[200]").unwrap(), None);
         assert!(lookup(Some(&doc), "$.rows[2x]").is_err());
         assert!(lookup(Some(&doc), "$.café").is_err());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_json_quoted_key_tests {
+    use super::*;
+    #[test]
+    fn supports_unicode_simple_keys_and_escaped_fallback() {
+        let doc = parse(r#"{"root":{"a.b":1,"é🙂":2,"x'k":3}}"#).unwrap();
+        assert_eq!(lookup(Some(&doc), "$.root['a.b']").unwrap(), Some(&serde_json::json!(1)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["é🙂"]"#).unwrap(), Some(&serde_json::json!(2)));
+        assert_eq!(lookup(Some(&doc), "$.root['missing']").unwrap(), None);
+        assert_eq!(lookup(Some(&doc), r#"$.root['x\'k']"#).unwrap(), Some(&serde_json::json!(3)));
     }
 }

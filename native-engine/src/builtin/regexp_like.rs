@@ -10,6 +10,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
     regex_support::check_input(text)?;
+    if pattern.is_empty() { return Ok(Value::Boolean(true)); }
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
 }
 
@@ -63,5 +64,18 @@ mod regexp_escape_extension_tests {
         assert!(!regex_support::compile(&pattern).unwrap().is_match("abbb"));
         assert_eq!(regexp_escape(&[Value::Null]).unwrap(), Value::Null);
         assert!(regexp_escape(&[Value::Text("(".repeat(4097))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod empty_regex_like_perf_tests {
+    use super::*;
+    #[test]
+    fn empty_pattern_matches_every_nonnull_input() {
+        for text in ["", "hello", "é🙂"] {
+            assert_eq!(evaluate(&[Value::Text(text.into()), Value::Text("".into())])
+                .unwrap(), Value::Boolean(true));
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("".into())]).unwrap(), Value::Null);
     }
 }

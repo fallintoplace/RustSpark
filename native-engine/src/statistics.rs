@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::{batch::Batch, scalar::Value, Error, Result};
+use crate::{batch::Batch, scalar::Value, schema::DataType, Error, Result};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnStatistics {
@@ -19,10 +19,32 @@ impl Default for ColumnStatistics {
 impl ColumnStatistics {
     pub fn from_batch(batch: &Batch, name: &str) -> Result<Self> {
         let column = batch.schema().column(name)?;
-        let mut stats = Self::default();
-        for value in batch.column(column)? {
-            stats.observe(value)?;
+        let values = batch.column(column)?;
+        if batch.schema().field(column)?.data_type == DataType::Integer {
+            // Typed integer statistics need no dynamic comparisons or value clones.
+            let rows = u64::try_from(values.len())
+                .map_err(|_| Error::Execution("statistics row count overflow".into()))?;
+            let mut nulls = 0u64;
+            let mut min: Option<i64> = None;
+            let mut max: Option<i64> = None;
+            for value in values {
+                match value {
+                    Value::Null => nulls += 1,
+                    Value::Integer(n) => {
+                        min = Some(min.map_or(*n, |old| old.min(*n)));
+                        max = Some(max.map_or(*n, |old| old.max(*n)));
+                    }
+                    _ => unreachable!("native batch schema was validated"),
+                }
+            }
+            return Ok(Self {
+                rows, nulls,
+                min: min.map(Value::Integer),
+                max: max.map(Value::Integer),
+            });
         }
+        let mut stats = Self::default();
+        for value in values { stats.observe(value)?; }
         Ok(stats)
     }
 
@@ -221,5 +243,34 @@ mod direct_multibatch_stats_perf_tests {
         let mut merged = ColumnStatistics::default();
         for batch in &batches { merged.merge(&ColumnStatistics::from_batch(batch, "x").unwrap()).unwrap(); }
         assert_eq!(ColumnStatistics::from_batches(&batches, "x").unwrap(), merged);
+    }
+}
+
+#[cfg(test)]
+mod typed_integer_stats_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn fast_integer_bounds_match_incremental_stats() {
+        let schema = Schema::new(vec![
+            Field::new("number", DataType::Integer, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null], vec![Value::Integer(i64::MAX)],
+            vec![Value::Integer(-5)], vec![Value::Integer(i64::MIN)],
+            vec![Value::Null], vec![Value::Integer(15)],
+        ]).unwrap();
+        let actual = ColumnStatistics::from_batch(&input, "number").unwrap();
+        let mut expected = ColumnStatistics::default();
+        for value in input.column(0).unwrap() { expected.observe(value).unwrap(); }
+        assert_eq!(actual, expected);
+        assert_eq!(actual.rows, 6);
+        assert_eq!(actual.nulls, 2);
+        assert_eq!(actual.min, Some(Value::Integer(i64::MIN)));
+        assert_eq!(actual.max, Some(Value::Integer(i64::MAX)));
+        let empty = Batch::empty(schema);
+        assert_eq!(ColumnStatistics::from_batch(&empty, "number").unwrap(),
+            ColumnStatistics::default());
     }
 }

@@ -108,6 +108,14 @@ where L: IntoIterator<Item = Result<Batch>>,
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
+        // With no build rows, these join kinds cannot emit a match. The
+        // probe spill may be huge, so bypass its row decoding and hash build.
+        // LEFT, FULL, and ANTI must still visit the probe side.
+        if build.num_rows() == 0 &&
+            matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi) {
+            writer.finish()?;
+            continue;
+        }
         // A RIGHT or FULL join must emit build-only rows once per partition,
         // not once for every probe batch.
         let outer_build = matches!(kind, JoinKind::Right | JoinKind::Full);
@@ -377,5 +385,39 @@ mod columnar_outer_unmatched_tests {
         assert_eq!(rows.iter().filter(|row| row[0] == Value::Null).count(), 12);
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod empty_build_grace_join_short_circuit_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::fs;
+
+    #[test]
+    fn empty_build_shards_return_typed_empty_outputs_for_inner_right_semi() {
+        let dir = std::env::temp_dir().join(format!("native-empty-build-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), (0..60)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let right = Batch::empty(schema.clone());
+        for kind in [JoinKind::Inner, JoinKind::Right, JoinKind::Semi] {
+            let files = grace_join([Ok(left.clone())], [Ok(right.clone())],
+                schema.clone(), schema.clone(), "k", "k", kind,
+                &dir, 4, 100, 7, &QueryControl::default()).unwrap();
+            let mut rows = 0usize;
+            for path in files.paths() {
+                let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 7).unwrap();
+                while let Some(batch) = reader.next_batch().unwrap() {
+                    rows += batch.num_rows();
+                }
+            }
+            assert_eq!(rows, 0);
+            drop(files);
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 }

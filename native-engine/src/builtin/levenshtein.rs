@@ -17,6 +17,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if max_distance < 0 { return Ok(Value::Integer(-1)); }
         Some(usize::try_from(max_distance).unwrap_or(usize::MAX))
     } else { None };
+    if first == second { return Ok(Value::Integer(0)); }
+    if threshold == Some(0) { return Ok(Value::Integer(-1)); }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     // Removing identical edges does not change the edit distance.
@@ -87,6 +89,13 @@ fn hamming_distance(args: &[Value]) -> Result<Value> {
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
     if left.len() > 1_000_000 || right.len() > 1_000_000 {
         return Err(Error::Execution("HAMMING_DISTANCE input exceeds 1 MiB budget".into()));
+    }
+    if left.is_ascii() && right.is_ascii() {
+        if left.len() != right.len() {
+            return Err(Error::Type("HAMMING_DISTANCE requires equal-length strings".into()));
+        }
+        let mismatches = left.bytes().zip(right.bytes()).filter(|(a, b)| a != b).count();
+        return Ok(Value::Integer(mismatches as i64));
     }
     let mut left = left.chars();
     let mut right = right.chars();
@@ -161,5 +170,18 @@ mod hamming_distance_extension_tests {
         assert_eq!(hamming_distance(&[Value::Text("é🙂".into()), Value::Text("é界".into())]).unwrap(), Value::Integer(1));
         assert!(hamming_distance(&[Value::Text("ab".into()), Value::Text("a".into())]).is_err());
         assert_eq!(hamming_distance(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod distance_fast_path_tests {
+    use super::*;
+    #[test]
+    fn equal_strings_bypass_edit_work_and_ascii_hamming_counts_bytes() {
+        let long = Value::Text("x".repeat(20_000));
+        assert_eq!(evaluate(&[long.clone(), long, Value::Integer(0)]).unwrap(), Value::Integer(0));
+        assert_eq!(evaluate(&[Value::Text("same".into()), Value::Text("sane".into()), Value::Integer(0)]).unwrap(), Value::Integer(-1));
+        assert_eq!(hamming_distance(&[Value::Text("AABB".into()), Value::Text("ABBA".into())]).unwrap(), Value::Integer(2));
+        assert!(hamming_distance(&[Value::Text("A".into()), Value::Text("AB".into())]).is_err());
     }
 }

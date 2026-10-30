@@ -27,6 +27,13 @@ impl Iterator for BatchChunks<'_> {
         Some(self.batch.slice_rows(start, end))
     }
 
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        // Skip whole windows without creating the discarded batches.
+        let skip = self.size.saturating_mul(n);
+        self.position = self.position.saturating_add(skip);
+        self.next()
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.batch.num_rows().saturating_sub(self.position);
         let batches = remaining / self.size + usize::from(remaining % self.size != 0);
@@ -34,8 +41,16 @@ impl Iterator for BatchChunks<'_> {
     }
 }
 
+impl ExactSizeIterator for BatchChunks<'_> {}
+impl std::iter::FusedIterator for BatchChunks<'_> {}
+
 pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
+    // A single input is already a valid batch. Avoid allocating fresh
+    // column vectors and revalidating every scalar during reconstruction.
+    if batches.len() == 1 {
+        return Ok(first.clone());
+    }
     let schema = first.schema().clone();
     let mut total = 0_usize;
     for batch in batches {
@@ -95,5 +110,45 @@ mod zero_column_concat_consolidation_tests {
         let a = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(concatenate(&[a, b]).unwrap().rows().unwrap(), vec![vec![]; 5]);
+    }
+}
+
+#[cfg(test)]
+mod singleton_chunk_concatenation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn single_chunk_keeps_nullable_rows_and_zero_column_cardinality() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("é".repeat(1024))], vec![Value::Null],
+        ]).unwrap();
+        assert_eq!(concatenate(&[input.clone()]).unwrap(), input);
+        let empty_width = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
+        assert_eq!(concatenate(&[empty_width.clone()]).unwrap(), empty_width);
+    }
+}
+
+#[cfg(test)]
+mod batch_chunk_nth_skip_tests {
+    use super::*;
+
+    #[test]
+    fn jumping_over_chunks_does_not_change_remaining_rows() {
+        let input = Batch::from_rows(
+            crate::schema::Schema::new(vec![
+                crate::schema::Field::new("n", crate::schema::DataType::Integer, false),
+            ]).unwrap(),
+            (0..25).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap();
+        let mut iter = chunks(&input, 4).unwrap();
+        assert_eq!(iter.len(), 7);
+        assert_eq!(iter.nth(2).unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(8)]);
+        assert_eq!(iter.len(), 4);
+        assert_eq!(iter.next().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(12)]);
+        assert!(iter.nth(usize::MAX).is_none());
+        assert_eq!(iter.len(), 0);
+        assert!(iter.next().is_none());
     }
 }

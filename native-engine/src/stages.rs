@@ -13,6 +13,7 @@ pub enum StageKind {
     Limit,
     Distinct,
     HashJoin,
+    CrossJoin,
     UnionAll,
     Intersect,
     Except,
@@ -20,7 +21,7 @@ pub enum StageKind {
 
 impl StageKind {
     pub fn is_blocking(self) -> bool {
-        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::Intersect | Self::Except)
+        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::CrossJoin | Self::Intersect | Self::Except)
     }
 }
 
@@ -39,6 +40,10 @@ pub struct StageGraph {
 
 impl StageGraph {
     pub fn new(stages: Vec<Stage>) -> Result<Self> {
+        // Enforce the same bound as logical-plan lowering for direct graph users.
+        if stages.len() > 4096 {
+            return Err(Error::Execution("native stage graph exceeds safety limits".into()));
+        }
         let mut present = vec![false; stages.len()];
         for stage in &stages {
             if stage.id >= stages.len() || std::mem::replace(&mut present[stage.id], true) {
@@ -60,7 +65,7 @@ impl StageGraph {
                 StageKind::Scan => 0,
                 StageKind::Filter | StageKind::Project | StageKind::Aggregate |
                 StageKind::Sort | StageKind::Limit | StageKind::Distinct => 1,
-                StageKind::HashJoin | StageKind::UnionAll | StageKind::Intersect |
+                StageKind::HashJoin | StageKind::CrossJoin | StageKind::UnionAll | StageKind::Intersect |
                 StageKind::Except => 2,
             };
             if stage.inputs.len() != required_inputs {
@@ -140,7 +145,7 @@ impl StageGraph {
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
                 Plan::CrossJoin { left, right } => (
-                    StageKind::HashJoin,
+                    StageKind::CrossJoin,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
                 Plan::UnionAll { left, right } => (
@@ -313,5 +318,40 @@ mod dense_root_lookup_tests {
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
         ]).unwrap();
         assert_eq!(multiple.root(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_direct_stage_budget_tests {
+    use super::*;
+
+    #[test]
+    fn direct_stage_graphs_cannot_bypass_lowering_limit() {
+        let oversized = (0..4097).map(|id| Stage {
+            id, kind: StageKind::Scan, inputs: vec![],
+        }).collect();
+        assert!(StageGraph::new(oversized).is_err());
+        let accepted = StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(accepted.execution_order().unwrap(), [0]);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_stage_kind_tests {
+    use super::*;
+
+    #[test]
+    fn cross_join_is_not_mislabeled_as_hash_join() {
+        let plan = Plan::CrossJoin {
+            left: Box::new(Plan::scan("left")),
+            right: Box::new(Plan::scan("right")),
+        };
+        let graph = StageGraph::from_plan(&plan).unwrap();
+        let root = &graph.stages()[graph.root().unwrap()];
+        assert_eq!(root.kind, StageKind::CrossJoin);
+        assert_eq!(root.inputs.len(), 2);
+        assert!(root.kind.is_blocking());
     }
 }

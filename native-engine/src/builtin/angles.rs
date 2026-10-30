@@ -15,11 +15,13 @@ fn degrees(args: &[Value]) -> Result<Value> {
 }
 fn pi(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::PI)) }
 fn e(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::E)) }
+fn tau(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::TAU)) }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "radians", min_args: 1, max_args: 1, result_type: float_type, call: radians },
     Function { name: "degrees", min_args: 1, max_args: 1, result_type: float_type, call: degrees },
     Function { name: "pi", min_args: 0, max_args: 0, result_type: float_result, call: pi },
     Function { name: "e", min_args: 0, max_args: 0, result_type: float_result, call: e },
+    Function { name: "tau", min_args: 0, max_args: 0, result_type: float_result, call: tau },
 ];
 #[cfg(test)]
 mod tests {
@@ -31,5 +33,16 @@ mod tests {
         assert_eq!(degrees(&[Value::Integer(0)]).unwrap(), Value::Float(0.0));
         assert_eq!(pi(&[]).unwrap(), Value::Float(std::f64::consts::PI));
         assert_eq!(degrees(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod tau_constant_tests {
+    use super::*;
+    #[test]
+    fn full_turn_constant_has_expected_value_and_arity() {
+        assert!(crate::builtin::supports("tau"));
+        assert_eq!(tau(&[]).unwrap(), Value::Float(std::f64::consts::TAU));
+        assert_eq!(tau(&[]).unwrap(), Value::Float(2.0 * std::f64::consts::PI));
     }
 }

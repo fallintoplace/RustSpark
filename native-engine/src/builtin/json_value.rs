@@ -18,6 +18,22 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 
+struct PatchOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for PatchOutput {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("JSON_MERGE_PATCH output budget exceeded"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 fn json_merge_patch_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
 fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
@@ -42,11 +58,11 @@ fn json_merge_patch(args: &[Value]) -> Result<Value> {
     let mut document = json_path::parse(document)?;
     let patch = json_path::parse(patch)?;
     apply_merge_patch(&mut document, &patch);
-    let result = document.to_string();
-    if result.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("JSON_MERGE_PATCH output exceeds 16 MiB".into()));
-    }
-    Ok(Value::Text(result))
+    let mut writer = PatchOutput { bytes: Vec::new(), limit: 16 * 1024 * 1024 };
+    serde_json::to_writer(&mut writer, &document)
+        .map_err(|error| Error::Execution(format!("JSON_MERGE_PATCH output failed: {error}")))?;
+    Ok(Value::Text(String::from_utf8(writer.bytes)
+        .expect("serde_json writes UTF-8")))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -92,5 +108,19 @@ mod json_merge_patch_extension_tests {
             serde_json::json!({"b":{"c":5,"d":3},"e":9}));
         assert_eq!(json_merge_patch(&[Value::Text("[]".into()), Value::Text(r#"{"x":1}"#.into())]).unwrap(), Value::Text(r#"{"x":1}"#.into()));
         assert_eq!(json_merge_patch(&[Value::Null, Value::Text("{}".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod json_patch_bounded_output_tests {
+    use super::*;
+    #[test]
+    fn writer_rejects_growth_and_patch_stays_correct() {
+        let mut writer = PatchOutput { bytes: Vec::new(), limit: 6 };
+        assert!(serde_json::to_writer(&mut writer, &serde_json::json!({"long":"value"})).is_err());
+        assert!(writer.bytes.len() <= 6);
+        let value = json_merge_patch(&[Value::Text(r#"{"a":1}"#.into()),
+            Value::Text(r#"{"b":2}"#.into())]).unwrap();
+        assert_eq!(value, Value::Text(r#"{"a":1,"b":2}"#.into()));
     }
 }

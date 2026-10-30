@@ -17,6 +17,9 @@ fn atleastnnonnulls_type(types: &[DataType]) -> Result<DataType> {
 fn atleastnnonnulls(args: &[Value]) -> Result<Value> {
     let Some(minimum) = super::integer(&args[0])? else { return Ok(Value::Null); };
     if minimum <= 0 { return Ok(Value::Boolean(true)); }
+    if usize::try_from(minimum).map_or(true, |needed| needed > args.len() - 1) {
+        return Ok(Value::Boolean(false));
+    }
     let mut found = 0_i64;
     for value in &args[1..] {
         if !value.is_null() && !matches!(value, Value::Float(n) if n.is_nan()) {
@@ -55,5 +58,17 @@ mod atleastnnonnulls_extension_tests {
         assert_eq!(atleastnnonnulls(&[Value::Integer(2), Value::Float(f64::NAN), Value::Null, Value::Integer(1)]).unwrap(), Value::Boolean(false));
         assert_eq!(atleastnnonnulls(&[Value::Integer(0), Value::Null]).unwrap(), Value::Boolean(true));
         assert_eq!(atleastnnonnulls(&[Value::Integer(1), Value::Null]).unwrap(), Value::Boolean(false));
+    }
+}
+
+#[cfg(test)]
+mod impossible_nonnull_threshold_tests {
+    use super::*;
+    #[test]
+    fn exceeds_maximum_possible_nonnulls_without_traversal() {
+        assert_eq!(atleastnnonnulls(&[Value::Integer(5), Value::Text("a".into()), Value::Integer(2)]).unwrap(), Value::Boolean(false));
+        assert_eq!(atleastnnonnulls(&[Value::Integer(i64::MAX), Value::Float(f64::NAN)]).unwrap(), Value::Boolean(false));
+        assert_eq!(atleastnnonnulls(&[Value::Integer(2), Value::Integer(1), Value::Text("é".into())]).unwrap(), Value::Boolean(true));
+        assert_eq!(atleastnnonnulls(&[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
     }
 }

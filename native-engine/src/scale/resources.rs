@@ -31,6 +31,7 @@ impl MemoryBudget {
     /// Atomically reserve estimated operator memory. The returned guard releases
     /// the reservation even if the operator exits with an error.
     pub fn reserve(&self, bytes: usize) -> Result<Reservation> {
+        if bytes == 0 { return Ok(Reservation { budget: self.clone(), bytes: 0 }); }
         let mut current = self.used.load(Ordering::Acquire);
         loop {
             let next = current.checked_add(bytes)
@@ -51,6 +52,15 @@ impl MemoryBudget {
 
 impl Reservation {
     pub fn bytes(&self) -> usize { self.bytes }
+
+    /// Transfer part of this allocation to another guard, with no new budget admission.
+    pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
+        if bytes > self.bytes {
+            return Err(Error::Execution("cannot split more memory than reserved".into()));
+        }
+        self.bytes -= bytes;
+        Ok(Self { budget: self.budget.clone(), bytes })
+    }
 
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
@@ -135,5 +145,41 @@ mod grouped_scale_memory_tests {
         assert_eq!(budget.used(), 50);
         drop(allocations);
         assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod scale_reservation_split_tests {
+    use super::*;
+
+    #[test]
+    fn partial_transfers_release_each_byte_once() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let mut parent = budget.reserve(80).unwrap();
+        let mut child = parent.split_off(25).unwrap();
+        assert_eq!(budget.used(), 80);
+        assert_eq!(parent.bytes(), 55);
+        assert!(parent.split_off(56).is_err());
+        child.resize(30).unwrap();
+        assert_eq!(budget.used(), 85);
+        drop(parent);
+        assert_eq!(budget.used(), 30);
+        drop(child);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod zero_scale_reservations_fast_path_tests {
+    use super::*;
+    #[test]
+    fn zero_byte_guards_do_not_consume_full_budget() {
+        let budget = MemoryBudget::new(1).unwrap();
+        let _full = budget.reserve(1).unwrap();
+        let empty = budget.reserve(0).unwrap();
+        assert_eq!(empty.bytes(), 0);
+        assert_eq!(budget.used(), 1);
+        drop(empty);
+        assert_eq!(budget.used(), 1);
     }
 }
