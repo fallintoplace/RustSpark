@@ -47,6 +47,17 @@ class RustSparkTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, '[{"v":1.25}]', "")
         self.assertEqual(RustSpark().query("SELECT 1"), [{"v": 1.25}])
 
+    @patch("rustspark_local.subprocess.run")
+    def test_named_parameter_budget_counts_utf8_bytes(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        client = RustSpark()
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            client.query("SELECT 1", named_params={"p": "utf8:" + "é" * 4094})
+        at_limit = "utf8:" + "é" * 4093 + "x"
+        self.assertEqual(len(at_limit.encode("utf-8")), 8192)
+        self.assertEqual(client.query("SELECT 1", named_params={"p": at_limit}), [])
+        self.assertIn(f"p={at_limit}", run.call_args.args[0])
+
     def test_rejects_unsafe_or_conflicting_options_early(self):
         client = RustSpark()
         with self.assertRaises(ValueError):
