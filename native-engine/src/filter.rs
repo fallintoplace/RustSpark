@@ -5,6 +5,9 @@ pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch.clone());
     }
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
+        return Ok(Batch::empty(batch.schema().clone()));
+    }
     batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
 }
 
@@ -135,5 +138,24 @@ mod literal_bounded_filter_perf_tests {
         for value in [Value::Boolean(false), Value::Null] {
             assert_eq!(filter_first(&batch, &Expr::Literal(value), 2).unwrap().num_rows(), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod constant_filter_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn false_and_unknown_filters_produce_empty_typed_results() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+        ]).unwrap(), vec![vec![Value::Null], vec![Value::Text("x".into())]]).unwrap();
+        for predicate in [Expr::Literal(Value::Boolean(false)), Expr::Literal(Value::Null)] {
+            let output = filter(&input, &predicate).unwrap();
+            assert_eq!(output.num_rows(), 0);
+            assert_eq!(output.schema(), input.schema());
+        }
+        assert_eq!(filter(&input, &Expr::Literal(Value::Boolean(true))).unwrap(), input);
     }
 }
