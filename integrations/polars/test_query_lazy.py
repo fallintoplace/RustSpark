@@ -64,6 +64,10 @@ class PolarsCommandTests(unittest.TestCase):
             with rustspark_lazy_frame("SELECT 1", process_timeout=3) as frame:
                 self.assertEqual(frame, "lazy frame")
             self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            run.side_effect = FileNotFoundError("rustspark")
+            with self.assertRaisesRegex(RuntimeError, "Unable to launch RustSpark"):
+                with rustspark_lazy_frame("SELECT 1", process_timeout=3):
+                    pass
             run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
             with self.assertRaisesRegex(RuntimeError, "process timeout"):
                 with rustspark_lazy_frame("SELECT 1", process_timeout=3):
