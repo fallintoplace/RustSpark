@@ -116,7 +116,10 @@ impl Iterator for ExternalSort {
                 break;
             };
             let run = &mut self.runs[selected];
-            let batch = run.batch.as_ref().expect("run exists");
+            let Some(batch) = run.batch.as_ref() else {
+                self.finished = true;
+                return Some(Err(Error::Execution("missing active external sort batch".into())));
+            };
             match batch.row(run.position) {
                 Ok(row) => rows.push(row),
                 Err(e) => {
