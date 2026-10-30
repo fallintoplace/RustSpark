@@ -10,15 +10,17 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
 pub fn union_all_with_max_rows(
     left: &Batch, right: &Batch, max_rows: usize,
 ) -> Result<Batch> {
-    // Schema validation must still run even when the row cap would fail.
-    let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
     let count = left
         .num_rows()
         .checked_add(right.num_rows())
         .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
     if count > max_rows {
+        // Report an invalid UNION schema before its size limit, without
+        // materializing widened input columns on this failing path.
+        crate::set_ops::compatible_schema(left, right)?;
         return Err(Error::Execution("UNION ALL output row limit exceeded".into()));
     }
+    let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
     let mut columns = Vec::with_capacity(schema.len());
     for column in 0..schema.len() {
         let mut values = Vec::with_capacity(count);
