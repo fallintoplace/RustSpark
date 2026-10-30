@@ -30,10 +30,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let mut result = String::with_capacity(text.len());
     result.push_str(&text[..start]);
     let mut consumed = 0;
+    let mut expanded = String::new();
     for captures in compiled.captures_iter(suffix) {
         let matched = captures.get(0).expect("regex captures always contain the whole match");
         let unchanged = &suffix[consumed..matched.start()];
-        let mut expanded = String::new();
+        expanded.clear();
         captures.expand(replacement, &mut expanded);
         if result.len().checked_add(unchanged.len())
             .and_then(|len| len.checked_add(expanded.len()))
@@ -117,5 +118,20 @@ mod bounded_incremental_regex_replace_tests {
             Value::Text("-".into())]).unwrap(), Value::Text("-a-b-".into()));
         assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Text("z".into()),
             Value::Text("x".into())]).unwrap(), Value::Text("abc".into()));
+    }
+}
+
+#[cfg(test)]
+mod expansion_buffer_reuse_tests {
+    use super::*;
+
+    #[test]
+    fn multiple_captures_expand_independently() {
+        let args = [
+            Value::Text("a1 b2 c3".into()),
+            Value::Text(r"([a-z])([0-9])".into()),
+            Value::Text("$2$1".into()),
+        ];
+        assert_eq!(evaluate(&args).unwrap(), Value::Text("1a 2b 3c".into()));
     }
 }
