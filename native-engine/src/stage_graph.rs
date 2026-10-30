@@ -14,6 +14,7 @@ pub struct StageGraph {
     stages: Vec<Stage>,
     order: Vec<u64>,
     order_indices: Vec<usize>,
+    longest_chain: usize,
 }
 
 impl StageGraph {
@@ -56,10 +57,12 @@ impl StageGraph {
         }
         let mut order = Vec::with_capacity(stages.len());
         let mut order_indices = Vec::with_capacity(stages.len());
+        let mut depth = vec![1usize; stages.len()];
         while let Some(position) = ready.pop_front() {
             order.push(stages[position].id);
             order_indices.push(position);
             for &successor in &successors[position] {
+                depth[successor] = depth[successor].max(depth[position] + 1);
                 indegree[successor] -= 1;
                 if indegree[successor] == 0 {
                     ready.push_back(successor);
@@ -69,7 +72,8 @@ impl StageGraph {
         if order.len() != stages.len() {
             return Err(Error::Execution("execution stage graph contains a cycle".into()));
         }
-        Ok(Self { stages, order, order_indices })
+        let longest_chain = depth.into_iter().max().unwrap_or(0);
+        Ok(Self { stages, order, order_indices, longest_chain })
     }
 
     pub fn topological_order(&self) -> &[u64] {
@@ -138,16 +142,7 @@ mod tests {
 impl StageGraph {
     /// Number of stages in the longest dependency chain (zero for an empty graph).
     pub fn longest_dependency_chain(&self) -> usize {
-        let by_id: HashMap<u64, &Stage> = self.stages.iter().map(|stage| (stage.id, stage)).collect();
-        let mut depth = HashMap::new();
-        for id in &self.order {
-            let stage = by_id[id];
-            let longest_parent = stage.dependencies.iter()
-                .map(|parent| depth.get(parent).copied().unwrap_or(0))
-                .max().unwrap_or(0);
-            depth.insert(*id, longest_parent + 1);
-        }
-        depth.values().copied().max().unwrap_or(0)
+        self.longest_chain
     }
 }
 
@@ -183,6 +178,24 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod cached_stage_chain_depth_tests {
+    use super::*;
+    #[test]
+    fn longest_path_tracks_diamond_dependencies() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 10, dependencies: vec![8, 9], partitions: 1 },
+            Stage { id: 8, dependencies: vec![4], partitions: 1 },
+            Stage { id: 9, dependencies: vec![4], partitions: 1 },
+            Stage { id: 4, dependencies: vec![], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.longest_dependency_chain(), 3);
+        assert_eq!(graph.longest_dependency_chain(), 3);
+        assert_eq!(StageGraph::new(vec![]).unwrap().longest_dependency_chain(), 0);
     }
 }
 
