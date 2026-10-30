@@ -96,6 +96,12 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 }
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    except_distinct_with_max_rows(left, right, usize::MAX)
+}
+
+pub fn except_distinct_with_max_rows(
+    left: &Batch, right: &Batch, max_output_rows: usize,
+) -> Result<Batch> {
     if left.num_rows() == 0 {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
@@ -111,7 +117,12 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
         let mut emitted = HashSet::<&Value>::new();
         let mut rows = Vec::new();
         for (index, value) in left.column(0)?.iter().enumerate() {
-            if !right_values.contains(value) && emitted.insert(value) { rows.push(index); }
+            if !right_values.contains(value) && emitted.insert(value) {
+                if rows.len() >= max_output_rows {
+                    return Err(Error::Execution("EXCEPT DISTINCT output row limit exceeded".into()));
+                }
+                rows.push(index);
+            }
         }
         return left.take(&rows)?.relabel(schema);
     }
@@ -121,6 +132,9 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     for index in 0..left.num_rows() {
         let row = left.row(index)?;
         if !right_rows.contains(&row) && emitted.insert(row.clone()) {
+            if rows.len() >= max_output_rows {
+                return Err(Error::Execution("EXCEPT DISTINCT output row limit exceeded".into()));
+            }
             rows.push(row);
         }
     }
@@ -415,5 +429,27 @@ mod typed_empty_set_short_circuits_tests {
             Field::new("id", DataType::Text, false),
         ]).unwrap());
         assert!(intersect_distinct(&integers, &invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_except_distinct_result_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn caps_distinct_output_before_cloning_many_result_rows() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![Value::Integer(1)]]).unwrap();
+        assert!(except_distinct_with_max_rows(&left, &right, 1)
+            .unwrap_err().to_string().contains("output row limit"));
+        assert_eq!(except_distinct_with_max_rows(&left, &right, 2).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
     }
 }
