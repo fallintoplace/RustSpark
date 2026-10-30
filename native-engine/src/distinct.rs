@@ -125,7 +125,9 @@ pub fn distinct_on(batch: &Batch, keys: &[&str]) -> Result<Batch> {
     let mut seen = HashSet::new();
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
-        let key = columns.iter().map(|&column| batch.value(row, column).cloned())
+        // Keep keys borrowed from the immutable batch instead of cloning text values
+        // for every input row. Only selected output rows are copied by `take`.
+        let key = columns.iter().map(|&column| batch.value(row, column))
             .collect::<Result<Vec<_>>>()?;
         if seen.insert(key) {
             indices.push(row);
@@ -165,6 +167,36 @@ mod distinct_on_feature_tests {
         assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
             "execution: DISTINCT key limit exceeded");
         assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_multicolumn_distinct_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn multi_column_keys_preserve_first_rows_with_long_text_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("group", DataType::Text, true),
+            Field::new("version", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let long = "é🙂".repeat(2048);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(long.clone()), Value::Null, Value::Text("first".into())],
+            vec![Value::Text(long.clone()), Value::Null, Value::Text("duplicate".into())],
+            vec![Value::Text(long.clone()), Value::Integer(1), Value::Text("other".into())],
+            vec![Value::Null, Value::Integer(1), Value::Text("null key".into())],
+            vec![Value::Null, Value::Integer(1), Value::Text("duplicate null key".into())],
+        ]).unwrap();
+        let result = distinct_on(&batch, &["group", "version"]).unwrap();
+        assert_eq!(result.num_rows(), 3);
+        assert_eq!(result.column(2).unwrap(), &[
+            Value::Text("first".into()),
+            Value::Text("other".into()),
+            Value::Text("null key".into()),
+        ]);
     }
 }
 
