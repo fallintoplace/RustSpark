@@ -63,6 +63,29 @@ fn type_code(data_type: DataType) -> u8 {
     }
 }
 
+fn write_value(output: &mut impl Write, value: &Value) -> Result<()> {
+    match value {
+        Value::Null => output.write_all(&[0])?,
+        Value::Boolean(false) => output.write_all(&[1])?,
+        Value::Boolean(true) => output.write_all(&[2])?,
+        Value::Integer(value) => {
+            output.write_all(&[3])?;
+            output.write_all(&value.to_le_bytes())?;
+        }
+        Value::Float(value) => {
+            output.write_all(&[4])?;
+            output.write_all(&value.to_bits().to_le_bytes())?;
+        }
+        Value::Text(value) => {
+            // Callers validate all text lengths before emitting the batch header.
+            output.write_all(&[5])?;
+            write_u32(output, value.len())?;
+            output.write_all(value.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
 pub struct SpillWriter<W: Write> {
     output: W,
     schema: Schema,
@@ -88,6 +111,44 @@ impl<W: Write> SpillWriter<W> {
 
     pub fn write_batch(&mut self, batch: &Batch) -> Result<()> {
         self.write_batch_range(batch, 0, batch.num_rows())
+    }
+
+    /// Spill selected source rows directly without cloning a temporary Batch.
+    pub fn write_batch_indices(&mut self, batch: &Batch, rows: &[usize]) -> Result<()> {
+        if batch.schema() != &self.schema {
+            return Err(Error::Schema("spill batch schema mismatch".into()));
+        }
+        if rows.len().checked_mul(self.schema.len()).is_none_or(|cells| cells > MAX_CELLS) {
+            return Err(Error::Execution("spill batch exceeds cell limit".into()));
+        }
+        if u32::try_from(rows.len()).is_err() {
+            return Err(Error::Execution("spill length exceeds u32".into()));
+        }
+        let columns = (0..self.schema.len()).map(|index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
+        let mut text_bytes = 0usize;
+        for &row in rows {
+            if row >= batch.num_rows() {
+                return Err(Error::Execution("spill row index out of bounds".into()));
+            }
+            for column in &columns {
+                if let Value::Text(text) = &column[row] {
+                    if text.len() > MAX_TEXT_BYTES {
+                        return Err(Error::Execution("spill text value too long".into()));
+                    }
+                    text_bytes = text_bytes.checked_add(text.len())
+                        .filter(|bytes| *bytes <= MAX_BATCH_BYTES)
+                        .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+                }
+            }
+        }
+        write_u32(&mut self.output, rows.len())?;
+        for &row in rows {
+            for column in &columns {
+                write_value(&mut self.output, &column[row])?;
+            }
+        }
+        Ok(())
     }
 
     pub fn write_batch_range(&mut self, batch: &Batch, start: usize, end: usize) -> Result<()> {
@@ -121,27 +182,7 @@ impl<W: Write> SpillWriter<W> {
         write_u32(&mut self.output, end - start)?;
         for row in start..end {
             for column in &columns {
-                match &column[row] {
-                    Value::Null => self.output.write_all(&[0])?,
-                    Value::Boolean(false) => self.output.write_all(&[1])?,
-                    Value::Boolean(true) => self.output.write_all(&[2])?,
-                    Value::Integer(value) => {
-                        self.output.write_all(&[3])?;
-                        self.output.write_all(&value.to_le_bytes())?;
-                    }
-                    Value::Float(value) => {
-                        self.output.write_all(&[4])?;
-                        self.output.write_all(&value.to_bits().to_le_bytes())?;
-                    }
-                    Value::Text(value) => {
-                        if value.len() > MAX_TEXT_BYTES {
-                            return Err(Error::Execution("spill text value too long".into()));
-                        }
-                        self.output.write_all(&[5])?;
-                        write_u32(&mut self.output, value.len())?;
-                        self.output.write_all(value.as_bytes())?;
-                    }
-                }
+                write_value(&mut self.output, &column[row])?;
             }
         }
         Ok(())
@@ -374,5 +415,36 @@ mod spill_window_write_tests {
         assert_eq!(left, batch.slice_rows(2, 5).unwrap());
         assert_eq!(right, batch.slice_rows(7, 11).unwrap());
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod selected_native_partition_spill_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn index_writer_preserves_order_duplicates_and_zero_width() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("x".into())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("abc".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        assert!(writer.write_batch_indices(&batch, &[1, 3]).is_err());
+        writer.write_batch_indices(&batch, &[2, 0, 2]).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), batch.take(&[2, 0, 2]).unwrap());
+        assert!(reader.next_batch().unwrap().is_none());
+        let zero = Schema::new(vec![]).unwrap();
+        let source = Batch::new_with_row_count(zero.clone(), vec![], 4).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), zero).unwrap();
+        writer.write_batch_indices(&source, &[3, 1]).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap().num_rows(), 2);
     }
 }
