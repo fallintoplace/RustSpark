@@ -8,7 +8,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let characters = if text.is_ascii() { text.len() } else { text.chars().count() };
+    let characters = super::char_length::character_count(text);
     let len = i64::try_from(characters)
         .map_err(|_| Error::Execution("LEN exceeds integer range".into()))?;
     Ok(Value::Integer(len))
