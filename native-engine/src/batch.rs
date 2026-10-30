@@ -1,9 +1,19 @@
 use crate::{
     scalar::Value,
-    schema::Schema,
+    schema::{Field, Schema},
     Error,
     Result,
 };
+
+fn validate_value(value: &Value, field: &Field) -> Result<()> {
+    if !field.data_type.accepts(value) {
+        return Err(Error::Type(format!("invalid value in column {}", field.name)));
+    }
+    if !field.nullable && value.is_null() {
+        return Err(Error::Type(format!("NULL in required column {}", field.name)));
+    }
+    Ok(())
+}
 
 /// A compact, typed columnar batch. Each column has the same row count.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,12 +39,7 @@ impl Batch {
             }
             let field = schema.field(index)?;
             for value in column {
-                if !field.data_type.accepts(value) {
-                    return Err(Error::Type(format!("invalid value in column {}", field.name)));
-                }
-                if !field.nullable && value.is_null() {
-                    return Err(Error::Type(format!("NULL in required column {}", field.name)));
-                }
+                validate_value(value, field)?;
             }
         }
         Ok(Self { schema, columns, rows })
@@ -57,12 +62,7 @@ impl Batch {
                 return Err(Error::Schema("row width does not match schema".into()));
             }
             for ((column, value), field) in columns.iter_mut().zip(row).zip(schema.fields()) {
-                if !field.data_type.accepts(&value) {
-                    return Err(Error::Type(format!("invalid value in column {}", field.name)));
-                }
-                if !field.nullable && value.is_null() {
-                    return Err(Error::Type(format!("NULL in required column {}", field.name)));
-                }
+                validate_value(&value, field)?;
                 column.push(value);
             }
         }
