@@ -104,7 +104,13 @@ fn execute_inner(
                 filter::filter(&descend(input)?, predicate)?
             }
         },
-        Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,
+        Plan::Project { input, selections } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                project::project(catalog.get(table)?, selections)?
+            } else {
+                project::project(&descend(input)?, selections)?
+            }
+        },
         Plan::Aggregate { input, group_by, aggregates } => {
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
@@ -318,5 +324,27 @@ mod logical_plan_width_budget_tests {
         let error = validate_depth(&oversized, 64).unwrap_err();
         assert!(error.to_string().contains("node count"));
         assert!(validate_depth(&balanced_plan(8), 64).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod catalog_projection_borrow_tests {
+    use super::*;
+    use crate::{expr::Expr, project::Selection, schema::{DataType, Field, Schema}, scalar::Value};
+    #[test]
+    fn projects_directly_from_catalog_with_nullable_values_and_aliases() {
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("hello".into())], vec![Value::Null]]
+        ).unwrap()).unwrap();
+        let plan = Plan::Project {
+            input: Box::new(Plan::scan("source")),
+            selections: vec![Selection::new(Expr::Column("text".into()), "alias")],
+        };
+        let result = execute(&plan, &catalog).unwrap();
+        assert_eq!(result.rows().unwrap(),
+            vec![vec![Value::Text("hello".into())], vec![Value::Null]]);
+        assert_eq!(result.schema().field(0).unwrap().name, "alias");
     }
 }
