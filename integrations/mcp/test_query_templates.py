@@ -54,5 +54,14 @@ class TemplatesTests(unittest.TestCase):
 
 
 
+class DuplicateResultKeysTests(unittest.TestCase):
+    def test_nested_and_top_level_duplicate_keys_are_rejected(self):
+        for text in ('[{"id":1,"id":2}]', '[{"outer":{"name":"a","name":"b"}}]'):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Duplicate SQL"):
+                parse_query_rows(text)
+        self.assertEqual(parse_query_rows('[{"outer":{"x":1,"y":2}}]'),
+                         [{"outer": {"x": 1, "y": 2}}])
+
+
 if __name__ == "__main__":
     unittest.main()
