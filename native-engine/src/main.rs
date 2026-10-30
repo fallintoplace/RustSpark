@@ -264,7 +264,9 @@ fn run_manifest_stream(args: &Args, manifest: &Path) -> Result<()> {
     if text.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(Error::Execution("catalog manifest exceeds 8 MiB limit".into()));
     }
-    let catalog = FileCatalog::import_manifest(&text)?;
+    let directory = manifest.parent().filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let catalog = FileCatalog::import_manifest_relative_to(&text, directory)?;
     let plan = sql::parse_sql(&args.sql)?;
     let options = StreamOptions::default();
     let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
