@@ -144,9 +144,16 @@ impl Expr {
                 | BinaryOp::Less
                 | BinaryOp::LessEqual
                 | BinaryOp::Greater
-                | BinaryOp::GreaterEqual
-                | BinaryOp::And
-                | BinaryOp::Or => Ok(DataType::Boolean),
+                | BinaryOp::GreaterEqual => Ok(DataType::Boolean),
+                BinaryOp::And | BinaryOp::Or => {
+                    for operand in [left.as_ref(), right.as_ref()] {
+                        if !matches!(operand, Expr::Literal(Value::Null))
+                            && operand.output_type(schema)? != DataType::Boolean {
+                            return Err(Error::Type("AND/OR require boolean operands".into()));
+                        }
+                    }
+                    Ok(DataType::Boolean)
+                },
                 BinaryOp::Divide => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
@@ -617,5 +624,27 @@ mod case_condition_type_checks {
             else_expr: None,
         };
         assert_eq!(valid.output_type(&schema).unwrap(), DataType::Integer);
+    }
+}
+
+#[cfg(test)]
+mod logical_operator_plan_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn boolean_operators_validate_both_inputs_on_empty_batches() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("ok", DataType::Boolean, true),
+        ]).unwrap();
+        for op in [BinaryOp::And, BinaryOp::Or] {
+            assert!(Expr::binary(Expr::Column("ok".into()), op,
+                Expr::Column("n".into())).output_type(&schema).is_err());
+            assert!(Expr::binary(Expr::Column("missing".into()), op,
+                Expr::Column("ok".into())).output_type(&schema).is_err());
+            assert_eq!(Expr::binary(Expr::Literal(Value::Null), op,
+                Expr::Column("ok".into())).output_type(&schema).unwrap(), DataType::Boolean);
+        }
     }
 }
