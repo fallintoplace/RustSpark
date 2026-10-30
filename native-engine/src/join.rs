@@ -63,10 +63,11 @@ pub fn cross_join_with_limits(
     if count > MAX_JOIN_ROWS.min(max_output_rows) {
         return Err(Error::Execution("CROSS JOIN output exceeds safety limit".into()));
     }
-    let bytes = batch_value_bytes(left)?.checked_mul(right.num_rows())
-        .and_then(|left_bytes| batch_value_bytes(right).ok()
-            .and_then(|right_bytes| right_bytes.checked_mul(left.num_rows()))
-            .and_then(|right_bytes| left_bytes.checked_add(right_bytes)))
+    let left_bytes = batch_value_bytes(left)?;
+    let right_bytes = batch_value_bytes(right)?;
+    let bytes = left_bytes.checked_mul(right.num_rows())
+        .and_then(|total| right_bytes.checked_mul(left.num_rows())
+            .and_then(|other| total.checked_add(other)))
         .ok_or_else(|| Error::Execution("CROSS JOIN output byte estimate overflow".into()))?;
     if bytes > max_output_bytes {
         return Err(Error::Execution("CROSS JOIN output byte budget exceeded".into()));
