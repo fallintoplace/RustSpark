@@ -293,16 +293,17 @@ fn run_stream(args: &Args) -> Result<()> {
 const MAX_PARQUET_ROWS: usize = 1_000_000;
 
 fn read_parquet_bounded(path: &Path) -> Result<Batch> {
-    let mut schema: Option<Schema> = None;
+    // Metadata exists even when there are no record batches to decode.
+    let schema = parquet_scan::file_schema(path)?;
+    let summary = parquet_scan::file_summary(path)?;
+    if summary.rows > MAX_PARQUET_ROWS as u64 {
+        return Err(Error::Execution("Parquet input exceeds native 1000000 row limit".into()));
+    }
     let mut rows = Vec::new();
     for next in parquet_scan::scan(path, 4_096)? {
         let batch = next?;
-        if let Some(current) = &schema {
-            if current != batch.schema() {
-                return Err(Error::Schema("Parquet batch schema changed".into()));
-            }
-        } else {
-            schema = Some(batch.schema().clone());
+        if batch.schema() != &schema {
+            return Err(Error::Schema("Parquet batch schema changed".into()));
         }
         let total = rows.len().checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("Parquet row count overflow".into()))?;
@@ -311,7 +312,6 @@ fn read_parquet_bounded(path: &Path) -> Result<Batch> {
         }
         rows.extend(batch.rows()?);
     }
-    let schema = schema.ok_or_else(|| Error::Unsupported("empty Parquet data cannot yet be queried in the native CLI".into()))?;
     Batch::from_rows(schema, rows)
 }
 
@@ -367,6 +367,26 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_parquet_file_is_a_valid_empty_table() {
+        use parquet::arrow::ArrowWriter;
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::empty(schema.clone());
+        let arrow = rustspark_native::arrow_bridge::to_arrow(&batch).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-empty-native-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = fs::File::create(&path).unwrap();
+        let writer = ArrowWriter::try_new(file, arrow.schema(), None).unwrap();
+        writer.close().unwrap();
+        let result = read_parquet_bounded(&path).unwrap();
+        assert_eq!(result.schema(), &schema);
+        assert_eq!(result.num_rows(), 0);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn reject_invalid_cli_combinations() {
