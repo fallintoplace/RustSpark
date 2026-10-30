@@ -36,7 +36,7 @@ impl Iterator for BatchChunks<'_> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.batch.num_rows().saturating_sub(self.position);
-        let batches = remaining / self.size + usize::from(remaining % self.size != 0);
+        let batches = remaining.div_ceil(self.size);
         (batches, Some(batches))
     }
 }
