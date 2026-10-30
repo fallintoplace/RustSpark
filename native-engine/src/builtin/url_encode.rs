@@ -3,6 +3,10 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+
+fn is_url_safe(byte: u8) -> bool {
+    matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*')
+}
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
@@ -10,28 +14,26 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
     // No escaping or form-space substitution is needed for safe ASCII.
-    if text.bytes().all(|byte| matches!(byte,
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*')) {
+    if text.bytes().all(is_url_safe) {
         return Ok(Value::Text(text.to_owned()));
     }
     let mut output_bytes = 0usize;
     for &byte in text.as_bytes() {
-        let emitted = if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ') { 1 } else { 3 };
+        let emitted = if is_url_safe(byte) || byte == b' ' { 1 } else { 3 };
         output_bytes = output_bytes.checked_add(emitted)
             .filter(|&bytes| bytes <= MAX_OUTPUT_BYTES)
             .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
     }
     let mut encoded = String::with_capacity(output_bytes);
     for &byte in text.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' =>
-                encoded.push(char::from(byte)),
-            b' ' => encoded.push('+'),
-            _ => {
-                encoded.push('%');
-                encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
-                encoded.push(char::from(DIGITS[usize::from(byte & 15)]));
-            }
+        if is_url_safe(byte) {
+            encoded.push(char::from(byte));
+        } else if byte == b' ' {
+            encoded.push('+');
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(DIGITS[usize::from(byte & 15)]));
         }
     }
     Ok(Value::Text(encoded))
