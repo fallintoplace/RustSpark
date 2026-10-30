@@ -57,12 +57,15 @@ impl DictionaryColumn {
     pub fn encoded_string_bytes(&self) -> usize { self.encoded_string_bytes }
     pub fn dictionary(&self) -> &[String] { &self.dictionary }
 
+    fn lookup_code(&self, code: u32) -> Result<&str> {
+        self.dictionary.get(code as usize).map(String::as_str)
+            .ok_or_else(|| Error::Execution("invalid dictionary code".into()))
+    }
+
     pub fn value(&self, index: usize) -> Result<Value> {
         match self.indices.get(index) {
             Some(None) => Ok(Value::Null),
-            Some(Some(id)) => self.dictionary.get(*id as usize)
-                .cloned().map(Value::Text)
-                .ok_or_else(|| Error::Execution("invalid dictionary code".into())),
+            Some(Some(id)) => Ok(Value::Text(self.lookup_code(*id)?.to_owned())),
             None => Err(Error::Execution("dictionary index out of bounds".into())),
         }
     }
@@ -82,8 +85,7 @@ impl DictionaryColumn {
         // Fail before allocating any decoded strings when a compact column
         // expands past its caller's budget.
         for id in self.indices.iter().flatten() {
-            let text = self.dictionary.get(*id as usize)
-                .ok_or_else(|| Error::Execution("invalid dictionary code".into()))?;
+            let text = self.lookup_code(*id)?;
             used = used.checked_add(text.len())
                 .filter(|bytes| *bytes <= max_bytes)
                 .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
