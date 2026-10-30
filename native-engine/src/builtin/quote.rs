@@ -8,8 +8,8 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let escaped_quotes = text.bytes().filter(|&byte| byte == b'\'').count();
-    let capacity = text.len().checked_add(escaped_quotes)
+    let escaped = text.bytes().filter(|&byte| byte == b'\'' || byte == b'\\').count();
+    let capacity = text.len().checked_add(escaped)
         .and_then(|length| length.checked_add(2))
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
     if capacity > 16 * 1024 * 1024 {
@@ -18,7 +18,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let mut output = String::with_capacity(capacity);
     output.push('\'');
     for ch in text.chars() {
-        if ch == '\'' { output.push('\\'); }
+        if ch == '\'' || ch == '\\' { output.push('\\'); }
         output.push(ch);
     }
     output.push('\'');
@@ -92,5 +92,20 @@ mod quote_output_limit_tests {
         assert!(evaluate(&[Value::Text("x".repeat(16 * 1024 * 1024 - 1))]).is_err());
         assert!(evaluate(&[Value::Text("'".repeat(8 * 1024 * 1024))]).is_err());
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod quote_backslash_tests {
+    use super::*;
+
+    #[test]
+    fn escapes_existing_backslashes_as_well_as_quotes() {
+        assert_eq!(evaluate(&[Value::Text(r"a\b".into())]).unwrap(),
+            Value::Text(r"'a\\b'".into()));
+        assert_eq!(evaluate(&[Value::Text("a\\'b".into())]).unwrap(),
+            Value::Text("'a\\\\\\'b'".into()));
+        assert_eq!(evaluate(&[Value::Text("🙂\\z".into())]).unwrap(),
+            Value::Text("'🙂\\\\z'".into()));
     }
 }
