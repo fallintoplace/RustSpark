@@ -22,6 +22,20 @@ struct Task {
     status: TaskStatus,
 }
 
+impl Task {
+    fn expire_if_needed(&mut self, now: Instant, max_attempts: u32) -> bool {
+        if !matches!(&self.status, TaskStatus::Leased { until, .. } if *until <= now) {
+            return false;
+        }
+        self.status = if self.attempts >= max_attempts {
+            TaskStatus::Failed
+        } else {
+            TaskStatus::Queued
+        };
+        true
+    }
+}
+
 pub struct TaskScheduler {
     tasks: BTreeMap<u64, Task>,
     max_attempts: u32,
@@ -72,13 +86,7 @@ impl TaskScheduler {
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
         let mut candidate = None;
         for (&id, task) in &mut self.tasks {
-            if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
-                task.status = if task.attempts >= self.max_attempts {
-                    TaskStatus::Failed
-                } else {
-                    TaskStatus::Queued
-                };
-            }
+            task.expire_if_needed(now, self.max_attempts);
             if candidate.is_none() && task.status == TaskStatus::Queued {
                 candidate = Some(id);
             }
@@ -95,12 +103,7 @@ impl TaskScheduler {
     pub fn expire_leases(&mut self, now: Instant) -> usize {
         let mut expired = 0usize;
         for task in self.tasks.values_mut() {
-            if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
-                task.status = if task.attempts >= self.max_attempts {
-                    TaskStatus::Failed
-                } else {
-                    TaskStatus::Queued
-                };
+            if task.expire_if_needed(now, self.max_attempts) {
                 expired += 1;
             }
         }
