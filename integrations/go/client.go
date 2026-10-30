@@ -189,6 +189,23 @@ func oneRow(rows []map[string]any) (map[string]any, error) {
     return rows[0], nil
 }
 
+// cancelOnWriteError stops a child that would otherwise block on a full
+// stdout pipe after the consumer stops accepting stream bytes.
+type cancelOnWriteError struct {
+    output io.Writer
+    cancel context.CancelFunc
+    writeErr error
+}
+
+func (writer *cancelOnWriteError) Write(data []byte) (int, error) {
+    count, err := writer.output.Write(data)
+    if err != nil {
+        writer.writeErr = err
+        writer.cancel()
+    }
+    return count, err
+}
+
 // QueryNDJSON streams newline-delimited JSON rows to output without storing
 // them in memory. The caller is responsible for JSON parsing and byte limits.
 // An output write failure stops the query subprocess.
@@ -204,12 +221,16 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     }
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
-    command := exec.CommandContext(ctx, binary, args...)
-    command.Stdout = output
+    childContext, cancel := context.WithCancel(ctx)
+    defer cancel()
+    command := exec.CommandContext(childContext, binary, args...)
+    sink := &cancelOnWriteError{output: output, cancel: cancel}
+    command.Stdout = sink
     stderr := boundedStderr()
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return ctx.Err() }
+        if sink.writeErr != nil { return fmt.Errorf("RustSpark NDJSON output failed: %w", sink.writeErr) }
         return fmt.Errorf("RustSpark NDJSON query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
     }
     return nil
