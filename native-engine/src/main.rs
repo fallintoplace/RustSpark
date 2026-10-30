@@ -36,6 +36,8 @@ fn usage() -> &'static str {
     "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
+const MAX_CLI_TABLE_SOURCES: usize = 128;
+
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
@@ -85,6 +87,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 if !matches!(path.extension().and_then(|ext| ext.to_str())
                     .map(|ext| ext.to_ascii_lowercase()).as_deref(), Some("csv" | "parquet")) {
                     return Err(Error::Unsupported("--source supports .csv or .parquet files".into()));
+                }
+                if sources.len() >= MAX_CLI_TABLE_SOURCES {
+                    return Err(Error::Execution(
+                        "native CLI table source limit exceeded".into()
+                    ));
                 }
                 sources.push((table_name.to_string(), path));
             },
@@ -367,6 +374,23 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn too_many_named_sources_fail_before_opening_any_files() {
+        let make_args = |count| {
+            let mut args = Vec::new();
+            for index in 0..count {
+                args.push("--source".to_string());
+                args.push(format!("table_{index}=missing_{index}.csv"));
+            }
+            args.extend(["--sql".to_string(), "SELECT * FROM table_0".to_string()]);
+            args
+        };
+        assert!(parse_args(make_args(MAX_CLI_TABLE_SOURCES)).is_ok());
+        let error = parse_args(make_args(MAX_CLI_TABLE_SOURCES + 1))
+            .err().unwrap();
+        assert!(error.to_string().contains("source limit"), "{error}");
+    }
 
     #[test]
     fn reject_invalid_cli_combinations() {
