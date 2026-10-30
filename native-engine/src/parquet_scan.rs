@@ -43,6 +43,35 @@ pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
     Ok(ParquetScan { inner: reader })
 }
 
+/// Decode only named Parquet columns. Output follows the file's column order.
+pub fn scan_columns(
+    path: impl AsRef<Path>, batch_size: usize, columns: &[&str],
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    if columns.is_empty() {
+        return Err(Error::Schema("Parquet projection must have at least one column".into()));
+    }
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let fields = builder.schema().fields();
+    let mut selected = Vec::with_capacity(columns.len());
+    for &name in columns {
+        let index = fields.iter().position(|field| field.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
+        if selected.contains(&index) {
+            return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
+        }
+        selected.push(index);
+    }
+    let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
+    let inner = builder.with_projection(mask).with_batch_size(batch_size)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner })
+}
+
 impl Iterator for ParquetScan {
     type Item = Result<Batch>;
 
@@ -205,6 +234,43 @@ mod parquet_file_summary_tests {
         assert_eq!(file_summary(&path).unwrap(), ParquetSummary {
             rows: 5, row_groups: 3, columns: 2,
         });
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_projection_pushdown_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn reads_only_requested_columns_and_preserves_nulls() {
+        let path = std::env::temp_dir().join(format!("rustspark-projection-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("é🙂".into()), Value::Boolean(true)],
+            vec![Value::Integer(2), Value::Null, Value::Null],
+        ]).unwrap();
+        let arrow = arrow_bridge::to_arrow(&input).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let output = scan_columns(&path, 1, &["LABEL"]).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].schema().fields()[0].name, "label");
+        assert_eq!(output[0].row(0).unwrap(), vec![Value::Text("é🙂".into())]);
+        assert_eq!(output[1].row(0).unwrap(), vec![Value::Null]);
+        assert!(scan_columns(&path, 1, &[]).is_err());
+        assert!(scan_columns(&path, 1, &["label", "LABEL"]).is_err());
+        assert!(scan_columns(&path, 1, &["missing"]).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
