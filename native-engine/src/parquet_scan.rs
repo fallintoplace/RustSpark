@@ -121,6 +121,43 @@ pub fn scan_row_groups(
     Ok(ParquetScan { inner })
 }
 
+/// Scan only the requested named columns inside the selected row groups.
+pub fn scan_columns_row_groups(
+    path: impl AsRef<Path>, batch_size: usize, columns: &[&str], row_groups: &[usize],
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    if columns.is_empty() {
+        return Err(Error::Schema("Parquet projection must have at least one column".into()));
+    }
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let mut selected = Vec::with_capacity(columns.len());
+    for &name in columns {
+        let index = builder.schema().fields().iter()
+            .position(|field| field.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
+        if selected.contains(&index) {
+            return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
+        }
+        selected.push(index);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for &index in row_groups {
+        if index >= builder.metadata().num_row_groups() || !seen.insert(index) {
+            return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+        }
+    }
+    let projection = ProjectionMask::roots(builder.parquet_schema(), selected);
+    let inner = builder.with_projection(projection)
+        .with_row_groups(row_groups.to_vec())
+        .with_batch_size(batch_size).build()
+        .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner })
+}
+
 /// Skip and limit decoded rows in the Parquet reader instead of materializing
 /// and slicing unwanted native batches afterward.
 pub fn scan_window(
@@ -433,6 +470,40 @@ mod native_parquet_row_group_summary_tests {
         assert_eq!(groups.iter().map(|g| g.rows).collect::<Vec<_>>(), [2, 2, 1]);
         assert_eq!(groups.iter().map(|g| g.index).collect::<Vec<_>>(), [0, 1, 2]);
         assert!(groups.iter().all(|g| g.compressed_bytes > 0 && g.uncompressed_bytes > 0));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_parquet_selected_column_group_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn scans_only_selected_columns_from_selected_row_groups() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-selected-groups-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap(), (0..6).map(|n| vec![
+            Value::Integer(n), if n == 4 { Value::Null } else { Value::Text(format!("value-{n}")) },
+        ]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let props = WriterProperties::builder().set_max_row_group_size(2).build();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), arrow.schema(), Some(props)).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let output = scan_columns_row_groups(&path, 1, &["NOTE"], &[2])
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = output.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Value::Null], vec![Value::Text("value-5".into())]]);
+        assert!(scan_columns_row_groups(&path, 1, &["missing"], &[0]).is_err());
+        assert!(scan_columns_row_groups(&path, 1, &["id"], &[9]).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
