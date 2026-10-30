@@ -143,6 +143,22 @@ impl TaskScheduler {
         true
     }
 
+    /// Reclaim all leases from a failed worker without touching other workers.
+    pub fn revoke_worker(&mut self, worker_id: u64) -> usize {
+        let mut revoked = 0;
+        for task in self.tasks.values_mut() {
+            if matches!(&task.status, TaskStatus::Leased { worker, .. } if *worker == worker_id) {
+                task.status = if task.attempts >= self.max_attempts {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Queued
+                };
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
     pub fn cancel_task(&mut self, id: u64) -> bool {
         let Some(task) = self.tasks.get_mut(&id) else { return false; };
         if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
@@ -353,5 +369,30 @@ mod scheduler_ready_task_inspection_tests {
         assert_eq!(scheduler.counts().leased, 1);
         assert!(scheduler.cancel_task(3));
         assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
+    }
+}
+
+#[cfg(test)]
+mod native_worker_revocation_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_attempts_cannot_publish_and_only_target_worker_is_affected() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3], 2).unwrap();
+        let first = scheduler.lease(10, now, Duration::from_secs(30)).unwrap().unwrap();
+        let other = scheduler.lease(20, now, Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(scheduler.revoke_worker(10), 1);
+        assert_eq!(scheduler.revoke_worker(10), 0);
+        assert!(!scheduler.finish_at(&first, true, now));
+        assert_eq!(scheduler.status(other.task), Some(&TaskStatus::Leased {
+            worker: 20, attempt: other.attempt, until: now + Duration::from_secs(30),
+        }));
+        let retry = scheduler.lease(30, now, Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(retry.task, first.task);
+        assert_eq!(retry.attempt, 2);
+        assert_eq!(scheduler.revoke_worker(30), 1);
+        assert_eq!(scheduler.status(first.task), Some(&TaskStatus::Failed));
+        assert!(scheduler.finish_at(&other, true, now));
     }
 }
