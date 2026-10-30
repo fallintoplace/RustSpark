@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -34,6 +34,20 @@ struct Args {
 
 fn usage() -> &'static str {
     "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+}
+
+const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_bounded_sql_file(path: &Path) -> Result<String> {
+    // Bound reads rather than checking metadata, which may become stale or
+    // report zero for pipes and other unusual input files.
+    let input = fs::File::open(path)?;
+    let mut sql = String::new();
+    input.take(MAX_SQL_FILE_BYTES + 1).read_to_string(&mut sql)?;
+    if sql.len() as u64 > MAX_SQL_FILE_BYTES {
+        return Err(Error::Parse("SQL file exceeds 1 MiB limit".into()));
+    }
+    Ok(sql)
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -128,7 +142,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_bounded_sql_file(&path)?,
         _ => return Err(Error::Parse("--sql or --sql-file is required".into())),
     };
     if sql.trim().is_empty() {
@@ -430,5 +444,30 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod bounded_sql_file_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_oversized_sql_files_before_parsing() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-sql-limit-{}-{}.sql",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::write(&path, vec![b'x'; MAX_SQL_FILE_BYTES as usize + 1]).unwrap();
+        let args = vec!["--csv".into(), "unused.csv".into(), "--sql-file".into(),
+                        path.to_string_lossy().into_owned()];
+        let error = parse_args(args).err().expect("oversized file must fail");
+        assert!(error.to_string().contains("1 MiB"));
+        fs::write(&path, "SELECT 1").unwrap();
+        let args = vec!["--csv".into(), "unused.csv".into(), "--sql-file".into(),
+                        path.to_string_lossy().into_owned()];
+        assert_eq!(parse_args(args).unwrap().unwrap().sql, "SELECT 1");
+        fs::remove_file(path).unwrap();
     }
 }
