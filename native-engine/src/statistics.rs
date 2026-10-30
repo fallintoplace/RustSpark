@@ -40,6 +40,29 @@ impl ColumnStatistics {
         Ok(columns)
     }
 
+    /// Merge complete column statistics over compatible native batches.
+    pub fn all_columns_batches(
+        batches: &[Batch],
+    ) -> Result<std::collections::HashMap<String, Self>> {
+        let Some(first) = batches.first() else {
+            return Ok(std::collections::HashMap::new());
+        };
+        let schema = first.schema();
+        let mut combined = Self::all_columns(first)?;
+        for batch in &batches[1..] {
+            if batch.schema() != schema {
+                return Err(Error::Schema("statistics input batch schemas differ".into()));
+            }
+            let next = Self::all_columns(batch)?;
+            for (name, stats) in next {
+                combined.get_mut(&name)
+                    .ok_or_else(|| Error::Schema("missing statistics column".into()))?
+                    .merge(&stats)?;
+            }
+        }
+        Ok(combined)
+    }
+
     pub fn observe(&mut self, value: &Value) -> Result<()> {
         let rows = self.rows.checked_add(1)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
@@ -262,5 +285,40 @@ mod all_native_column_statistics_tests {
         assert!(pruning::can_skip_columns(&stats, &predicate));
         let empty = ColumnStatistics::all_columns(&Batch::empty(schema)).unwrap();
         assert_eq!(empty["label"].rows, 0);
+    }
+}
+
+#[cfg(test)]
+mod native_multi_column_batch_statistics_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, pruning,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn merges_nulls_ranges_and_types_across_boundaries() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(5), Value::Null],
+            vec![Value::Null, Value::Text("z".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(15), Value::Text("a".into())],
+        ]).unwrap();
+        let merged = ColumnStatistics::all_columns_batches(&[left, right]).unwrap();
+        assert_eq!(merged["id"].rows, 3);
+        assert_eq!(merged["id"].nulls, 1);
+        assert_eq!(merged["id"].min, Some(Value::Integer(5)));
+        assert_eq!(merged["id"].max, Some(Value::Integer(15)));
+        let predicate = Expr::binary(Expr::Column("id".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(20)));
+        assert!(pruning::can_skip_columns(&merged, &predicate));
+        assert!(ColumnStatistics::all_columns_batches(&[
+            Batch::empty(schema),
+            Batch::empty(Schema::new(vec![Field::new("id", DataType::Text, true)]).unwrap()),
+        ]).is_err());
+        assert!(ColumnStatistics::all_columns_batches(&[]).unwrap().is_empty());
     }
 }
