@@ -47,7 +47,7 @@ impl HyperLogLog {
             self.nonempty = other.nonempty;
             return;
         }
-        for (dest, source) in self.registers.iter_mut().zip(other.registers) {
+        for (dest, source) in self.registers.iter_mut().zip(other.registers.iter().copied()) {
             if *dest == 0 && source != 0 { self.nonempty += 1; }
             *dest = (*dest).max(source);
         }
@@ -312,5 +312,23 @@ mod native_selected_distinct_estimates_tests {
         assert_eq!(approximate_distinct_selected(&source, "account", &[]).unwrap(), 0.0);
         assert!(approximate_distinct_selected(&source, "account", &[2001]).is_err());
         assert!(approximate_distinct_selected(&source, "missing", &[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hll_borrowed_merge_tests {
+    use super::*;
+    #[test]
+    fn merge_matches_registerwise_max_after_repeated_merges() {
+        let mut first = HyperLogLog::new();
+        let mut second = HyperLogLog::new();
+        for n in 0..8000 { first.add(&Value::Integer(n)); second.add(&Value::Integer(n + 4000)); }
+        let expected = first.registers.iter().zip(&second.registers)
+            .map(|(&left, &right)| left.max(right)).collect::<Vec<_>>();
+        first.merge(&second);
+        assert_eq!(first.registers.as_slice(), expected.as_slice());
+        let once = first.clone();
+        first.merge(&second);
+        assert_eq!(first, once);
     }
 }
