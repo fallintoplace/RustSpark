@@ -63,5 +63,22 @@ class DuplicateResultKeysTests(unittest.TestCase):
                          [{"outer": {"x": 1, "y": 2}}])
 
 
+
+class BoundedMcpBackendTests(unittest.TestCase):
+    def test_output_is_bounded_without_buffering_unlimited_backend_data(self):
+        import subprocess
+        import sys
+        from bounded_backend import run_bounded
+
+        good = run_bounded([sys.executable, "-c", "print('ok')"],
+                           timeout=5, max_bytes=128)
+        self.assertEqual(good.stdout, "ok\\n")
+        with self.assertRaisesRegex(ValueError, "budget"):
+            run_bounded([sys.executable, "-c", "print('x' * 65536)"],
+                        timeout=5, max_bytes=128)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded([sys.executable, "-c", "import time; time.sleep(2)"],
+                        timeout=0.1, max_bytes=128)
+
 if __name__ == "__main__":
     unittest.main()
