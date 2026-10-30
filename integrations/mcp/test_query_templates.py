@@ -65,3 +65,9 @@ class DuplicateResultKeysTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BoundedMcpResultsTests(unittest.TestCase):
+    def test_rejects_utf8_result_over_byte_limit(self):
+        with self.assertRaisesRegex(ValueError, "byte limit"):
+            parse_query_rows('[{"n":"' + "é" * (4 * 1024 * 1024 + 1) + '"}]')
+        self.assertEqual(parse_query_rows('[{"n":1}]'), [{"n": 1}])
