@@ -126,6 +126,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if stream && !sources.is_empty() {
         return Err(Error::Unsupported("--stream does not yet support multiple file sources".into()));
     }
+    let mut source_names = std::collections::HashSet::new();
+    for (name, _) in &sources {
+        if !source_names.insert(name.to_ascii_lowercase()) {
+            return Err(Error::Parse(format!("duplicate --source table: {name}")));
+        }
+    }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
         (None, Some(path)) => fs::read_to_string(path)?,
@@ -382,6 +388,19 @@ mod tests {
         assert!(parse_args(args.into_iter().map(String::from)).unwrap().unwrap().stream);
         let bad = ["--parquet", "data.parquet", "--stream", "--csv-schema", "x:int64", "--sql", "SELECT * FROM data"];
         assert!(parse_args(bad.into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn duplicate_sources_fail_before_any_file_is_opened() {
+        for options in [
+            vec!["--source", "sales=missing.csv", "--source", "SALES=also-missing.parquet",
+                "--sql", "SELECT * FROM sales"],
+            vec!["--source", "Sales=missing.csv", "--source", "sales=also-missing.csv",
+                "--sql", "SELECT * FROM Sales"],
+        ] {
+            let error = parse_args(options.into_iter().map(String::from)).err().unwrap();
+            assert!(error.to_string().contains("duplicate --source table"));
+        }
     }
 
     #[test]
