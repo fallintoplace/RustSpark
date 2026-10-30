@@ -47,7 +47,8 @@ mod tests {
         assert_eq!(chr(&[Value::Integer(0x1f642)]).unwrap(), Value::Text("B".into()));
         assert_eq!(chr(&[Value::Integer(321)]).unwrap(), Value::Text("A".into()));
         assert_eq!(chr(&[Value::Integer(-191)]).unwrap(), Value::Text("A".into()));
-        assert_eq!(chr(&[Value::Integer(0xd800)]).unwrap(), Value::Text("\\0".into()));
+        assert_eq!(chr(&[Value::Integer(0xd800)]).unwrap(), Value::Text("\0".into()));
+        assert_eq!(chr(&[Value::Integer(256)]).unwrap(), Value::Text("\0".into()));
         assert_eq!(chr(&[Value::Null]).unwrap(), Value::Null);
         assert_eq!(ascii_type(&[DataType::Integer]).unwrap(), DataType::Integer);
         assert_eq!(ascii(&[Value::Integer(42)]).unwrap(), Value::Integer(52));

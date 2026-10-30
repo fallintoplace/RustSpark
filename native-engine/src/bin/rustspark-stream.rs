@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -8,12 +8,28 @@ use rustspark_native::{
     batch::Batch, scalar::Value,
     schema::{DataType, Field, Schema},
     sql, Error, Result,
-    scale::{cancel::QueryControl, file_catalog::FileCatalog,
+    scale::{cancel::QueryControl, catalog_manifest, file_catalog::FileCatalog,
         stream_execute::{self, StreamOptions}},
 };
 
+const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_sql_file(path: &std::path::Path) -> Result<String> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_SQL_FILE_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    let mut sql = String::new();
+    file.take(MAX_SQL_FILE_BYTES + 1).read_to_string(&mut sql)?;
+    if sql.len() as u64 > MAX_SQL_FILE_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    Ok(sql)
+}
+
 struct Args {
-    csv: Option<PathBuf>, parquet: Option<PathBuf>, table: String, schema: Option<Schema>, sql: String,
+    csv: Option<PathBuf>, parquet: Option<PathBuf>, catalog_manifest: Option<PathBuf>,
+    table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
 }
 
@@ -42,6 +58,7 @@ fn parse_schema(text: &str) -> Result<Schema> {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
+    let mut catalog_manifest = None;
     let mut table = "data".to_string();
     let mut schema = None;
     let mut sql = None;
@@ -66,6 +83,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
             },
             "--table" => table = value,
+            "--catalog-manifest" => {
+                if catalog_manifest.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --catalog-manifest".into()));
+                }
+            },
             "--schema" => schema = Some(parse_schema(&value)?),
             "--sql" => sql = Some(value),
             "--sql-file" => sql_file = Some(PathBuf::from(value)),
@@ -83,20 +105,24 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_sql_file(&path)?,
         _ => return Err(Error::Parse("choose --sql or --sql-file".into())),
     };
     if sql.trim().is_empty() { return Err(Error::Parse("SQL cannot be empty".into())); }
-    if csv.is_some() == parquet.is_some() {
-        return Err(Error::Parse("choose --csv or --parquet".into()));
+    let inputs = usize::from(csv.is_some()) + usize::from(parquet.is_some())
+        + usize::from(catalog_manifest.is_some());
+    if inputs != 1 {
+        return Err(Error::Parse("choose --csv, --parquet, or --catalog-manifest".into()));
     }
     if csv.is_some() && schema.is_none() {
         return Err(Error::Parse("--schema required for CSV".into()));
     }
-    if parquet.is_some() && schema.is_some() {
+    if (parquet.is_some() || catalog_manifest.is_some()) && schema.is_some() {
         return Err(Error::Parse("Parquet schema comes from file metadata".into()));
     }
-    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch }))
+    Ok(Some(Args {
+        csv, parquet, catalog_manifest, table, schema, sql, batch_rows, record_bytes, scratch,
+    }))
 }
 
 fn escape(text: &str) -> String {
@@ -139,7 +165,11 @@ fn run() -> Result<()> {
         println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE) --sql QUERY");
         return Ok(());
     };
-    let mut catalog = FileCatalog::new();
+    let mut catalog = if let Some(path) = &args.catalog_manifest {
+        catalog_manifest::load(path)?
+    } else {
+        FileCatalog::new()
+    };
     if let Some(path) = &args.csv {
         catalog.register_csv(&args.table, path,
             args.schema.ok_or_else(|| Error::Parse("CSV schema required".into()))?, args.record_bytes)?;
@@ -179,6 +209,33 @@ mod tests {
         let mut output = Vec::new();
         write_csv(&schema, [Ok(data)], &mut output).unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "id,city\n1,\"A,\"\"B\"\"\"\n2,\n");
+    }
+
+
+    #[test]
+    fn streaming_sql_file_admission_bounds_memory() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-stream-sql-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
+        ));
+        fs::write(&path, vec![b'x'; MAX_SQL_FILE_BYTES as usize + 1]).unwrap();
+        assert!(read_sql_file(&path).is_err());
+        fs::write(&path, "SELECT * FROM data").unwrap();
+        assert_eq!(read_sql_file(&path).unwrap(), "SELECT * FROM data");
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn catalog_manifest_is_a_distinct_streaming_source() {
+        let valid = ["--catalog-manifest", "catalog.json",
+            "--sql", "SELECT * FROM events"];
+        assert!(parse_args(valid.into_iter().map(String::from))
+            .unwrap().unwrap().catalog_manifest.is_some());
+        let invalid = ["--catalog-manifest", "catalog.json", "--csv", "events.csv",
+            "--schema", "id:int", "--sql", "SELECT * FROM events"];
+        assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
     }
 
     #[test]
