@@ -31,6 +31,19 @@ impl Drop for RunSet {
     }
 }
 
+fn validate_sort_keys(schema: &Schema, keys: &[SortKey]) -> Result<()> {
+    if keys.is_empty() {
+        return Err(Error::Execution("external sort needs at least one key".into()));
+    }
+    for key in keys {
+        if !matches!(&key.expression, crate::expr::Expr::Column(_)) {
+            return Err(Error::Unsupported("external merge requires column sort keys".into()));
+        }
+        key.expression.output_type(schema)?;
+    }
+    Ok(())
+}
+
 pub fn write_sorted_runs<I>(
     input: I, schema: Schema, keys: &[SortKey],
     directory: &Path, max_rows_per_run: usize, control: &QueryControl
@@ -40,15 +53,7 @@ where I: IntoIterator<Item = Result<Batch>>
     if !(1..=65_536).contains(&max_rows_per_run) {
         return Err(Error::Execution("sort run size must be in 1..=65536".into()));
     }
-    if keys.is_empty() {
-        return Err(Error::Execution("external sort needs at least one key".into()));
-    }
-    for key in keys {
-        if !matches!(&key.expression, crate::expr::Expr::Column(_)) {
-            return Err(Error::Unsupported("external merge requires column sort keys".into()));
-        }
-        key.expression.output_type(&schema)?;
-    }
+    validate_sort_keys(&schema, keys)?;
     let mut runs = RunSet { files: Vec::new(), schema: schema.clone() };
     for incoming in input {
         control.check()?;
