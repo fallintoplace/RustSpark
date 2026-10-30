@@ -138,5 +138,25 @@ class DeterministicNamedParamsTests(unittest.TestCase):
             RustSpark().query("SELECT 1", named_params={1: "int64:1"})
 
 
+
+class TypedParameterAdmissionTests(unittest.TestCase):
+    @patch("rustspark_local.subprocess.run")
+    def test_bounded_parameter_payloads(self, run):
+        client = RustSpark()
+        with self.assertRaisesRegex(ValueError, "64"):
+            client.query("SELECT 1", named_params={
+                f"p{i}": "int64:1" for i in range(65)
+            })
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            client.query("SELECT 1", named_params={
+                "payload": "utf8:" + "x" * 8192
+            })
+        run.assert_not_called()
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        self.assertEqual(client.query("SELECT 1", named_params={
+            "payload": "utf8:" + "x" * (8192 - len("utf8:"))
+        }), [])
+
+
 if __name__ == "__main__":
     unittest.main()
