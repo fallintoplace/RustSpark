@@ -115,10 +115,12 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
+        let key_slices = key_columns.iter().map(|&column| batch.column(column))
+            .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
             let mut hasher = PartitionHasher::default();
-            for &column in &key_columns {
-                batch.value(row, column)?.hash(&mut hasher);
+            for values in &key_slices {
+                values[row].hash(&mut hasher);
             }
             let hash = hasher.finish();
             let bucket = match mask {
@@ -301,6 +303,37 @@ mod multi_batch_bitmask_regressions {
             for bucket in 0..fanout {
                 let expected = parts.iter().flat_map(|part| partition(part, &["id"], fanout).unwrap()[bucket].rows().unwrap()).collect::<Vec<_>>();
                 assert_eq!(actual[bucket].rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prebound_multi_batch_keys_tests {
+    use super::*;
+    use crate::{schema::{Schema, Field, DataType}, scalar::Value};
+
+    #[test]
+    fn hashes_multiple_nullable_keys_into_identical_buckets() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Integer, true),
+            Field::new("b", DataType::Text, true),
+        ]).unwrap();
+        let data = (0..25).map(|n| vec![
+            if n % 3 == 0 { Value::Null } else { Value::Integer(n % 7) },
+            if n % 5 == 0 { Value::Null } else { Value::Text(format!("s{}", n % 4)) },
+        ]).collect::<Vec<_>>();
+        let first = Batch::from_rows(schema.clone(), data[..12].to_vec()).unwrap();
+        let second = Batch::from_rows(schema, data[12..].to_vec()).unwrap();
+        for count in [2, 8, 9] {
+            let actual = partition_batches(&[first.clone(), second.clone()], &["a", "b"], count).unwrap();
+            let reference = (0..count).map(|bucket| {
+                [first.clone(), second.clone()].iter().flat_map(|batch|
+                    partition(batch, &["a", "b"], count).unwrap()[bucket].rows().unwrap()
+                ).collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+            for (batch, expected) in actual.iter().zip(reference) {
+                assert_eq!(batch.rows().unwrap(), expected);
             }
         }
     }
