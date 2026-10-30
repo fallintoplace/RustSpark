@@ -6,7 +6,24 @@ use crate::{
     statistics::ColumnStatistics,
 };
 
+// Metadata is a pruning hint, never proof when its counters or extrema conflict.
+fn consistent(stats: &ColumnStatistics) -> bool {
+    if stats.nulls > stats.rows {
+        return false;
+    }
+    match (&stats.min, &stats.max) {
+        (Some(min), Some(max)) => matches!(
+            min.sql_compare(max),
+            Ok(Some(Ordering::Less | Ordering::Equal))
+        ),
+        _ => true,
+    }
+}
+
 pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> bool {
+    if !consistent(stats) {
+        return false;
+    }
     if stats.rows == 0 {
         return true;
     }
@@ -165,6 +182,9 @@ pub fn can_skip_columns(
         return true;
     }
     // Inconsistent metadata is not proof that any row can be skipped.
+    if stats.values().any(|summary| !consistent(summary)) {
+        return false;
+    }
     if let Some(first) = stats.values().next() {
         if stats.values().any(|column| column.rows != first.rows) {
             return false;
@@ -292,5 +312,27 @@ mod null_safe_statistics_pruning_tests {
         assert!(!can_skip(&all_null, "n", &condition(Value::Null, true)));
         assert!(can_skip(&all_null, "n", &condition(Value::Integer(5), true)));
         assert!(can_skip(&same, "n", &condition(Value::Null, true)));
+    }
+}
+
+#[cfg(test)]
+mod invalid_statistics_safety_tests {
+    use super::*;
+
+    #[test]
+    fn corrupted_metadata_cannot_discard_possible_rows() {
+        let predicate = Expr::binary(Expr::Column("n".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(100)));
+        let bad_counts = ColumnStatistics { rows: 4, nulls: 5,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(2)) };
+        let reversed = ColumnStatistics { rows: 4, nulls: 0,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(1)) };
+        let incomparable = ColumnStatistics { rows: 4, nulls: 0,
+            min: Some(Value::Text("abc".into())), max: Some(Value::Integer(20)) };
+        for corrupt in [bad_counts, reversed, incomparable] {
+            assert!(!can_skip(&corrupt, "n", &predicate));
+            let summaries = std::collections::HashMap::from([("n".into(), corrupt)]);
+            assert!(!can_skip_columns(&summaries, &predicate));
+        }
     }
 }
