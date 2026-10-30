@@ -11,6 +11,24 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
+    /// Estimate a Bloom layout for a build-side cardinality and target false-positive rate.
+    /// The result is bounded by the same memory and hash-count limits as `new`.
+    pub fn for_expected_items(items: usize, false_positive_rate: f64) -> Result<Self> {
+        if items == 0 || !false_positive_rate.is_finite()
+            || !(0.0..1.0).contains(&false_positive_rate)
+        {
+            return Err(Error::Execution("invalid Bloom cardinality or false-positive rate".into()));
+        }
+        let ln2 = std::f64::consts::LN_2;
+        let bits = (-(items as f64) * false_positive_rate.ln() / (ln2 * ln2)).ceil();
+        if !bits.is_finite() || bits < 1.0 || bits > (1_u64 << 29) as f64 {
+            return Err(Error::Execution("Bloom sizing exceeds native memory budget".into()));
+        }
+        let bits = bits as usize;
+        let hashes = ((bits as f64 / items as f64) * ln2).round().clamp(1.0, 16.0) as u32;
+        Self::new(bits, hashes)
+    }
+
     pub fn new(bits: usize, hashes: u32) -> Result<Self> {
         if bits == 0 || bits > 1 << 29 || !(1..=16).contains(&hashes) {
             return Err(Error::Execution("invalid Bloom filter sizing".into()));
@@ -176,5 +194,28 @@ mod bloom_occupancy_metrics_tests {
         bloom.union_with(&copy).unwrap();
         assert_eq!(bloom.bits_set(), bits);
         assert_eq!(bloom.estimated_false_positive_rate(), fpr);
+    }
+}
+
+#[cfg(test)]
+mod cardinality_sizing_tests {
+    use super::*;
+
+    #[test]
+    fn estimated_layout_retains_all_inserted_keys() {
+        let mut bloom = BloomFilter::for_expected_items(1_000, 0.01).unwrap();
+        assert!(bloom.byte_size() < 2_000);
+        for value in 0..1_000 { bloom.insert(&Value::Integer(value)); }
+        for value in 0..1_000 { assert!(bloom.might_contain(&Value::Integer(value))); }
+        assert!(bloom.estimated_false_positive_rate() <= 1.0);
+    }
+
+    #[test]
+    fn invalid_and_unbounded_requests_are_rejected() {
+        for fpr in [-0.1, 0.0, 1.0, 2.0, f64::NAN, f64::INFINITY] {
+            assert!(BloomFilter::for_expected_items(100, fpr).is_err());
+        }
+        assert!(BloomFilter::for_expected_items(0, 0.01).is_err());
+        assert!(BloomFilter::for_expected_items(usize::MAX, 0.01).is_err());
     }
 }
