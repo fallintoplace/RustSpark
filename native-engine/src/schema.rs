@@ -46,12 +46,21 @@ pub struct Schema {
     indices: HashMap<String, usize>,
 }
 
+const MAX_SCHEMA_FIELDS: usize = 4_096;
+const MAX_COLUMN_NAME_BYTES: usize = 4_096;
+
 impl Schema {
     pub fn new(fields: Vec<Field>) -> Result<Self> {
+        if fields.len() > MAX_SCHEMA_FIELDS {
+            return Err(Error::Schema("schema exceeds maximum field count".into()));
+        }
         let mut indices = HashMap::with_capacity(fields.len());
         for (index, field) in fields.iter().enumerate() {
             if field.name.trim().is_empty() {
                 return Err(Error::Schema("column names cannot be empty".into()));
+            }
+            if field.name.len() > MAX_COLUMN_NAME_BYTES {
+                return Err(Error::Schema("column name exceeds byte limit".into()));
             }
             if indices.insert(field.name.to_ascii_lowercase(), index).is_some() {
                 return Err(Error::Schema(format!("duplicate column: {}", field.name)));
@@ -159,5 +168,32 @@ mod column_index_perf_tests {
             Field::new("ID", DataType::Integer, true),
             Field::new("id", DataType::Integer, true),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_schema_size_admission_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_adversarially_wide_schemas_before_building_index() {
+        let fields = (0..MAX_SCHEMA_FIELDS + 1)
+            .map(|n| Field::new(format!("field_{n}"), DataType::Integer, false))
+            .collect::<Vec<_>>();
+        assert!(Schema::new(fields).unwrap_err().to_string().contains("field count"));
+        let fields = (0..MAX_SCHEMA_FIELDS)
+            .map(|n| Field::new(format!("field_{n}"), DataType::Integer, false))
+            .collect::<Vec<_>>();
+        assert_eq!(Schema::new(fields).unwrap().len(), MAX_SCHEMA_FIELDS);
+    }
+
+    #[test]
+    fn rejects_oversized_column_names() {
+        let too_long = "x".repeat(MAX_COLUMN_NAME_BYTES + 1);
+        assert!(Schema::new(vec![Field::new(too_long, DataType::Text, true)])
+            .unwrap_err().to_string().contains("byte limit"));
+        assert!(Schema::new(vec![
+            Field::new("x".repeat(MAX_COLUMN_NAME_BYTES), DataType::Text, true),
+        ]).is_ok());
     }
 }
