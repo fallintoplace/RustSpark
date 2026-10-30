@@ -7,6 +7,7 @@ use crate::{arrow_bridge, batch::Batch, Error, Result};
 
 pub struct ParquetScan {
     inner: ParquetRecordBatchReader,
+    finished: bool,
 }
 
 /// File metadata for planning scans without decoding any row batches.
@@ -51,7 +52,7 @@ pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
         .with_batch_size(batch_size)
         .build()
         .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner: reader })
+    Ok(ParquetScan { inner: reader, finished: false })
 }
 
 /// Decode only named Parquet columns. Output follows the file's column order.
@@ -80,7 +81,7 @@ pub fn scan_columns(
     let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
     let inner = builder.with_projection(mask).with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner })
+    Ok(ParquetScan { inner, finished: false })
 }
 
 /// Restrict decoding to validated row-group indices.
@@ -102,7 +103,7 @@ pub fn scan_row_groups(
     }
     let inner = builder.with_row_groups(row_groups.to_vec()).with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner })
+    Ok(ParquetScan { inner, finished: false })
 }
 
 /// Skip and limit decoded rows in the Parquet reader instead of materializing
@@ -122,18 +123,23 @@ pub fn scan_window(
         .with_limit(limit)
         .with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner })
+    Ok(ParquetScan { inner, finished: false })
 }
 
 impl Iterator for ParquetScan {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|result| {
+        if self.finished { return None; }
+        let result = self.inner.next().map(|result| {
             let record = result
                 .map_err(|e| Error::Execution(format!("Parquet decode: {e}")))?;
             arrow_bridge::from_arrow(&record)
-        })
+        });
+        if result.as_ref().is_none_or(Result::is_err) {
+            self.finished = true;
+        }
+        result
     }
 }
 
@@ -425,6 +431,38 @@ mod streaming_parquet_schema_tests {
         assert_eq!(rows.into_iter().flat_map(|batch| batch.rows().unwrap())
             .map(|row| row[0].clone()).collect::<Vec<_>>(),
             vec![Value::Integer(6), Value::Integer(7)]);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_scan_terminal_decode_errors_tests {
+    use super::*;
+    use arrow_array::{ArrayRef, Date32Array, RecordBatch};
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    #[test]
+    fn unsupported_arrow_columns_fail_once_and_stop_the_scan() {
+        let path = std::env::temp_dir().join(format!(
+            "native-parquet-fuse-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let record = RecordBatch::try_from_iter(vec![
+            ("date", Arc::new(Date32Array::from(vec![1, 2])) as ArrayRef),
+        ]).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), record.schema(), None,
+        ).unwrap();
+        writer.write(&record).unwrap();
+        writer.close().unwrap();
+
+        let mut source = scan(&path, 1).unwrap();
+        assert!(source.next().unwrap().is_err());
+        assert!(source.next().is_none());
+        assert!(source.next().is_none());
+        drop(source);
         std::fs::remove_file(path).unwrap();
     }
 }
