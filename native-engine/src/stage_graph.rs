@@ -103,6 +103,33 @@ impl StageGraph {
         tasks
     }
 
+    /// Interleave independent ready stages one partition at a time.
+    /// A heap bounds work to the requested task window rather than all partitions.
+    pub fn fair_ready_tasks(
+        &self, completed: &HashSet<u64>, max_tasks: usize,
+    ) -> Vec<(u64, usize)> {
+        use std::{cmp::Reverse, collections::BinaryHeap};
+        let ready = self.order_indices.iter().copied().filter(|&position| {
+            let stage = &self.stages[position];
+            !completed.contains(&stage.id) &&
+                stage.dependencies.iter().all(|dependency| completed.contains(dependency))
+        }).collect::<Vec<_>>();
+        let mut pending = BinaryHeap::new();
+        for slot in 0..ready.len() {
+            pending.push(Reverse((0usize, slot)));
+        }
+        let mut tasks = Vec::new();
+        while tasks.len() < max_tasks {
+            let Some(Reverse((partition, slot))) = pending.pop() else { break; };
+            let stage = &self.stages[ready[slot]];
+            tasks.push((stage.id, partition));
+            if partition + 1 < stage.partitions {
+                pending.push(Reverse((partition + 1, slot)));
+            }
+        }
+        tasks
+    }
+
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -214,5 +241,25 @@ mod bounded_stage_partition_tasks_tests {
             (4, 0), (9, 0), (9, 1), (9, 2)
         ]);
         assert!(graph.ready_tasks(&HashSet::from([2, 4, 9]), 8).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fair_native_stage_partition_tests {
+    use super::*;
+
+    #[test]
+    fn interleaves_ready_stages_without_scheduling_blocked_dependencies() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 9, dependencies: vec![2], partitions: 3 },
+            Stage { id: 2, dependencies: vec![], partitions: 2 },
+            Stage { id: 4, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.fair_ready_tasks(&HashSet::new(), 4),
+            vec![(2, 0), (4, 0), (2, 1)]);
+        assert_eq!(graph.fair_ready_tasks(&HashSet::from([2]), 4),
+            vec![(4, 0), (9, 0), (9, 1), (9, 2)]);
+        assert!(graph.fair_ready_tasks(&HashSet::new(), 0).is_empty());
+        assert!(graph.fair_ready_tasks(&HashSet::from([2, 4, 9]), 4).is_empty());
     }
 }
