@@ -37,7 +37,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   parquet_tables: Mapping[str, str | Path] | None = None,
                   json_tables: Mapping[str, str | Path] | None = None,
                   named_params: Mapping[str, str] | None = None) -> list[str]:
-    if not sql.strip():
+    if not isinstance(sql, str) or not sql.strip():
         raise ValueError("SQL cannot be empty")
     if sum(source is not None for source in (csv, parquet, json_input)) > 1:
         raise ValueError("Specify only one unnamed CSV, Parquet, or JSON source")
