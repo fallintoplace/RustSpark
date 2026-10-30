@@ -91,7 +91,7 @@ pub fn filter_partitions(
     max_workers: usize,
     predicate: crate::expr::Expr,
 ) -> Result<Vec<Batch>> {
-    map_partitions(input, max_workers, |batch| crate::filter::filter(&batch, &predicate))
+    map_partitions(input, max_workers, |batch| crate::filter::filter_owned(batch, &predicate))
 }
 
 #[cfg(test)]
@@ -157,5 +157,24 @@ mod serial_worker_fast_path_tests {
         });
         assert!(result.unwrap_err().to_string().contains("stop"));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[cfg(test)]
+mod owned_parallel_native_filter_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn identity_filter_preserves_order_and_nullable_payloads() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let batches = (0..12).map(|index| {
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Text(format!("batch-{index}").repeat(1000))],
+                vec![Value::Null],
+            ]).unwrap()
+        }).collect::<Vec<_>>();
+        let output = filter_partitions(batches.clone(), 4, Expr::Literal(Value::Boolean(true))).unwrap();
+        assert_eq!(output, batches);
     }
 }
