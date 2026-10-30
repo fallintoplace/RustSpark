@@ -451,7 +451,7 @@ mod tests {
             "--csv".to_string(), "ignored.csv".to_string(),
             "--sql".to_string(), too_large,
         ]);
-        assert!(parsed.unwrap_err().to_string().contains("4 MiB"));
+        assert!(parsed.err().unwrap().to_string().contains("4 MiB"));
         let path = std::env::temp_dir().join(format!(
             "rustspark-oversize-query-{}-{}.sql",
             std::process::id(),
@@ -465,7 +465,7 @@ mod tests {
         ];
         let result = parse_args(args);
         fs::remove_file(&path).unwrap();
-        assert!(result.unwrap_err().to_string().contains("4 MiB"));
+        assert!(result.err().unwrap().to_string().contains("4 MiB"));
     }
 
     #[test]
