@@ -77,6 +77,23 @@ impl TaskScheduler {
         Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
     }
 
+    /// Reclaim expired leases independently of worker requests, so monitoring
+    /// and retry orchestration can observe current task states.
+    pub fn expire_leases(&mut self, now: Instant) -> usize {
+        let mut expired = 0usize;
+        for task in self.tasks.values_mut() {
+            if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
+                task.status = if task.attempts >= self.max_attempts {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Queued
+                };
+                expired += 1;
+            }
+        }
+        expired
+    }
+
     /// Extend an active attempt without reviving a stale or expired lease.
     pub fn renew(&mut self, lease: &Lease, now: Instant, ttl: Duration) -> Result<bool> {
         if ttl.is_zero() {
@@ -146,6 +163,13 @@ impl TaskScheduler {
             }
         }
         counts
+    }
+
+    /// View a bounded, deterministic list of ready task IDs without leasing.
+    pub fn queued_tasks(&self, limit: usize) -> Vec<u64> {
+        self.tasks.iter().filter_map(|(&id, task)|
+            (task.status == TaskStatus::Queued).then_some(id)
+        ).take(limit).collect()
     }
 
     pub fn status(&self, task: u64) -> Option<&TaskStatus> {
@@ -282,5 +306,52 @@ mod consolidated_heartbeat_regressions {
         invalid = lease.clone();
         invalid.attempt += 1;
         assert!(!queue.renew(&invalid, now, Duration::from_secs(2)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod proactive_task_lease_expiry_tests {
+    use super::*;
+
+    #[test]
+    fn expired_leases_are_requeued_or_failed_without_new_worker_polling() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let mut queue = TaskScheduler::new([10, 20], 1).unwrap();
+        let leased = queue.lease(3, now, ttl).unwrap().unwrap();
+        assert_eq!(leased.task, 10);
+        assert_eq!(queue.expire_leases(now), 0);
+        assert_eq!(queue.expire_leases(now + ttl), 1);
+        assert_eq!(queue.expire_leases(now + ttl), 0);
+        assert_eq!(queue.status(10), Some(&TaskStatus::Failed));
+        assert_eq!(queue.counts(), TaskCounts {
+            queued: 1, leased: 0, done: 0, failed: 1,
+        });
+
+        let mut retryable = TaskScheduler::new([1], 2).unwrap();
+        retryable.lease(4, now, ttl).unwrap().unwrap();
+        assert_eq!(retryable.expire_leases(now + ttl), 1);
+        assert_eq!(retryable.status(1), Some(&TaskStatus::Queued));
+        assert_eq!(retryable.lease(5, now + ttl, ttl).unwrap().unwrap().attempt, 2);
+    }
+}
+
+#[cfg(test)]
+mod scheduler_ready_task_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn lists_ready_tasks_in_sorted_order_without_claiming_them() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([9, 1, 5, 3], 2).unwrap();
+        assert_eq!(scheduler.queued_tasks(2), vec![1, 3]);
+        assert_eq!(scheduler.queued_tasks(0), vec![]);
+        let first = scheduler.lease(4, now, Duration::from_secs(10))
+            .unwrap().unwrap();
+        assert_eq!(first.task, 1);
+        assert_eq!(scheduler.queued_tasks(10), vec![3, 5, 9]);
+        assert_eq!(scheduler.counts().leased, 1);
+        assert!(scheduler.cancel_task(3));
+        assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
     }
 }

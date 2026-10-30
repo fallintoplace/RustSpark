@@ -30,6 +30,10 @@ fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &
 /// CSV reader for small local datasets. Supports UTF-8, CRLF, escaped quotes,
 /// embedded commas and multiline quoted fields. It intentionally has limits.
 pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
+    parse_records_with_limit(input, MAX_CSV_ROWS)
+}
+
+fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<String>>> {
     if input.len() as u64 > MAX_CSV_BYTES {
         return Err(Error::Execution("CSV input exceeds 64 MiB limit".into()));
     }
@@ -79,7 +83,7 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
                         let _ = chars.next();
                     }
                     finish_record(&mut records, &mut row, &mut field);
-                    if records.len() > MAX_CSV_ROWS {
+                    if records.len() > max_records {
                         return Err(Error::Execution("CSV row count limit exceeded".into()));
                     }
                     state = State::Start;
@@ -102,7 +106,7 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
     if !row.is_empty() || !field.is_empty() || state == State::AfterQuote {
         finish_record(&mut records, &mut row, &mut field);
     }
-    if records.len() > MAX_CSV_ROWS {
+    if records.len() > max_records {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
     Ok(records)
@@ -132,7 +136,10 @@ fn kind(values: &[Vec<String>], column: usize) -> DataType {
 }
 
 pub fn from_csv_str(input: &str) -> Result<Batch> {
-    let mut records = parse_records(input.strip_prefix('\u{feff}').unwrap_or(input))?;
+    // Count the CSV header separately from the table's data-row admission budget.
+    let mut records = parse_records_with_limit(
+        input.strip_prefix('\u{feff}').unwrap_or(input), MAX_CSV_ROWS + 1,
+    )?;
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
@@ -340,5 +347,18 @@ mod csv_inference_single_pass_perf_tests {
         assert_eq!(from_csv_str("v\n1\n-8\n").unwrap().schema().field(0).unwrap().data_type, DataType::Integer);
         assert_eq!(from_csv_str("v\n1\n2.5\n").unwrap().schema().field(0).unwrap().data_type, DataType::Float);
         assert_eq!(from_csv_str("v\n1\nNaN\n").unwrap().schema().field(0).unwrap().data_type, DataType::Text);
+    }
+}
+
+#[cfg(test)]
+mod csv_data_row_limit_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn raw_record_limit_and_header_inclusive_table_limit_differ() {
+        let input = "id\n1\n2\n";
+        assert!(parse_records_with_limit(input, 2).is_err());
+        assert_eq!(parse_records_with_limit(input, 3).unwrap().len(), 3);
+        assert_eq!(from_csv_str(input).unwrap().num_rows(), 2);
     }
 }

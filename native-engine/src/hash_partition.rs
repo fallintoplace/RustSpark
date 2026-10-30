@@ -27,6 +27,11 @@ pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<
     }
     let indices = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
+    if partitions == 1 {
+        // Every row hashes to partition zero. Keep the validated input batch
+        // directly instead of allocating key groups and hashing all rows.
+        return Ok(vec![batch.clone()]);
+    }
     let columns = indices.iter().map(|&index| batch.column(index))
         .collect::<Result<Vec<_>>>()?;
     let mut groups = vec![Vec::new(); partitions];
@@ -207,5 +212,28 @@ mod bitmasked_bucket_tests {
                 assert_eq!(part, &batch.take(&indices).unwrap());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod one_partition_hash_shortcut_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn one_partition_preserves_source_and_validates_keys() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, true),
+            Field::new("v", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("é🙂".repeat(1024)), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        assert_eq!(partition(&input, &["k"], 1).unwrap(), vec![input.clone()]);
+        assert!(partition(&input, &["missing"], 1).is_err());
+        assert!(partition(&input, &[], 1).is_err());
+        assert_eq!(partition(&Batch::empty(input.schema().clone()), &["k"], 1)
+            .unwrap()[0].num_rows(), 0);
     }
 }
