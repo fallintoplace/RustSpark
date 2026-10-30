@@ -9,7 +9,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let document = json_path::parse(text)?;
     match json_path::lookup(Some(&document), path)? {
         Some(value @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =>
-            Ok(Value::Text(value.to_string())),
+            Ok(Value::Text(json_path::serialize_bounded(value, 16 * 1024 * 1024)?)),
         _ => Ok(Value::Null),
     }
 }
