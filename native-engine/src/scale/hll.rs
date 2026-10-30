@@ -40,7 +40,14 @@ impl HyperLogLog {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        for (dest, source) in self.registers.iter_mut().zip(other.registers) {
+        if other.nonempty == 0 { return; }
+        if self.nonempty == 0 {
+            // Copy a populated sketch into a fresh target in one operation.
+            self.registers.copy_from_slice(&other.registers);
+            self.nonempty = other.nonempty;
+            return;
+        }
+        for (dest, source) in self.registers.iter_mut().zip(other.registers.iter().copied()) {
             if *dest == 0 && source != 0 { self.nonempty += 1; }
             *dest = (*dest).max(source);
         }
@@ -129,6 +136,21 @@ mod approximate_column_feature_tests {
     }
 }
 
+
+/// Approximate distinct keys over an arbitrary row selection without copying values.
+pub fn approximate_distinct_selected(
+    batch: &crate::batch::Batch, column: &str, selected: &[usize]
+) -> Result<f64> {
+    let index = batch.schema().column(column)?;
+    let values = batch.column(index)?;
+    let mut sketch = HyperLogLog::new();
+    for &row in selected {
+        let value = values.get(row)
+            .ok_or_else(|| Error::Execution("selected HLL row out of bounds".into()))?;
+        sketch.add(value);
+    }
+    Ok(sketch.estimate())
+}
 
 /// Merge distinct-count sketches across compatible input batches.
 pub fn approximate_distinct_batches(
@@ -230,5 +252,84 @@ mod cached_nonempty_register_count_tests {
         assert!(a.nonempty_registers() > 4000);
         a.merge(&b);
         assert_eq!(a.nonempty_registers(), a.registers.iter().filter(|&&rank| rank != 0).count());
+    }
+}
+
+#[cfg(test)]
+mod hll_cached_zero_count_estimate_tests {
+    use super::*;
+    #[test]
+    fn cached_zero_count_agrees_after_adding_and_merging() {
+        let mut a = HyperLogLog::new();
+        let mut b = HyperLogLog::new();
+        for n in 0..10_000 {
+            if n % 2 == 0 { a.add(&Value::Integer(n)); }
+            else { b.add(&Value::Integer(n)); }
+        }
+        a.merge(&b);
+        let zeros = a.registers.iter().filter(|&&rank| rank == 0).count();
+        assert_eq!(zeros, REGISTERS - a.nonempty_registers());
+        assert!(a.estimate() > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod hll_empty_merge_shortcuts_tests {
+    use super::*;
+
+    #[test]
+    fn merging_empty_and_populated_sketches_keeps_registers() {
+        let mut populated = HyperLogLog::new();
+        for n in 0..1000 { populated.add(&Value::Integer(n)); }
+        let baseline = populated.clone();
+        let empty = HyperLogLog::new();
+        populated.merge(&empty);
+        assert_eq!(populated, baseline);
+        let mut receiver = HyperLogLog::new();
+        receiver.merge(&baseline);
+        assert_eq!(receiver, baseline);
+        receiver.merge(&baseline);
+        assert_eq!(receiver, baseline);
+        assert_eq!(receiver.nonempty_registers(), baseline.nonempty_registers());
+    }
+}
+
+#[cfg(test)]
+mod native_selected_distinct_estimates_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn selected_rows_match_a_materialized_subset_exactly() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("account", DataType::Integer, true)
+        ]).unwrap(), (0..2000).map(|n| vec![if n % 5 == 0 {
+            Value::Null
+        } else { Value::Integer(n % 271) }]).collect()).unwrap();
+        let indices = (0..source.num_rows()).step_by(3).collect::<Vec<_>>();
+        let subset = source.take(&indices).unwrap();
+        assert_eq!(approximate_distinct_selected(&source, "account", &indices).unwrap(),
+            approximate_distinct(&subset, "account").unwrap());
+        assert_eq!(approximate_distinct_selected(&source, "account", &[]).unwrap(), 0.0);
+        assert!(approximate_distinct_selected(&source, "account", &[2001]).is_err());
+        assert!(approximate_distinct_selected(&source, "missing", &[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hll_borrowed_merge_tests {
+    use super::*;
+    #[test]
+    fn merge_matches_registerwise_max_after_repeated_merges() {
+        let mut first = HyperLogLog::new();
+        let mut second = HyperLogLog::new();
+        for n in 0..8000 { first.add(&Value::Integer(n)); second.add(&Value::Integer(n + 4000)); }
+        let expected = first.registers.iter().zip(&second.registers)
+            .map(|(&left, &right)| left.max(right)).collect::<Vec<_>>();
+        first.merge(&second);
+        assert_eq!(first.registers.as_slice(), expected.as_slice());
+        let once = first.clone();
+        first.merge(&second);
+        assert_eq!(first, once);
     }
 }

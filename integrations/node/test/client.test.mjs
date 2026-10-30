@@ -75,3 +75,41 @@ test("SQL file and deterministic table and parameter ordering", () => {
   assert.throws(() => client.query("SELECT 1", { sqlFile: "x.sql" }), TypeError);
   assert.throws(() => client.query("", { sqlFile: "" }), TypeError);
 });
+
+test("rejects oversized or excessive named parameters before spawning", () => {
+  const client = new RustSpark({ runner: () => { throw Error("should not run"); } });
+  assert.throws(() => client.query("SELECT 1", { namedParams: { p: "utf8:" + "x".repeat(8192) } }), TypeError);
+  assert.throws(() => client.query("SELECT 1", {
+    namedParams: Object.fromEntries(Array.from({ length: 65 }, (_, index) => ["p" + index, "int64:1"])),
+  }), RangeError);
+});
+
+test("rejects empty named input file paths before invoking the CLI", () => {
+  const client = new RustSpark({ runner: () => { throw new Error("should not run"); } });
+  for (const option of ["csvTables", "parquetTables", "jsonTables"]) {
+    assert.throws(() => client.query("SELECT 1", {
+      [option]: { sales: "" },
+    }), TypeError, option);
+  }
+  assert.throws(() => client.query("SELECT 1", {
+    csvTables: { sales: null },
+  }), TypeError);
+});
+
+test("rejects int64 SQL results that JSON.parse would round", () => {
+  for (const stdout of [
+    '[{"id":9007199254740993}]',
+    '[{"id":-9007199254740993}]',
+    '[{"id":9223372036854775807}]',
+    '[{"nested":{"ids":[9007199254740992]}}]',
+  ]) {
+    const client = new RustSpark({ runner: () => ({ status: 0, stdout }) });
+    assert.throws(() => client.query("SELECT id FROM t"), RustSparkError);
+  }
+  const valid = new RustSpark({ runner: () => ({
+    status: 0, stdout: '[{"id":9007199254740991},{"id":-9007199254740991},{"float":1.25}]',
+  }) });
+  assert.deepEqual(valid.query("SELECT id FROM t"), [
+    { id: 9007199254740991 }, { id: -9007199254740991 }, { float: 1.25 },
+  ]);
+});

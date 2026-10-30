@@ -35,12 +35,13 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   database_dir: str | Path | None = None,
                   csv_tables: Mapping[str, str | Path] | None = None,
                   parquet_tables: Mapping[str, str | Path] | None = None,
+                  json_tables: Mapping[str, str | Path] | None = None,
                   named_params: Mapping[str, str] | None = None) -> list[str]:
     if not sql.strip():
         raise ValueError("SQL cannot be empty")
     if sum(source is not None for source in (csv, parquet, json_input)) > 1:
         raise ValueError("Specify only one unnamed CSV, Parquet, or JSON source")
-    if any(source is not None for source in (csv, parquet, json_input)) and (csv_tables or parquet_tables):
+    if any(source is not None for source in (csv, parquet, json_input)) and (csv_tables or parquet_tables or json_tables):
         raise ValueError("Named and unnamed file inputs cannot be mixed")
     if type(max_rows) is not int or max_rows < 1:
         raise ValueError("max_rows must be a positive integer")
@@ -56,6 +57,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
             command.extend([flag, os.fspath(source)])
     _add_named_tables(command, "--csv-table", csv_tables)
     _add_named_tables(command, "--parquet-table", parquet_tables)
+    _add_named_tables(command, "--json-table", json_tables)
     if query_timeout is not None:
         command.extend(["--query-timeout", str(query_timeout)])
 
@@ -79,6 +81,7 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
                     database_dir: str | Path | None = None,
                     csv_tables: Mapping[str, str | Path] | None = None,
                     parquet_tables: Mapping[str, str | Path] | None = None,
+                    json_tables: Mapping[str, str | Path] | None = None,
                     named_params: Mapping[str, str] | None = None,
                     process_timeout: float | None = None):
     """Load a bounded SQL result as pandas, preserving Arrow logical types.
@@ -98,7 +101,8 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
             sql, output, binary=binary, csv=csv, parquet=parquet,
             json_input=json_input, max_rows=max_rows, query_timeout=query_timeout,
             database_dir=database_dir, csv_tables=csv_tables,
-            parquet_tables=parquet_tables, named_params=named_params,
+            parquet_tables=parquet_tables, json_tables=json_tables,
+            named_params=named_params,
         )
         try:
             result = subprocess.run(command, capture_output=True, text=True,

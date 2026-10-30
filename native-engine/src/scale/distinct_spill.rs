@@ -70,6 +70,9 @@ where I: IntoIterator<Item = Result<Batch>>
                 }
             }
         }
+        // Untouched partitions have no output. Avoid writing and later
+        // reopening a separate schema-only result file for each empty shard.
+        if seen.is_empty() { continue; }
         let id = DISTINCT_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-distinct-{}-{id}.rspill", std::process::id()));
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
@@ -125,5 +128,38 @@ mod tests {
         assert!(values.contains(&Value::Integer(5)));
         drop(files);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sparse_distinct_result_shards_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::fs;
+
+    #[test]
+    fn sparse_partitions_write_only_nonempty_distinct_shards() {
+        let dir = std::env::temp_dir().join(format!("native-distinct-sparse-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(42)], vec![Value::Integer(42)],
+        ]).unwrap();
+        let output = distinct_to_disk([Ok(input)], schema.clone(),
+            &dir, 64, 100, 2, &QueryControl::default()).unwrap();
+        assert_eq!(output.paths().len(), 1);
+        let mut reader = SpillReader::new(BufReader::new(
+            File::open(&output.paths()[0]).unwrap()), 2).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(42)]]);
+        drop(output);
+
+        let empty = distinct_to_disk(Vec::<Result<Batch>>::new(), schema,
+            &dir, 8, 100, 2, &QueryControl::default()).unwrap();
+        assert!(empty.paths().is_empty());
+        drop(empty);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

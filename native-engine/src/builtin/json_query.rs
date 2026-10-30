@@ -22,9 +22,10 @@ fn json_equal_type(types: &[DataType]) -> Result<DataType> {
 fn json_equal(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
-    let left = json_path::parse(left)?;
-    let right = json_path::parse(right)?;
-    Ok(Value::Boolean(left == right))
+    let left_doc = json_path::parse(left)?;
+    if left == right { return Ok(Value::Boolean(true)); }
+    let right_doc = json_path::parse(right)?;
+    Ok(Value::Boolean(left_doc == right_doc))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -57,5 +58,24 @@ mod json_equal_extension_tests {
         assert_eq!(json_equal(&[Value::Text("[1,2]".into()), Value::Text("[2,1]".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(json_equal(&[Value::Null, Value::Text("null".into())]).unwrap(), Value::Null);
         assert!(json_equal(&[Value::Text("{broken".into()), Value::Text("{}".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod identical_json_equality_tests {
+    use super::*;
+
+    #[test]
+    fn compares_identical_json_without_ignoring_malformed_input() {
+        let text = Value::Text(r#"{"nested":[1,2,null],"é":"🙂"}"#.into());
+        assert_eq!(json_equal(&[text.clone(), text]).unwrap(), Value::Boolean(true));
+        assert_eq!(json_equal(&[
+            Value::Text(r#"{"a":1,"b":2}"#.into()),
+            Value::Text(r#"{"b":2, "a":1}"#.into()),
+        ]).unwrap(), Value::Boolean(true));
+        assert!(json_equal(&[
+            Value::Text("{invalid".into()), Value::Text("{invalid".into())
+        ]).is_err());
+        assert_eq!(json_equal(&[Value::Null, Value::Text("null".into())]).unwrap(), Value::Null);
     }
 }

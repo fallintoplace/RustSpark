@@ -22,7 +22,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else {
         replacement.chars().count()
     };
-    if text.len().checked_add(replacement.len()).is_none_or(|n| n > 16 * 1024 * 1024) {
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    if text.len() > MAX_BYTES || replacement.len() > MAX_BYTES {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
@@ -30,7 +31,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_or(text.len(), |(byte, _)| byte);
     let end = text[begin..].char_indices().nth(count)
         .map_or(text.len(), |(byte, _)| begin + byte);
-    let mut result = String::with_capacity(text.len().saturating_add(replacement.len()));
+    let result_len = begin.checked_add(replacement.len())
+        .and_then(|n| n.checked_add(text.len() - end))
+        .filter(|&n| n <= MAX_BYTES)
+        .ok_or_else(|| Error::Execution("OVERLAY output exceeds native 16 MiB budget".into()))?;
+    let mut result = String::with_capacity(result_len);
     result.push_str(&text[..begin]);
     result.push_str(replacement);
     result.push_str(&text[end..]);
@@ -116,5 +121,20 @@ mod common_suffix_extension_tests {
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("abc".into())]).unwrap(), Value::Text("abc".into()));
         assert_eq!(common_suffix(&[Value::Text("abc".into()), Value::Text("xyz".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod overlay_actual_output_budget_tests {
+    use super::*;
+    #[test]
+    fn permits_large_replacements_that_shrink_within_budget() {
+        let source = "a".repeat(9 * 1024 * 1024);
+        let replacement = "b".repeat(8 * 1024 * 1024);
+        let result = evaluate(&[Value::Text(source), Value::Text(replacement.clone()),
+            Value::Integer(1), Value::Integer(9 * 1024 * 1024)]).unwrap();
+        assert_eq!(result, Value::Text(replacement));
+        assert!(evaluate(&[Value::Text("a".repeat(16 * 1024 * 1024)),
+            Value::Text("b".into()), Value::Integer(1), Value::Integer(0)]).is_err());
     }
 }

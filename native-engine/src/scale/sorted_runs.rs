@@ -37,8 +37,17 @@ pub fn write_sorted_runs<I>(
 ) -> Result<RunSet>
 where I: IntoIterator<Item = Result<Batch>>
 {
-    if max_rows_per_run == 0 {
-        return Err(Error::Execution("sort run size must be positive".into()));
+    if !(1..=65_536).contains(&max_rows_per_run) {
+        return Err(Error::Execution("sort run size must be in 1..=65536".into()));
+    }
+    if keys.is_empty() {
+        return Err(Error::Execution("external sort needs at least one key".into()));
+    }
+    for key in keys {
+        if !matches!(&key.expression, crate::expr::Expr::Column(_)) {
+            return Err(Error::Unsupported("external merge requires column sort keys".into()));
+        }
+        key.expression.output_type(&schema)?;
     }
     let mut runs = RunSet { files: Vec::new(), schema: schema.clone() };
     for incoming in input {
@@ -97,5 +106,54 @@ mod tests {
         drop(runs);
         assert!(paths.iter().all(|p| !p.exists()));
         fs::remove_dir(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sorted_run_bound_checks {
+    use super::*;
+
+    #[test]
+    fn invalid_run_sizes_fail_before_reading_input() {
+        let schema = Schema::new(vec![]).unwrap();
+        let input = Vec::<Result<Batch>>::new();
+        let keys = [];
+        let directory = std::env::temp_dir();
+        let control = QueryControl::default();
+        assert!(write_sorted_runs(input.clone(), schema.clone(), &keys,
+            &directory, 0, &control).is_err());
+        assert!(write_sorted_runs(input, schema, &keys,
+            &directory, 65_537, &control).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sorted_run_key_prevalidation_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, schema::{DataType, Field}, scalar::Value};
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn invalid_keys_do_not_poll_any_source_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let count = Rc::clone(&calls);
+        let source = std::iter::repeat_with(move || {
+            count.set(count.get() + 1);
+            Err(Error::Execution("source polled".into()))
+        });
+        let directory = std::env::temp_dir();
+        let control = QueryControl::default();
+        assert!(write_sorted_runs(source, schema.clone(), &[
+            SortKey::ascending(Expr::Column("missing".into()))
+        ], &directory, 4, &control).is_err());
+        assert_eq!(calls.get(), 0);
+        let computed = SortKey::ascending(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)),
+        ));
+        assert!(write_sorted_runs(
+            Vec::<Result<Batch>>::new(), schema, &[computed], &directory, 4, &control
+        ).is_err());
     }
 }

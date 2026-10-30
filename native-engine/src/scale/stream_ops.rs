@@ -25,7 +25,10 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
                 self.stopped = true;
                 return Some(Err(error));
             }
-            let next = self.input.next()?;
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
             let result = next.and_then(|batch| {
                 if matches!(&self.predicate,
                     Expr::Literal(crate::scalar::Value::Boolean(true))) {
@@ -66,14 +69,24 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
-        if let Err(error) = self.control.check() {
-            self.stopped = true;
-            return Some(Err(error));
+        loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                return Some(Err(error));
+            }
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
+            match next.and_then(|batch| project::project(&batch, &self.selections)) {
+                Ok(batch) if batch.num_rows() == 0 => continue,
+                Ok(batch) => return Some(Ok(batch)),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
         }
-        let next = self.input.next()?;
-        let result = next.and_then(|batch| project::project(&batch, &self.selections));
-        if result.is_err() { self.stopped = true; }
-        Some(result)
     }
 }
 
@@ -82,12 +95,14 @@ pub struct LimitStream<I> {
     offset: usize,
     remaining: Option<usize>,
     control: QueryControl,
+    invalid_limit: bool,
     stopped: bool,
 }
 
 impl<I> LimitStream<I> {
     pub fn new(input: I, offset: usize, count: Option<usize>, control: QueryControl) -> Self {
-        Self { input, offset, remaining: count, control, stopped: false }
+        let invalid_limit = count.is_some_and(|n| offset.checked_add(n).is_none());
+        Self { input, offset, remaining: count, control, invalid_limit, stopped: false }
     }
 }
 
@@ -95,13 +110,21 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.stopped || self.remaining == Some(0) { return None; }
+        if self.stopped { return None; }
+        if self.invalid_limit {
+            self.stopped = true;
+            return Some(Err(crate::Error::Execution("LIMIT + OFFSET overflow".into())));
+        }
+        if self.remaining == Some(0) { return None; }
         loop {
             if let Err(error) = self.control.check() {
                 self.stopped = true;
                 return Some(Err(error));
             }
-            let next = self.input.next()?;
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
             let batch = match next {
                 Ok(batch) => batch,
                 Err(error) => {
@@ -233,5 +256,86 @@ mod whole_limit_stream_batch_perf_tests {
         assert_eq!(result.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
         assert_eq!(result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>(),
             (3..8).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod projection_empty_batch_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn empty_rows_are_skipped_but_zero_column_rows_remain() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let data = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let mut stream = ProjectStream::new(
+            [Ok(Batch::empty(schema)), Ok(data)].into_iter(),
+            vec![Selection::new(Expr::Column("n".into()), "value")],
+            QueryControl::default(),
+        );
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next().is_none());
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        let output = ProjectStream::new([Ok(zero)].into_iter(), vec![],
+            QueryControl::default()).next().unwrap().unwrap();
+        assert_eq!(output.num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod limit_stream_overflow_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn overflow_returns_terminal_error_without_polling() {
+        let polls = Rc::new(Cell::new(0usize));
+        let observed = Rc::clone(&polls);
+        let source = std::iter::repeat_with(move || {
+            observed.set(observed.get() + 1);
+            Err(crate::Error::Execution("unexpected poll".into()))
+        });
+        let mut stream = LimitStream::new(source, usize::MAX, Some(1), QueryControl::default());
+        assert!(stream.next().unwrap().unwrap_err().to_string().contains("overflow"));
+        assert!(stream.next().is_none());
+        assert_eq!(polls.get(), 0);
+    }
+}
+
+#[cfg(test)]
+mod fused_stream_operator_eof_tests {
+    use super::*;
+    use crate::{scalar::Value, project::Selection};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    fn once_exhausted(polls: Arc<AtomicUsize>) -> impl Iterator<Item = Result<Batch>> {
+        std::iter::from_fn(move || {
+            let attempt = polls.fetch_add(1, Ordering::Relaxed);
+            if attempt == 0 { None } else { panic!("polled upstream past EOF") }
+        })
+    }
+
+    #[test]
+    fn filter_project_and_limit_never_resume_an_exhausted_source() {
+        let filtered_polls = Arc::new(AtomicUsize::new(0));
+        let mut filtered = FilterStream::new(once_exhausted(Arc::clone(&filtered_polls)),
+            Expr::Literal(Value::Boolean(true)), QueryControl::default());
+        assert!(filtered.next().is_none());
+        assert!(filtered.next().is_none());
+        assert_eq!(filtered_polls.load(Ordering::Relaxed), 1);
+
+        let projected_polls = Arc::new(AtomicUsize::new(0));
+        let mut projected = ProjectStream::new(once_exhausted(Arc::clone(&projected_polls)),
+            Vec::<Selection>::new(), QueryControl::default());
+        assert!(projected.next().is_none());
+        assert!(projected.next().is_none());
+        assert_eq!(projected_polls.load(Ordering::Relaxed), 1);
+
+        let limited_polls = Arc::new(AtomicUsize::new(0));
+        let mut limited = LimitStream::new(once_exhausted(Arc::clone(&limited_polls)),
+            0, Some(5), QueryControl::default());
+        assert!(limited.next().is_none());
+        assert!(limited.next().is_none());
+        assert_eq!(limited_polls.load(Ordering::Relaxed), 1);
     }
 }

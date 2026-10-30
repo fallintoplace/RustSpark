@@ -27,6 +27,11 @@ impl MemoryPool {
         self.used.load(Ordering::Acquire)
     }
 
+    /// Snapshot of unreserved capacity. Concurrent reservations may change it.
+    pub fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.used())
+    }
+
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation> {
         self.charge(bytes)?;
         Ok(Reservation {
@@ -35,7 +40,26 @@ impl MemoryPool {
         })
     }
 
+    /// Atomically claim at most the requested number of free bytes.
+    /// Callers can shrink work units when less capacity is available.
+    pub fn reserve_up_to(self: &Arc<Self>, requested: usize) -> Result<Reservation> {
+        let mut current = self.used.load(Ordering::Acquire);
+        loop {
+            let available = self.limit.saturating_sub(current);
+            let bytes = requested.min(available);
+            let next = current.checked_add(bytes)
+                .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
+            match self.used.compare_exchange_weak(
+                current, next, Ordering::AcqRel, Ordering::Relaxed
+            ) {
+                Ok(_) => return Ok(Reservation { pool: Arc::clone(self), bytes }),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn charge(&self, bytes: usize) -> Result<()> {
+        if bytes == 0 { return Ok(()); }
         let mut current = self.used.load(Ordering::Relaxed);
         loop {
             let next = current
@@ -81,6 +105,7 @@ impl Reservation {
     }
 
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
+        if new_bytes == self.bytes { return Ok(()); }
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
             self.pool.charge(extra)?;
@@ -203,5 +228,80 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod zero_charge_fast_path_tests {
+    use super::*;
+    #[test]
+    fn zero_byte_reservations_work_at_full_budget() {
+        let pool = MemoryPool::new(4);
+        let _full = pool.reserve(4).unwrap();
+        let mut empty = pool.reserve(0).unwrap();
+        empty.resize(0).unwrap();
+        assert_eq!(pool.used(), 4);
+        drop(empty);
+        assert_eq!(pool.used(), 4);
+    }
+}
+
+#[cfg(test)]
+mod memory_pool_available_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn remaining_capacity_tracks_reserve_resize_and_release() {
+        let pool = MemoryPool::new(100);
+        assert_eq!(pool.remaining(), 100);
+        let mut guard = pool.reserve(60).unwrap();
+        assert_eq!(pool.remaining(), 40);
+        guard.resize(75).unwrap();
+        assert_eq!(pool.remaining(), 25);
+        assert!(guard.resize(101).is_err());
+        assert_eq!(pool.remaining(), 25);
+        drop(guard);
+        assert_eq!(pool.remaining(), 100);
+        let zero = MemoryPool::new(0);
+        assert_eq!(zero.remaining(), 0);
+    }
+}
+
+#[cfg(test)]
+mod partial_native_memory_admission_tests {
+    use super::*;
+
+    #[test]
+    fn allocates_available_capacity_without_overcommitting() {
+        let pool = MemoryPool::new(100);
+        let first = pool.reserve(70).unwrap();
+        let second = pool.reserve_up_to(80).unwrap();
+        assert_eq!(second.bytes(), 30);
+        assert_eq!(pool.used(), 100);
+        let empty = pool.reserve_up_to(20).unwrap();
+        assert_eq!(empty.bytes(), 0);
+        drop(first);
+        assert_eq!(pool.remaining(), 70);
+        let next = pool.reserve_up_to(10).unwrap();
+        assert_eq!(next.bytes(), 10);
+        drop((second, empty, next));
+        assert_eq!(pool.used(), 0);
+        assert_eq!(MemoryPool::new(0).reserve_up_to(100).unwrap().bytes(), 0);
+    }
+
+    #[test]
+    fn concurrent_partial_claims_cannot_exceed_capacity() {
+        let pool = MemoryPool::new(100);
+        let mut reservations = Vec::new();
+        std::thread::scope(|scope| {
+            let threads = (0..8).map(|_| {
+                let pool = Arc::clone(&pool);
+                scope.spawn(move || pool.reserve_up_to(30).unwrap())
+            }).collect::<Vec<_>>();
+            for worker in threads { reservations.push(worker.join().unwrap()); }
+        });
+        assert_eq!(reservations.iter().map(Reservation::bytes).sum::<usize>(), 100);
+        drop(reservations);
+        assert_eq!(pool.used(), 0);
     }
 }

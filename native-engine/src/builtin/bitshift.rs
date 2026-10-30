@@ -25,7 +25,7 @@ fn unsigned_right(args: &[Value]) -> Result<Value> {
 fn rotate_left(args: &[Value]) -> Result<Value> {
     let Some(number) = super::integer(&args[0])? else { return Ok(Value::Null); };
     let Some(count) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    Ok(Value::Integer(number.rotate_left(count.rem_euclid(64) as u32)))
+    Ok(Value::Integer(number.rotate_left((count as u32) & 63)))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -62,5 +62,18 @@ mod rotate_left_extension_tests {
         assert_eq!(rotate_left(&[Value::Integer(1), Value::Integer(-1)]).unwrap(), Value::Integer(i64::MIN));
         assert_eq!(rotate_left(&[Value::Integer(-1), Value::Integer(7)]).unwrap(), Value::Integer(-1));
         assert_eq!(rotate_left(&[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod rotate_mask_regression_tests {
+    use super::*;
+    #[test]
+    fn masked_rotation_matches_euclidean_remainder() {
+        for shift in [i64::MIN, -129, -64, -1, 0, 1, 64, 65, i64::MAX] {
+            let value = 0x1234_5678_9abc_def0_i64;
+            let actual = rotate_left(&[Value::Integer(value), Value::Integer(shift)]).unwrap();
+            assert_eq!(actual, Value::Integer(value.rotate_left(shift.rem_euclid(64) as u32)));
+        }
     }
 }

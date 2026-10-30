@@ -14,6 +14,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(times) = super::integer(&args[1])? else { return Ok(Value::Null); };
     let count = usize::try_from(times.max(0))
         .map_err(|_| Error::Execution("REPEAT count overflow".into()))?;
+    if text.is_empty() || count == 0 { return Ok(Value::Text(String::new())); }
     if count > 1_000_000 {
         return Err(Error::Execution("REPEAT exceeds repetition limit".into()));
     }
@@ -47,5 +48,17 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("x".into()), Value::Integer(-1)]).unwrap(), Value::Text("".into()));
         assert_eq!(evaluate(&[Value::Text("é".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
         assert!(evaluate(&[Value::Text("x".into()), Value::Integer(16_777_217)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod empty_repeat_regression_tests {
+    use super::*;
+    #[test]
+    fn empty_input_never_allocates_count_dependent_output() {
+        assert_eq!(evaluate(&[Value::Text(String::new()), Value::Integer(1_000_001)]).unwrap(), Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Text(String::new()), Value::Integer(0)]).unwrap(), Value::Text(String::new()));
+        assert!(evaluate(&[Value::Text("x".into()), Value::Integer(1_000_001)]).is_err());
+        assert_eq!(evaluate(&[Value::Null, Value::Integer(1_000_001)]).unwrap(), Value::Null);
     }
 }

@@ -48,14 +48,21 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
-    let Some(start) = text.char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()))
-        .nth(offset) else {
-        return Ok(Value::Integer(0));
+    let ascii = text.is_ascii();
+    let start = if ascii {
+        if offset > text.len() { return Ok(Value::Integer(0)); }
+        offset
+    } else {
+        let Some(start) = text.char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+            .nth(offset) else {
+            return Ok(Value::Integer(0));
+        };
+        start
     };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
-    let characters = text[start..start + found].chars().count();
+    let characters = if ascii { found } else { text[start..start + found].chars().count() };
     let position = offset.checked_add(characters).and_then(|n| n.checked_add(1))
         .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
     let position = i64::try_from(position)
@@ -167,5 +174,18 @@ mod strcmp_extension_tests {
         assert_eq!(strcmp(&[Value::Text("é".into()), Value::Text("é".into())]).unwrap(), Value::Integer(0));
         assert_eq!(strcmp(&[Value::Text("z".into()), Value::Text("a".into())]).unwrap(), Value::Integer(1));
         assert_eq!(strcmp(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod locate_ascii_offset_tests {
+    use super::*;
+    #[test]
+    fn large_offsets_are_one_based_and_unicode_stays_character_based() {
+        let input = format!("{}xyz", "a".repeat(20_000));
+        assert_eq!(locate(&[Value::Text("xyz".into()), Value::Text(input),
+            Value::Integer(19_999)]).unwrap(), Value::Integer(20_001));
+        assert_eq!(locate(&[Value::Text("x".into()), Value::Text("ééx".into()),
+            Value::Integer(2)]).unwrap(), Value::Integer(3));
     }
 }
