@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 from mcp.server import MCPServer
 from query_templates import list_templates, make_command, parse_query_rows, template_path
@@ -40,16 +41,21 @@ def run_named_query(name: str, parameters: dict[str, str],
     command = make_command(binary, database_dir, path, parameters,
                            max_rows=max_rows, query_timeout=query_timeout)
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True,
-            timeout=30, check=False,
-        )
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
+            result = subprocess.run(
+                command, stdout=output, stderr=subprocess.DEVNULL,
+                timeout=30, check=False,
+            )
+            if result.returncode:
+                raise RuntimeError("RustSpark query did not complete")
+            if output.tell() > 8 * 1024 * 1024:
+                raise RuntimeError("RustSpark query result too large")
+            output.seek(0)
+            stdout = output.read()
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError("RustSpark query backend unavailable") from error
-    if result.returncode:
-        raise RuntimeError("RustSpark query did not complete")
     try:
-        rows = parse_query_rows(result.stdout)
+        rows = parse_query_rows(stdout)
     except ValueError as error:
         raise RuntimeError("Invalid SQL query result") from error
     return json.dumps(rows, ensure_ascii=False)
