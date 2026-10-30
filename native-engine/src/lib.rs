@@ -105,3 +105,5 @@ pub mod spill_ipc;
 pub mod external_sort;
 
 pub mod parquet_scan;
+
+pub mod output_file;
