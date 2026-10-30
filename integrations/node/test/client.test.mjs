@@ -72,6 +72,10 @@ test("SQL file and deterministic table and parameter ordering", () => {
   assert.deepEqual(command.slice(0, 4), ["--sql-file", "queries/report.sql", "--stdout-format", "json-array"]);
   assert.ok(command.indexOf("alpha=/a.csv") < command.indexOf("zeta=/z.csv"));
   assert.ok(command.indexOf("alpha=int64:1") < command.indexOf("zeta=int64:2"));
+  client.query(undefined, { sqlFile: "queries/report.sql" });
+  assert.deepEqual(command.slice(0, 4), ["--sql-file", "queries/report.sql", "--stdout-format", "json-array"]);
+  client.query(null, { sqlFile: "queries/report.sql" });
+  assert.deepEqual(command.slice(0, 4), ["--sql-file", "queries/report.sql", "--stdout-format", "json-array"]);
   assert.throws(() => client.query("SELECT 1", { sqlFile: "x.sql" }), TypeError);
   assert.throws(() => client.query("", { sqlFile: "" }), TypeError);
 });
