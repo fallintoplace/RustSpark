@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
-    LargeStringArray, RecordBatch, StringArray, UInt64Array,
+    LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::StringBuilder, types::Int32Type,
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
@@ -67,7 +67,10 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
             }
         }
     }
-    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns)
+    // An Arrow record batch without columns still has a logical row count.
+    // Supply it explicitly so SELECT literals/zero-column projections survive.
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    RecordBatch::try_new_with_options(Arc::new(ArrowSchema::new(fields)), columns, &options)
         .map_err(|err| Error::Execution(format!("Arrow conversion failed: {err}")))
 }
 
@@ -251,7 +254,7 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
         }
         columns.push(values);
     }
-    Batch::new(Schema::new(fields)?, columns)
+    Batch::new_with_row_count(Schema::new(fields)?, columns, input.num_rows())
 }
 
 #[cfg(test)]
@@ -393,5 +396,32 @@ mod arrow_narrow_batch_dispatch_tests {
         ]);
         assert_eq!(batch.row(1).unwrap(), vec![Value::Null; 3]);
         assert_eq!(batch.value(2, 2).unwrap(), &Value::Float(-0.0));
+    }
+}
+
+#[cfg(test)]
+mod zero_column_arrow_cardinality_tests {
+    use super::*;
+
+    #[test]
+    fn zero_width_native_batches_keep_nonzero_row_counts() {
+        let input = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 7).unwrap();
+        let record = to_arrow(&input).unwrap();
+        assert_eq!(record.num_columns(), 0);
+        assert_eq!(record.num_rows(), 7);
+        assert_eq!(from_arrow(&record).unwrap(), input);
+        let empty = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 0).unwrap();
+        assert_eq!(from_arrow(&to_arrow(&empty).unwrap()).unwrap(), empty);
+    }
+
+    #[test]
+    fn externally_constructed_empty_schema_preserves_cardinality() {
+        let arrow = RecordBatch::try_new_with_options(
+            Arc::new(ArrowSchema::empty()), vec![],
+            &RecordBatchOptions::new().with_row_count(Some(3)),
+        ).unwrap();
+        let native = from_arrow(&arrow).unwrap();
+        assert_eq!(native.num_rows(), 3);
+        assert_eq!(native.rows().unwrap(), vec![vec![]; 3]);
     }
 }
