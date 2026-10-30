@@ -105,7 +105,8 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
             named_params=named_params,
         )
         try:
-            result = subprocess.run(command, capture_output=True, text=True,
+            result = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True,
                                     check=False, timeout=process_timeout)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
