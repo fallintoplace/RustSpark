@@ -78,6 +78,12 @@ impl RunMerger {
         if keys.is_empty() {
             return Err(Error::Execution("external merge needs at least one sort key".into()));
         }
+        const MAX_SPILL_CELLS: usize = 4_000_000;
+        if [input_batch_rows, output_batch_rows].into_iter().any(|rows|
+            rows.checked_mul(schema.len()).is_none_or(|cells| cells > MAX_SPILL_CELLS)
+        ) {
+            return Err(Error::Execution("external merge batch exceeds spill cell budget".into()));
+        }
         let mut selected = Vec::new();
         for key in keys {
             let Expr::Column(name) = &key.expression else {
@@ -364,5 +370,26 @@ mod columnar_spill_output_tests {
         assert_eq!(merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(), expected.rows().unwrap());
         drop(runs);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod wide_merge_buffer_preflight_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn a_wide_batch_is_rejected_before_touching_input_files() {
+        let schema = Schema::new((0..64).map(|n|
+            Field::new(format!("c{n}"), DataType::Integer, false)
+        ).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("c0".into()))];
+        let missing = ["this-file-must-not-be-opened.rspill"];
+        let result = RunMerger::new(&missing, schema.clone(), &keys, 65_536, 1,
+            QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
+        let result = RunMerger::new(&missing, schema, &keys, 1, 65_536,
+            QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
