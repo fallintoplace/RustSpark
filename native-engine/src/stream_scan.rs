@@ -58,6 +58,11 @@ impl Iterator for ScanCursor<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.failed { return None; }
+        // WHERE FALSE and WHERE NULL cannot select a row, regardless of input size.
+        if matches!(&self.predicate,
+            Some(Expr::Literal(Value::Boolean(false) | Value::Null))) {
+            return None;
+        }
         if self.predicate.is_none() && self.identity_projection {
             if self.next_row == self.source.num_rows() { return None; }
             let end = self.next_row.saturating_add(self.target_rows).min(self.source.num_rows());
@@ -266,5 +271,25 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod constant_rejected_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn false_and_null_filters_never_emit_rows_even_for_large_sources() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..1000).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap();
+        for value in [Value::Boolean(false), Value::Null] {
+            let mut cursor = scan(&input, Some(Expr::Literal(value)), &[], 16).unwrap();
+            assert!(cursor.next().is_none());
+            assert!(cursor.next().is_none());
+        }
+        assert_eq!(scan(&input, None, &[], 16).unwrap().count(), 63);
     }
 }
