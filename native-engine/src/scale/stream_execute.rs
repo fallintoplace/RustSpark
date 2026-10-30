@@ -9,7 +9,7 @@ use super::{
     cancel::QueryControl,
     chunks::RowBatcher, file_catalog::FileCatalog,
     stream_ops::{FilterStream, ProjectStream, LimitStream},
-    union_stream::UnionAllStream,
+    union_stream::{UnionAllStream, UnionDistinctStream},
     sorted_runs::write_sorted_runs,
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
@@ -369,6 +369,18 @@ fn lower(
         }
         Plan::Filter { input, predicate } =>
             Ok(Box::new(FilterStream::new(child(input)?, predicate.clone(), control.clone()))),
+        Plan::Distinct { input } if matches!(input.as_ref(), Plan::UnionAll { .. }) => {
+            let Plan::UnionAll { left, right } = input.as_ref() else {
+                unreachable!("checked UNION ALL plan");
+            };
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            let left = lower(left, catalog, options, control, depth + 2)?;
+            let right = lower(right, catalog, options, control, depth + 2)?;
+            Ok(Box::new(UnionDistinctStream::new(
+                left, right, schema, control.clone(),
+                MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
+            )?))
+        }
         Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
             child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
         ))),
@@ -778,5 +790,38 @@ mod stream_distinct_single_probe_perf_tests {
         let source: BatchStream = Box::new([Ok(overflowing)].into_iter());
         assert!(DistinctOutput::new(source, QueryControl::default(), 1, 4096)
             .next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_union_distinct_lowering_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field}, scalar::Value, sql};
+    use std::fs;
+
+    #[test]
+    fn union_distinct_keeps_first_rows_and_nulls_across_csv_batches() {
+        let dir = std::env::temp_dir().join(format!("native-union-distinct-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let left = dir.join("a.csv");
+        let right = dir.join("b.csv");
+        fs::write(&left, "id\n1\n2\n\n").unwrap();
+        fs::write(&right, "id\n2\n3\n\n").unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("a", &left, schema.clone(), 256).unwrap();
+        catalog.register_csv("b", &right, schema, 256).unwrap();
+        let plan = sql::parse_sql("SELECT id FROM a UNION SELECT id FROM b").unwrap();
+        let parts = execute(&plan, &catalog, &StreamOptions {
+            batch_rows: 1, scratch_directory: dir.clone(), ..StreamOptions::default()
+        }, QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+            ]);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
