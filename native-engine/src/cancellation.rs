@@ -1,19 +1,16 @@
 //! Cooperative cancellation for independent native query operators.
-use std::{
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
-    time::{Duration, Instant},
-};
-use crate::{Error, Result};
+use std::time::{Duration, Instant};
+use crate::{cancel::Cancellation, Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct QueryCancellation {
-    cancelled: Arc<AtomicBool>,
+    cancelled: Cancellation,
     deadline: Option<Instant>,
 }
 
 impl QueryCancellation {
     pub fn new() -> Self {
-        Self { cancelled: Arc::new(AtomicBool::new(false)), deadline: None }
+        Self { cancelled: Cancellation::new(), deadline: None }
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
@@ -25,15 +22,15 @@ impl QueryCancellation {
     }
 
     pub fn with_deadline(deadline: Instant) -> Self {
-        Self { cancelled: Arc::new(AtomicBool::new(false)), deadline: Some(deadline) }
+        Self { cancelled: Cancellation::new(), deadline: Some(deadline) }
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.cancelled.cancel();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.cancelled.is_cancelled()
     }
 
     /// Called at scan, join, aggregate, and pipeline boundaries.
