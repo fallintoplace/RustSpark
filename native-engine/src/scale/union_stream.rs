@@ -1,4 +1,5 @@
 //! Streaming UNION ALL preserves input order and checks every batch schema.
+use std::hash::{Hash, Hasher};
 use crate::{batch::Batch, schema::Schema, Error, Result};
 use super::cancel::QueryControl;
 
@@ -104,7 +105,8 @@ mod tests {
 /// Bounded UNION DISTINCT across two input streams, preserving first appearance.
 pub struct UnionDistinctStream<L, R> {
     inner: UnionAllStream<L, R>,
-    seen: std::collections::HashMap<Vec<crate::scalar::Value>, ()>,
+    seen: std::collections::HashMap<u64, Vec<Vec<crate::scalar::Value>>>,
+    unique_keys: usize,
     retained_bytes: usize,
     max_keys: usize,
     max_bytes: usize,
@@ -122,7 +124,7 @@ impl<L, R> UnionDistinctStream<L, R> {
         Ok(Self {
             inner: UnionAllStream::new(left, right, schema, control),
             seen: std::collections::HashMap::new(),
-            retained_bytes: 0, max_keys, max_bytes, stopped: false,
+            unique_keys: 0, retained_bytes: 0, max_keys, max_bytes, stopped: false,
         })
     }
 }
@@ -142,8 +144,45 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     return Some(Err(error));
                 }
             };
+            // Probe hash buckets using references to column values. Only first
+            // occurrences are materialized as owned keys.
+            let columns = match (0..batch.schema().len())
+                .map(|col| batch.column(col))
+                .collect::<Result<Vec<_>>>() {
+                    Ok(columns) => columns,
+                    Err(error) => {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                };
             let mut selected = Vec::new();
             for row in 0..batch.num_rows() {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                columns.len().hash(&mut hasher);
+                for column in &columns { column[row].hash(&mut hasher); }
+                let fingerprint = hasher.finish();
+                if self.seen.get(&fingerprint).is_some_and(|entries|
+                    entries.iter().any(|key| key.iter().zip(&columns)
+                        .all(|(value, column)| value == &column[row]))) {
+                    continue;
+                }
+                if self.unique_keys >= self.max_keys {
+                    self.stopped = true;
+                    return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
+                }
+                let footprint = columns.iter().fold(
+                    64usize.saturating_add(columns.len().saturating_mul(
+                        std::mem::size_of::<crate::scalar::Value>())),
+                    |total, column| match &column[row] {
+                        crate::scalar::Value::Text(text) => total.saturating_add(text.len()),
+                        _ => total,
+                    }
+                );
+                let next_total = self.retained_bytes.checked_add(footprint);
+                if next_total.is_none_or(|bytes| bytes > self.max_bytes) {
+                    self.stopped = true;
+                    return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
+                }
                 let key = match batch.row(row) {
                     Ok(key) => key,
                     Err(error) => {
@@ -151,29 +190,10 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         return Some(Err(error));
                     }
                 };
-                let at_limit = self.seen.len() >= self.max_keys;
-                match self.seen.entry(key) {
-                    std::collections::hash_map::Entry::Occupied(_) => continue,
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let key = entry.key();
-                        let footprint = key.iter().fold(
-                            64usize.saturating_add(key.len().saturating_mul(
-                                std::mem::size_of::<crate::scalar::Value>())),
-                            |total, value| match value {
-                                crate::scalar::Value::Text(text) => total.saturating_add(text.len()),
-                                _ => total,
-                            }
-                        );
-                        let next_total = self.retained_bytes.checked_add(footprint);
-                        if at_limit || next_total.is_none_or(|bytes| bytes > self.max_bytes) {
-                            self.stopped = true;
-                            return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
-                        }
-                        self.retained_bytes = next_total.expect("validated set memory");
-                        entry.insert(());
-                        selected.push(row);
-                    }
-                }
+                self.retained_bytes = next_total.expect("validated set memory");
+                self.unique_keys += 1;
+                self.seen.entry(fingerprint).or_default().push(key);
+                selected.push(row);
             }
             if !selected.is_empty() {
                 if selected.len() == batch.num_rows() {
@@ -310,5 +330,34 @@ mod union_schema_move_perf_tests {
         assert_eq!(batches[0].num_rows(), 2);
         assert_eq!(batches[0].value(0, 0).unwrap(),
             &Value::Text("large-value".repeat(100)));
+    }
+}
+
+#[cfg(test)]
+mod union_borrowed_row_probe_perf_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn handles_repeated_large_keys_across_streams_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let big = Value::Text("repeated-unicode-é".repeat(512));
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![big.clone(), Value::Integer(1)],
+            vec![big.clone(), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(0)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![big.clone(), Value::Integer(1)],
+            vec![big, Value::Integer(2)],
+            vec![Value::Null, Value::Integer(0)],
+        ]).unwrap();
+        let output = UnionDistinctStream::new([Ok(left)].into_iter(), [Ok(right)].into_iter(),
+            schema, QueryControl::default(), 3, 32 * 1024).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.into_iter().flat_map(|b| b.rows().unwrap()).count(), 3);
     }
 }
