@@ -64,7 +64,8 @@ where I: Iterator<Item = Result<Vec<Value>>>
         // Exact or bounded iterators often have far fewer rows remaining than
         // the requested batch size. Avoid reserving tens of thousands of slots
         // for a tiny final batch.
-        let capacity = self.input.size_hint().1.map_or(limit, |upper| upper.min(limit));
+        let capacity = self.input.size_hint().1
+            .map_or(limit.min(256), |upper| upper.min(limit));
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(capacity)).collect::<Vec<Vec<Value>>>();
         let mut row_count = 0usize;
@@ -311,5 +312,27 @@ mod row_batch_byte_admission_tests {
         assert_eq!(batches.next().unwrap().unwrap().num_rows(), 1);
         assert!(batches.next().unwrap().is_err());
         assert!(batches.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod unknown_length_batch_stream_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn unknown_length_iterator_keeps_row_order() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut n = 0;
+        let rows = std::iter::from_fn(move || {
+            if n == 300 { return None; }
+            let value = n;
+            n += 1;
+            Some(Ok(vec![Value::Integer(value)]))
+        });
+        let output = RowBatcher::new(rows, schema, 4096).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().map(Batch::num_rows).sum::<usize>(), 300);
+        assert_eq!(output[0].value(299, 0).unwrap(), &Value::Integer(299));
     }
 }
