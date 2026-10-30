@@ -18,3 +18,5 @@ pub mod dictionary;
 pub mod hll;
 pub mod file_catalog;
 pub mod stream_execute;
+
+pub mod manifest_storage;
