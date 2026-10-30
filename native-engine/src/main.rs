@@ -75,16 +75,24 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                     return Err(Error::Parse("duplicate --parquet".into()));
                 }
             }
-            "--source" => {
+            "--source" | "--csv-table" | "--parquet-table" => {
                 let (table_name, file) = value.split_once('=')
-                    .ok_or_else(|| Error::Parse("--source expects TABLE=FILE".into()))?;
+                    .ok_or_else(|| Error::Parse(format!("{arg} expects TABLE=FILE")))?;
                 if table_name.is_empty() || file.is_empty() {
-                    return Err(Error::Parse("--source requires a table and file path".into()));
+                    return Err(Error::Parse(format!("{arg} requires a table and file path")));
                 }
                 let path = PathBuf::from(file);
-                if !matches!(path.extension().and_then(|ext| ext.to_str())
-                    .map(|ext| ext.to_ascii_lowercase()).as_deref(), Some("csv" | "parquet")) {
-                    return Err(Error::Unsupported("--source supports .csv or .parquet files".into()));
+                let extension = path.extension().and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase());
+                let supported = match arg.as_str() {
+                    "--csv-table" => extension.as_deref() == Some("csv"),
+                    "--parquet-table" => extension.as_deref() == Some("parquet"),
+                    _ => matches!(extension.as_deref(), Some("csv" | "parquet")),
+                };
+                if !supported {
+                    return Err(Error::Unsupported(format!(
+                        "{arg} requires a .csv or .parquet file of the requested type"
+                    )));
                 }
                 sources.push((table_name.to_string(), path));
             },
@@ -424,6 +432,28 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+
+    #[test]
+    fn client_style_named_file_source_flags_register_tables() {
+        let args = parse_args([
+            "--csv-table", "sales=first.csv",
+            "--parquet-table", "users=second.PARQUET",
+            "--sql", "SELECT * FROM sales",
+        ].into_iter().map(String::from)).unwrap().unwrap();
+        assert_eq!(args.sources.len(), 2);
+        assert_eq!(args.sources[0].0, "sales");
+        assert_eq!(args.sources[1].0, "users");
+        for source in [
+            vec!["--csv-table", "x=bad.parquet"],
+            vec!["--parquet-table", "x=bad.csv"],
+            vec!["--csv-table", "x"],
+        ] {
+            let mut flags = source;
+            flags.extend(["--sql", "SELECT 1 FROM x"]);
+            assert!(parse_args(flags.into_iter().map(String::from)).is_err());
+        }
     }
 
     #[test]
