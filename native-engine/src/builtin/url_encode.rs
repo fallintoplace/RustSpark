@@ -9,12 +9,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > MAX_OUTPUT_BYTES {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
-    let mut encoded = String::with_capacity(text.len());
+    let mut output_bytes = 0usize;
     for &byte in text.as_bytes() {
-        let escaped = !matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ');
-        if encoded.len() > MAX_OUTPUT_BYTES - if escaped { 3 } else { 1 } {
-            return Err(Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()));
-        }
+        let emitted = if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' | b' ') { 1 } else { 3 };
+        output_bytes = output_bytes.checked_add(emitted)
+            .filter(|&bytes| bytes <= MAX_OUTPUT_BYTES)
+            .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
+    }
+    let mut encoded = String::with_capacity(output_bytes);
+    for &byte in text.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' =>
                 encoded.push(char::from(byte)),
@@ -43,5 +46,17 @@ mod tests {
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(evaluate(&[Value::Text("🙂".repeat(1_400_000))]).is_err());
         assert!(evaluate(&[Value::Text("a".repeat(MAX_OUTPUT_BYTES + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod url_encode_exact_capacity_tests {
+    use super::*;
+    #[test]
+    fn handles_large_escaped_text_and_output_overflow() {
+        let input = "/".repeat(8192);
+        assert_eq!(evaluate(&[Value::Text(input)]).unwrap(), Value::Text("%2F".repeat(8192)));
+        assert_eq!(evaluate(&[Value::Text("é 🙂".into())]).unwrap(), Value::Text("%C3%A9+%F0%9F%99%82".into()));
+        assert!(evaluate(&[Value::Text("/".repeat(MAX_OUTPUT_BYTES / 3 + 1))]).is_err());
     }
 }
