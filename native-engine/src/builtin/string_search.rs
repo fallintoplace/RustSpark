@@ -62,7 +62,7 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
         start
     };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
-    let characters = if ascii { found } else { text[start..start + found].chars().count() };
+    let characters = super::char_length::character_count(&text[start..start + found]);
     let position = offset.checked_add(characters).and_then(|n| n.checked_add(1))
         .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
     let position = i64::try_from(position)
