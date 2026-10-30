@@ -94,6 +94,44 @@ pub fn scan_row_groups(
     Ok(ParquetScan { inner })
 }
 
+/// Push down column projection and row-group selection together before decoding.
+pub fn scan_columns_row_groups(
+    path: impl AsRef<Path>, batch_size: usize,
+    columns: &[&str], row_groups: &[usize],
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    if columns.is_empty() {
+        return Err(Error::Schema("Parquet projection must have at least one column".into()));
+    }
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let fields = builder.schema().fields();
+    let mut projection = Vec::with_capacity(columns.len());
+    for &name in columns {
+        let index = fields.iter().position(|field| field.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
+        if projection.contains(&index) {
+            return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
+        }
+        projection.push(index);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for &group in row_groups {
+        if group >= builder.metadata().num_row_groups() || !seen.insert(group) {
+            return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+        }
+    }
+    let mask = ProjectionMask::roots(builder.parquet_schema(), projection);
+    let inner = builder.with_projection(mask)
+        .with_row_groups(row_groups.to_vec())
+        .with_batch_size(batch_size)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner })
+}
+
 /// Skip and limit decoded rows in the Parquet reader instead of materializing
 /// and slicing unwanted native batches afterward.
 pub fn scan_window(
@@ -376,6 +414,39 @@ mod parquet_native_offset_limit_pushdown_tests {
         assert_eq!(scan_window(&path, 3, 0, 0).unwrap().count(), 0);
         assert_eq!(scan_window(&path, 3, 100, 5).unwrap().count(), 0);
         assert!(scan_window(&path, 3, usize::MAX, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod combined_parquet_pushdown_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn projects_selected_fields_from_selected_row_groups() {
+        let path = std::env::temp_dir().join(format!("rustspark-projection-groups-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("name", DataType::Text, true),
+        ]).unwrap(), (0..6).map(|n| vec![Value::Integer(n),
+            if n % 2 == 0 { Value::Null } else { Value::Text(format!("n{n}")) },
+        ]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&input).unwrap();
+        let options = WriterProperties::builder().set_max_row_group_size(2).build();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), arrow.schema(), Some(options)).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let output = scan_columns_row_groups(&path, 1, &["NAME"], &[0, 2]).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            vec![vec![Value::Null], vec![Value::Text("n1".into())],
+                vec![Value::Null], vec![Value::Text("n5".into())]]);
+        assert!(scan_columns_row_groups(&path, 2, &["name", "NAME"], &[0]).is_err());
+        assert!(scan_columns_row_groups(&path, 2, &["name"], &[3]).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
