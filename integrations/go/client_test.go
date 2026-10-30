@@ -108,3 +108,15 @@ func TestQueryOneBoundsCardinality(t *testing.T) {
         t.Fatal("expected error for multiple rows")
     }
 }
+
+func TestDiagnosticBufferDoesNotGrowWithoutLimit(t *testing.T) {
+    var stderr boundedDiagnostic
+    data := []byte(strings.Repeat("x", maxDiagnosticBytes*3))
+    count, err := stderr.Write(data)
+    if err != nil || count != len(data) {
+        t.Fatalf("expected full write consumption, got %d: %v", count, err)
+    }
+    if stderr.Len() != maxDiagnosticBytes {
+        t.Fatalf("diagnostic buffer grew to %d bytes", stderr.Len())
+    }
+}
