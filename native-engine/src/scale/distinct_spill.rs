@@ -13,6 +13,7 @@ use super::{
 };
 
 static DISTINCT_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_DISTINCT_KEY_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct DistinctFiles {
     paths: Vec<PathBuf>,
@@ -35,6 +36,18 @@ pub fn distinct_to_disk<I>(
     input: I, schema: Schema, directory: &Path, partitions: usize,
     max_unique_rows_per_partition: usize, io_batch_rows: usize,
     control: &QueryControl,
+) -> Result<DistinctFiles>
+where I: IntoIterator<Item = Result<Batch>>
+{
+    distinct_to_disk_with_byte_budget(input, schema, directory, partitions,
+        max_unique_rows_per_partition, io_batch_rows, MAX_DISTINCT_KEY_BYTES, control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn distinct_to_disk_with_byte_budget<I>(
+    input: I, schema: Schema, directory: &Path, partitions: usize,
+    max_unique_rows_per_partition: usize, io_batch_rows: usize,
+    max_key_bytes: usize, control: &QueryControl,
 ) -> Result<DistinctFiles>
 where I: IntoIterator<Item = Result<Batch>>
 {
@@ -61,13 +74,26 @@ where I: IntoIterator<Item = Result<Batch>>
             return Err(Error::Schema("DISTINCT partition schema mismatch".into()));
         }
         let mut seen: HashSet<Vec<Value>> = HashSet::new();
+        let mut key_bytes = 0usize;
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
             for index in 0..batch.num_rows() {
+                if index % 1024 == 0 { control.check()?; }
                 let row = batch.row(index)?;
-                if seen.insert(row) && seen.len() > max_unique_rows_per_partition {
+                if seen.contains(&row) { continue; }
+                if seen.len() >= max_unique_rows_per_partition {
                     return Err(Error::Execution("DISTINCT partition exceeds state budget".into()));
                 }
+                let footprint = row.iter().try_fold(64usize, |size, value| {
+                    let text_bytes = match value { Value::Text(text) => text.len(), _ => 0 };
+                    size.checked_add(std::mem::size_of::<Value>())
+                        .and_then(|size| size.checked_add(text_bytes))
+                }).ok_or_else(|| Error::Execution("DISTINCT key byte size overflow".into()))?;
+                let next = key_bytes.checked_add(footprint)
+                    .filter(|bytes| *bytes <= max_key_bytes)
+                    .ok_or_else(|| Error::Execution("DISTINCT key byte budget exceeded".into()))?;
+                seen.insert(row);
+                key_bytes = next;
             }
         }
         // Untouched partitions have no output. Avoid writing and later
@@ -161,5 +187,34 @@ mod sparse_distinct_result_shards_tests {
         assert!(empty.paths().is_empty());
         drop(empty);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bounded_disk_distinct_key_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn long_text_keys_cannot_evade_the_distinct_memory_budget() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-distinct-byte-cap-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("a".repeat(200))],
+            vec![Value::Text("b".repeat(200))],
+        ]).unwrap();
+        let result = distinct_to_disk_with_byte_budget([Ok(input.clone())], schema.clone(),
+            &directory, 1, 100, 2, 300, &QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
+        let output = distinct_to_disk_with_byte_budget([Ok(input)], schema,
+            &directory, 1, 100, 2, 1024, &QueryControl::default()).unwrap();
+        assert_eq!(output.paths().len(), 1);
+        drop(output);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
