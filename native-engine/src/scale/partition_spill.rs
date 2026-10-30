@@ -55,7 +55,7 @@ fn write_shard(
         let file = OpenOptions::new().write(true).create_new(true).open(&paths[index])?;
         *slot = Some(SpillWriter::new(BufWriter::new(file), schema.clone())?);
     }
-    slot.as_mut().expect("shard writer initialized").write_batch(&batch.take(rows)?)
+    slot.as_mut().expect("shard writer initialized").write_batch_indices(batch, rows)
 }
 
 impl PartitionWriter {
