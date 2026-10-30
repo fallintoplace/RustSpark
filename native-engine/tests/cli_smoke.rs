@@ -44,7 +44,7 @@ fn native_cli_limits_output_rows_with_and_without_streaming() {
     let path = std::env::temp_dir().join(format!(
         "rustspark-native-row-cap-{}-{unique}.csv", std::process::id()
     ));
-    fs::write(&path, "n\\n1\\n2\\n3\\n").unwrap();
+    fs::write(&path, "n\n1\n2\n3\n").unwrap();
     let binary = env!("CARGO_BIN_EXE_rustspark-native");
     for flags in [vec![], vec!["--stream"]] {
         let mut args = vec!["--csv", path.to_str().unwrap(),
@@ -52,7 +52,7 @@ fn native_cli_limits_output_rows_with_and_without_streaming() {
         args.extend(flags);
         let output = Command::new(binary).args(args).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "n\\n1\\n2\\n");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "n\n1\n2\n");
     }
     fs::remove_file(path).unwrap();
 }
