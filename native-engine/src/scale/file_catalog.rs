@@ -13,6 +13,7 @@ pub struct CsvTable {
 impl CsvTable {
     pub fn schema(&self) -> &Schema { &self.schema }
     pub fn path(&self) -> &Path { &self.path }
+    pub fn max_record_bytes(&self) -> usize { self.max_record_bytes }
     pub fn open(&self) -> Result<CsvRows<BufReader<File>>> {
         open_csv(&self.path, self.schema.clone(), self.max_record_bytes)
     }
