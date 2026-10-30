@@ -54,6 +54,7 @@ impl HyperLogLog {
     }
 
     pub fn estimate(&self) -> f64 {
+        if self.nonempty == 0 { return 0.0; }
         let m = REGISTERS as f64;
         let zeros = REGISTERS - self.nonempty;
         let mut harmonic = 0.0;
