@@ -213,15 +213,11 @@ mod duplicate_option_rejection_tests {
             ("--sql", "SELECT n FROM data", "SELECT * FROM data"),
             ("--sql-file", "a.sql", "b.sql"),
         ] {
-            let options = ["--csv".to_owned(), "data.csv".to_owned(),
-                "--schema".to_owned(), "n:int".to_owned(),
-                "--sql".to_owned(), "SELECT n FROM data".to_owned()];
-            let mut options = options.to_vec();
-            options.push(flag.to_owned());
-            options.push(first.to_owned());
-            options.push(flag.to_owned());
-            options.push(second.to_owned());
-            assert!(parse_args(options).is_err(), "{flag}");
+            let args = ["--csv", "data.csv", flag, first, flag, second];
+            let diagnostic = parse_args(args.into_iter().map(String::from))
+                .err().unwrap().to_string();
+            assert!(diagnostic.contains(&format!("duplicate option: {flag}")),
+                "{diagnostic}");
         }
     }
 }
