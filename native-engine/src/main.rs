@@ -30,10 +30,11 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    explain_stages: bool,
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl] [--explain-stages]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -46,6 +47,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut explain_stages = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -54,6 +56,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
         if arg == "--jsonl" {
             if jsonl { return Err(Error::Parse("duplicate --jsonl".into())); }
             jsonl = true;
+            continue;
+        }
+        if arg == "--explain-stages" {
+            if explain_stages {
+                return Err(Error::Parse("duplicate --explain-stages".into()));
+            }
+            explain_stages = true;
             continue;
         }
         if arg == "--stream" {
@@ -134,7 +143,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, explain_stages }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -313,6 +322,12 @@ fn run() -> Result<()> {
         println!("{}", usage());
         return Ok(());
     };
+    if args.explain_stages {
+        let plan = sql::parse_sql(&args.sql)?;
+        let graph = rustspark_native::stages::StageGraph::from_plan(&plan)?;
+        print!("{}", graph.explain()?);
+        return Ok(());
+    }
     if args.stream {
         return run_stream(&args);
     }
@@ -421,5 +436,19 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod explain_stages_cli_flag_tests {
+    use super::*;
+    #[test]
+    fn exposes_explain_flag_without_opening_input_files() {
+        let args = parse_args(["--csv", "not-a-file.csv", "--sql", "SELECT * FROM data",
+            "--explain-stages"].into_iter().map(String::from)).unwrap().unwrap();
+        assert!(args.explain_stages);
+        let duplicate = ["--csv", "not-a-file.csv", "--sql", "SELECT * FROM data",
+            "--explain-stages", "--explain-stages"];
+        assert!(parse_args(duplicate.into_iter().map(String::from)).is_err());
     }
 }
