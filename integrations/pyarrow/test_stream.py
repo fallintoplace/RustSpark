@@ -17,6 +17,12 @@ class ArrowStreamCommandTests(unittest.TestCase):
         self.assertIn("/tmp/a b.csv", args)
         self.assertIn("50", args)
 
+    def test_missing_binary_reports_stream_error(self):
+        with patch.dict(sys.modules, {"pyarrow": SimpleNamespace()}), \\
+             patch("stream.subprocess.Popen", side_effect=FileNotFoundError("rustspark")):
+            with self.assertRaisesRegex(RuntimeError, "Unable to launch RustSpark"):
+                list(iter_arrow_batches("SELECT 1"))
+
     def test_rejects_conflicting_sources(self):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", csv="a.csv", parquet="b.parquet")
