@@ -39,6 +39,7 @@ pub fn merge_to_fan_in(
     if source.schema() != &schema {
         return Err(Error::Schema("multi-pass sort schema mismatch".into()));
     }
+    control.check()?;
     let mut result = MultiPassRuns {
         current: source.files().to_vec(), _source: source, scratch: Vec::new()
     };
@@ -102,5 +103,24 @@ mod tests {
         assert_eq!(rows, (0..101).map(Value::Integer).collect::<Vec<_>>());
         drop(merged);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cancelled_empty_merge_pass_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}, scale::sorted_runs::write_sorted_runs};
+
+    #[test]
+    fn cancelled_merge_fails_even_with_zero_runs() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("k".into()))];
+        let source = write_sorted_runs(Vec::<Result<crate::batch::Batch>>::new(),
+            schema.clone(), &keys, std::env::temp_dir().as_path(), 4,
+            &QueryControl::default()).unwrap();
+        let cancelled = QueryControl::default();
+        cancelled.cancel();
+        assert!(merge_to_fan_in(source, std::env::temp_dir().as_path(),
+            schema, &keys, 4, 2, &cancelled).is_err());
     }
 }
