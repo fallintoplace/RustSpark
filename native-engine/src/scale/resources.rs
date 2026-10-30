@@ -53,6 +53,9 @@ impl MemoryBudget {
 impl Reservation {
     pub fn bytes(&self) -> usize { self.bytes }
 
+    /// Transfer this guard's charge to other guards without releasing the budget.
+    fn disarm(&mut self) { self.bytes = 0; }
+
     /// Transfer part of this allocation to another guard, with no new budget admission.
     pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
         if bytes > self.bytes {
@@ -67,7 +70,7 @@ impl Reservation {
             let extra = new_bytes - self.bytes;
             let mut additional = self.budget.reserve(extra)?;
             // Transfer the reservation, then release only the guard object.
-            additional.bytes = 0;
+            additional.disarm();
         } else if new_bytes < self.bytes {
             self.budget.used.fetch_sub(self.bytes - new_bytes, Ordering::AcqRel);
         }
@@ -128,7 +131,7 @@ pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Res
         budget: budget.clone(), bytes,
     }).collect();
     // Transfer the already-charged capacity to independent drop guards.
-    combined.bytes = 0;
+    combined.disarm();
     Ok(reservations)
 }
 
