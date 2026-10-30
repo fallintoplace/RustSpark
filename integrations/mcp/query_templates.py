@@ -55,6 +55,9 @@ def make_command(binary: str, database_dir: Path, template: Path,
 
 
 def parse_query_rows(text: str) -> list[dict]:
+    if len(text) > 8 * 1024 * 1024 or len(text.encode("utf-8")) > 8 * 1024 * 1024:
+        raise ValueError("SQL result exceeds MCP response byte limit")
+
     def reject_nonfinite(value):
         raise ValueError(f"Nonfinite SQL JSON constant: {value}")
 
