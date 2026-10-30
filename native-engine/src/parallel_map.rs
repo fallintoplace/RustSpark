@@ -98,6 +98,25 @@ mod tests {
 }
 
  
+/// Run independent native partitions with cooperative query deadlines and cancellation.
+pub fn map_partitions_guarded<F>(
+    input: Vec<Batch>, max_workers: usize,
+    guard: &crate::cancel::QueryGuard, operator: F,
+) -> Result<Vec<Batch>>
+where
+    F: Fn(Batch) -> Result<Batch> + Sync,
+{
+    guard.check()?;
+    let output = map_partitions(input, max_workers, |batch| {
+        guard.check()?;
+        let output = operator(batch)?;
+        guard.check()?;
+        Ok(output)
+    })?;
+    guard.check()?;
+    Ok(output)
+}
+
 /// Apply an independent SQL predicate to every partition in parallel.
 pub fn filter_partitions(
     input: Vec<Batch>,
@@ -170,5 +189,31 @@ mod serial_worker_fast_path_tests {
         });
         assert!(result.unwrap_err().to_string().contains("stop"));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[cfg(test)]
+mod native_cancellable_parallel_worker_tests {
+    use super::*;
+    use crate::{cancel::{Cancellation, QueryGuard}, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn cancellation_rejects_work_before_dispatch_and_after_execution() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(3)]]).unwrap();
+        let cancellation = Cancellation::new();
+        let guard = QueryGuard::new(cancellation.clone());
+        assert_eq!(map_partitions_guarded(vec![batch.clone()], 1, &guard, Ok).unwrap(),
+            vec![batch.clone()]);
+        cancellation.cancel();
+        assert!(map_partitions_guarded(vec![batch.clone()], 1, &guard, Ok).is_err());
+        let token = Cancellation::new();
+        let running = QueryGuard::new(token.clone());
+        let result = map_partitions_guarded(vec![batch], 1, &running, |batch| {
+            token.cancel();
+            Ok(batch)
+        });
+        assert!(result.is_err());
     }
 }
