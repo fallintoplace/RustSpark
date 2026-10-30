@@ -17,6 +17,11 @@ class ArrowStreamCommandTests(unittest.TestCase):
         self.assertIn("/tmp/a b.csv", args)
         self.assertIn("50", args)
 
+    def test_nontext_sql_raises_validation_error(self):
+        for sql in (None, 2, False, [], ""):
+            with self.subTest(sql=sql), self.assertRaisesRegex(ValueError, "SQL must not be empty"):
+                build_command(sql)
+
     def test_rejects_conflicting_sources(self):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", csv="a.csv", parquet="b.parquet")
