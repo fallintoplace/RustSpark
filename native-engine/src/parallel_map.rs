@@ -159,3 +159,49 @@ mod serial_worker_fast_path_tests {
         assert_eq!(calls.load(Ordering::Relaxed), 3);
     }
 }
+
+/// Apply native typed projections independently across partition batches.
+/// Output partition order is identical to input order.
+pub fn project_partitions(
+    input: Vec<Batch>,
+    max_workers: usize,
+    selections: Vec<crate::project::Selection>,
+) -> Result<Vec<Batch>> {
+    map_partitions(input, max_workers, |batch| crate::project::project(&batch, &selections))
+}
+
+#[cfg(test)]
+mod parallel_native_projection_tests {
+    use super::*;
+    use crate::{
+        expr::{BinaryOp, Expr},
+        project::Selection,
+        scalar::Value,
+        schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn parallel_projections_preserve_order_aliases_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        let parts = (0..8).map(|n| Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(n)], vec![Value::Null],
+        ]).unwrap()).collect::<Vec<_>>();
+        let projection = vec![
+            Selection::new(Expr::Column("n".into()), "original"),
+            Selection::new(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)),
+            ), "increased"),
+        ];
+        let parallel = project_partitions(parts.clone(), 3, projection.clone()).unwrap();
+        let sequential = project_partitions(parts, 1, projection).unwrap();
+        assert_eq!(parallel, sequential);
+        assert_eq!(parallel[5].rows().unwrap(), vec![
+            vec![Value::Integer(5), Value::Integer(6)],
+            vec![Value::Null, Value::Null],
+        ]);
+        assert_eq!(parallel[0].schema().field(1).unwrap().name, "increased");
+    }
+}
