@@ -22,6 +22,25 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
             if matches!(&**value, Expr::Column(name) if name.eq_ignore_ascii_case(column))) => {
             stats.rows == stats.nulls
         }
+        Expr::Not(inner) => {
+            if let Expr::Binary { left, op, right } = inner.as_ref() {
+                let inverted = match op {
+                    BinaryOp::Equal => Some(BinaryOp::NotEqual),
+                    BinaryOp::NotEqual => Some(BinaryOp::Equal),
+                    BinaryOp::Less => Some(BinaryOp::GreaterEqual),
+                    BinaryOp::LessEqual => Some(BinaryOp::Greater),
+                    BinaryOp::Greater => Some(BinaryOp::LessEqual),
+                    BinaryOp::GreaterEqual => Some(BinaryOp::Less),
+                    _ => None,
+                };
+                if let Some(op) = inverted {
+                    return can_skip(stats, column, &Expr::binary(
+                        *left.clone(), op, *right.clone(),
+                    ));
+                }
+            }
+            false
+        }
         Expr::Binary { left, op: BinaryOp::And, right } => {
             can_skip(stats, column, left) || can_skip(stats, column, right)
         }
@@ -197,5 +216,25 @@ mod constant_false_partition_pruning_tests {
         assert!(can_skip_columns(&empty, &and));
         let or = Expr::binary(true_predicate, BinaryOp::Or, null_predicate);
         assert!(!can_skip_columns(&empty, &or));
+    }
+}
+
+#[cfg(test)]
+mod negated_native_range_pruning_tests {
+    use super::*;
+
+    #[test]
+    fn skips_only_impossible_negations() {
+        let summary = ColumnStatistics { rows: 10, nulls: 2,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(19)) };
+        let gt = |n| Expr::binary(Expr::Column("x".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(n)));
+        assert!(can_skip(&summary, "x", &Expr::Not(Box::new(gt(9)))));
+        assert!(!can_skip(&summary, "x", &Expr::Not(Box::new(gt(17)))));
+        assert!(!can_skip(&summary, "y", &Expr::Not(Box::new(gt(9)))));
+        assert!(can_skip(&summary, "x", &Expr::Not(Box::new(
+            Expr::binary(Expr::Column("x".into()), BinaryOp::Equal,
+                         Expr::Literal(Value::Integer(5)))
+        )) ) == false);
     }
 }
