@@ -109,6 +109,26 @@ func TestQueryOneBoundsCardinality(t *testing.T) {
     }
 }
 
+func TestDecodeRowsRejectsNullAndNonObjectRows(t *testing.T) {
+    for _, raw := range []string{
+        "null", "[null]", "[{},null]", "{}", "[1]", "[true]",
+        "[{}] []", "[{}] garbage",
+    } {
+        if rows, err := decodeRows(strings.NewReader(raw)); err == nil {
+            t.Fatalf("accepted non-object JSON result %q: %#v", raw, rows)
+        }
+    }
+    for _, raw := range []string{"[]", "[{}]", "[{\"n\":1234567890123456789}]"} {
+        rows, err := decodeRows(strings.NewReader(raw))
+        if err != nil {
+            t.Fatalf("rejected valid rows %q: %v", raw, err)
+        }
+        if len(rows) == 0 && raw != "[]" {
+            t.Fatalf("unexpected empty result for %q", raw)
+        }
+    }
+}
+
 func TestStderrBudgetStopsUnboundedDiagnostics(t *testing.T) {
     output := boundedStderr()
     if _, err := output.Write(bytes.Repeat([]byte("x"), maxStderrBytes)); err != nil {

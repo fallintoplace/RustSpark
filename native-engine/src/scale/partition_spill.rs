@@ -138,7 +138,9 @@ impl PartitionWriter {
     }
 
     pub fn finish(mut self) -> Result<PartitionFiles> {
-        let owned = self.owned.take().expect("active partition writer");
+        // Keep path ownership until every file is finalized. If a flush or
+        // create_new fails, dropping self removes the incomplete spill files.
+        let owned = self.owned.as_ref().expect("active partition writer");
         for (index, writer) in self.writers.take().unwrap_or_default().into_iter().enumerate() {
             if let Some(writer) = writer {
                 writer.finish()?;
@@ -150,7 +152,7 @@ impl PartitionWriter {
                 SpillWriter::new(BufWriter::new(file), owned.schema.clone())?.finish()?;
             }
         }
-        Ok(owned)
+        Ok(self.owned.take().expect("active partition writer"))
     }
 }
 
@@ -367,5 +369,34 @@ mod single_shard_partition_zero_copy_tests {
         drop(reader);
         drop(files);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod failed_partition_finish_cleanup_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::fs;
+
+    #[test]
+    fn failed_finalization_removes_prior_partial_spill_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "failed-native-partition-finish-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos(),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let writer = PartitionWriter::new(&directory, schema, &["key"], 2, 16).unwrap();
+        let paths = writer.owned.as_ref().unwrap().paths().to_vec();
+
+        // A directory in the second shard slot forces finalization to fail
+        // after the first empty shard file has already been created.
+        fs::create_dir(&paths[1]).unwrap();
+        assert!(writer.finish().is_err());
+        assert!(!paths[0].exists(), "incomplete first shard leaked after failure");
+        fs::remove_dir(&paths[1]).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 }
