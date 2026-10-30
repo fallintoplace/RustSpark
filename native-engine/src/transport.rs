@@ -55,6 +55,31 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
     Ok(())
 }
 
+/// Encode multiple native exchange frames under one aggregate budget.
+/// Validate all sizes before writing to avoid partial output for admission failures.
+pub fn write_frames_limited(
+    output: &mut impl Write, frames: &[Frame],
+    max_frame_bytes: usize, max_total_bytes: usize, max_frames: usize,
+) -> Result<()> {
+    if frames.len() > max_frames {
+        return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
+    }
+    let mut total = 0usize;
+    for frame in frames {
+        if frame.payload.len() > max_frame_bytes ||
+            u32::try_from(frame.payload.len()).is_err() {
+            return Err(Error::Execution("exchange frame exceeds memory or wire budget".into()));
+        }
+        total = total.checked_add(frame.payload.len())
+            .filter(|used| *used <= max_total_bytes)
+            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
+    }
+    for frame in frames {
+        write_frame(output, frame, max_frame_bytes)?;
+    }
+    Ok(())
+}
+
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
     let mut header = [0u8; 32];
@@ -245,5 +270,31 @@ mod exchange_header_read_coalescing_tests {
         assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
         assert_eq!(reader.calls, 3);
         assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod bounded_native_exchange_writer_tests {
+    use super::*;
+
+    #[test]
+    fn validates_all_frames_before_emitting_wire_bytes() {
+        let frames = (0..3).map(|task| Frame {
+            stage: 1, task, attempt: 0, payload: vec![42; 4],
+        }).collect::<Vec<_>>();
+        let mut wire = Vec::new();
+        assert!(write_frames_limited(&mut wire, &frames, 4, 11, 3).is_err());
+        assert!(wire.is_empty());
+        assert!(write_frames_limited(&mut wire, &frames, 4, 12, 2).is_err());
+        assert!(wire.is_empty());
+        write_frames_limited(&mut wire, &frames, 4, 12, 3).unwrap();
+        assert_eq!(read_frames_limited(&mut wire.as_slice(), 4, 12, 3).unwrap(), frames);
+    }
+
+    #[test]
+    fn accepts_empty_wire_stream_with_zero_budget() {
+        let mut wire = Vec::new();
+        write_frames_limited(&mut wire, &[], 0, 0, 0).unwrap();
+        assert!(wire.is_empty());
     }
 }
