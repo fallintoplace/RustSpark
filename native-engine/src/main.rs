@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -30,6 +30,21 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+}
+
+const MAX_SQL_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_sql_file(path: &Path) -> Result<String> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_SQL_BYTES {
+        return Err(Error::Execution("SQL query exceeds 4 MiB input limit".into()));
+    }
+    let mut sql = String::new();
+    file.take(MAX_SQL_BYTES + 1).read_to_string(&mut sql)?;
+    if sql.len() as u64 > MAX_SQL_BYTES {
+        return Err(Error::Execution("SQL query exceeds 4 MiB input limit".into()));
+    }
+    Ok(sql)
 }
 
 fn usage() -> &'static str {
@@ -128,9 +143,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_sql_file(&path)?,
         _ => return Err(Error::Parse("--sql or --sql-file is required".into())),
     };
+    if sql.len() as u64 > MAX_SQL_BYTES {
+        return Err(Error::Execution("SQL query exceeds 4 MiB input limit".into()));
+    }
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
@@ -424,6 +442,30 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+    #[test]
+    fn native_sql_input_limits_are_enforced_before_parsing() {
+        let too_large = "x".repeat(MAX_SQL_BYTES as usize + 1);
+        let parsed = parse_args([
+            "--csv".to_string(), "ignored.csv".to_string(),
+            "--sql".to_string(), too_large,
+        ]);
+        assert!(parsed.unwrap_err().to_string().contains("4 MiB"));
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-oversize-query-{}-{}.sql",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_SQL_BYTES + 1).unwrap();
+        let args = vec![
+            "--csv".to_string(), "ignored.csv".to_string(),
+            "--sql-file".to_string(), path.to_string_lossy().into_owned(),
+        ];
+        let result = parse_args(args);
+        fs::remove_file(&path).unwrap();
+        assert!(result.unwrap_err().to_string().contains("4 MiB"));
     }
 
     #[test]
