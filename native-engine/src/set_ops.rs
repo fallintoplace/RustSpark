@@ -64,6 +64,12 @@ fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crat
 }
 
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    intersect_distinct_with_max_rows(left, right, usize::MAX)
+}
+
+pub fn intersect_distinct_with_max_rows(
+    left: &Batch, right: &Batch, max_output_rows: usize,
+) -> Result<Batch> {
     if left.num_rows() == 0 || right.num_rows() == 0 {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
@@ -79,7 +85,12 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
         let mut emitted = HashSet::<&Value>::new();
         let mut rows = Vec::new();
         for (index, value) in left.column(0)?.iter().enumerate() {
-            if right_values.contains(value) && emitted.insert(value) { rows.push(index); }
+            if right_values.contains(value) && emitted.insert(value) {
+                if rows.len() >= max_output_rows {
+                    return Err(Error::Execution("INTERSECT DISTINCT output row limit exceeded".into()));
+                }
+                rows.push(index);
+            }
         }
         return left.take(&rows)?.relabel(schema);
     }
@@ -89,6 +100,9 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     for index in 0..left.num_rows() {
         let row = left.row(index)?;
         if right_rows.contains(&row) && emitted.insert(row.clone()) {
+            if rows.len() >= max_output_rows {
+                return Err(Error::Execution("INTERSECT DISTINCT output row limit exceeded".into()));
+            }
             rows.push(row);
         }
     }
@@ -415,5 +429,29 @@ mod typed_empty_set_short_circuits_tests {
             Field::new("id", DataType::Text, false),
         ]).unwrap());
         assert!(intersect_distinct(&integers, &invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod intersect_distinct_output_limit_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn row_limit_counts_unique_intersection_matches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2)], vec![Value::Integer(1)],
+        ]).unwrap();
+        assert!(intersect_distinct_with_max_rows(&left, &right, 1)
+            .unwrap_err().to_string().contains("output row limit"));
+        assert_eq!(intersect_distinct_with_max_rows(&left, &right, 2)
+            .unwrap().rows().unwrap(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)],
+            ]);
     }
 }
