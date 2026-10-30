@@ -240,7 +240,10 @@ mod tests {
  
 /// Decode bounded CSV input using a declared schema and matching header order.
 pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
-    let mut records = parse_records(input.strip_prefix('\u{feff}').unwrap_or(input))?;
+    // The header is not a data row and must not use one admission slot.
+    let mut records = parse_records_with_limit(
+        input.strip_prefix('\u{feff}').unwrap_or(input), MAX_CSV_ROWS + 1,
+    )?;
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
@@ -360,5 +363,20 @@ mod csv_data_row_limit_accounting_tests {
         assert!(parse_records_with_limit(input, 2).is_err());
         assert_eq!(parse_records_with_limit(input, 3).unwrap().len(), 3);
         assert_eq!(from_csv_str(input).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod typed_csv_header_budget_regression_tests {
+    use super::*;
+
+    #[test]
+    fn typed_csv_keeps_header_outside_row_budget() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap();
+        let input = "value\n1\n2\n";
+        assert!(parse_records_with_limit(input, 2).is_err());
+        assert_eq!(parse_records_with_limit(input, 3).unwrap().len(), 3);
+        let decoded = from_csv_str_typed(input, schema).unwrap();
+        assert_eq!(decoded.num_rows(), 2);
     }
 }
