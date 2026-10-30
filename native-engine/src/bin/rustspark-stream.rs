@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -37,6 +37,17 @@ fn parse_schema(text: &str) -> Result<Schema> {
     }
     if fields.is_empty() { return Err(Error::Schema("schema must not be empty".into())); }
     Schema::new(fields)
+}
+
+const MAX_SQL_BYTES: usize = 1024 * 1024;
+
+fn read_sql_limited(reader: impl Read) -> Result<String> {
+    let mut sql = String::new();
+    reader.take((MAX_SQL_BYTES + 1) as u64).read_to_string(&mut sql)?;
+    if sql.len() > MAX_SQL_BYTES {
+        return Err(Error::Execution("streaming SQL file exceeds 1 MiB limit".into()));
+    }
+    Ok(sql)
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -83,9 +94,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_sql_limited(fs::File::open(path)?)?,
         _ => return Err(Error::Parse("choose --sql or --sql-file".into())),
     };
+    if sql.len() > MAX_SQL_BYTES {
+        return Err(Error::Execution("streaming SQL statement exceeds 1 MiB limit".into()));
+    }
     if sql.trim().is_empty() { return Err(Error::Parse("SQL cannot be empty".into())); }
     if csv.is_some() == parquet.is_some() {
         return Err(Error::Parse("choose --csv or --parquet".into()));
@@ -191,5 +205,28 @@ mod tests {
         assert!(parse_args(parquet.into_iter().map(String::from)).unwrap().unwrap().parquet.is_some());
         let invalid = ["--parquet", "data.parquet", "--schema", "n:int", "--sql", "SELECT * FROM data"];
         assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sql_input_budget_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn reject_sql_files_that_exceed_one_mebibyte() {
+        assert_eq!(read_sql_limited(Cursor::new("SELECT 1")).unwrap(), "SELECT 1");
+        assert!(read_sql_limited(Cursor::new("x".repeat(MAX_SQL_BYTES))).is_ok());
+        assert!(read_sql_limited(Cursor::new("x".repeat(MAX_SQL_BYTES + 1))).is_err());
+    }
+
+    #[test]
+    fn also_reject_oversized_inline_sql() {
+        let options = [
+            "--csv".to_string(), "data.csv".to_string(),
+            "--schema".to_string(), "n:int".to_string(),
+            "--sql".to_string(), "X".repeat(MAX_SQL_BYTES + 1),
+        ];
+        assert!(parse_args(options).is_err());
     }
 }
