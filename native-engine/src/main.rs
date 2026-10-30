@@ -191,7 +191,9 @@ fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
                 Value::Integer(value) => serde_json::Value::Number((*value).into()),
                 Value::Float(value) => serde_json::Number::from_f64(*value)
                     .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                    .ok_or_else(|| Error::Execution(
+                        "JSON Lines cannot represent non-finite floating-point values".into()
+                    ))?,
                 Value::Text(value) => serde_json::Value::String(value.clone()),
             };
             record.insert(field.name.clone(), json);
@@ -424,6 +426,24 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+    #[test]
+    fn json_lines_rejects_nonfinite_floats_instead_of_silent_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("value", DataType::Float, true),
+        ]).unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let batch = Batch::from_rows(schema.clone(), vec![vec![Value::Float(value)]]).unwrap();
+            let mut bytes = Vec::new();
+            let error = print_jsonl_rows(&batch, &mut bytes).unwrap_err();
+            assert!(error.to_string().contains("non-finite"), "{error}");
+            assert!(bytes.is_empty(), "a rejected row must not be emitted");
+        }
+        let batch = Batch::from_rows(schema, vec![vec![Value::Float(1.25)]]).unwrap();
+        let mut bytes = Vec::new();
+        print_jsonl_rows(&batch, &mut bytes).unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "{\"value\":1.25}\n");
     }
 
     #[test]
