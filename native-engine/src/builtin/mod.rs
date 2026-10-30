@@ -300,6 +300,16 @@ pub fn output_type(name: &str, arguments: &[Expr], schema: &Schema) -> Result<Da
         return if not_null.is_empty() { Ok(DataType::Text) }
             else { same_type(&not_null) };
     }
+    if name.eq_ignore_ascii_case("nullif") {
+        // NULLIF returns its first input type. Bare NULL literals have no
+        // independent SQL type, so infer from the other argument.
+        if matches!(arguments[0], Expr::Literal(Value::Null)) {
+            return Ok(types[1]);
+        }
+        if matches!(arguments[1], Expr::Literal(Value::Null)) {
+            return Ok(types[0]);
+        }
+    }
     (function.result_type)(&types)
 }
 
@@ -423,5 +433,32 @@ mod nullable_if_branch_type_tests {
         let args = [literal(Value::Boolean(true)), literal(Value::Integer(1)),
                     literal(Value::Text("bad".into()))];
         assert!(output_type("if", &args, &schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod nullif_untyped_literal_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_result_types_and_nullif_runtime_values() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        let null = Expr::Literal(Value::Null);
+        for (other, expected, result) in [
+            (Value::Integer(7), DataType::Integer, Value::Integer(7)),
+            (Value::Float(3.25), DataType::Float, Value::Float(3.25)),
+            (Value::Text("hello".into()), DataType::Text, Value::Text("hello".into())),
+        ] {
+            let left = [null.clone(), Expr::Literal(other.clone())];
+            assert_eq!(output_type("nullif", &left, &schema).unwrap(), expected);
+            assert_eq!(evaluate("nullif", &left, &batch, 0).unwrap(), Value::Null);
+            let right = [Expr::Literal(other), null.clone()];
+            assert_eq!(output_type("nullif", &right, &schema).unwrap(), expected);
+            assert_eq!(evaluate("nullif", &right, &batch, 0).unwrap(), result);
+        }
+        let both = [null.clone(), null];
+        assert_eq!(output_type("nullif", &both, &schema).unwrap(), DataType::Text);
+        assert_eq!(evaluate("nullif", &both, &batch, 0).unwrap(), Value::Null);
     }
 }
