@@ -27,6 +27,14 @@ impl Drop for PartitionFiles {
     }
 }
 
+// Rust drops fields in declaration order. Close BufWriter handles before the
+// PartitionFiles guard tries to unlink scratch paths (required on Windows).
+impl Drop for PartitionWriter {
+    fn drop(&mut self) {
+        self.writers.take();
+    }
+}
+
 pub struct PartitionWriter {
     owned: Option<PartitionFiles>,
     writers: Option<Vec<Option<SpillWriter<BufWriter<File>>>>>,
@@ -367,5 +375,30 @@ mod single_shard_partition_zero_copy_tests {
         drop(reader);
         drop(files);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod abandoned_partition_writer_cleanup_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn dropping_unfinished_writer_removes_all_open_shards() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-abandoned-partition-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let mut writer = PartitionWriter::new(&dir, schema, &["key"], 1, 2).unwrap();
+        let path = writer.owned.as_ref().unwrap().paths()[0].clone();
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        assert!(path.exists());
+        drop(writer);
+        assert!(!path.exists(), "open shard handles must close before cleanup");
+        std::fs::remove_dir(&dir).unwrap();
     }
 }
