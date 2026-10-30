@@ -123,18 +123,14 @@ where I: Iterator<Item = Result<Vec<Value>>>
     }
 }
 
-pub struct BatchChunks<'a> {
-    input: &'a Batch,
-    position: usize,
-    batch_rows: usize,
-}
+pub struct BatchChunks<'a>(crate::batch_chunks::BatchChunks<'a>);
 
 impl<'a> BatchChunks<'a> {
     pub fn new(input: &'a Batch, batch_rows: usize) -> Result<Self> {
         if batch_rows == 0 {
             return Err(Error::Execution("batch size must be positive".into()));
         }
-        Ok(Self { input, position: 0, batch_rows })
+        Ok(Self(crate::batch_chunks::chunks(input, batch_rows)?))
     }
 }
 
@@ -142,11 +138,7 @@ impl Iterator for BatchChunks<'_> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.input.num_rows() { return None; }
-        let start = self.position;
-        let end = start.saturating_add(self.batch_rows).min(self.input.num_rows());
-        self.position = end;
-        Some(self.input.slice_rows(start, end))
+        self.0.next()
     }
 }
 
