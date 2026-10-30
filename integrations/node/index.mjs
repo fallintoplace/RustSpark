@@ -88,6 +88,9 @@ export class RustSpark {
         if (typeof value === "number" && !Number.isFinite(value)) {
           throw new RangeError("non-finite SQL JSON number");
         }
+        if (typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+          throw new RangeError("SQL integer cannot be represented safely in JavaScript");
+        }
         return value;
       });
     }
