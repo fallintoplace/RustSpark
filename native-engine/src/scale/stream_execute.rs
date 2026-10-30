@@ -89,6 +89,13 @@ impl Iterator for GroupedOutput {
     }
 }
 
+// Close the reader while the GroupFiles cleanup guard is still alive.
+impl Drop for GroupedOutput {
+    fn drop(&mut self) {
+        self.reader = None;
+    }
+}
+
 /// Keep hash join shard paths owned until the active reader has finished.
 struct JoinedOutput {
     files: JoinFiles,
@@ -98,6 +105,13 @@ struct JoinedOutput {
     control: QueryControl,
     stopped: bool,
 }
+// Close the reader while the JoinFiles cleanup guard is still alive.
+impl Drop for JoinedOutput {
+    fn drop(&mut self) {
+        self.reader = None;
+    }
+}
+
 impl Iterator for JoinedOutput {
     type Item = Result<Batch>;
     fn next(&mut self) -> Option<Self::Item> {
