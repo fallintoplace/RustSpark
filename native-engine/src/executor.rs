@@ -91,7 +91,7 @@ fn execute_inner(
     let batch = match plan {
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
-        Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,
+        Plan::Project { input, selections } => project::project_owned(descend(input)?, selections)?,
         Plan::Aggregate { input, group_by, aggregates } => {
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
@@ -265,5 +265,35 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod native_owned_execution_projection_tests {
+    use super::*;
+    use crate::{
+        catalog::Catalog, project::Selection, scalar::Value,
+        schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn executes_native_column_rename_without_losing_nullable_text() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("long".repeat(256))],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", source).unwrap();
+        let plan = Plan::scan("t").project(vec![
+            Selection::new(Expr::Column("note".into()), "payload"),
+            Selection::new(Expr::Column("id".into()), "key"),
+        ]);
+        let result = execute(&plan, &catalog).unwrap();
+        assert_eq!(result.schema().fields()[0].name, "payload");
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.value(1, 0).unwrap(), &Value::Null);
     }
 }
