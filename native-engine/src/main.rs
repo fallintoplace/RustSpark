@@ -110,6 +110,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if csv_schema.is_some() && !stream {
         return Err(Error::Parse("--csv-schema requires --stream".into()));
     }
+    if csv_schema.is_some() && parquet.is_some() {
+        return Err(Error::Parse("--csv-schema cannot be used with Parquet input".into()));
+    }
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
@@ -377,6 +380,8 @@ mod tests {
         assert!(parse_args(args.into_iter().map(String::from)).is_err());
         let args = ["--parquet", "data.parquet", "--sql", "SELECT * FROM data", "--stream"];
         assert!(parse_args(args.into_iter().map(String::from)).unwrap().unwrap().stream);
+        let bad = ["--parquet", "data.parquet", "--stream", "--csv-schema", "x:int64", "--sql", "SELECT * FROM data"];
+        assert!(parse_args(bad.into_iter().map(String::from)).is_err());
     }
 
     #[test]
