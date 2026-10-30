@@ -20,6 +20,7 @@ pub enum BinaryOp {
     Subtract,
     Multiply,
     Divide,
+    Modulo,
     And,
     Or,
 }
@@ -182,7 +183,7 @@ impl Expr {
                         Err(Error::Type("division requires numeric operands".into()))
                     }
                 },
-                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
+                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Modulo => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
                     if a == DataType::Float || b == DataType::Float {
@@ -384,7 +385,7 @@ fn evaluate_binary(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
                 _ => unreachable!(),
             })))
         }
-        Add | Subtract | Multiply | Divide => numeric(left, op, right),
+        Add | Subtract | Multiply | Divide | Modulo => numeric(left, op, right),
     }
 }
 
@@ -398,6 +399,10 @@ fn numeric(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
                 BinaryOp::Add => a.checked_add(*b),
                 BinaryOp::Subtract => a.checked_sub(*b),
                 BinaryOp::Multiply => a.checked_mul(*b),
+                BinaryOp::Modulo => {
+                    if *b == 0 { return Err(Error::Execution("division by zero".into())); }
+                    a.checked_rem(*b)
+                },
                 _ => unreachable!(),
             };
             return value
@@ -412,7 +417,7 @@ fn numeric(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     };
     let a = as_float(left)?;
     let b = as_float(right)?;
-    if op == BinaryOp::Divide && b == 0.0 {
+    if matches!(op, BinaryOp::Divide | BinaryOp::Modulo) && b == 0.0 {
         return Err(Error::Execution("division by zero".into()));
     }
     let value = match op {
@@ -420,6 +425,7 @@ fn numeric(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
         BinaryOp::Subtract => a - b,
         BinaryOp::Multiply => a * b,
         BinaryOp::Divide => a / b,
+        BinaryOp::Modulo => a % b,
         _ => unreachable!(),
     };
     if !value.is_finite() {
@@ -736,5 +742,24 @@ mod cast_expression_planning_validation_tests {
             assert_eq!(make(Expr::Column("s".into())).output_type(&schema).unwrap(),
                 DataType::Integer);
         }
+    }
+}
+
+#[cfg(test)]
+mod modulo_binary_expression_tests {
+    use super::*;
+
+    #[test]
+    fn native_modulo_handles_signed_and_nullable_numbers() {
+        assert_eq!(evaluate_binary(&Value::Integer(-7), BinaryOp::Modulo,
+            &Value::Integer(3)).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate_binary(&Value::Float(7.5), BinaryOp::Modulo,
+            &Value::Float(2.0)).unwrap(), Value::Float(1.5));
+        assert_eq!(evaluate_binary(&Value::Null, BinaryOp::Modulo,
+            &Value::Integer(2)).unwrap(), Value::Null);
+        assert!(evaluate_binary(&Value::Integer(3), BinaryOp::Modulo,
+            &Value::Integer(0)).is_err());
+        assert!(evaluate_binary(&Value::Integer(i64::MIN), BinaryOp::Modulo,
+            &Value::Integer(-1)).is_err());
     }
 }
