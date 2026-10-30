@@ -96,7 +96,20 @@ impl Iterator for ScanCursor<'_> {
         if output.is_err() { self.failed = true; }
         Some(output)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.failed { return (0, Some(0)); }
+        let remaining = self.source.num_rows().saturating_sub(self.next_row);
+        if self.predicate.is_none() {
+            let chunks = remaining.div_ceil(self.target_rows);
+            (chunks, Some(chunks))
+        } else {
+            (0, Some(remaining))
+        }
+    }
 }
+
+impl std::iter::FusedIterator for ScanCursor<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -266,5 +279,42 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod scan_iterator_contract_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::iter::FusedIterator;
+
+    fn assert_fused<T: FusedIterator>(_: &T) {}
+
+    #[test]
+    fn unfiltered_chunks_have_exact_remaining_counts() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), (0..5).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut cursor = scan(&input, None, &[], 2).unwrap();
+        assert_fused(&cursor);
+        assert_eq!(cursor.size_hint(), (3, Some(3)));
+        cursor.next().unwrap().unwrap();
+        assert_eq!(cursor.size_hint(), (2, Some(2)));
+        cursor.next().unwrap().unwrap();
+        cursor.next().unwrap().unwrap();
+        assert_eq!(cursor.next().is_none(), true);
+        assert_eq!(cursor.next().is_none(), true);
+        assert_eq!(cursor.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn filtered_scans_use_safe_upper_bounds() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), (0..4).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut cursor = scan(&input, Some(Expr::Literal(Value::Boolean(false))), &[], 2).unwrap();
+        assert_eq!(cursor.size_hint(), (0, Some(4)));
+        assert!(cursor.next().is_none());
+        assert_eq!(cursor.size_hint(), (0, Some(0)));
     }
 }
