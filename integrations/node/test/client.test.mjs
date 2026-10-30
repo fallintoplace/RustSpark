@@ -83,3 +83,21 @@ test("rejects oversized or excessive named parameters before spawning", () => {
     namedParams: Object.fromEntries(Array.from({ length: 65 }, (_, index) => ["p" + index, "int64:1"])),
   }), RangeError);
 });
+
+test("rejects int64 SQL results that JSON.parse would round", () => {
+  for (const stdout of [
+    '[{"id":9007199254740993}]',
+    '[{"id":-9007199254740993}]',
+    '[{"id":9223372036854775807}]',
+    '[{"nested":{"ids":[9007199254740992]}}]',
+  ]) {
+    const client = new RustSpark({ runner: () => ({ status: 0, stdout }) });
+    assert.throws(() => client.query("SELECT id FROM t"), RustSparkError);
+  }
+  const valid = new RustSpark({ runner: () => ({
+    status: 0, stdout: '[{"id":9007199254740991},{"id":-9007199254740991},{"float":1.25}]',
+  }) });
+  assert.deepEqual(valid.query("SELECT id FROM t"), [
+    { id: 9007199254740991 }, { id: -9007199254740991 }, { float: 1.25 },
+  ]);
+});
