@@ -94,7 +94,10 @@ def iter_arrow_batches(
     )
     # Spool stderr to disk so verbose diagnostics cannot block the Arrow stream.
     with tempfile.TemporaryFile() as error_log:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log)
+        try:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log)
+        except OSError as error:
+            raise RuntimeError("Unable to launch RustSpark Arrow stream") from error
         try:
             assert process.stdout is not None
             with pa.ipc.open_stream(process.stdout) as reader:
