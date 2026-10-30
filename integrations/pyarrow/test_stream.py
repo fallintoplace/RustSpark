@@ -78,6 +78,12 @@ class ArrowStreamCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "FINAL ERROR"):
                 list(iter_arrow_batches("SELECT 1", database_dir="/tmp/my db"))
 
+    def test_mixed_type_table_keys_fail_with_validation_error(self):
+        for name in (None, 3):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "table name"):
+                build_command("SELECT 1", csv_tables={"valid": "good.csv", name: "bad.csv"})
+
+
 
 if __name__ == "__main__":
     unittest.main()
