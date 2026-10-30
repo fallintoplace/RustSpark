@@ -52,6 +52,15 @@ impl MemoryBudget {
 impl Reservation {
     pub fn bytes(&self) -> usize { self.bytes }
 
+    /// Transfer part of this allocation to another guard, with no new budget admission.
+    pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
+        if bytes > self.bytes {
+            return Err(Error::Execution("cannot split more memory than reserved".into()));
+        }
+        self.bytes -= bytes;
+        Ok(Self { budget: self.budget.clone(), bytes })
+    }
+
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
@@ -134,6 +143,27 @@ mod grouped_scale_memory_tests {
         let allocations = reserve_many(&budget, &[30, 20]).unwrap();
         assert_eq!(budget.used(), 50);
         drop(allocations);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod scale_reservation_split_tests {
+    use super::*;
+
+    #[test]
+    fn partial_transfers_release_each_byte_once() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let mut parent = budget.reserve(80).unwrap();
+        let mut child = parent.split_off(25).unwrap();
+        assert_eq!(budget.used(), 80);
+        assert_eq!(parent.bytes(), 55);
+        assert!(parent.split_off(56).is_err());
+        child.resize(30).unwrap();
+        assert_eq!(budget.used(), 85);
+        drop(parent);
+        assert_eq!(budget.used(), 30);
+        drop(child);
         assert_eq!(budget.used(), 0);
     }
 }
