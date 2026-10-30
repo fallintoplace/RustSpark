@@ -43,8 +43,23 @@ where I: Iterator<Item = Result<Vec<Value>>>
         while row_count < limit {
             match self.input.next() {
                 Some(Ok(row)) => {
-                    if row.len() != self.schema.len() {
-                        let error = Error::Schema("row width does not match schema".into());
+                    // Validate as rows arrive, so an invalid value cannot
+                    // force materialization of a whole batch or discard the
+                    // successfully validated prefix.
+                    let error = if row.len() != self.schema.len() {
+                        Some(Error::Schema("row width does not match schema".into()))
+                    } else {
+                        row.iter().zip(self.schema.fields()).find_map(|(value, field)| {
+                            if !field.data_type.accepts(value) {
+                                Some(Error::Type(format!("invalid value in column {}", field.name)))
+                            } else if !field.nullable && value.is_null() {
+                                Some(Error::Type(format!("NULL in required column {}", field.name)))
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    if let Some(error) = error {
                         if row_count == 0 {
                             self.finished = true;
                             return Some(Err(error));
@@ -232,5 +247,48 @@ mod native_columnar_row_batched_tests {
         assert_eq!(zero_chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
         assert!(zero_chunks[0].rows().unwrap().iter().all(Vec::is_empty));
         assert_eq!(chunks[0].schema(), &schema);
+    }
+}
+
+#[cfg(test)]
+mod row_batcher_early_type_validation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn returns_valid_prefix_then_type_error_without_polling_extra_rows() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let polls = Rc::new(Cell::new(0usize));
+        let counter = Rc::clone(&polls);
+        let source = vec![
+            vec![Value::Integer(7)],
+            vec![Value::Integer(8)],
+            vec![Value::Text("bad".into())],
+            vec![Value::Integer(9)],
+        ].into_iter().map(move |row| {
+            counter.set(counter.get() + 1);
+            Ok(row)
+        });
+        let mut stream = RowBatcher::new(source, schema, 128).unwrap();
+        let first = stream.next().unwrap().unwrap();
+        assert_eq!(first.rows().unwrap(), vec![
+            vec![Value::Integer(7)], vec![Value::Integer(8)],
+        ]);
+        assert_eq!(polls.get(), 3);
+        assert!(stream.next().unwrap().unwrap_err().to_string().contains("invalid value"));
+        assert_eq!(polls.get(), 3);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn required_null_is_rejected_immediately_without_emitting_empty_batch() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut stream = RowBatcher::new(
+            vec![Ok(vec![Value::Null]), Ok(vec![Value::Integer(9)])].into_iter(),
+            schema, 100,
+        ).unwrap();
+        assert!(stream.next().unwrap().unwrap_err().to_string().contains("required"));
+        assert!(stream.next().is_none());
     }
 }
