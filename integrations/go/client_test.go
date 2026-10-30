@@ -4,6 +4,7 @@ import (
     "bytes"
     "context"
     "errors"
+    "fmt"
     "reflect"
     "strings"
     "testing"
@@ -139,5 +140,26 @@ func TestStderrBudgetStopsUnboundedDiagnostics(t *testing.T) {
     }
     if output.Len() != maxStderrBytes {
         t.Fatalf("expected %d buffered diagnostic bytes, got %d", maxStderrBytes, output.Len())
+    }
+}
+
+func TestNamedParameterLimitsMatchNativeCLI(t *testing.T) {
+    client := Client{}
+    params := make(map[string]string)
+    for index := 0; index < 65; index++ {
+        params[fmt.Sprintf("p%d", index)] = "int64:1"
+    }
+    if _, err := client.arguments("SELECT 1", Options{NamedParams: params}); err == nil {
+        t.Fatal("more than 64 parameters must be rejected")
+    }
+    if _, err := client.arguments("SELECT 1", Options{NamedParams: map[string]string{
+        "long": "utf8:" + strings.Repeat("x", 8192),
+    }}); err == nil {
+        t.Fatal("parameter longer than 8192 bytes must be rejected")
+    }
+    if _, err := client.arguments("SELECT 1", Options{NamedParams: map[string]string{
+        "max": "utf8:" + strings.Repeat("x", 8192-len("utf8:")),
+    }}); err != nil {
+        t.Fatalf("valid maximum-length parameter rejected: %v", err)
     }
 }
