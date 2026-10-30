@@ -30,6 +30,7 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    max_output_rows: Option<usize>,
 }
 
 fn usage() -> &'static str {
@@ -46,6 +47,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut max_output_rows = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -89,6 +91,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--max-output-rows" => {
+                let parsed = value.parse::<usize>()
+                    .map_err(|_| Error::Parse("--max-output-rows expects a nonnegative integer".into()))?;
+                if max_output_rows.replace(parsed).is_some() {
+                    return Err(Error::Parse("duplicate --max-output-rows".into()));
+                }
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -134,7 +143,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, max_output_rows }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -281,8 +290,14 @@ fn run_stream(args: &Args) -> Result<()> {
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     if !args.jsonl { print_header(&output_schema, &mut output)?; }
+    let mut emitted_rows = 0usize;
     for batch in pipeline {
         let batch = batch?;
+        emitted_rows = emitted_rows.checked_add(batch.num_rows())
+            .ok_or_else(|| Error::Execution("native result row count overflow".into()))?;
+        if args.max_output_rows.is_some_and(|limit| emitted_rows > limit) {
+            return Err(Error::Execution("native result exceeds output row budget".into()));
+        }
         if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
         else { print_csv_rows(&batch, &mut output)?; }
     }
@@ -346,6 +361,9 @@ fn run() -> Result<()> {
     }
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
+    if args.max_output_rows.is_some_and(|limit| batch.num_rows() > limit) {
+        return Err(Error::Execution("native result exceeds output row budget".into()));
+    }
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
@@ -367,6 +385,22 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_row_budget_is_parsed_and_rejects_duplicates() {
+        let ok = parse_args([
+            "--csv", "input.csv", "--sql", "SELECT * FROM data", "--max-output-rows", "0",
+        ].into_iter().map(String::from)).unwrap().unwrap();
+        assert_eq!(ok.max_output_rows, Some(0));
+        for args in [
+            vec!["--csv", "file.csv", "--sql", "SELECT * FROM data",
+                "--max-output-rows", "-1"],
+            vec!["--csv", "file.csv", "--sql", "SELECT * FROM data",
+                "--max-output-rows", "2", "--max-output-rows", "3"],
+        ] {
+            assert!(parse_args(args.into_iter().map(String::from)).is_err());
+        }
+    }
 
     #[test]
     fn reject_invalid_cli_combinations() {
