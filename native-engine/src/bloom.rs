@@ -52,6 +52,20 @@ impl BloomFilter {
         })
     }
 
+    /// Return candidate probe rows for a SQL equijoin key (NULL does not join).
+    /// A Bloom false positive is allowed, but inserted non-NULL keys are never lost.
+    pub fn matching_rows(&self, batch: &crate::batch::Batch, key: &str) -> Result<Vec<usize>> {
+        let index = batch.schema().column(key)?;
+        let values = batch.column(index)?;
+        let mut rows = Vec::new();
+        for (row, value) in values.iter().enumerate() {
+            if !value.is_null() && self.might_contain(value) {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
 
     /// Number of active bits for monitoring filter saturation.
@@ -176,5 +190,29 @@ mod bloom_occupancy_metrics_tests {
         bloom.union_with(&copy).unwrap();
         assert_eq!(bloom.bits_set(), bits);
         assert_eq!(bloom.estimated_false_positive_rate(), fpr);
+    }
+}
+
+#[cfg(test)]
+mod native_bloom_batch_candidate_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn retains_matching_keys_and_excludes_null_probe_rows() {
+        let mut filter = BloomFilter::new(16_384, 5).unwrap();
+        filter.insert(&Value::Integer(42));
+        filter.insert(&Value::Integer(7));
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("k", DataType::Integer, true),
+        ]).unwrap(), vec![
+            vec![Value::Null], vec![Value::Integer(42)],
+            vec![Value::Integer(100)], vec![Value::Integer(7)],
+        ]).unwrap();
+        let candidates = filter.matching_rows(&input, "k").unwrap();
+        assert!(candidates.contains(&1));
+        assert!(candidates.contains(&3));
+        assert!(!candidates.contains(&0));
+        assert!(filter.matching_rows(&input, "missing").is_err());
     }
 }
