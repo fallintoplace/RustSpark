@@ -153,7 +153,8 @@ impl RunMerger {
         }
         let Some(&index) = self.heap.first() else { return Ok(false); };
         let selected = &mut self.runs[index];
-        let batch = selected.batch.as_ref().expect("active run batch");
+        let batch = selected.batch.as_ref()
+            .ok_or_else(|| Error::Execution("missing active external merge batch".into()))?;
         for (column, dest) in output.iter_mut().enumerate() {
             dest.push(batch.column(column)?[selected.position].clone());
         }
