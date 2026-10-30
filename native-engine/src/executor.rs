@@ -120,12 +120,13 @@ fn execute_inner(
             left_key,
             right_key,
             kind,
-        } => join::hash_join(
+        } => join::hash_join_with_max_rows(
             &descend(left)?,
             &descend(right)?,
             left_key,
             right_key,
             *kind,
+            options.max_output_rows,
         )?,
         Plan::CrossJoin { left, right } => join::cross_join(&descend(left)?, &descend(right)?)?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
