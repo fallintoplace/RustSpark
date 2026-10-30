@@ -30,10 +30,11 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    write_parquet: Option<PathBuf>,
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl] [--write-parquet FILE]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -46,6 +47,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut write_parquet = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -99,6 +101,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                     return Err(Error::Parse("duplicate --sql".into()));
                 }
             }
+            "--write-parquet" => {
+                if write_parquet.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --write-parquet".into()));
+                }
+            },
             "--sql-file" => {
                 if sql_file.replace(PathBuf::from(value)).is_some() {
                     return Err(Error::Parse("duplicate --sql-file".into()));
@@ -115,6 +122,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
+    }
+    if write_parquet.is_some() && (stream || jsonl) {
+        return Err(Error::Parse("--write-parquet cannot be combined with --stream or --jsonl".into()));
     }
     if sources.is_empty() {
         if csv.is_some() == parquet.is_some() {
@@ -134,7 +144,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, write_parquet }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -346,12 +356,48 @@ fn run() -> Result<()> {
     }
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
+    if let Some(path) = &args.write_parquet {
+        return write_result_parquet(path, &batch);
+    }
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
     else { print_csv(&batch, &mut output)?; }
     output.flush()?;
     Ok(())
+}
+
+
+fn write_result_parquet(path: &Path, batch: &Batch) -> Result<()> {
+    use parquet::arrow::ArrowWriter;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|error| Error::Execution(format!("system clock: {error}")))?
+        .as_nanos();
+    let scratch = parent.join(format!(
+        ".rustspark-query-{}-{timestamp}.parquet.tmp", std::process::id()
+    ));
+    let result = (|| -> Result<()> {
+        let output = fs::OpenOptions::new().write(true).create_new(true).open(&scratch)?;
+        let arrow = rustspark_native::arrow_bridge::to_arrow(batch)?;
+        let mut writer = ArrowWriter::try_new(output, arrow.schema(), None)
+            .map_err(|error| Error::Execution(format!("Parquet writer: {error}")))?;
+        writer.write(&arrow)
+            .map_err(|error| Error::Execution(format!("Parquet write: {error}")))?;
+        writer.close()
+            .map_err(|error| Error::Execution(format!("Parquet finish: {error}")))?;
+        fs::OpenOptions::new().write(true).open(&scratch)?.sync_all()?;
+        // hard_link atomically publishes a completed file and refuses overwrite.
+        fs::hard_link(&scratch, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(scratch);
+    result
 }
 
 fn main() -> ExitCode {
@@ -430,5 +476,37 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod persistent_parquet_query_export_tests {
+    use super::*;
+    #[test]
+    fn publishes_complete_parquet_without_overwriting_tables() {
+        let dir = std::env::temp_dir().join(format!("rustspark-query-parquet-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("materialized.parquet");
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Integer, false)
+        ]).unwrap(), vec![vec![Value::Integer(17)], vec![Value::Integer(29)]]).unwrap();
+        write_result_parquet(&path, &source).unwrap();
+        let batches = parquet_scan::scan(&path, 16).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].rows().unwrap(), source.rows().unwrap());
+        assert!(write_result_parquet(&path, &source).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn output_rejects_stream_and_jsonl_combinations() {
+        for incompatible in ["--stream", "--jsonl"] {
+            let args = ["--csv", "source.csv", "--sql", "SELECT * FROM data",
+                        "--write-parquet", "out.parquet", incompatible];
+            assert!(parse_args(args.into_iter().map(str::to_string)).is_err());
+        }
     }
 }
