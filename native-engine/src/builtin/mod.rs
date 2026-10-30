@@ -82,6 +82,7 @@ mod quote;
 mod cot;
 mod csc;
 mod sec;
+mod unicode_codepoint;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -184,6 +185,7 @@ const MODULES: &[&[Function]] = &[
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
     &md5_digest::FUNCTIONS,
+    &unicode_codepoint::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
