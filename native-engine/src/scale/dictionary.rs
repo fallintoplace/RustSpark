@@ -94,7 +94,7 @@ impl DictionaryColumn {
         for code in &self.indices {
             let value = match code {
                 None => Value::Null,
-                Some(id) => Value::Text(self.dictionary[*id as usize].clone()),
+                Some(id) => Value::Text(self.lookup_code(*id)?.to_owned()),
             };
             rows.push(value);
         }
@@ -274,5 +274,25 @@ mod dictionary_preflight_rejects_late_overflow_tests {
         let base = 4096 * std::mem::size_of::<Value>();
         assert!(encoded.decode_with_budget(base + 4096 * 3 - 1).is_err());
         assert_eq!(encoded.decode_with_budget(base + 4096 * 3).unwrap().len(), 4096);
+    }
+}
+
+#[cfg(test)]
+mod checked_dictionary_decode_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn decoded_rows_match_single_key_lookups() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("東京".into())], vec![Value::Null],
+            vec![Value::Text("東京".into())],
+        ]).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&batch, "label", 4, 1024, 4).unwrap();
+        let decoded = dictionary.decode_with_budget(1024).unwrap();
+        for (index, value) in decoded.iter().enumerate() {
+            assert_eq!(value, &dictionary.value(index).unwrap());
+        }
     }
 }
