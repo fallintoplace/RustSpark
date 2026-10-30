@@ -52,6 +52,9 @@ pub fn cross_join_with_max_rows(
         fields.push(Field::new(name, field.data_type, field.nullable));
     }
     let schema = Schema::new(fields)?;
+    if count == 0 {
+        return Ok(Batch::empty(schema));
+    }
     let mut columns = Vec::with_capacity(schema.len());
     for index in 0..left.schema().len() {
         let source = left.column(index)?;
@@ -591,5 +594,27 @@ mod default_columnar_hash_join_tests {
             .unwrap().num_rows(), 1);
         assert_eq!(hash_join(&left, &right, "key", "key", JoinKind::Anti)
             .unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod empty_cross_join_output_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn empty_cartesian_side_preserves_joined_schema() {
+        let empty = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Text, true),
+        ]).unwrap(), vec![vec![Value::Text("a".into())]]).unwrap();
+        for (a, b) in [(&empty, &right), (&right, &empty)] {
+            let result = cross_join(a, b).unwrap();
+            assert_eq!(result.num_rows(), 0);
+            assert_eq!(result.schema().len(), 2);
+            assert_eq!(result.schema().fields()[1].name, "right_id");
+        }
     }
 }
