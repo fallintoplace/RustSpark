@@ -301,6 +301,17 @@ pub fn aggregate_with_max_groups(
     items: &[AggregateItem],
     max_groups: usize,
 ) -> Result<Batch> {
+    aggregate_with_max_groups_checked(batch, group_by, items, max_groups, || Ok(()))
+}
+
+/// Permit long-running GROUP BY computations to observe cancellation or deadlines.
+pub fn aggregate_with_max_groups_checked(
+    batch: &Batch,
+    group_by: &[(Expr, String)],
+    items: &[AggregateItem],
+    max_groups: usize,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
     let mut fields = Vec::with_capacity(group_by.len() + items.len());
     for (expr, alias) in group_by {
         fields.push(Field::new(alias, expr.output_type(batch.schema())?, true));
@@ -325,6 +336,7 @@ pub fn aggregate_with_max_groups(
         _ => Ok(None),
     }).collect::<Result<Vec<_>>>()?;
     for row in 0..batch.num_rows() {
+        if row % 1024 == 0 { check()?; }
         let index = if group_by.is_empty() {
             0
         } else {
@@ -351,6 +363,7 @@ pub fn aggregate_with_max_groups(
             state.update(&item.op, batch, row)?;
         }
     }
+    check()?;
     let rows = groups
         .into_iter()
         .map(|(mut key, states)| {
@@ -608,5 +621,38 @@ mod count_argument_preflight_regressions {
             assert_eq!(aggregate(&batch, &[], &[AggregateItem::new(op, "count")])
                 .unwrap().row(0).unwrap(), vec![Value::Integer(0)]);
         }
+    }
+}
+
+#[cfg(test)]
+mod grouped_aggregate_cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn long_grouped_aggregate_stops_after_mid_scan_check() {
+        let schema = Schema::new(vec![
+            Field::new("group_key", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..2048)
+            .map(|_| vec![Value::Integer(1)]).collect()).unwrap();
+        let mut checks = 0;
+        let result = aggregate_with_max_groups_checked(
+            &input,
+            &[(Expr::Column("group_key".into()), "key".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "rows")],
+            10,
+            || {
+                checks += 1;
+                if checks == 2 {
+                    Err(Error::Execution("cancelled during grouped aggregation".into()))
+                } else { Ok(()) }
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(checks, 2);
+        let completed = aggregate_with_max_groups(
+            &input, &[], &[AggregateItem::new(AggregateOp::CountAll, "rows")], 1,
+        ).unwrap();
+        assert_eq!(completed.row(0).unwrap(), vec![Value::Integer(2048)]);
     }
 }
