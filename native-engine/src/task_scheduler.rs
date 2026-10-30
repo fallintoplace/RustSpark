@@ -37,11 +37,24 @@ pub struct TaskCounts {
 
 impl TaskScheduler {
     pub fn new(tasks: impl IntoIterator<Item = u64>, max_attempts: u32) -> Result<Self> {
+        Self::with_task_limit(tasks, max_attempts, 1_000_000)
+    }
+
+    /// Admit bounded task IDs before beginning native worker scheduling.
+    pub fn with_task_limit(
+        tasks: impl IntoIterator<Item = u64>, max_attempts: u32, max_tasks: usize,
+    ) -> Result<Self> {
         if max_attempts == 0 {
             return Err(Error::Execution("task retry budget must be positive".into()));
         }
+        if max_tasks == 0 {
+            return Err(Error::Execution("task admission limit must be positive".into()));
+        }
         let mut entries = BTreeMap::new();
         for id in tasks {
+            if entries.len() >= max_tasks {
+                return Err(Error::Execution("native task admission limit exceeded".into()));
+            }
             if entries.insert(id, Task {
                 attempts: 0, status: TaskStatus::Queued,
             }).is_some() {
@@ -75,6 +88,23 @@ impl TaskScheduler {
         task.attempts += 1;
         task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
         Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
+    }
+
+    /// Reclaim expired leases independently of worker requests, so monitoring
+    /// and retry orchestration can observe current task states.
+    pub fn expire_leases(&mut self, now: Instant) -> usize {
+        let mut expired = 0usize;
+        for task in self.tasks.values_mut() {
+            if matches!(&task.status, TaskStatus::Leased { until, .. } if *until <= now) {
+                task.status = if task.attempts >= self.max_attempts {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Queued
+                };
+                expired += 1;
+            }
+        }
+        expired
     }
 
     /// Extend an active attempt without reviving a stale or expired lease.
@@ -146,6 +176,13 @@ impl TaskScheduler {
             }
         }
         counts
+    }
+
+    /// View a bounded, deterministic list of ready task IDs without leasing.
+    pub fn queued_tasks(&self, limit: usize) -> Vec<u64> {
+        self.tasks.iter().filter_map(|(&id, task)|
+            (task.status == TaskStatus::Queued).then_some(id)
+        ).take(limit).collect()
     }
 
     pub fn status(&self, task: u64) -> Option<&TaskStatus> {
@@ -282,5 +319,67 @@ mod consolidated_heartbeat_regressions {
         invalid = lease.clone();
         invalid.attempt += 1;
         assert!(!queue.renew(&invalid, now, Duration::from_secs(2)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod proactive_task_lease_expiry_tests {
+    use super::*;
+
+    #[test]
+    fn expired_leases_are_requeued_or_failed_without_new_worker_polling() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let mut queue = TaskScheduler::new([10, 20], 1).unwrap();
+        let leased = queue.lease(3, now, ttl).unwrap().unwrap();
+        assert_eq!(leased.task, 10);
+        assert_eq!(queue.expire_leases(now), 0);
+        assert_eq!(queue.expire_leases(now + ttl), 1);
+        assert_eq!(queue.expire_leases(now + ttl), 0);
+        assert_eq!(queue.status(10), Some(&TaskStatus::Failed));
+        assert_eq!(queue.counts(), TaskCounts {
+            queued: 1, leased: 0, done: 0, failed: 1,
+        });
+
+        let mut retryable = TaskScheduler::new([1], 2).unwrap();
+        retryable.lease(4, now, ttl).unwrap().unwrap();
+        assert_eq!(retryable.expire_leases(now + ttl), 1);
+        assert_eq!(retryable.status(1), Some(&TaskStatus::Queued));
+        assert_eq!(retryable.lease(5, now + ttl, ttl).unwrap().unwrap().attempt, 2);
+    }
+}
+
+#[cfg(test)]
+mod scheduler_ready_task_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn lists_ready_tasks_in_sorted_order_without_claiming_them() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([9, 1, 5, 3], 2).unwrap();
+        assert_eq!(scheduler.queued_tasks(2), vec![1, 3]);
+        assert_eq!(scheduler.queued_tasks(0), vec![]);
+        let first = scheduler.lease(4, now, Duration::from_secs(10))
+            .unwrap().unwrap();
+        assert_eq!(first.task, 1);
+        assert_eq!(scheduler.queued_tasks(10), vec![3, 5, 9]);
+        assert_eq!(scheduler.counts().leased, 1);
+        assert!(scheduler.cancel_task(3));
+        assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
+    }
+}
+
+#[cfg(test)]
+mod native_scheduler_admission_limit_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_oversized_worklists_without_leasing() {
+        assert!(TaskScheduler::with_task_limit([1, 2, 3], 2, 2).is_err());
+        assert!(TaskScheduler::with_task_limit([], 2, 0).is_err());
+        let mut queue = TaskScheduler::with_task_limit([2, 1], 2, 2).unwrap();
+        assert_eq!(queue.counts().queued, 2);
+        assert_eq!(queue.lease(9, Instant::now(), Duration::from_secs(5))
+            .unwrap().unwrap().task, 1);
     }
 }

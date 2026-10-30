@@ -17,6 +17,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .ok_or_else(|| Error::Execution("REGEXP_COUNT overflow".into()))?;
         return Ok(Value::Integer(count));
     }
+    if pattern.len() == 1 && pattern.as_bytes()[0].is_ascii_alphanumeric() {
+        let needle = pattern.as_bytes()[0];
+        let count = text.bytes().filter(|&byte| byte == needle).count();
+        return Ok(Value::Integer(i64::try_from(count)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
+    }
     let re = regex_support::compile(pattern)?;
     let count = re.find_iter(text).count();
     Ok(Value::Integer(i64::try_from(count)
@@ -42,5 +48,25 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("".into()),
             Value::Text("".into())]).unwrap(), Value::Integer(1));
         assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod literal_ascii_regexp_count_tests {
+    use super::*;
+
+    #[test]
+    fn counts_literals_without_changing_regex_metacharacters() {
+        let run = |text: &str, pattern: &str| evaluate(&[
+            Value::Text(text.into()), Value::Text(pattern.into())
+        ]).unwrap();
+        assert_eq!(run("banana", "a"), Value::Integer(3));
+        assert_eq!(run("é1🙂1", "1"), Value::Integer(2));
+        assert_eq!(run("Aaa", "a"), Value::Integer(2));
+        assert_eq!(run("a.a", "."), Value::Integer(3));
+        assert_eq!(run("aaa", "a+"), Value::Integer(1));
+        assert_eq!(run("é🙂", ""), Value::Integer(3));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(),
+            Value::Null);
     }
 }

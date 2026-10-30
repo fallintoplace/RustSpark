@@ -62,6 +62,12 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
+    // Column references have no row-dependent evaluation errors. A window
+    // with zero or one rows is already sorted, so avoid key binding and index
+    // sorting after the schema checks.
+    if end - start <= 1 && keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        return batch.slice_rows(start, end);
+    }
     if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         let columns = keys.iter().map(|key| match &key.expression {
             Expr::Column(name) => batch.column(batch.schema().column(name)?),
@@ -258,5 +264,32 @@ mod range_sort_run_tests {
         }
         assert!(sort_range(&batch, &key, 12, 32).is_err());
         assert_eq!(sort_range(&batch, &[], 5, 8).unwrap(), batch.slice_rows(5, 8).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod singleton_column_sort_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn column_sort_preserves_singleton_windows_after_key_validation() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".repeat(1024))],
+            vec![Value::Null],
+            vec![Value::Text("z".into())],
+        ]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        assert_eq!(sort_range(&batch, &keys, 0, 1).unwrap(),
+            batch.slice_rows(0, 1).unwrap());
+        assert_eq!(sort_range(&batch, &keys, 1, 1).unwrap().num_rows(), 0);
+        assert_eq!(sort_range(&batch, &keys, 2, 3).unwrap().row(0).unwrap(),
+            vec![Value::Text("z".into())]);
+        assert!(sort_range(&batch,
+            &[SortKey::ascending(Expr::Column("unknown".into()))], 1, 1).is_err());
+        assert_eq!(sort_range(&Batch::empty(schema), &keys, 0, 0).unwrap().num_rows(), 0);
     }
 }

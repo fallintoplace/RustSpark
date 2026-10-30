@@ -1,7 +1,7 @@
 //! Streaming physical execution of the supported native logical-plan subset.
 use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
 use crate::{
-    aggregate::AggregateOp, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
+    aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
     project::Selection, scalar::Value,
     schema::{DataType, Field, Schema}, Error, Result,
 };
@@ -9,7 +9,9 @@ use super::{
     cancel::QueryControl,
     chunks::RowBatcher, file_catalog::FileCatalog,
     stream_ops::{FilterStream, ProjectStream, LimitStream},
-    union_stream::UnionAllStream,
+    union_stream::{UnionAllStream, UnionDistinctStream},
+    cross_join_stream::CrossJoinStream,
+    set_stream::{SetStream, SetMode, set_schema},
     sorted_runs::write_sorted_runs,
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
@@ -175,11 +177,17 @@ impl Iterator for DistinctOutput {
                 self.stopped = true;
                 return Some(Err(error));
             }
-            let batch = match self.source.next()? {
-                Ok(batch) => batch,
-                Err(error) => {
+            let batch = match self.source.next() {
+                Some(Ok(batch)) => batch,
+                Some(Err(error)) => {
                     self.stopped = true;
                     return Some(Err(error));
+                }
+                None => {
+                    // An upstream Iterator need not itself be fused. Once
+                    // DISTINCT reports EOF it must never emit later rows.
+                    self.stopped = true;
+                    return None;
                 }
             };
             let mut selected = Vec::new();
@@ -252,7 +260,7 @@ fn infer(
     }
     let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth);
     match plan {
-        Plan::Scan { table } => Ok(catalog.get(table)?.schema().clone()),
+        Plan::Scan { table } => Ok(catalog.schema(table)?.clone()),
         Plan::Filter { input, predicate } => {
             let schema = child(input)?;
             let kind = predicate.output_type(&schema)?;
@@ -271,6 +279,13 @@ fn infer(
         }
         Plan::Limit { input, .. } |
         Plan::Distinct { input } => child(input),
+        Plan::CrossJoin { left, right } => {
+            let left_schema = child(left)?;
+            let right_schema = child(right)?;
+            Ok(join::cross_join(
+                &Batch::empty(left_schema), &Batch::empty(right_schema)
+            )?.schema().clone())
+        }
         Plan::Join { left, right, left_key, right_key, kind } => {
             let left_schema = child(left)?;
             let right_schema = child(right)?;
@@ -281,7 +296,14 @@ fn infer(
         }
         Plan::Aggregate { input, group_by, aggregates } => {
             if group_by.is_empty() {
-                return Err(Error::Unsupported("streaming global aggregates are not implemented".into()));
+                let schema = child(input)?;
+                if aggregates.iter().any(|item| matches!(&item.op,
+                    AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
+                    AggregateOp::AvgDistinct(_))) {
+                    return Err(Error::Unsupported(
+                        "stream global DISTINCT aggregates require a spill path".into()));
+                }
+                return aggregate::global_output_schema(&schema, aggregates);
             }
             let source = child(input)?;
             let mut fields = Vec::new();
@@ -323,6 +345,11 @@ fn infer(
             }).collect::<Result<Vec<_>>>()?;
             Schema::new(fields)
         }
+        Plan::Intersect { left, right } |
+        Plan::IntersectAll { left, right } |
+        Plan::Except { left, right } |
+        Plan::ExceptAll { left, right } =>
+            set_schema(&child(left)?, &child(right)?),
         Plan::UnionAll { left, right } => {
             let left_schema = child(left)?;
             let right_schema = child(right)?;
@@ -362,6 +389,9 @@ fn lower(
     let child = |plan: &Plan| lower(plan, catalog, options, control, depth + 1);
     match plan {
         Plan::Scan { table } => {
+            if let Some(parquet) = catalog.get_parquet(table)? {
+                return Ok(Box::new(parquet.open(options.batch_rows)?));
+            }
             let source = catalog.get(table)?;
             let reader = source.open()?;
             let batches = RowBatcher::new(reader, source.schema().clone(), options.batch_rows)?;
@@ -369,9 +399,29 @@ fn lower(
         }
         Plan::Filter { input, predicate } =>
             Ok(Box::new(FilterStream::new(child(input)?, predicate.clone(), control.clone()))),
+        Plan::Distinct { input } if matches!(input.as_ref(), Plan::UnionAll { .. }) => {
+            let Plan::UnionAll { left, right } = input.as_ref() else {
+                unreachable!("checked UNION ALL plan");
+            };
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            let left = lower(left, catalog, options, control, depth + 2)?;
+            let right = lower(right, catalog, options, control, depth + 2)?;
+            Ok(Box::new(UnionDistinctStream::new(
+                left, right, schema, control.clone(),
+                MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
+            )?))
+        }
         Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
             child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
         ))),
+        Plan::CrossJoin { left, right } => {
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            Ok(Box::new(CrossJoinStream::new(
+                child(left)?, child(right)?, left_schema, right_schema,
+                options.batch_rows, control.clone(),
+            )?))
+        }
         Plan::Join { left, right, left_key, right_key, kind } => {
             // Partitioned grace_join already tracks matched build keys across
             // all probe batches. Do not downgrade RIGHT/FULL to an inner join.
@@ -389,6 +439,12 @@ fn lower(
         }
         Plan::Aggregate { input, group_by, aggregates } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            if group_by.is_empty() {
+                let result = aggregate::aggregate_global_stream(
+                    child(input)?, &schema, aggregates, || control.check(),
+                )?;
+                return Ok(Box::new(std::iter::once(Ok(result))));
+            }
             let mut groups = Vec::with_capacity(group_by.len());
             for (expr, alias) in group_by {
                 let Expr::Column(name) = expr else {
@@ -430,6 +486,23 @@ fn lower(
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
             Ok(Box::new(SortedOutput { reader, _files: files }))
+        }
+        Plan::Intersect { left, right } |
+        Plan::IntersectAll { left, right } |
+        Plan::Except { left, right } |
+        Plan::ExceptAll { left, right } => {
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            let mode = match plan {
+                Plan::Intersect { .. } => SetMode::IntersectDistinct,
+                Plan::IntersectAll { .. } => SetMode::IntersectAll,
+                Plan::Except { .. } => SetMode::ExceptDistinct,
+                _ => SetMode::ExceptAll,
+            };
+            Ok(Box::new(SetStream::new(
+                child(left)?, child(right)?, left_schema, right_schema, mode,
+                control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
+            )?))
         }
         Plan::UnionAll { left, right } => {
             let schema = infer(plan, catalog, depth, options.max_plan_depth)?;
@@ -778,5 +851,87 @@ mod stream_distinct_single_probe_perf_tests {
         let source: BatchStream = Box::new([Ok(overflowing)].into_iter());
         assert!(DistinctOutput::new(source, QueryControl::default(), 1, 4096)
             .next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod distinct_stream_end_of_input_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn does_not_poll_upstream_after_first_end_of_stream() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&polls);
+        let source = std::iter::from_fn(move || {
+            let call = observed.fetch_add(1, Ordering::Relaxed);
+            if call == 0 { None } else { panic!("distinct polled exhausted source") }
+        });
+        let mut distinct = DistinctOutput::new(Box::new(source),
+            QueryControl::default(), 100, 4096);
+        assert!(distinct.next().is_none());
+        assert!(distinct.next().is_none());
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod streaming_global_aggregate_sql_tests {
+    use super::*;
+    use crate::{sql, scalar::Value, schema::{DataType, Field}};
+    use std::fs;
+
+    #[test]
+    fn sql_count_sum_and_avg_across_file_batches() {
+        let path = std::env::temp_dir().join(format!("native-global-agg-{}-{}.csv",
+            std::process::id(), std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, "n\n1\n2\n3\n4\n").unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &path, schema, 128).unwrap();
+        let plan = sql::parse_sql(
+            "SELECT COUNT(*) AS n, SUM(n) AS total, AVG(n) AS average FROM t").unwrap();
+        let options = StreamOptions { batch_rows: 2, ..StreamOptions::default() };
+        let rows = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row(0).unwrap(), vec![
+            Value::Integer(4), Value::Integer(10), Value::Float(2.5),
+        ]);
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod direct_union_distinct_lowering_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field}, scalar::Value, sql};
+    use std::fs;
+
+    #[test]
+    fn union_distinct_keeps_first_rows_and_nulls_across_csv_batches() {
+        let dir = std::env::temp_dir().join(format!("native-union-distinct-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let left = dir.join("a.csv");
+        let right = dir.join("b.csv");
+        fs::write(&left, "id\n1\n2\n\n").unwrap();
+        fs::write(&right, "id\n2\n3\n\n").unwrap();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("a", &left, schema.clone(), 256).unwrap();
+        catalog.register_csv("b", &right, schema, 256).unwrap();
+        let plan = sql::parse_sql("SELECT id FROM a UNION SELECT id FROM b").unwrap();
+        let parts = execute(&plan, &catalog, &StreamOptions {
+            batch_rows: 1, scratch_directory: dir.clone(), ..StreamOptions::default()
+        }, QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+            ]);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

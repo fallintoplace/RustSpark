@@ -4,6 +4,12 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
 fn concat(args: &[Value]) -> Result<Value> {
+    if let [Value::Text(text)] = args {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("CONCAT output exceeds 16 MiB".into()));
+        }
+        return Ok(Value::Text(text.clone()));
+    }
     let mut length = 0_usize;
     for value in args {
         let Some(text) = super::string(value)? else { return Ok(Value::Null); };
@@ -53,5 +59,17 @@ mod tests {
         let plan = sql::parse_sql("SELECT CONCAT(city, '-DE') AS value FROM t").unwrap();
         let rows = executor::execute(&plan, &catalog).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("Berlin-DE".into())], vec![Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod single_value_concat_tests {
+    use super::*;
+    #[test]
+    fn single_argument_fast_path_preserves_null_and_size_bound() {
+        let content = "café🙂".repeat(1000);
+        assert_eq!(concat(&[Value::Text(content.clone())]).unwrap(), Value::Text(content));
+        assert_eq!(concat(&[Value::Null]).unwrap(), Value::Null);
+        assert!(concat(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
     }
 }

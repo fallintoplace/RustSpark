@@ -32,7 +32,21 @@ fn lcm(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Execution("LCM result exceeds BIGINT range".into()))
 }
 
+fn gcd_type(types: &[DataType]) -> Result<DataType> {
+    if types.iter().all(|kind| *kind == DataType::Integer) { Ok(DataType::Integer) }
+    else { Err(Error::Type("GCD requires integer inputs".into())) }
+}
+fn gcd(args: &[Value]) -> Result<Value> {
+    let Some(a) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let Some(b) = super::integer(&args[1])? else { return Ok(Value::Null); };
+    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
+    while b != 0 { (a, b) = (b, a % b); }
+    i64::try_from(a).map(Value::Integer)
+        .map_err(|_| Error::Execution("GCD exceeds BIGINT range".into()))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "gcd", min_args: 2, max_args: 2, result_type: gcd_type, call: gcd },
     Function { name: "lcm", min_args: 2, max_args: 2, result_type: lcm_type, call: lcm },
     Function { name: "factorial", min_args: 1, max_args: 1, result_type: output, call: factorial },
 ];
@@ -67,5 +81,20 @@ mod lcm_extension_tests {
         assert_eq!(lcm(&[Value::Integer(0), Value::Integer(i64::MIN)]).unwrap(), Value::Integer(0));
         assert!(lcm(&[Value::Integer(i64::MAX), Value::Integer(2)]).is_err());
         assert_eq!(lcm(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod gcd_native_feature_tests {
+    use super::*;
+    #[test]
+    fn gcd_handles_signs_zero_nulls_and_overflow() {
+        assert!(crate::builtin::supports("gcd"));
+        assert_eq!(gcd(&[Value::Integer(-42), Value::Integer(30)]).unwrap(), Value::Integer(6));
+        assert_eq!(gcd(&[Value::Integer(0), Value::Integer(0)]).unwrap(), Value::Integer(0));
+        assert_eq!(gcd(&[Value::Integer(i64::MIN), Value::Integer(2)]).unwrap(), Value::Integer(2));
+        assert!(gcd(&[Value::Integer(i64::MIN), Value::Integer(0)]).is_err());
+        assert_eq!(gcd(&[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
+        assert!(gcd_type(&[DataType::Text, DataType::Integer]).is_err());
     }
 }

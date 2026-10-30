@@ -169,7 +169,7 @@ impl<R: BufRead> Iterator for CsvStream<R> {
             return Some(Err(error));
         }
         let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
-        for _ in 0..self.batch_rows {
+        for _ in 0..self.batch_rows.min(65_536) {
             match self.records.record() {
                 Ok(Some(fields)) => {
                     if fields.len() != self.schema.len() {
@@ -357,5 +357,18 @@ mod consolidated_csv_prefix_regressions {
         assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
         assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod bounded_csv_stream_batch_tests {
+    use super::*;
+    use std::io::Cursor;
+    #[test]
+    fn huge_requested_batch_is_chunked_without_losing_rows() {
+        let input = format!("n\n{}", "x\n".repeat(65_537));
+        let batches = CsvStream::new(Cursor::new(input), usize::MAX, 32)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [65_536, 1]);
     }
 }

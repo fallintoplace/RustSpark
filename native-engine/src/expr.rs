@@ -67,8 +67,10 @@ impl Expr {
                 let kind = needle.output_type(schema)?;
                 let needle_null = matches!(needle.as_ref(), Expr::Literal(Value::Null));
                 for choice in choices {
-                    if matches!(choice, Expr::Literal(Value::Null)) || needle_null { continue; }
+                    // Even a NULL needle must type-check all referenced
+                    // columns, although evaluation will short-circuit.
                     let other = choice.output_type(schema)?;
+                    if matches!(choice, Expr::Literal(Value::Null)) || needle_null { continue; }
                     if kind != other && !matches!(
                         (kind, other),
                         (DataType::Integer, DataType::Float) | (DataType::Float, DataType::Integer)
@@ -78,11 +80,57 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
-            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
-            Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
+            Self::Not(inner) => {
+                if !matches!(inner.as_ref(), Self::Literal(Value::Null))
+                    && inner.output_type(schema)? != DataType::Boolean {
+                    return Err(Error::Type("NOT requires a boolean operand".into()));
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::IsNull(inner) => {
+                // IS NULL is valid for any value type, but its input still
+                // needs to resolve against the schema before execution.
+                inner.output_type(schema)?;
+                Ok(DataType::Boolean)
+            },
+            Self::Like { value, pattern, escape } => {
+                for expression in [value.as_ref(), pattern.as_ref()] {
+                    if expression.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE requires text operands".into()));
+                    }
+                }
+                if let Some(escape) = escape {
+                    if escape.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE ESCAPE requires text".into()));
+                    }
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::IsDistinctFrom { left, right, .. } => {
+                let l = left.output_type(schema)?;
+                let r = right.output_type(schema)?;
+                if !matches!(left.as_ref(), Self::Literal(Value::Null))
+                    && !matches!(right.as_ref(), Self::Literal(Value::Null))
+                    && l != r
+                    && !matches!((l, r), (DataType::Integer, DataType::Float) |
+                        (DataType::Float, DataType::Integer)) {
+                    return Err(Error::Type("IS DISTINCT FROM requires comparable operands".into()));
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::TryCast { expression, target } | Self::Cast { expression, target } => {
+                // The target type does not make an unknown input column valid.
+                expression.output_type(schema)?;
+                Ok(*target)
+            },
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
+                for (condition, _) in branches {
+                    if !matches!(condition, Expr::Literal(Value::Null))
+                        && condition.output_type(schema)? != DataType::Boolean {
+                        return Err(Error::Type("CASE WHEN requires a boolean condition".into()));
+                    }
+                }
                 let mut output = None;
                 for expr in branches.iter().map(|(_, value)| value)
                     .chain(else_expr.iter().map(Box::as_ref))
@@ -102,9 +150,28 @@ impl Expr {
                 | BinaryOp::Less
                 | BinaryOp::LessEqual
                 | BinaryOp::Greater
-                | BinaryOp::GreaterEqual
-                | BinaryOp::And
-                | BinaryOp::Or => Ok(DataType::Boolean),
+                | BinaryOp::GreaterEqual => {
+                    let left_type = left.output_type(schema)?;
+                    let right_type = right.output_type(schema)?;
+                    if !matches!(left.as_ref(), Expr::Literal(Value::Null))
+                        && !matches!(right.as_ref(), Expr::Literal(Value::Null))
+                        && left_type != right_type
+                        && !matches!((left_type, right_type),
+                            (DataType::Integer, DataType::Float) |
+                            (DataType::Float, DataType::Integer)) {
+                        return Err(Error::Type("comparison requires comparable SQL types".into()));
+                    }
+                    Ok(DataType::Boolean)
+                },
+                BinaryOp::And | BinaryOp::Or => {
+                    for operand in [left.as_ref(), right.as_ref()] {
+                        if !matches!(operand, Expr::Literal(Value::Null))
+                            && operand.output_type(schema)? != DataType::Boolean {
+                            return Err(Error::Type("AND/OR require boolean operands".into()));
+                        }
+                    }
+                    Ok(DataType::Boolean)
+                },
                 BinaryOp::Divide => {
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
@@ -458,5 +525,216 @@ mod like_rolling_buffer_perf_tests {
         assert!(sql_like_escape("a%b", "a\\%b", '\\').unwrap());
         assert!(sql_like_escape("", "%%", '\\').unwrap());
         assert!(!sql_like_escape("", "_%", '\\').unwrap());
+    }
+}
+
+#[cfg(test)]
+mod not_expression_static_type_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn rejects_not_of_integer_even_with_no_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("enabled", DataType::Boolean, true),
+        ]).unwrap();
+        let invalid = Expr::Not(Box::new(Expr::Column("n".into())));
+        assert!(invalid.output_type(&schema).is_err());
+        assert!(Expr::Not(Box::new(Expr::Column("missing".into())))
+            .output_type(&schema).is_err());
+        let valid = Expr::Not(Box::new(Expr::Column("enabled".into())));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+        let nullable = Expr::Not(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(nullable.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod is_null_static_schema_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_inner_columns_even_when_input_batch_is_empty() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let missing = Expr::IsNull(Box::new(Expr::Column("missing".into())));
+        assert!(missing.output_type(&schema).is_err());
+        let valid = Expr::IsNull(Box::new(Expr::Column("text".into())));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+        let literal = Expr::IsNull(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(literal.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod like_expression_type_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn rejects_invalid_pattern_and_escape_types_before_execution() {
+        let schema = Schema::new(vec![
+            Field::new("s", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let like = |value, pattern, escape| Expr::Like {
+            value: Box::new(value), pattern: Box::new(pattern),
+            escape: escape.map(Box::new),
+        };
+        assert!(like(Expr::Column("n".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
+        assert!(like(Expr::Column("s".into()), Expr::Column("n".into()), None)
+            .output_type(&schema).is_err());
+        assert!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
+            Some(Expr::Literal(Value::Integer(1)))).output_type(&schema).is_err());
+        assert_eq!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
+            None).output_type(&schema).unwrap(), DataType::Boolean);
+        assert!(like(Expr::Column("missing".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod distinct_comparison_static_type_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_compatible_types_and_nullable_literals() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("f", DataType::Float, true),
+            Field::new("t", DataType::Text, true),
+        ]).unwrap();
+        let compare = |left, right| Expr::IsDistinctFrom {
+            left: Box::new(left), right: Box::new(right), negated: false,
+        };
+        assert_eq!(compare(Expr::Column("n".into()), Expr::Column("f".into()))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert_eq!(compare(Expr::Column("n".into()), Expr::Literal(Value::Null))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert!(compare(Expr::Column("n".into()), Expr::Column("t".into()))
+            .output_type(&schema).is_err());
+        assert!(compare(Expr::Column("missing".into()), Expr::Column("n".into()))
+            .output_type(&schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod case_condition_type_checks {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn invalid_case_when_conditions_fail_before_execution() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let invalid = Expr::Case {
+            branches: vec![(Expr::Column("n".into()), Expr::Literal(Value::Integer(1)))],
+            else_expr: None,
+        };
+        assert!(invalid.output_type(&schema).is_err());
+        let valid = Expr::Case {
+            branches: vec![(Expr::Literal(Value::Boolean(true)),
+                Expr::Literal(Value::Integer(1)))],
+            else_expr: None,
+        };
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Integer);
+    }
+}
+
+#[cfg(test)]
+mod logical_operator_plan_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn boolean_operators_validate_both_inputs_on_empty_batches() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("ok", DataType::Boolean, true),
+        ]).unwrap();
+        for op in [BinaryOp::And, BinaryOp::Or] {
+            assert!(Expr::binary(Expr::Column("ok".into()), op,
+                Expr::Column("n".into())).output_type(&schema).is_err());
+            assert!(Expr::binary(Expr::Column("missing".into()), op,
+                Expr::Column("ok".into())).output_type(&schema).is_err());
+            assert_eq!(Expr::binary(Expr::Literal(Value::Null), op,
+                Expr::Column("ok".into())).output_type(&schema).unwrap(), DataType::Boolean);
+        }
+    }
+}
+
+#[cfg(test)]
+mod binary_comparison_planning_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn incompatible_columns_fail_before_rows_are_evaluated() {
+        let schema = Schema::new(vec![
+            Field::new("count", DataType::Integer, true),
+            Field::new("score", DataType::Float, true),
+            Field::new("name", DataType::Text, true),
+        ]).unwrap();
+        for op in [BinaryOp::Equal, BinaryOp::NotEqual, BinaryOp::Less,
+                   BinaryOp::LessEqual, BinaryOp::Greater, BinaryOp::GreaterEqual] {
+            assert!(Expr::binary(Expr::Column("count".into()), op,
+                Expr::Column("name".into())).output_type(&schema).is_err());
+            assert!(Expr::binary(Expr::Column("missing".into()), op,
+                Expr::Column("name".into())).output_type(&schema).is_err());
+            assert_eq!(Expr::binary(Expr::Column("count".into()), op,
+                Expr::Column("score".into())).output_type(&schema).unwrap(), DataType::Boolean);
+            assert_eq!(Expr::binary(Expr::Column("count".into()), op,
+                Expr::Literal(Value::Null)).output_type(&schema).unwrap(), DataType::Boolean);
+        }
+    }
+}
+
+#[cfg(test)]
+mod in_list_static_choice_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn null_needle_still_requires_valid_choice_columns() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let invalid = Expr::InList {
+            needle: Box::new(Expr::Literal(Value::Null)),
+            choices: vec![Expr::Column("missing".into())],
+            negated: false,
+        };
+        assert!(invalid.output_type(&schema).is_err());
+        let valid = Expr::InList {
+            needle: Box::new(Expr::Literal(Value::Null)),
+            choices: vec![Expr::Column("n".into()), Expr::Literal(Value::Null)],
+            negated: true,
+        };
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod cast_expression_planning_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_source_columns_for_cast_and_try_cast() {
+        let schema = Schema::new(vec![
+            Field::new("s", DataType::Text, true),
+        ]).unwrap();
+        for try_mode in [false, true] {
+            let make = |inner| if try_mode {
+                Expr::TryCast { expression: Box::new(inner), target: DataType::Integer }
+            } else {
+                Expr::Cast { expression: Box::new(inner), target: DataType::Integer }
+            };
+            assert!(make(Expr::Column("absent".into())).output_type(&schema).is_err());
+            assert_eq!(make(Expr::Column("s".into())).output_type(&schema).unwrap(),
+                DataType::Integer);
+        }
     }
 }

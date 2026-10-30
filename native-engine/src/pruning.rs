@@ -11,12 +11,62 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
         return true;
     }
     match predicate {
+        // WHERE FALSE and WHERE NULL cannot return rows regardless of bounds.
+        Expr::Literal(Value::Boolean(false) | Value::Null) => true,
+        Expr::Not(inner) if matches!(&**inner,
+            Expr::Literal(Value::Boolean(true) | Value::Null)) => true,
         Expr::IsNull(inner) if matches!(&**inner, Expr::Column(name) if name.eq_ignore_ascii_case(column)) => {
             stats.nulls == 0
         }
         Expr::Not(inner) if matches!(&**inner, Expr::IsNull(value)
             if matches!(&**value, Expr::Column(name) if name.eq_ignore_ascii_case(column))) => {
             stats.rows == stats.nulls
+        }
+        Expr::IsDistinctFrom { left, right, negated } => {
+            let literal = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(name), Expr::Literal(value)) |
+                (Expr::Literal(value), Expr::Column(name))
+                    if name.eq_ignore_ascii_case(column) => value,
+                _ => return false,
+            };
+            if literal.is_null() {
+                return if *negated { stats.nulls == 0 }
+                    else { stats.nulls == stats.rows };
+            }
+            if stats.nulls == stats.rows {
+                return *negated;
+            }
+            let (Some(min), Some(max)) = (&stats.min, &stats.max) else {
+                return false;
+            };
+            let (Some(low), Some(high)) = (
+                min.sql_compare(literal).ok().flatten(),
+                max.sql_compare(literal).ok().flatten(),
+            ) else { return false; };
+            if *negated {
+                low == Ordering::Greater || high == Ordering::Less
+            } else {
+                stats.nulls == 0 && low == Ordering::Equal && high == Ordering::Equal
+            }
+        }
+        Expr::Not(inner) => {
+            if let Expr::Binary { left, op, right } = inner.as_ref() {
+                let inverted = match op {
+                    BinaryOp::Equal => Some(BinaryOp::NotEqual),
+                    BinaryOp::NotEqual => Some(BinaryOp::Equal),
+                    BinaryOp::Less => Some(BinaryOp::GreaterEqual),
+                    BinaryOp::LessEqual => Some(BinaryOp::Greater),
+                    BinaryOp::Greater => Some(BinaryOp::LessEqual),
+                    BinaryOp::GreaterEqual => Some(BinaryOp::Less),
+                    _ => None,
+                };
+                if let Some(op) = inverted {
+                    return can_skip(stats, column, &Expr::binary(
+                        *left.clone(), op, *right.clone(),
+                    ));
+                }
+            }
+            false
         }
         Expr::Binary { left, op: BinaryOp::And, right } => {
             can_skip(stats, column, left) || can_skip(stats, column, right)
@@ -108,6 +158,12 @@ pub fn can_skip_columns(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
     predicate: &Expr,
 ) -> bool {
+    // Constant false/unknown predicates do not need any metadata.
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) ||
+        matches!(predicate, Expr::Not(inner)
+            if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
+        return true;
+    }
     // Inconsistent metadata is not proof that any row can be skipped.
     if let Some(first) = stats.values().next() {
         if stats.values().any(|column| column.rows != first.rows) {
@@ -165,5 +221,76 @@ mod inconsistent_column_statistics_tests {
         let predicate = Expr::binary(Expr::Column("value".into()),
             BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(2)));
         assert!(!can_skip_columns(&stats, &predicate));
+    }
+}
+
+#[cfg(test)]
+mod constant_false_partition_pruning_tests {
+    use super::*;
+
+    #[test]
+    fn constants_skip_without_statistics_but_true_never_skips() {
+        let empty = std::collections::HashMap::new();
+        let false_predicate = Expr::Literal(Value::Boolean(false));
+        let null_predicate = Expr::Literal(Value::Null);
+        let true_predicate = Expr::Literal(Value::Boolean(true));
+        assert!(can_skip_columns(&empty, &false_predicate));
+        assert!(can_skip_columns(&empty, &null_predicate));
+        assert!(!can_skip_columns(&empty, &true_predicate));
+        let not_true = Expr::Not(Box::new(true_predicate.clone()));
+        assert!(can_skip_columns(&empty, &not_true));
+        let and = Expr::binary(true_predicate.clone(), BinaryOp::And, false_predicate);
+        assert!(can_skip_columns(&empty, &and));
+        let or = Expr::binary(true_predicate, BinaryOp::Or, null_predicate);
+        assert!(!can_skip_columns(&empty, &or));
+    }
+}
+
+#[cfg(test)]
+mod negated_native_range_pruning_tests {
+    use super::*;
+
+    #[test]
+    fn skips_only_impossible_negations() {
+        let summary = ColumnStatistics { rows: 10, nulls: 2,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(19)) };
+        let gt = |n| Expr::binary(Expr::Column("x".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(n)));
+        assert!(can_skip(&summary, "x", &Expr::Not(Box::new(gt(9)))));
+        assert!(!can_skip(&summary, "x", &Expr::Not(Box::new(gt(17)))));
+        assert!(!can_skip(&summary, "y", &Expr::Not(Box::new(gt(9)))));
+        assert!(can_skip(&summary, "x", &Expr::Not(Box::new(
+            Expr::binary(Expr::Column("x".into()), BinaryOp::Equal,
+                         Expr::Literal(Value::Integer(5)))
+        )) ) == false);
+    }
+}
+
+#[cfg(test)]
+mod null_safe_statistics_pruning_tests {
+    use super::*;
+
+    fn condition(literal: Value, negated: bool) -> Expr {
+        Expr::IsDistinctFrom {
+            left: Box::new(Expr::Column("n".into())),
+            right: Box::new(Expr::Literal(literal)), negated,
+        }
+    }
+
+    #[test]
+    fn distinct_predicates_prune_only_proven_impossible_partitions() {
+        let same = ColumnStatistics { rows: 5, nulls: 0,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(10)) };
+        assert!(can_skip(&same, "n", &condition(Value::Integer(10), false)));
+        assert!(!can_skip(&same, "n", &condition(Value::Integer(11), false)));
+        assert!(can_skip(&same, "n", &condition(Value::Integer(11), true)));
+        assert!(!can_skip(&same, "n", &condition(Value::Integer(10), true)));
+        let mixed_nulls = ColumnStatistics { rows: 6, nulls: 1, ..same.clone() };
+        assert!(!can_skip(&mixed_nulls, "n", &condition(Value::Integer(10), false)));
+        let all_null = ColumnStatistics { rows: 4, nulls: 4, min: None, max: None };
+        assert!(can_skip(&all_null, "n", &condition(Value::Null, false)));
+        assert!(!can_skip(&all_null, "n", &condition(Value::Null, true)));
+        assert!(can_skip(&all_null, "n", &condition(Value::Integer(5), true)));
+        assert!(can_skip(&same, "n", &condition(Value::Null, true)));
     }
 }

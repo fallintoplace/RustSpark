@@ -65,9 +65,8 @@ fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         let candidate = ColumnCandidate { row, columns: &columns, options: &options };
         if heap.len() < k {
             heap.push(candidate);
-        } else if heap.peek().is_some_and(|worst| candidate < *worst) {
-            heap.pop();
-            heap.push(candidate);
+        } else if let Some(mut worst) = heap.peek_mut() {
+            if candidate < *worst { *worst = candidate; }
         }
     }
     let mut retained = heap.into_vec();
@@ -85,6 +84,22 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
+    }
+    if k == 1 && keys.len() == 1 {
+        if let Expr::Column(name) = &keys[0].expression {
+            // For a one-row result the heap, sort options, and candidate
+            // vectors are unnecessary. Scan the borrowed key column once.
+            let column = batch.column(batch.schema().column(name)?)?;
+            let mut best = 0usize;
+            for row in 1..batch.num_rows() {
+                if crate::sort::compare_values(
+                    &column[row], &column[best], keys[0].descending, keys[0].nulls_first,
+                ) == Ordering::Less {
+                    best = row;
+                }
+            }
+            return batch.take(&[best]);
+        }
     }
     if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
         return top_k_columns(batch, keys, k);
@@ -246,5 +261,61 @@ mod column_topk_perf_tests {
         let computed = [SortKey::ascending(Expr::binary(Expr::Column("n".into()), BinaryOp::Add, Expr::Literal(Value::Integer(1))))];
         assert_eq!(top_k(&numbers, &computed, 2).unwrap(),
             crate::sort::sort(&numbers, &computed).unwrap().slice_rows(0, 2).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod column_topk_heap_root_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn column_heap_replacement_matches_full_stable_sort_with_many_updates() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let rows = (0..2000).map(|id| vec![
+            if id % 13 == 0 { Value::Null }
+            else { Value::Integer(((id * 113) % 101) as i64) },
+            Value::Integer(id as i64),
+        ]).collect();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let keys = [SortKey { expression: Expr::Column("score".into()),
+            descending: true, nulls_first: false }];
+        let sorted = crate::sort::sort(&batch, &keys).unwrap();
+        for count in [1, 3, 32, 513, 1999] {
+            assert_eq!(top_k(&batch, &keys, count).unwrap(),
+                sorted.slice_rows(0, count).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod singleton_topk_column_scan_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}, sort};
+
+    #[test]
+    fn one_row_topk_preserves_null_nan_descending_and_stable_ties() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Float, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Float(3.0), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Float(1.0), Value::Integer(3)],
+            vec![Value::Float(1.0), Value::Integer(4)],
+            vec![Value::Float(f64::NAN), Value::Integer(5)],
+        ]).unwrap();
+        for (descending, nulls_first) in [(false, false), (false, true),
+            (true, false), (true, true)] {
+            let keys = [SortKey {
+                expression: Expr::Column("score".into()), descending, nulls_first,
+            }];
+            let expected = sort::sort(&batch, &keys).unwrap();
+            let result = top_k(&batch, &keys, 1).unwrap();
+            assert_eq!(result.num_rows(), 1);
+            assert_eq!(result.value(0, 1).unwrap(), expected.value(0, 1).unwrap());
+        }
     }
 }

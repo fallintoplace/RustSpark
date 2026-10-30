@@ -1,9 +1,11 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
-fn evaluate(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
+fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
+    if text.len() > limit {
+        return Err(Error::Execution("INITCAP input exceeds byte limit".into()));
+    }
     if text.is_ascii() {
         let mut bytes = text.as_bytes().to_vec();
         let mut start_of_word = true;
@@ -16,7 +18,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                 start_of_word = false;
             }
         }
-        return Ok(Value::Text(String::from_utf8(bytes).expect("ASCII input")));
+        return Ok(String::from_utf8(bytes).expect("ASCII input"));
     }
     let mut result = String::with_capacity(text.len());
     let mut start_of_word = true;
@@ -35,8 +37,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             }
             start_of_word = false;
         }
+        if result.len() > limit {
+            return Err(Error::Execution("INITCAP output exceeds byte limit".into()));
+        }
     }
-    Ok(Value::Text(result))
+    Ok(result)
+}
+fn evaluate(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
+    Ok(Value::Text(initcap_bounded(text, 16 * 1024 * 1024)?))
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "initcap", min_args: 1, max_args: 1, result_type: output, call: evaluate,
@@ -72,5 +81,16 @@ mod initcap_ascii_bytes_tests {
     fn retains_ascii_whitespace_boundaries() {
         assert_eq!(evaluate(&[Value::Text("aB\\tcD\\neF".into())]).unwrap(), Value::Text("Ab\\tCd\\nEf".into()));
         assert_eq!(evaluate(&[Value::Text("éCOLE".into())]).unwrap(), Value::Text("École".into()));
+    }
+}
+
+#[cfg(test)]
+mod initcap_bounded_output_tests {
+    use super::*;
+    #[test]
+    fn preserves_titlecase_and_rejects_excessive_input() {
+        assert_eq!(initcap_bounded("éCOLE wow", 16).unwrap(), "École Wow");
+        assert!(initcap_bounded("éCOLE wow", 4).is_err());
+        assert_eq!(initcap_bounded("abc DEF", 7).unwrap(), "Abc Def");
     }
 }

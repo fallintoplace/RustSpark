@@ -45,6 +45,11 @@ impl QueryGuard {
         Ok(Self { cancellation, deadline: Some(deadline) })
     }
 
+    /// Monotonic time left before the deadline, or None for unbounded queries.
+    pub fn remaining_time(&self) -> Option<Duration> {
+        self.deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
     pub fn check(&self) -> Result<()> {
         if self.cancellation.is_cancelled() {
             return Err(Error::Execution("query cancelled".into()));
@@ -93,5 +98,23 @@ mod absolute_deadline_engine_tests {
         assert!(guard.check().unwrap_err().to_string().contains("deadline"));
         token.cancel();
         assert!(guard.check().unwrap_err().to_string().contains("cancelled"));
+    }
+}
+
+#[cfg(test)]
+mod query_guard_remaining_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn reports_bounded_and_unbounded_remaining_time() {
+        let unbounded = QueryGuard::default();
+        assert_eq!(unbounded.remaining_time(), None);
+        let expired = QueryGuard::with_deadline(Cancellation::new(), Instant::now());
+        assert_eq!(expired.remaining_time(), Some(Duration::ZERO));
+        let bounded = QueryGuard::with_timeout(
+            Cancellation::new(), Duration::from_secs(60)).unwrap();
+        let remaining = bounded.remaining_time().unwrap();
+        assert!(remaining <= Duration::from_secs(60));
+        assert!(remaining > Duration::ZERO);
     }
 }

@@ -17,6 +17,26 @@ fn width_bucket(args: &[Value]) -> Result<Value> {
     if !(1..=1_000_000).contains(&buckets) {
         return Err(Error::Execution("WIDTH_BUCKET count must be in 1..=1000000".into()));
     }
+    if let (Value::Integer(x), Value::Integer(lower), Value::Integer(upper)) =
+        (&args[0], &args[1], &args[2])
+    {
+        if lower == upper {
+            return Err(Error::Execution("WIDTH_BUCKET bounds must differ".into()));
+        }
+        let (x, lower, upper) = (i128::from(*x), i128::from(*lower), i128::from(*upper));
+        let count = i128::from(buckets);
+        let slot = if lower < upper {
+            if x < lower { 0 } else if x >= upper { count + 1 }
+            else { (x - lower) * count / (upper - lower) + 1 }
+        } else if x > lower {
+            0
+        } else if x <= upper {
+            count + 1
+        } else {
+            (lower - x) * count / (lower - upper) + 1
+        };
+        return Ok(Value::Integer(slot as i64));
+    }
     if !x.is_finite() || !lower.is_finite() || !upper.is_finite() || lower == upper {
         return Err(Error::Execution("WIDTH_BUCKET requires finite increasing bounds".into()));
     }
@@ -103,5 +123,23 @@ mod clamp_extension_tests {
         assert_eq!(clamp(&[Value::Float(1.5), Value::Float(0.0), Value::Float(1.0)]).unwrap(), Value::Float(1.0));
         assert!(clamp(&[Value::Integer(1), Value::Integer(5), Value::Integer(0)]).is_err());
         assert_eq!(clamp(&[Value::Null, Value::Integer(0), Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod exact_bigint_width_bucket_tests {
+    use super::*;
+    #[test]
+    fn distinguishes_adjacent_64_bit_boundaries_without_f64_rounding() {
+        let run = |x, low, high| width_bucket(&[
+            Value::Integer(x), Value::Integer(low), Value::Integer(high),
+            Value::Integer(2),
+        ]).unwrap();
+        assert_eq!(run(i64::MAX - 2, i64::MAX - 2, i64::MAX), Value::Integer(1));
+        assert_eq!(run(i64::MAX - 1, i64::MAX - 2, i64::MAX), Value::Integer(2));
+        assert_eq!(run(i64::MAX, i64::MAX - 2, i64::MAX), Value::Integer(3));
+        assert_eq!(run(i64::MIN + 1, i64::MIN, i64::MIN + 2), Value::Integer(2));
+        assert_eq!(run(i64::MAX - 1, i64::MAX, i64::MAX - 2), Value::Integer(2));
+        assert_eq!(run(i64::MAX, i64::MAX, i64::MAX - 2), Value::Integer(1));
     }
 }

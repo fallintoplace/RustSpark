@@ -34,8 +34,14 @@ pub fn execute_with_options(
 }
 
 fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
+    const MAX_NODES: usize = 4096;
     let mut pending = vec![(plan, 0_usize)];
+    let mut visited = 0usize;
     while let Some((node, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_NODES {
+            return Err(Error::Execution("query plan exceeds maximum node count".into()));
+        }
         if depth >= max_depth {
             return Err(Error::Execution("query plan exceeds maximum depth".into()));
         }
@@ -90,10 +96,27 @@ fn execute_inner(
     let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
         Plan::Scan { table } => catalog.get(table)?.clone(),
-        Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
-        Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,
+        Plan::Filter { input, predicate } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                // Avoid cloning the full source table before selecting rows.
+                filter::filter(catalog.get(table)?, predicate)?
+            } else {
+                filter::filter(&descend(input)?, predicate)?
+            }
+        },
+        Plan::Project { input, selections } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                project::project(catalog.get(table)?, selections)?
+            } else {
+                project::project(&descend(input)?, selections)?
+            }
+        },
         Plan::Aggregate { input, group_by, aggregates } => {
-            aggregate::aggregate(&descend(input)?, group_by, aggregates)?
+            if let Plan::Scan { table } = input.as_ref() {
+                aggregate::aggregate(catalog.get(table)?, group_by, aggregates)?
+            } else {
+                aggregate::aggregate(&descend(input)?, group_by, aggregates)?
+            }
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
@@ -113,7 +136,13 @@ fn execute_inner(
                 limit::limit(&descend(input)?, *offset, *count)?
             }
         },
-        Plan::Distinct { input } => distinct::distinct(&descend(input)?)?,
+        Plan::Distinct { input } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                distinct::distinct(catalog.get(table)?)?
+            } else {
+                distinct::distinct(&descend(input)?)?
+            }
+        },
         Plan::Join {
             left,
             right,
@@ -127,7 +156,9 @@ fn execute_inner(
             right_key,
             *kind,
         )?,
-        Plan::CrossJoin { left, right } => join::cross_join(&descend(left)?, &descend(right)?)?,
+        Plan::CrossJoin { left, right } => join::cross_join_with_max_rows(
+            &descend(left)?, &descend(right)?, options.max_output_rows
+        )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
         Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
@@ -182,6 +213,23 @@ mod tests {
             &guard,
         ).unwrap_err();
         assert!(error.to_string().contains("deadline"));
+    }
+
+    #[test]
+    fn filtered_scan_does_not_materialize_oversized_source() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("large", Batch::from_rows(schema,
+            (0..20).map(|n| vec![Value::Integer(n)]).collect()).unwrap()).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(19)),
+        );
+        let options = ExecutionOptions { max_output_rows: 1, ..ExecutionOptions::default() };
+        let output = execute_with_options(&Plan::scan("large").filter(predicate),
+            &catalog, options).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![vec![Value::Integer(19)]]);
+        assert!(execute_with_options(&Plan::scan("large"), &catalog, options).is_err());
     }
 
     #[test]
@@ -265,5 +313,92 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod logical_plan_width_budget_tests {
+    use super::*;
+
+    fn balanced_plan(depth: usize) -> Plan {
+        if depth == 0 { return Plan::scan("source"); }
+        Plan::UnionAll {
+            left: Box::new(balanced_plan(depth - 1)),
+            right: Box::new(balanced_plan(depth - 1)),
+        }
+    }
+
+    #[test]
+    fn rejects_wide_logical_trees_before_optimizer_allocates() {
+        let oversized = balanced_plan(12);
+        let error = validate_depth(&oversized, 64).unwrap_err();
+        assert!(error.to_string().contains("node count"));
+        assert!(validate_depth(&balanced_plan(8), 64).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod catalog_projection_borrow_tests {
+    use super::*;
+    use crate::{expr::Expr, project::Selection, schema::{DataType, Field, Schema}, scalar::Value};
+    #[test]
+    fn projects_directly_from_catalog_with_nullable_values_and_aliases() {
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("hello".into())], vec![Value::Null]]
+        ).unwrap()).unwrap();
+        let plan = Plan::Project {
+            input: Box::new(Plan::scan("source")),
+            selections: vec![Selection::new(Expr::Column("text".into()), "alias")],
+        };
+        let result = execute(&plan, &catalog).unwrap();
+        assert_eq!(result.rows().unwrap(),
+            vec![vec![Value::Text("hello".into())], vec![Value::Null]]);
+        assert_eq!(result.schema().field(0).unwrap().name, "alias");
+    }
+}
+
+#[cfg(test)]
+mod catalog_aggregate_borrow_tests {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp},
+        schema::{DataType, Field, Schema}, scalar::Value};
+    #[test]
+    fn counts_a_large_catalog_with_a_single_row_output_budget() {
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..100).map(|n| vec![Value::Integer(n)]).collect()
+        ).unwrap()).unwrap();
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("source")),
+            group_by: vec![],
+            aggregates: vec![AggregateItem::new(AggregateOp::CountAll, "rows")],
+        };
+        let result = execute_with_options(&plan, &catalog,
+            ExecutionOptions { max_output_rows: 1, ..ExecutionOptions::default() }).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![vec![Value::Integer(100)]]);
+    }
+}
+
+#[cfg(test)]
+mod catalog_distinct_borrow_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+    #[test]
+    fn deduplicates_large_catalog_scan_to_small_budget() {
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            (0..100).map(|n| vec![if n % 2 == 0 { Value::Null }
+                else { Value::Integer(7) }]).collect()
+        ).unwrap()).unwrap();
+        let result = execute_with_options(&Plan::Distinct {
+                input: Box::new(Plan::scan("source")),
+            }, &catalog, ExecutionOptions { max_output_rows: 2,
+                ..ExecutionOptions::default() }).unwrap();
+        assert_eq!(result.rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(7)]]);
     }
 }

@@ -20,20 +20,20 @@ pub fn concat(
     max_rows: usize,
 ) -> Result<Batch> {
     let mut inputs = batches.into_iter();
-    if inputs.size_hint() == (1, Some(1)) {
-        if let Some(batch) = inputs.next() {
-            if batch.schema() != schema {
-                return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-            }
-            if batch.num_rows() > max_rows {
-                return Err(Error::Execution("batch collection row limit exceeded".into()));
-            }
-            return Ok(batch);
-        }
+    // Exact size hints are not guaranteed for filtered and streaming sources.
+    // Inspect at most two owned batches before deciding whether concatenation
+    // actually needs to duplicate any column buffers.
+    let Some(first) = inputs.next() else { return Ok(Batch::empty(schema.clone())); };
+    if first.schema() != schema {
+        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
     }
+    if first.num_rows() > max_rows {
+        return Err(Error::Execution("batch collection row limit exceeded".into()));
+    }
+    let Some(second) = inputs.next() else { return Ok(first); };
     let mut total = 0usize;
     let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
-    for batch in inputs {
+    for batch in std::iter::once(first).chain(std::iter::once(second)).chain(inputs) {
         if batch.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
@@ -150,5 +150,31 @@ mod single_owned_batch_concat_tests {
         let other_schema = Schema::new(vec![crate::schema::Field::new(
             "different", crate::schema::DataType::Text, true)]).unwrap();
         assert!(concat(&other_schema, [first], 5).is_err());
+    }
+}
+
+#[cfg(test)]
+mod inexact_single_batch_concat_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn inexact_iterators_can_pass_owned_single_batches_through() {
+        let schema = Schema::new(vec![
+            Field::new("word", DataType::Text, true),
+        ]).unwrap();
+        let original = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".repeat(20_000))], vec![Value::Null],
+        ]).unwrap();
+        let iterator = std::iter::once(original.clone()).filter(|_| true);
+        assert_eq!(concat(&schema, iterator, 2).unwrap(), original);
+        assert!(concat(&schema, std::iter::once(original.clone()).filter(|_| true), 1).is_err());
+
+        let zero_width = Schema::new(vec![]).unwrap();
+        let one = Batch::new_with_row_count(zero_width.clone(), vec![], 5).unwrap();
+        assert_eq!(concat(&zero_width, std::iter::once(one).filter(|_| true), 5)
+            .unwrap().num_rows(), 5);
+        let empty = concat(&zero_width, std::iter::empty(), 0).unwrap();
+        assert_eq!(empty.num_rows(), 0);
     }
 }
