@@ -96,7 +96,14 @@ fn execute_inner(
     let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
         Plan::Scan { table } => catalog.get(table)?.clone(),
-        Plan::Filter { input, predicate } => filter::filter(&descend(input)?, predicate)?,
+        Plan::Filter { input, predicate } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                // Avoid cloning the full source table before selecting rows.
+                filter::filter(catalog.get(table)?, predicate)?
+            } else {
+                filter::filter(&descend(input)?, predicate)?
+            }
+        },
         Plan::Project { input, selections } => project::project(&descend(input)?, selections)?,
         Plan::Aggregate { input, group_by, aggregates } => {
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
@@ -190,6 +197,23 @@ mod tests {
             &guard,
         ).unwrap_err();
         assert!(error.to_string().contains("deadline"));
+    }
+
+    #[test]
+    fn filtered_scan_does_not_materialize_oversized_source() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("large", Batch::from_rows(schema,
+            (0..20).map(|n| vec![Value::Integer(n)]).collect()).unwrap()).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(19)),
+        );
+        let options = ExecutionOptions { max_output_rows: 1, ..ExecutionOptions::default() };
+        let output = execute_with_options(&Plan::scan("large").filter(predicate),
+            &catalog, options).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![vec![Value::Integer(19)]]);
+        assert!(execute_with_options(&Plan::scan("large"), &catalog, options).is_err());
     }
 
     #[test]
