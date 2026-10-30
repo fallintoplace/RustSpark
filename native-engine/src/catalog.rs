@@ -65,8 +65,12 @@ impl Catalog {
 }
 
 fn normalize(name: &str) -> Result<Cow<'_, str>> {
-    if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
-        return Err(Error::Schema("expected a simple nonempty table name".into()));
+    if !name.as_bytes().first().is_some_and(|byte|
+        byte.is_ascii_alphabetic() || *byte == b'_'
+    ) || !name.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    ) {
+        return Err(Error::Schema("expected a simple ASCII table identifier".into()));
     }
     if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
         Ok(Cow::Owned(name.to_ascii_lowercase()))
@@ -172,5 +176,28 @@ mod borrowed_catalog_key_tests {
         assert!(catalog.get("Sales").is_ok());
         assert!(catalog.get("unknown").is_err());
         assert!(normalize("has space").is_err());
+    }
+}
+
+#[cfg(test)]
+mod catalog_identifier_validation_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_rejects_names_that_native_sql_cannot_reference() {
+        for name in ["", "has space", "name.with.dot", "name;drop", "9leading", "x-y", "é"] {
+            let mut catalog = Catalog::new();
+            let input = Batch::empty(crate::schema::Schema::new(vec![]).unwrap());
+            assert!(catalog.register(name, input).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn catalog_accepts_case_insensitive_sql_identifiers() {
+        let mut catalog = Catalog::new();
+        catalog.register("_Q1", Batch::empty(crate::schema::Schema::new(vec![]).unwrap())).unwrap();
+        assert!(catalog.get("_q1").is_ok());
+        assert!(catalog.rename("_Q1", "Table_2").is_ok());
+        assert_eq!(catalog.list(), ["table_2"]);
     }
 }
