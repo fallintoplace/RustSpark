@@ -7,7 +7,7 @@ use std::{
 use rustspark_native::{
     batch::Batch, scalar::Value,
     schema::{DataType, Field, Schema},
-    sql, Error, Result,
+    sql, output_file::AtomicOutput, Error, Result,
     scale::{cancel::QueryControl, file_catalog::FileCatalog,
         stream_execute::{self, StreamOptions}},
 };
@@ -15,6 +15,7 @@ use rustspark_native::{
 struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
+    output_path: Option<PathBuf>,
 }
 
 fn parse_schema(text: &str) -> Result<Schema> {
@@ -49,6 +50,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut batch_rows = 4096;
     let mut record_bytes = 8 * 1024 * 1024;
     let mut scratch = env::temp_dir();
+    let mut output_path = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
@@ -74,6 +76,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--max-record-bytes" => record_bytes = value.parse()
                 .map_err(|_| Error::Parse("invalid --max-record-bytes".into()))?,
             "--scratch-dir" => scratch = PathBuf::from(value),
+            "--output" => {
+                if output_path.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --output".into()));
+                }
+            },
             _ => return Err(Error::Parse(format!("unknown option: {flag}"))),
         }
     }
@@ -96,7 +103,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if parquet.is_some() && schema.is_some() {
         return Err(Error::Parse("Parquet schema comes from file metadata".into()));
     }
-    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch }))
+    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch, output_path }))
 }
 
 fn escape(text: &str) -> String {
@@ -153,9 +160,25 @@ fn run() -> Result<()> {
     };
     let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
     let input = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
-    let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
-    write_csv(&schema, input, &mut output)
+    if let Some(path) = &args.output_path {
+        // An output must never replace the source file being queried.
+        if let Ok(target) = fs::canonicalize(path) {
+            if args.csv.as_ref().or(args.parquet.as_ref())
+                .and_then(|source| fs::canonicalize(source).ok())
+                .as_ref() == Some(&target) {
+                return Err(Error::Execution("result output path aliases input file".into()));
+            }
+        }
+        let mut writer = io::BufWriter::new(AtomicOutput::create(path)?);
+        write_csv(&schema, input, &mut writer)?;
+        writer.flush()?;
+        let file = writer.into_inner().map_err(|error| Error::Io(error.to_string()))?;
+        file.commit()
+    } else {
+        let stdout = io::stdout();
+        let mut output = io::BufWriter::new(stdout.lock());
+        write_csv(&schema, input, &mut output)
+    }
 }
 
 fn main() -> ExitCode {
@@ -191,5 +214,22 @@ mod tests {
         assert!(parse_args(parquet.into_iter().map(String::from)).unwrap().unwrap().parquet.is_some());
         let invalid = ["--parquet", "data.parquet", "--schema", "n:int", "--sql", "SELECT * FROM data"];
         assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod atomic_result_flag_tests {
+    use super::*;
+
+    #[test]
+    fn cli_accepts_output_and_rejects_duplicates() {
+        let flags = ["--csv", "a.csv", "--schema", "n:int",
+            "--sql", "SELECT n FROM data", "--output", "result.csv"];
+        assert_eq!(parse_args(flags.into_iter().map(String::from))
+            .unwrap().unwrap().output_path, Some(PathBuf::from("result.csv")));
+        let repeated = ["--csv", "a.csv", "--schema", "n:int",
+            "--sql", "SELECT n FROM data",
+            "--output", "a.csv", "--output", "b.csv"];
+        assert!(parse_args(repeated.into_iter().map(String::from)).is_err());
     }
 }
