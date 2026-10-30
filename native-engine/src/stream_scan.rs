@@ -58,10 +58,20 @@ impl Iterator for ScanCursor<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.failed { return None; }
-        if self.predicate.is_none() && self.identity_projection {
+        if self.predicate.is_none() {
             if self.next_row == self.source.num_rows() { return None; }
-            let end = self.next_row.saturating_add(self.target_rows).min(self.source.num_rows());
-            let result = self.source.slice_rows(self.next_row, end);
+            let start = self.next_row;
+            let end = start.saturating_add(self.target_rows).min(self.source.num_rows());
+            let result = if self.identity_projection {
+                self.source.slice_rows(start, end)
+            } else {
+                self.columns.iter().map(|&index| {
+                    self.source.column(index).map(|values| values[start..end].to_vec())
+                }).collect::<Result<Vec<_>>>()
+                    .and_then(|columns| Batch::new_with_row_count(
+                        self.output_schema.clone(), columns, end - start,
+                    ))
+            };
             self.next_row = end;
             if result.is_err() { self.failed = true; }
             return Some(result);
@@ -266,5 +276,31 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod contiguous_projected_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn unfiltered_projections_slice_only_requested_column_windows() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("unused", DataType::Text, false),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Integer(1)],
+            vec![Value::Text("b".into()), Value::Integer(2)],
+            vec![Value::Text("c".into()), Value::Integer(3)],
+        ]).unwrap();
+        let chunks = scan(&input, None, &["id"], 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(chunks[0].rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]);
+        assert_eq!(chunks[1].rows().unwrap(), vec![vec![Value::Integer(3)]]);
+        assert_eq!(chunks[0].schema().len(), 1);
     }
 }
