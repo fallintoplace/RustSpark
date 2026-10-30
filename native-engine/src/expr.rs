@@ -78,11 +78,53 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
-            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::Not(inner) => {
+                if !matches!(inner.as_ref(), Self::Literal(Value::Null))
+                    && inner.output_type(schema)? != DataType::Boolean {
+                    return Err(Error::Type("NOT requires a boolean operand".into()));
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::IsNull(inner) => {
+                // IS NULL is valid for any value type, but its input still
+                // needs to resolve against the schema before execution.
+                inner.output_type(schema)?;
+                Ok(DataType::Boolean)
+            },
+            Self::Like { value, pattern, escape } => {
+                for expression in [value.as_ref(), pattern.as_ref()] {
+                    if expression.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE requires text operands".into()));
+                    }
+                }
+                if let Some(escape) = escape {
+                    if escape.output_type(schema)? != DataType::Text {
+                        return Err(Error::Type("LIKE ESCAPE requires text".into()));
+                    }
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::IsDistinctFrom { left, right, .. } => {
+                let l = left.output_type(schema)?;
+                let r = right.output_type(schema)?;
+                if !matches!(left.as_ref(), Self::Literal(Value::Null))
+                    && !matches!(right.as_ref(), Self::Literal(Value::Null))
+                    && l != r
+                    && !matches!((l, r), (DataType::Integer, DataType::Float) |
+                        (DataType::Float, DataType::Integer)) {
+                    return Err(Error::Type("IS DISTINCT FROM requires comparable operands".into()));
+                }
+                Ok(DataType::Boolean)
+            },
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
+                for (condition, _) in branches {
+                    if !matches!(condition, Expr::Literal(Value::Null))
+                        && condition.output_type(schema)? != DataType::Boolean {
+                        return Err(Error::Type("CASE WHEN requires a boolean condition".into()));
+                    }
+                }
                 let mut output = None;
                 for expr in branches.iter().map(|(_, value)| value)
                     .chain(else_expr.iter().map(Box::as_ref))
@@ -465,6 +507,123 @@ mod like_rolling_buffer_perf_tests {
         assert!(sql_like_escape("a%b", "a\\%b", '\\').unwrap());
         assert!(sql_like_escape("", "%%", '\\').unwrap());
         assert!(!sql_like_escape("", "_%", '\\').unwrap());
+    }
+}
+
+#[cfg(test)]
+mod not_expression_static_type_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn rejects_not_of_integer_even_with_no_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("enabled", DataType::Boolean, true),
+        ]).unwrap();
+        let invalid = Expr::Not(Box::new(Expr::Column("n".into())));
+        assert!(invalid.output_type(&schema).is_err());
+        assert!(Expr::Not(Box::new(Expr::Column("missing".into())))
+            .output_type(&schema).is_err());
+        let valid = Expr::Not(Box::new(Expr::Column("enabled".into())));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+        let nullable = Expr::Not(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(nullable.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod is_null_static_schema_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_inner_columns_even_when_input_batch_is_empty() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let missing = Expr::IsNull(Box::new(Expr::Column("missing".into())));
+        assert!(missing.output_type(&schema).is_err());
+        let valid = Expr::IsNull(Box::new(Expr::Column("text".into())));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+        let literal = Expr::IsNull(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(literal.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod like_expression_type_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn rejects_invalid_pattern_and_escape_types_before_execution() {
+        let schema = Schema::new(vec![
+            Field::new("s", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let like = |value, pattern, escape| Expr::Like {
+            value: Box::new(value), pattern: Box::new(pattern),
+            escape: escape.map(Box::new),
+        };
+        assert!(like(Expr::Column("n".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
+        assert!(like(Expr::Column("s".into()), Expr::Column("n".into()), None)
+            .output_type(&schema).is_err());
+        assert!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
+            Some(Expr::Literal(Value::Integer(1)))).output_type(&schema).is_err());
+        assert_eq!(like(Expr::Column("s".into()), Expr::Literal(Value::Text("%".into())),
+            None).output_type(&schema).unwrap(), DataType::Boolean);
+        assert!(like(Expr::Column("missing".into()), Expr::Literal(Value::Text("%".into())), None)
+            .output_type(&schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod distinct_comparison_static_type_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_compatible_types_and_nullable_literals() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("f", DataType::Float, true),
+            Field::new("t", DataType::Text, true),
+        ]).unwrap();
+        let compare = |left, right| Expr::IsDistinctFrom {
+            left: Box::new(left), right: Box::new(right), negated: false,
+        };
+        assert_eq!(compare(Expr::Column("n".into()), Expr::Column("f".into()))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert_eq!(compare(Expr::Column("n".into()), Expr::Literal(Value::Null))
+            .output_type(&schema).unwrap(), DataType::Boolean);
+        assert!(compare(Expr::Column("n".into()), Expr::Column("t".into()))
+            .output_type(&schema).is_err());
+        assert!(compare(Expr::Column("missing".into()), Expr::Column("n".into()))
+            .output_type(&schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod case_condition_type_checks {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn invalid_case_when_conditions_fail_before_execution() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let invalid = Expr::Case {
+            branches: vec![(Expr::Column("n".into()), Expr::Literal(Value::Integer(1)))],
+            else_expr: None,
+        };
+        assert!(invalid.output_type(&schema).is_err());
+        let valid = Expr::Case {
+            branches: vec![(Expr::Literal(Value::Boolean(true)),
+                Expr::Literal(Value::Integer(1)))],
+            else_expr: None,
+        };
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Integer);
     }
 }
 
