@@ -2,7 +2,7 @@
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
     time::{SystemTime, UNIX_EPOCH},
 };
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
@@ -12,28 +12,34 @@ use crate::{arrow_bridge, batch::Batch, schema::Schema, Error, Result};
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
-pub struct SpillFile {
+struct SpillPath {
     path: PathBuf,
 }
 
-impl SpillFile {
-    pub fn path(&self) -> &Path { &self.path }
-
-    pub fn read(&self) -> Result<SpillReader> {
-        let file = File::open(&self.path)?;
-        let inner = FileReader::try_new(file, None)
-            .map_err(|e| Error::Execution(format!("open Arrow spill: {e}")))?;
-        Ok(SpillReader { inner, failed: false })
-    }
+impl Drop for SpillPath {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); }
 }
 
-impl Drop for SpillFile {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); }
+#[derive(Debug)]
+pub struct SpillFile {
+    path: Arc<SpillPath>,
+}
+
+impl SpillFile {
+    pub fn path(&self) -> &Path { &self.path.path }
+
+    pub fn read(&self) -> Result<SpillReader> {
+        let file = File::open(&self.path.path)?;
+        let inner = FileReader::try_new(file, None)
+            .map_err(|e| Error::Execution(format!("open Arrow spill: {e}")))?;
+        Ok(SpillReader { inner, failed: false, _owner: Arc::clone(&self.path) })
+    }
 }
 
 pub struct SpillReader {
     inner: FileReader<File>,
     failed: bool,
+    _owner: Arc<SpillPath>,
 }
 
 impl Iterator for SpillReader {
@@ -63,7 +69,7 @@ pub fn spill(dir: impl AsRef<Path>, schema: &Schema, batches: &[Batch]) -> Resul
         std::process::id()
     ));
     let output = OpenOptions::new().write(true).create_new(true).open(&path)?;
-    let temporary = SpillFile { path };
+    let temporary = SpillFile { path: Arc::new(SpillPath { path }) };
     let arrow_schema = arrow_bridge::to_arrow(&Batch::empty(schema.clone()))?.schema();
     let mut writer = FileWriter::try_new(output, &arrow_schema)
         .map_err(|e| Error::Execution(format!("create Arrow spill: {e}")))?;
@@ -117,9 +123,29 @@ mod malformed_ipc_reader_tests {
         let mut writer = FileWriter::try_new(File::create(&path).unwrap(), &record.schema()).unwrap();
         writer.write(&record).unwrap();
         writer.finish().unwrap();
-        let file = SpillFile { path };
+        let file = SpillFile { path: Arc::new(SpillPath { path }) };
         let mut reader = file.read().unwrap();
         assert!(reader.next().unwrap().is_err());
         assert!(reader.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod ipc_reader_lifetime_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn active_reader_keeps_spill_file_until_last_drop() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(17)]]).unwrap();
+        let scratch = spill(std::env::temp_dir(), &schema, &[batch.clone()]).unwrap();
+        let path = scratch.path().to_path_buf();
+        let mut reader = scratch.read().unwrap();
+        drop(scratch);
+        assert!(path.exists(), "reader must retain the spill-file cleanup guard");
+        assert_eq!(reader.next().unwrap().unwrap(), batch);
+        drop(reader);
+        assert!(!path.exists());
     }
 }
