@@ -137,10 +137,18 @@ fn execute_inner(
             }
         },
         Plan::Distinct { input } => {
+            // Admit unique rows under the query's output cap rather than
+            // allocating a rejected DISTINCT result and checking it later.
+            let max_keys = options.max_output_rows.min(1_000_000);
+            const MAX_DISTINCT_BYTES: usize = 64 * 1024 * 1024;
             if let Plan::Scan { table } = input.as_ref() {
-                distinct::distinct(catalog.get(table)?)?
+                distinct::distinct_with_budget(
+                    catalog.get(table)?, max_keys, MAX_DISTINCT_BYTES,
+                )?
             } else {
-                distinct::distinct(&descend(input)?)?
+                distinct::distinct_with_budget(
+                    &descend(input)?, max_keys, MAX_DISTINCT_BYTES,
+                )?
             }
         },
         Plan::Join {
@@ -400,5 +408,35 @@ mod catalog_distinct_borrow_tests {
                 ..ExecutionOptions::default() }).unwrap();
         assert_eq!(result.rows().unwrap(),
             vec![vec![Value::Null], vec![Value::Integer(7)]]);
+    }
+}
+
+#[cfg(test)]
+mod executor_distinct_query_budget_tests {
+    use super::*;
+    use crate::{batch::Batch, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn distinct_rejects_unique_rows_at_query_admission_limit() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("numbers", input).unwrap();
+        let plan = Plan::Distinct { input: Box::new(Plan::scan("numbers")) };
+        let options = ExecutionOptions {
+            max_output_rows: 1, ..ExecutionOptions::default()
+        };
+        let err = execute_with_options(&plan, &catalog, options).unwrap_err();
+        assert!(err.to_string().contains("DISTINCT key limit"), "{err}");
+        let accepted = execute_with_options(&plan, &catalog, ExecutionOptions {
+            max_output_rows: 2, ..ExecutionOptions::default()
+        }).unwrap();
+        assert_eq!(accepted.num_rows(), 2);
     }
 }
