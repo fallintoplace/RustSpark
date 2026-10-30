@@ -54,7 +54,10 @@ impl Ord for ColumnCandidate<'_> {
     }
 }
 
-fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
+fn top_k_columns(
+    batch: &Batch, keys: &[SortKey], k: usize,
+    check: &mut impl FnMut() -> Result<()>,
+) -> Result<Batch> {
     let columns = keys.iter().map(|key| match &key.expression {
         crate::expr::Expr::Column(name) => batch.column(batch.schema().column(name)?),
         _ => unreachable!("column-only Top-K"),
@@ -62,6 +65,7 @@ fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     let options = keys.iter().map(|key| (key.descending, key.nulls_first)).collect::<Vec<_>>();
     let mut heap = BinaryHeap::with_capacity(k);
     for row in 0..batch.num_rows() {
+        if row % 1024 == 0 { check()?; }
         let candidate = ColumnCandidate { row, columns: &columns, options: &options };
         if heap.len() < k {
             heap.push(candidate);
@@ -75,12 +79,22 @@ fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
 }
 
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
+    top_k_checked(batch, keys, k, || Ok(()))
+}
+
+pub fn top_k_checked(
+    batch: &Batch, keys: &[SortKey], k: usize,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take(&[]); }
     if k >= batch.num_rows() && !keys.is_empty() {
-        return crate::sort::sort(batch, keys);
+        let sorted = crate::sort::sort(batch, keys)?;
+        check()?;
+        return Ok(sorted);
     }
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
@@ -92,6 +106,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
             let column = batch.column(batch.schema().column(name)?)?;
             let mut best = 0usize;
             for row in 1..batch.num_rows() {
+                if row % 1024 == 0 { check()?; }
                 if crate::sort::compare_values(
                     &column[row], &column[best], keys[0].descending, keys[0].nulls_first,
                 ) == Ordering::Less {
@@ -102,7 +117,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         }
     }
     if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
-        return top_k_columns(batch, keys, k);
+        return top_k_columns(batch, keys, k, &mut check);
     }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let key_columns = keys.iter().map(|key| match &key.expression {
@@ -114,6 +129,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }).collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
+        if row % 1024 == 0 { check()?; }
         let values = keys.iter().zip(&key_columns).map(|(key, column)| {
             match column {
                 Some(values) => Ok(values[row].clone()),
@@ -131,6 +147,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     let mut retained = heap.into_vec();
     retained.sort();
+    check()?;
     batch.take(&retained.into_iter().map(|row| row.row).collect::<Vec<_>>())
 }
 
@@ -174,6 +191,14 @@ mod tests {
  
 /// Keep only OFFSET + LIMIT candidates, preserving stable ties.
 pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize) -> Result<Batch> {
+    top_k_offset_checked(batch, keys, offset, count, || Ok(()))
+}
+
+pub fn top_k_offset_checked(
+    batch: &Batch, keys: &[SortKey], offset: usize, count: usize,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     if count == 0 {
         for key in keys {
             key.expression.output_type(batch.schema())?;
@@ -182,7 +207,8 @@ pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize
     }
     let required = offset.checked_add(count)
         .ok_or_else(|| crate::Error::Execution("top-K pagination overflow".into()))?;
-    let best = top_k(batch, keys, required)?;
+    let best = top_k_checked(batch, keys, required, || check())?;
+    check()?;
     crate::limit::limit(&best, offset, Some(count))
 }
 
@@ -317,5 +343,29 @@ mod singleton_topk_column_scan_tests {
             assert_eq!(result.num_rows(), 1);
             assert_eq!(result.value(0, 1).unwrap(), expected.value(0, 1).unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod native_topk_cancel_during_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn single_key_topk_observes_cancellation_before_completing_scan() {
+        let schema = Schema::new(vec![Field::new("score", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..5000)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("score".into()))];
+        let mut checks = 0;
+        let error = top_k_offset_checked(&batch, &keys, 0, 1, || {
+            checks += 1;
+            if checks == 3 { Err(crate::Error::Execution("topk cancelled".into())) }
+            else { Ok(()) }
+        }).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(checks, 3);
+        let normal = top_k_offset(&batch, &keys, 0, 1).unwrap();
+        assert_eq!(normal.row(0).unwrap(), vec![Value::Integer(0)]);
     }
 }
