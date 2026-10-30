@@ -300,6 +300,18 @@ pub fn output_type(name: &str, arguments: &[Expr], schema: &Schema) -> Result<Da
         return if not_null.is_empty() { Ok(DataType::Text) }
             else { same_type(&not_null) };
     }
+    // A bare SQL NULL literal is untyped. Let unary functions infer their
+    // declared parameter category instead of treating NULL as a text value.
+    if arguments.len() == 1 && matches!(arguments[0], Expr::Literal(Value::Null)) {
+        if let Ok(result) = (function.result_type)(&types) {
+            return Ok(result);
+        }
+        for candidate in [DataType::Float, DataType::Integer, DataType::Boolean] {
+            if let Ok(result) = (function.result_type)(&[candidate]) {
+                return Ok(result);
+            }
+        }
+    }
     (function.result_type)(&types)
 }
 
@@ -423,5 +435,29 @@ mod nullable_if_branch_type_tests {
         let args = [literal(Value::Boolean(true)), literal(Value::Integer(1)),
                     literal(Value::Text("bad".into()))];
         assert!(output_type("if", &args, &schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod untyped_null_unary_scalar_tests {
+    use super::*;
+
+    #[test]
+    fn nullable_numeric_builtins_accept_sql_null_literals() {
+        let schema = Schema::new(vec![]).unwrap();
+        let null = [Expr::Literal(Value::Null)];
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        for (function, expected) in [
+            ("sqrt", DataType::Float),
+            ("exp", DataType::Float),
+            ("round", DataType::Float),
+            ("bit_count", DataType::Integer),
+            ("chr", DataType::Text),
+            ("isfinite", DataType::Boolean),
+        ] {
+            assert_eq!(output_type(function, &null, &schema).unwrap(), expected);
+            assert_eq!(evaluate(function, &null, &batch, 0).unwrap(), Value::Null);
+        }
+        assert!(output_type("sqrt", &[Expr::Literal(Value::Text("x".into()))], &schema).is_err());
     }
 }
