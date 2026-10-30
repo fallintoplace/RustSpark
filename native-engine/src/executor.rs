@@ -118,7 +118,9 @@ fn execute_inner(
                 aggregate::aggregate(&descend(input)?, group_by, aggregates)?
             }
         }
-        Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
+        Plan::Sort { input, keys } => sort::sort_checked(
+            &descend(input)?, keys, || guard.check(),
+        )?,
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
             && matches!(input.as_ref(), Plan::Sort { .. }) => {
             let Plan::Sort { input: source, keys } = input.as_ref() else {
