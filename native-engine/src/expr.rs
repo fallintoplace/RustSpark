@@ -85,8 +85,13 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::IsNull(_) | Self::Like { .. }
-            | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
+            Self::IsNull(inner) => {
+                // IS NULL is valid for any value type, but its input still
+                // needs to resolve against the schema before execution.
+                inner.output_type(schema)?;
+                Ok(DataType::Boolean)
+            },
+            Self::Like { .. } | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
             Self::Case { branches, else_expr } => {
@@ -487,5 +492,24 @@ mod not_expression_static_type_tests {
         assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
         let nullable = Expr::Not(Box::new(Expr::Literal(Value::Null)));
         assert_eq!(nullable.output_type(&schema).unwrap(), DataType::Boolean);
+    }
+}
+
+#[cfg(test)]
+mod is_null_static_schema_validation_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn validates_inner_columns_even_when_input_batch_is_empty() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let missing = Expr::IsNull(Box::new(Expr::Column("missing".into())));
+        assert!(missing.output_type(&schema).is_err());
+        let valid = Expr::IsNull(Box::new(Expr::Column("text".into())));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+        let literal = Expr::IsNull(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(literal.output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
