@@ -75,8 +75,10 @@ impl SetStream {
         let mut right_counts: HashMap<Vec<Value>, usize> = HashMap::new();
         let mut retained_bytes = 0usize;
         // Bounded materialization of right-hand distinct keys, not its row count.
-        for batch in right {
+        let mut right = right;
+        loop {
             control.check()?;
+            let Some(batch) = right.next() else { break };
             let batch = batch?;
             if batch.schema() != &right_schema {
                 return Err(Error::Schema("stream set right schema changed".into()));
@@ -230,5 +232,25 @@ mod tests {
         assert_eq!(output.field(0).unwrap().data_type, DataType::Float);
         assert_eq!(set_schema(&integer, &Schema::new(vec![Field::new("v",
             DataType::Text, true)]).unwrap()).is_err(), true);
+    }
+}
+
+#[cfg(test)]
+mod cancelled_set_build_input_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn cancelled_set_build_does_not_poll_right_source() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let left: BatchStream = Box::new(std::iter::empty());
+        let right: BatchStream = Box::new(std::iter::repeat_with(
+            || -> Result<Batch> { panic!("source polled") }
+        ));
+        let control = QueryControl::default();
+        control.cancel();
+        let result = SetStream::new(left, right, schema.clone(), schema,
+            SetMode::IntersectDistinct, control, 5, 1024);
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
