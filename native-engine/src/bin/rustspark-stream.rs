@@ -126,8 +126,14 @@ fn write_csv(
         if batch.schema() != schema {
             return Err(Error::Schema("streaming output schema changed".into()));
         }
-        for row in batch.rows()? {
-            writeln!(output, "{}", row.iter().map(csv_value).collect::<Vec<_>>().join(","))?;
+        for row in 0..batch.num_rows() {
+            // Output borrowed cells directly. Materializing batch.rows() used
+            // to clone every scalar, including long strings, before rendering.
+            for column in 0..schema.len() {
+                if column > 0 { output.write_all(b",")?; }
+                output.write_all(csv_value(batch.value(row, column)?).as_bytes())?;
+            }
+            output.write_all(b"\n")?;
         }
     }
     output.flush()?;
@@ -179,6 +185,23 @@ mod tests {
         let mut output = Vec::new();
         write_csv(&schema, [Ok(data)], &mut output).unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "id,city\n1,\"A,\"\"B\"\"\"\n2,\n");
+    }
+
+    #[test]
+    fn csv_writer_preserves_multiline_text_and_batch_boundaries() {
+        let schema = parse_schema("id:int!,text:text").unwrap();
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("a\nb\"c".into())],
+            vec![Value::Integer(2), Value::Text("é🙂".repeat(1000))],
+        ]).unwrap();
+        let mut output = Vec::new();
+        write_csv(&schema, [
+            Ok(source.slice_rows(0, 1).unwrap()),
+            Ok(source.slice_rows(1, 2).unwrap()),
+        ], &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("id,text\n1,\"a\nb\"\"c\"\n2,"));
+        assert!(text.ends_with(&format!("{}\n", "é🙂".repeat(1000))));
     }
 
     #[test]
