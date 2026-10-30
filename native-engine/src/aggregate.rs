@@ -64,7 +64,7 @@ impl AggregateItem {
 #[derive(Clone)]
 enum State {
     Count(i64),
-    CountDistinct(HashSet<Value>),
+    CountDistinct { seen: HashSet<Value>, bytes: usize },
     Sum(Option<Value>),
     SumDistinct { seen: HashSet<Value>, total: Option<Value> },
     Avg { sum: f64, compensation: f64, count: i64 },
@@ -77,7 +77,7 @@ impl State {
     fn new(op: &AggregateOp) -> Self {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
-            AggregateOp::CountDistinct(_) => Self::CountDistinct(HashSet::new()),
+            AggregateOp::CountDistinct(_) => Self::CountDistinct { seen: HashSet::new(), bytes: 0 },
             AggregateOp::Sum(_) => Self::Sum(None),
             AggregateOp::SumDistinct(_) => Self::SumDistinct { seen: HashSet::new(), total: None },
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
@@ -108,8 +108,23 @@ impl State {
                         .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
                 }
             }
-            Self::CountDistinct(values) => {
-                if !value.is_null() { values.insert(value); }
+            Self::CountDistinct { seen, bytes } => {
+                if !value.is_null() && !seen.contains(&value) {
+                    if seen.len() >= MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP {
+                        return Err(Error::Execution("COUNT DISTINCT key budget exceeded".into()));
+                    }
+                    let footprint = 64usize.saturating_add(std::mem::size_of::<Value>())
+                        .saturating_add(match &value {
+                            Value::Text(text) => text.len(),
+                            _ => 0,
+                        });
+                    let total = bytes.checked_add(footprint)
+                        .filter(|size| *size <= 64 * 1024 * 1024)
+                        .ok_or_else(|| Error::Execution(
+                            "COUNT DISTINCT byte budget exceeded".into()))?;
+                    seen.insert(value);
+                    *bytes = total;
+                }
             }
             Self::Sum(total) => add_sum(total, &value)?,
             Self::SumDistinct { seen, total } => {
@@ -137,8 +152,8 @@ impl State {
     fn finish(self) -> Result<Value> {
         Ok(match self {
             Self::Count(value) => Value::Integer(value),
-            Self::CountDistinct(values) => Value::Integer(
-                i64::try_from(values.len())
+            Self::CountDistinct { seen, .. } => Value::Integer(
+                i64::try_from(seen.len())
                     .map_err(|_| Error::Execution("COUNT DISTINCT overflow".into()))?
             ),
             Self::Avg { sum, compensation, count } =>
@@ -444,6 +459,40 @@ mod bound_group_columns_perf_tests {
             BinaryOp::Add, Expr::Literal(Value::Integer(1)));
         assert_eq!(aggregate_with_max_groups(&batch,
             &[(computed, "key".into())], &[], 2).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod count_distinct_budget_regression_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_keys_are_bounded_and_duplicate_nulls_do_not_use_slots() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let data = Batch::from_rows(schema,
+            std::iter::once(vec![Value::Null])
+                .chain((0..65_536).map(|n| vec![Value::Integer(n)]))
+                .collect()).unwrap();
+        let output = aggregate(&data, &[],
+            &[AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("id".into())), "n")]).unwrap();
+        assert_eq!(output.row(0).unwrap(), vec![Value::Integer(65_536)]);
+        let extra = Batch::from_rows(data.schema().clone(),
+            (0..=65_536).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        assert!(aggregate(&extra, &[],
+            &[AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("id".into())), "n")])
+            .is_err());
+    }
+
+    #[test]
+    fn repeated_text_values_count_once_and_nulls_are_ignored() {
+        let schema = Schema::new(vec![Field::new("word", DataType::Text, true)]).unwrap();
+        let data = Batch::from_rows(schema, vec![
+            vec![Value::Text("Berlin".into())],
+            vec![Value::Text("Berlin".into())], vec![Value::Null],
+        ]).unwrap();
+        assert_eq!(aggregate(&data, &[], &[AggregateItem::new(
+            AggregateOp::CountDistinct(Expr::Column("word".into())), "n")]).unwrap().row(0).unwrap(),
+            vec![Value::Integer(1)]);
     }
 }
 
