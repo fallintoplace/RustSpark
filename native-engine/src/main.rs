@@ -293,16 +293,12 @@ fn run_stream(args: &Args) -> Result<()> {
 const MAX_PARQUET_ROWS: usize = 1_000_000;
 
 fn read_parquet_bounded(path: &Path) -> Result<Batch> {
-    let mut schema: Option<Schema> = None;
+    let schema = parquet_scan::file_schema(path)?;
     let mut rows = Vec::new();
     for next in parquet_scan::scan(path, 4_096)? {
         let batch = next?;
-        if let Some(current) = &schema {
-            if current != batch.schema() {
-                return Err(Error::Schema("Parquet batch schema changed".into()));
-            }
-        } else {
-            schema = Some(batch.schema().clone());
+        if &schema != batch.schema() {
+            return Err(Error::Schema("Parquet batch schema changed".into()));
         }
         let total = rows.len().checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("Parquet row count overflow".into()))?;
@@ -311,7 +307,6 @@ fn read_parquet_bounded(path: &Path) -> Result<Batch> {
         }
         rows.extend(batch.rows()?);
     }
-    let schema = schema.ok_or_else(|| Error::Unsupported("empty Parquet data cannot yet be queried in the native CLI".into()))?;
     Batch::from_rows(schema, rows)
 }
 
