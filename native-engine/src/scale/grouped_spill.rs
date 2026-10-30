@@ -254,6 +254,11 @@ where I: IntoIterator<Item = Result<Batch>>
     let keys = groups.iter().map(|(name, _)| schema.column(name))
         .collect::<Result<Vec<_>>>()?;
     let output_schema = output_schema(&schema, groups, items)?;
+    if output_schema.len() > 4096 ||
+        io_batch_rows.checked_mul(output_schema.len())
+            .is_none_or(|cells| cells > 4_000_000) {
+        return Err(Error::Execution("grouped spill output exceeds wire cell budget".into()));
+    }
     let names = groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
     let mut writer = PartitionWriter::new(
         directory, schema.clone(), &names, partitions, io_batch_rows)?;
@@ -443,5 +448,24 @@ mod grouped_spill_window_output_tests {
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grouped_result_width_preflight_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn oversized_grouped_result_rejects_without_source_reads() {
+        let schema = Schema::new(vec![Field::new("g", DataType::Integer, false)]).unwrap();
+        let items = (0..4096).map(|n|
+            AggregateItem::new(AggregateOp::CountAll, format!("count{n}"))
+        ).collect::<Vec<_>>();
+        let source = std::iter::repeat_with(|| -> Result<Batch> { panic!("source polled") });
+        let result = grouped_aggregate(source, schema, &[("g".into(), "g".into())],
+            &items, std::env::temp_dir().as_path(), 1, 50, 4,
+            &QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
