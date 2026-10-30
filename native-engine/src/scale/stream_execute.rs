@@ -10,6 +10,7 @@ use super::{
     chunks::RowBatcher, file_catalog::FileCatalog,
     stream_ops::{FilterStream, ProjectStream, LimitStream},
     union_stream::UnionAllStream,
+    topk_stream::TopKOutput,
     sorted_runs::write_sorted_runs,
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
@@ -407,6 +408,18 @@ fn lower(
         }
         Plan::Project { input, selections } =>
             Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Limit { input, offset, count: Some(count) }
+            if matches!(input.as_ref(), Plan::Sort { .. }) &&
+                offset.checked_add(*count).is_some_and(|k| k <= 100_000) => {
+            let Plan::Sort { input: source, keys } = input.as_ref() else {
+                unreachable!("checked sort plan");
+            };
+            let schema = infer(source, catalog, depth + 2, options.max_plan_depth)?;
+            Ok(Box::new(TopKOutput::new(
+                lower(source, catalog, options, control, depth + 2)?,
+                schema, keys, *offset, *count, options.batch_rows, control.clone(),
+            )?))
+        }
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
