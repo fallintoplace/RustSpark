@@ -19,15 +19,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install RustSec cargo-audit
         run: cargo install --locked cargo-audit
-      - name: Resolve native dependency lockfile
-        run: cargo generate-lockfile
-      - name: Audit Cargo.lock against RustSec advisories
-        run: cargo audit --json > rustsec-audit.json
+      - name: Resolve both dependency lockfiles
+        run: |
+          cargo generate-lockfile --manifest-path Cargo.toml
+          cargo generate-lockfile --manifest-path native-engine/Cargo.toml
+      - name: Audit root and standalone native dependency graphs
+        shell: bash
+        run: |
+          set +e
+          cargo audit --file Cargo.lock --json > rustsec-root.json
+          root_status=$?
+          cargo audit --file native-engine/Cargo.lock --json > rustsec-native.json
+          native_status=$?
+          if [ "$root_status" -ne 0 ] || [ "$native_status" -ne 0 ]; then
+            echo "RustSec audit failed for at least one dependency graph" >&2
+            exit 1
+          fi
       - name: Upload audit results for triage
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: rustsec-audit-report
-          path: rustsec-audit.json
+          path: |
+            rustsec-root.json
+            rustsec-native.json
           if-no-files-found: ignore
           retention-days: 30
