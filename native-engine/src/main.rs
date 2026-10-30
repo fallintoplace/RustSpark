@@ -30,6 +30,7 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    max_output_bytes: u64,
 }
 
 fn usage() -> &'static str {
@@ -46,6 +47,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut max_output_bytes = 256 * 1024 * 1024u64;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -89,6 +91,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--max-output-bytes" => {
+                max_output_bytes = value.parse::<u64>()
+                    .map_err(|_| Error::Parse("invalid --max-output-bytes".into()))?;
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -106,6 +112,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             }
             _ => return Err(Error::Parse(format!("unknown option: {arg}"))),
         }
+    }
+    if max_output_bytes == 0 || max_output_bytes > 16 * 1024 * 1024 * 1024 {
+        return Err(Error::Execution("result byte limit must be within 1..=16 GiB".into()));
     }
     if csv_schema.is_some() && !stream {
         return Err(Error::Parse("--csv-schema requires --stream".into()));
@@ -134,7 +143,27 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, max_output_bytes }))
+}
+
+struct OutputBudget<W> {
+    writer: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for OutputBudget<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(io::Error::other("native result exceeds configured output byte limit"));
+        }
+        let written = self.writer.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 fn escape_field(input: &str) -> String {
@@ -279,7 +308,10 @@ fn run_stream(args: &Args) -> Result<()> {
     }
 
     let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
+    let mut output = OutputBudget {
+        writer: io::BufWriter::new(stdout.lock()),
+        remaining: args.max_output_bytes,
+    };
     if !args.jsonl { print_header(&output_schema, &mut output)?; }
     for batch in pipeline {
         let batch = batch?;
@@ -347,7 +379,10 @@ fn run() -> Result<()> {
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
     let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
+    let mut output = OutputBudget {
+        writer: io::BufWriter::new(stdout.lock()),
+        remaining: args.max_output_bytes,
+    };
     if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
     else { print_csv(&batch, &mut output)?; }
     output.flush()?;
@@ -430,5 +465,28 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod result_output_budget_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_writer_accepts_exact_size_and_rejects_more() {
+        let mut out = OutputBudget { writer: Vec::new(), remaining: 4 };
+        out.write_all(b"abcd").unwrap();
+        assert_eq!(out.remaining, 0);
+        assert!(out.write_all(b"x").is_err());
+        assert_eq!(out.writer, b"abcd");
+    }
+
+    #[test]
+    fn invalid_cli_result_limits_are_rejected_before_execution() {
+        for limit in ["0", "-1", "abc", "17179869185"] {
+            let options = ["--csv", "data.csv", "--sql", "SELECT * FROM data",
+                "--max-output-bytes", limit];
+            assert!(parse_args(options.into_iter().map(String::from)).is_err());
+        }
     }
 }
