@@ -96,6 +96,36 @@ fn execute_inner(
             aggregate::aggregate(&descend(input)?, group_by, aggregates)?
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
+        Plan::Limit { input, offset, count: Some(count) }
+            if matches!(input.as_ref(), Plan::Filter { input: source, .. }
+                if matches!(source.as_ref(), Plan::Scan { .. })) => {
+            let Plan::Filter { input: source, predicate } = input.as_ref() else {
+                unreachable!("checked filter plan");
+            };
+            let Plan::Scan { table } = source.as_ref() else {
+                unreachable!("checked catalog scan");
+            };
+            offset.checked_add(*count)
+                .ok_or_else(|| Error::Execution("LIMIT + OFFSET overflow".into()))?;
+            let source = catalog.get(table)?;
+            let mut chunks = Vec::new();
+            let mut output_rows = 0usize;
+            for chunk in crate::stream_scan::scan_window(
+                source, Some(predicate.clone()), &[], 4096, *offset, *count,
+            )? {
+                guard.check()?;
+                let chunk = chunk?;
+                output_rows = output_rows.checked_add(chunk.num_rows())
+                    .ok_or_else(|| Error::Execution("query output row count overflow".into()))?;
+                if output_rows > options.max_output_rows {
+                    return Err(Error::Execution(format!(
+                        "query output exceeds {} rows", options.max_output_rows,
+                    )));
+                }
+                chunks.push(chunk);
+            }
+            crate::batch_utils::concat(source.schema(), chunks, options.max_output_rows)?
+        },
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
             && matches!(input.as_ref(), Plan::Sort { .. }) => {
             let Plan::Sort { input: source, keys } = input.as_ref() else {
@@ -265,5 +295,34 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_filtered_scan_limit_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn filtered_limit_avoids_unbounded_intermediate_results() {
+        let mut catalog = Catalog::new();
+        catalog.register("large", Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..100).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap()).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(50)),
+        );
+        let plan = Plan::scan("large").filter(predicate).limit(10, Some(2));
+        let options = ExecutionOptions { max_output_rows: 2, ..ExecutionOptions::default() };
+        assert_eq!(execute_with_options(&plan, &catalog, options).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(60)], vec![Value::Integer(61)]]);
+        let too_many = Plan::scan("large").filter(Expr::Literal(Value::Boolean(true)))
+            .limit(0, Some(3));
+        assert!(execute_with_options(&too_many, &catalog, options).is_err());
+        let overflow = Plan::scan("large").filter(Expr::Literal(Value::Boolean(true)))
+            .limit(usize::MAX, Some(1));
+        assert!(execute_with_options(&overflow, &catalog, options).is_err());
     }
 }
