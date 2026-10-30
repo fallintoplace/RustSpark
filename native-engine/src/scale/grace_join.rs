@@ -78,12 +78,16 @@ where L: IntoIterator<Item = Result<Batch>>,
         directory, left_schema.clone(), &[left_key], partitions, io_batch_rows)?;
     let mut rhs = PartitionWriter::new(
         directory, right_schema.clone(), &[right_key], partitions, io_batch_rows)?;
-    for incoming in left {
+    let mut left = left.into_iter();
+    loop {
         control.check()?;
+        let Some(incoming) = left.next() else { break };
         lhs.write_batch(&incoming?, control)?;
     }
-    for incoming in right {
+    let mut right = right.into_iter();
+    loop {
         control.check()?;
+        let Some(incoming) = right.next() else { break };
         rhs.write_batch(&incoming?, control)?;
     }
     let lhs_files = lhs.finish()?;
@@ -419,5 +423,24 @@ mod empty_build_grace_join_short_circuit_tests {
             drop(files);
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod cancelled_grace_join_poll_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn cancelled_join_does_not_read_either_input() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let make_source = || std::iter::repeat_with(|| -> Result<Batch> { panic!("source polled") });
+        let control = QueryControl::default();
+        control.cancel();
+        let result = grace_join(make_source(), make_source(), schema.clone(), schema,
+            "key", "key", JoinKind::Inner, std::env::temp_dir().as_path(),
+            1, 100, 4, &control);
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
