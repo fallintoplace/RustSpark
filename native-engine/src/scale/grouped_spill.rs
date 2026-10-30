@@ -77,8 +77,7 @@ fn insert_distinct(
     if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
         return Err(Error::Execution("spill DISTINCT key limit exceeded".into()));
     }
-    let footprint = std::mem::size_of::<Value>().saturating_add(64)
-        .saturating_add(match value { Value::Text(text) => text.len(), _ => 0 });
+    let footprint = super::row_footprint::footprint(std::iter::once(value));
     let next = bytes.checked_add(footprint)
         .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
         .ok_or_else(|| Error::Execution("spill DISTINCT byte limit exceeded".into()))?;
