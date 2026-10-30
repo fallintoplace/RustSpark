@@ -41,3 +41,30 @@ fn streaming_mode_rejects_blocking_operators() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported"));
 }
+
+#[test]
+fn stream_cli_queries_tables_reloaded_from_atomic_manifest() {
+    use rustspark_native::scale::{catalog_manifest, file_catalog::FileCatalog};
+    use rustspark_native::schema::{DataType, Field, Schema};
+    let dir = std::env::temp_dir().join(format!(
+        "native-stream-catalog-reopen-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos(),
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("events.csv");
+    let manifest = dir.join("catalog.json");
+    std::fs::write(&source, "id\n1\n2\n").unwrap();
+    let mut catalog = FileCatalog::new();
+    let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+    catalog.register_csv("events", &source, schema, 1024).unwrap();
+    catalog_manifest::save_atomic(&catalog, &manifest).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustspark-stream"))
+        .args(["--catalog-manifest", manifest.to_str().unwrap(),
+            "--sql", "SELECT id FROM events ORDER BY id"])
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "id\n1\n2\n");
+    std::fs::remove_dir_all(dir).unwrap();
+}

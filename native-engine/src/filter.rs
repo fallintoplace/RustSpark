@@ -8,6 +8,14 @@ pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
     batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
 }
 
+/// Filter an owned native batch. An always-true predicate can reuse all columns.
+pub fn filter_owned(batch: Batch, predicate: &Expr) -> Result<Batch> {
+    if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
+        return Ok(batch);
+    }
+    filter(&batch, predicate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +143,23 @@ mod literal_bounded_filter_perf_tests {
         for value in [Value::Boolean(false), Value::Null] {
             assert_eq!(filter_first(&batch, &Expr::Literal(value), 2).unwrap().num_rows(), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod owned_filter_operator_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn ownership_fast_path_preserves_nullable_payloads() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text("large".repeat(1024))], vec![Value::Null],
+        ]).unwrap();
+        assert_eq!(filter_owned(batch.clone(), &Expr::Literal(Value::Boolean(true))).unwrap(), batch);
+        assert_eq!(filter_owned(batch.clone(), &Expr::Literal(Value::Boolean(false))).unwrap().num_rows(), 0);
+        assert!(filter_owned(batch, &Expr::Column("missing".into())).is_err());
     }
 }

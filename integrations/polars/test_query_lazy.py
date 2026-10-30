@@ -69,6 +69,17 @@ class PolarsCommandTests(unittest.TestCase):
                 with rustspark_lazy_frame("SELECT 1", process_timeout=3):
                     pass
 
+    def test_named_json_tables_are_forwarded_and_mixed_sources_rejected(self):
+        command = build_command("SELECT * FROM events", Path("out.arrow"),
+                                json_tables={"events": Path("events.json")})
+        self.assertEqual(command[command.index("--json-table") + 1], "events=events.json")
+        with self.assertRaisesRegex(ValueError, "Named and unnamed"):
+            build_command("SELECT 1", Path("out.arrow"), csv="events.csv",
+                          json_tables={"events": "events.json"})
+        with self.assertRaises(ValueError):
+            build_command("SELECT 1", Path("out.arrow"), json_tables={"bad-name": "x.json"})
+
+
 
 if __name__ == "__main__":
     unittest.main()

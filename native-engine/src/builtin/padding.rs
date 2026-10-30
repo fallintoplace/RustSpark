@@ -32,8 +32,11 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     let mut chars = pad.chars();
     let first = chars.next();
     let one_char = first.filter(|_| chars.next().is_none());
+    // Each ASCII pad scalar is one output byte, regardless of the pattern
+    // length. The old estimate over-reserved for multi-byte ASCII patterns.
+    let bytes_per_char = if pad.is_ascii() { 1 } else { pad.len().min(4) };
     let mut result = String::with_capacity(
-        text.len().saturating_add((target - size).saturating_mul(pad.len().min(4))),
+        text.len().saturating_add((target - size).saturating_mul(bytes_per_char)),
     );
     if !left { result.push_str(text); }
     if let Some(character) = one_char {
@@ -116,5 +119,20 @@ mod single_character_padding_tests {
             Value::Text("x界界界".into()));
         assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("ab".into())]).unwrap(),
             Value::Text("xaba".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_padding_capacity_estimate_tests {
+    use super::*;
+    #[test]
+    fn pads_long_ascii_patterns_without_unicode_regressions() {
+        let text = Value::Text("a".into());
+        assert_eq!(rpad(&[text.clone(), Value::Integer(8),
+            Value::Text("abcd".into())]).unwrap(), Value::Text("aabcdabc".into()));
+        assert_eq!(lpad(&[text, Value::Integer(7),
+            Value::Text("xyz".into())]).unwrap(), Value::Text("xyzxyza".into()));
+        assert_eq!(rpad(&[Value::Text("é".into()), Value::Integer(4),
+            Value::Text("🙂x".into())]).unwrap(), Value::Text("é🙂x🙂".into()));
     }
 }

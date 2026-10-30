@@ -8,15 +8,19 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import math
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import re
 import subprocess
+import threading
+import time
 
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_BACKEND_OUTPUT_BYTES = 8 * 1024 * 1024
 
 
 def _reject_duplicate_json_fields(pairs):
@@ -29,7 +33,17 @@ def _reject_duplicate_json_fields(pairs):
 
 
 def parse_result_rows(text: str) -> list[dict]:
-    rows = json.loads(text)
+    def finite_float(number):
+        parsed = float(number)
+        if not math.isfinite(parsed):
+            raise ValueError("Nonfinite SQL result number")
+        return parsed
+
+    def reject_constant(value):
+        raise ValueError(f"Nonfinite SQL result constant: {value}")
+
+    rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
+                      parse_constant=reject_constant, parse_float=finite_float)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL result must be a list of objects")
     return rows
@@ -69,6 +83,52 @@ def command_for_template(binary: str, database: Path, template: Path,
         args.extend(["--named-param", f"{name}={value}"])
     return args
 
+
+
+def run_bounded_backend(command: list[str], timeout: float,
+                        max_bytes: int = MAX_BACKEND_OUTPUT_BYTES) -> subprocess.CompletedProcess:
+    """Drain stdout with a hard memory limit. Discard backend diagnostics."""
+    if timeout <= 0 or max_bytes <= 0:
+        raise ValueError("Invalid query execution budget")
+    output = bytearray()
+    exceeded = threading.Event()
+    with subprocess.Popen(command, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        assert process.stdout is not None
+
+        def drain():
+            while True:
+                chunk = process.stdout.read(65536)
+                if not chunk:
+                    return
+                if len(output) + len(chunk) > max_bytes:
+                    exceeded.set()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    return
+                output.extend(chunk)
+
+        thread = threading.Thread(target=drain, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + timeout
+        thread.join(max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            process.kill()
+            thread.join()
+            raise subprocess.TimeoutExpired(command, timeout)
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        if exceeded.is_set():
+            raise ValueError("SQL result exceeds backend output budget")
+        return subprocess.CompletedProcess(
+            command, process.returncode, output.decode("utf-8"), ""
+        )
 
 def make_handler(*, secret: str, queries: Path, database: Path,
                  binary: str, max_rows: int, timeout: int):
@@ -125,9 +185,9 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.send_json(404, {"error": "Unknown query"})
                 return
             try:
-                result = subprocess.run(
+                result = run_bounded_backend(
                     command_for_template(binary, database, template, params, max_rows, timeout),
-                    capture_output=True, text=True, timeout=timeout + 10, check=False,
+                    timeout + 10,
                 )
                 if result.returncode:
                     self.send_json(422, {"error": "Query failed"})

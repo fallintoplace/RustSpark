@@ -51,7 +51,13 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
     if input.len() % 4 != 0 || input.len() > MAX_BYTES.div_ceil(3) * 4 {
         return Err(Error::Parse("invalid or oversized BASE64 length".into()));
     }
-    let mut bytes = Vec::with_capacity(input.len() / 4 * 3);
+    let padding = usize::from(input.last() == Some(&b'='))
+        + usize::from(input.get(input.len().saturating_sub(2)) == Some(&b'='));
+    let decoded_len = input.len() / 4 * 3 - padding;
+    if decoded_len > MAX_BYTES {
+        return Err(Error::Parse("decoded BASE64 exceeds byte limit".into()));
+    }
+    let mut bytes = Vec::with_capacity(decoded_len);
     let chunks = input.len() / 4;
     for (index, group) in input.chunks_exact(4).enumerate() {
         let padding = if group[2] == b'=' { 2 } else if group[3] == b'=' { 1 } else { 0 };
@@ -108,5 +114,18 @@ mod base64_reverse_table_perf_tests {
             Value::Text("abcXYZ+/".into()));
         assert!(unbase64_utf8(&[Value::Text("!!!!".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("____".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decoded_output_budget_tests {
+    use super::*;
+    #[test]
+    fn checks_decoded_size_instead_of_only_encoded_size() {
+        let too_large = "AAAA".repeat(MAX_BYTES.div_ceil(3));
+        assert!(unbase64_utf8(&[Value::Text(too_large)]).is_err());
+        let largest = "a".repeat(MAX_BYTES);
+        let encoded = base64(&[Value::Text(largest.clone())]).unwrap();
+        assert_eq!(unbase64_utf8(&[encoded]).unwrap(), Value::Text(largest));
     }
 }

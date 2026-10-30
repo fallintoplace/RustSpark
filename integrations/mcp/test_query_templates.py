@@ -46,6 +46,39 @@ class TemplatesTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_query_rows(text)
 
+    def test_mixed_type_parameter_keys_are_rejected_before_sorting(self):
+        for invalid in (None, 3):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "parameter name"):
+                make_command("rustspark", Path("/db"), Path("q.sql"),
+                             {"good": "int64:1", invalid: "int64:2"})
+
+
+
+class DuplicateResultKeysTests(unittest.TestCase):
+    def test_nested_and_top_level_duplicate_keys_are_rejected(self):
+        for text in ('[{"id":1,"id":2}]', '[{"outer":{"name":"a","name":"b"}}]'):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Duplicate SQL"):
+                parse_query_rows(text)
+        self.assertEqual(parse_query_rows('[{"outer":{"x":1,"y":2}}]'),
+                         [{"outer": {"x": 1, "y": 2}}])
+
+
+
+class BoundedMcpBackendTests(unittest.TestCase):
+    def test_output_is_bounded_without_buffering_unlimited_backend_data(self):
+        import subprocess
+        import sys
+        from bounded_backend import run_bounded
+
+        good = run_bounded([sys.executable, "-c", "print('ok')"],
+                           timeout=5, max_bytes=128)
+        self.assertEqual(good.stdout, "ok\n")
+        with self.assertRaisesRegex(ValueError, "budget"):
+            run_bounded([sys.executable, "-c", "print('x' * 65536)"],
+                        timeout=5, max_bytes=128)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded([sys.executable, "-c", "import time; time.sleep(2)"],
+                        timeout=0.1, max_bytes=128)
 
 if __name__ == "__main__":
     unittest.main()
