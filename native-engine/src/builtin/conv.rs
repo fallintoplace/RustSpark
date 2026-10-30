@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
@@ -26,15 +27,11 @@ fn encode(mut value: u64, base: u64, negative: bool) -> String {
         .expect("CONV emits only ASCII digits").to_owned()
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
-    let input = match &args[0] {
-        Value::Text(text) => text.as_str(),
-        Value::Integer(_) => "",
+    let source: Cow<'_, str> = match &args[0] {
+        Value::Text(text) => Cow::Borrowed(text),
+        Value::Integer(n) => Cow::Owned(n.to_string()),
         Value::Null => return Ok(Value::Null),
         _ => return Err(Error::Type("CONV requires text or integer input".into())),
-    };
-    let source = match &args[0] {
-        Value::Integer(n) => n.to_string(),
-        _ => input.to_string(),
     };
     let Some(from_base) = super::integer(&args[1])? else { return Ok(Value::Null) };
     let Some(to_base) = super::integer(&args[2])? else { return Ok(Value::Null) };
@@ -74,5 +71,18 @@ mod tests {
             Value::Text("1".repeat(64)));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_conv_text_tests {
+    use super::*;
+    #[test]
+    fn converts_borrowed_text_without_changing_signed_semantics() {
+        assert_eq!(evaluate(&[Value::Text("  FF  ".into()), Value::Integer(16), Value::Integer(10)]).unwrap(),
+            Value::Text("255".into()));
+        assert_eq!(evaluate(&[Value::Integer(-10), Value::Integer(16), Value::Integer(-10)]).unwrap(),
+            Value::Text("-16".into()));
+        assert_eq!(evaluate(&[Value::Text("not-a-number".into()), Value::Integer(10), Value::Integer(16)]).is_err(), true);
     }
 }
