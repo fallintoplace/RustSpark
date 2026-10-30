@@ -3,6 +3,12 @@ use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind},
     sync::{Mutex, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
 
+const MAX_OS_WORKERS: usize = 256;
+
+fn worker_count(partitions: usize, requested: usize) -> usize {
+    partitions.min(requested).min(MAX_OS_WORKERS)
+}
+
 /// Execute a partition-local physical operator across at most max_workers
 /// OS threads. Results are emitted in input order irrespective of completion order.
 pub fn map_partitions<F>(input: Vec<Batch>, max_workers: usize, operator: F) -> Result<Vec<Batch>>
@@ -27,7 +33,7 @@ where
     let output: Mutex<Vec<Option<Result<Batch>>>> =
         Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
     std::thread::scope(|scope| {
-        for _ in 0..max_workers.min(count) {
+        for _ in 0..worker_count(count, max_workers) {
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
@@ -65,6 +71,13 @@ mod tests {
             Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
             vec![vec![Value::Integer(n)]],
         ).unwrap()
+    }
+
+    #[test]
+    fn bounds_worker_spawns_for_untrusted_concurrency_settings() {
+        assert_eq!(worker_count(1_000_000, usize::MAX), MAX_OS_WORKERS);
+        assert_eq!(worker_count(4, usize::MAX), 4);
+        assert_eq!(worker_count(100, 3), 3);
     }
 
     #[test]
