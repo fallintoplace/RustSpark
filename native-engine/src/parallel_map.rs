@@ -126,6 +126,19 @@ pub fn filter_partitions(
     map_partitions(input, max_workers, |batch| crate::filter::filter(&batch, &predicate))
 }
 
+/// Bound concurrent filtering and propagate query cancellation into each
+/// worker's row selection, not only its partition boundaries.
+pub fn filter_partitions_guarded(
+    input: Vec<Batch>,
+    max_workers: usize,
+    predicate: crate::expr::Expr,
+    guard: &crate::cancel::QueryGuard,
+) -> Result<Vec<Batch>> {
+    map_partitions_guarded(input, max_workers, guard, |batch| {
+        crate::filter::filter_checked(&batch, &predicate, || guard.check())
+    })
+}
+
 #[cfg(test)]
 mod parallel_filter_feature_tests {
     use super::*;
@@ -215,5 +228,43 @@ mod native_cancellable_parallel_worker_tests {
             Ok(batch)
         });
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod parallel_filter_guard_integration_tests {
+    use super::*;
+    use crate::{
+        cancel::{Cancellation, QueryGuard},
+        expr::{BinaryOp, Expr},
+        scalar::Value,
+        schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn guarded_parallel_filter_preserves_order_and_honors_cancel() {
+        let schema = Schema::new(vec![
+            Field::new("value", DataType::Integer, false),
+        ]).unwrap();
+        let batches = (0..4).map(|partition| {
+            Batch::from_rows(schema.clone(), (0..2048)
+                .map(|n| vec![Value::Integer(partition * 2048 + n)])
+                .collect()).unwrap()
+        }).collect::<Vec<_>>();
+        let predicate = Expr::binary(
+            Expr::Column("value".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(4096)),
+        );
+        let token = Cancellation::new();
+        let guard = QueryGuard::new(token.clone());
+        let output = filter_partitions_guarded(
+            batches.clone(), 4, predicate.clone(), &guard,
+        ).unwrap();
+        assert_eq!(output.iter().map(Batch::num_rows).collect::<Vec<_>>(),
+            vec![0, 0, 2048, 2048]);
+        assert_eq!(output[2].value(0, 0).unwrap(), &Value::Integer(4096));
+        token.cancel();
+        assert!(filter_partitions_guarded(batches, 4, predicate, &guard)
+            .unwrap_err().to_string().contains("cancelled"));
     }
 }
