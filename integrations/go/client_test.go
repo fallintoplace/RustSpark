@@ -4,6 +4,7 @@ import (
     "bytes"
     "context"
     "errors"
+    "io"
     "reflect"
     "strings"
     "testing"
@@ -139,5 +140,19 @@ func TestStderrBudgetStopsUnboundedDiagnostics(t *testing.T) {
     }
     if output.Len() != maxStderrBytes {
         t.Fatalf("expected %d buffered diagnostic bytes, got %d", maxStderrBytes, output.Len())
+    }
+}
+
+type failingStreamWriter struct{}
+
+func (failingStreamWriter) Write([]byte) (int, error) {
+    return 0, io.ErrClosedPipe
+}
+
+func TestNDJSONStopsOnOutputFailure(t *testing.T) {
+    client := Client{Binary: "echo"}
+    err := client.QueryNDJSON(context.Background(), "SELECT 1", Options{}, failingStreamWriter{})
+    if !errors.Is(err, io.ErrClosedPipe) {
+        t.Fatalf("expected the output writer error, got %v", err)
     }
 }
