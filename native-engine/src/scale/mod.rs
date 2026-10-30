@@ -17,4 +17,5 @@ pub mod set_stream;
 pub mod dictionary;
 pub mod hll;
 pub mod file_catalog;
+pub mod catalog_manifest;
 pub mod stream_execute;
