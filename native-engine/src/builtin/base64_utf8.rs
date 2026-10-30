@@ -3,6 +3,10 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 const MAX_BYTES: usize = 1_000_000;
 const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn push_digit(output: &mut String, digit: u8) {
+    output.push(char::from(DIGITS[usize::from(digit)]));
+}
+
 fn base64(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let bytes = text.as_bytes();
@@ -11,17 +15,17 @@ fn base64(args: &[Value]) -> Result<Value> {
     let mut chunks = bytes.chunks_exact(3);
     for chunk in &mut chunks {
         let (a, b, c) = (chunk[0], chunk[1], chunk[2]);
-        output.push(DIGITS[(a >> 2) as usize] as char);
-        output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(DIGITS[(((b & 15) << 2) | (c >> 6)) as usize] as char);
-        output.push(DIGITS[(c & 63) as usize] as char);
+        push_digit(&mut output, (a >> 2));
+        push_digit(&mut output, (((a & 3) << 4) | (b >> 4)));
+        push_digit(&mut output, (((b & 15) << 2) | (c >> 6)));
+        push_digit(&mut output, (c & 63));
     }
     let tail = chunks.remainder();
     if !tail.is_empty() {
         let a = tail[0];
         let b = if tail.len() == 2 { tail[1] } else { 0 };
-        output.push(DIGITS[(a >> 2) as usize] as char);
-        output.push(DIGITS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+        push_digit(&mut output, (a >> 2));
+        push_digit(&mut output, (((a & 3) << 4) | (b >> 4)));
         output.push(if tail.len() == 2 { DIGITS[((b & 15) << 2) as usize] as char } else { '=' });
         output.push('=');
     }
