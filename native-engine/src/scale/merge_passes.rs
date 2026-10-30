@@ -33,8 +33,11 @@ pub fn merge_to_fan_in(
     source: RunSet, directory: &Path, schema: Schema, keys: &[SortKey],
     fan_in: usize, io_batch_rows: usize, control: &QueryControl
 ) -> Result<MultiPassRuns> {
-    if !(2..=64).contains(&fan_in) || io_batch_rows == 0 {
+    if !(2..=64).contains(&fan_in) {
         return Err(Error::Execution("external merge fan-in must be 2..=64".into()));
+    }
+    if io_batch_rows == 0 {
+        return Err(Error::Execution("external merge I/O batch size must be positive".into()));
     }
     if source.schema() != &schema {
         return Err(Error::Schema("multi-pass sort schema mismatch".into()));
@@ -102,5 +105,27 @@ mod tests {
         assert_eq!(rows, (0..101).map(Value::Integer).collect::<Vec<_>>());
         drop(merged);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod merge_batch_size_diagnostics_tests {
+    use super::*;
+    use crate::batch::Batch;
+    #[test]
+    fn separates_invalid_fan_in_from_invalid_io_batch_size() {
+        let schema = Schema::new(vec![]).unwrap();
+        let empty = || write_source(schema.clone());
+        let err = merge_to_fan_in(empty(), Path::new("."), schema.clone(), &[],
+            4, 0, &QueryControl::default()).err().unwrap();
+        assert!(err.to_string().contains("batch size"));
+        let err = merge_to_fan_in(empty(), Path::new("."), schema, &[],
+            1, 4, &QueryControl::default()).err().unwrap();
+        assert!(err.to_string().contains("fan-in"));
+    }
+    fn write_source(schema: Schema) -> RunSet {
+        super::super::sorted_runs::write_sorted_runs(
+            std::iter::empty::<Result<Batch>>(), schema, &[], Path::new("."), 1, &QueryControl::default()
+        ).unwrap()
     }
 }

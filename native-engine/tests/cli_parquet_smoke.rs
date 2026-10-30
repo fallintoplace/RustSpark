@@ -40,3 +40,28 @@ fn native_cli_reads_parquet_and_aggregates_without_datafusion() {
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("CSV"));
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn native_cli_queries_empty_parquet_with_preserved_schema() {
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "rustspark-native-empty-parquet-{}-{unique}.parquet", std::process::id()
+    ));
+    let schema = Schema::new(vec![
+        Field::new("id", DataType::Integer, false),
+        Field::new("description", DataType::Text, true),
+    ]).unwrap();
+    let empty = Batch::empty(schema);
+    let arrow = arrow_bridge::to_arrow(&empty).unwrap();
+    let writer = ArrowWriter::try_new(fs::File::create(&path).unwrap(), arrow.schema(), None).unwrap();
+    writer.close().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark-native"))
+        .args([
+            "--parquet", path.to_str().unwrap(),
+            "--sql", "SELECT id FROM data",
+        ]).output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(output.status.success(), "native CLI: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "id\n");
+}

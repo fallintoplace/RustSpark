@@ -109,13 +109,16 @@ class RustSpark:
             for table, path in sorted(values.items()):
                 command.extend([f"--{flag}", f"{table}={os.fspath(path)}"])
         params = named_params or {}
+        if len(params) > 64:
+            raise ValueError("At most 64 typed SQL parameters are supported")
         for name in params:
             if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
                 raise ValueError(f"Invalid SQL parameter name: {name!r}")
         for name in sorted(params):
             typed_value = params[name]
-            if not isinstance(typed_value, str) or ":" not in typed_value:
-                raise ValueError(f"Use type:value for parameter {name!r}")
+            if (not isinstance(typed_value, str)
+                or ":" not in typed_value or len(typed_value) > 8192):
+                raise ValueError(f"Use bounded type:value for parameter {name!r}")
             command.extend(["--named-param", f"{name}={typed_value}"])
         if max_rows is not None:
             command.extend(["--max-rows", str(max_rows)])

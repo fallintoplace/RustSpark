@@ -9,7 +9,7 @@ export class RustSparkError extends Error {
 
 function addNamedTables(args, flag, tables = {}) {
   for (const [table, path] of Object.entries(tables).sort(([a], [b]) => a.localeCompare(b, "en"))) {
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table) || typeof path !== "string") {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table) || typeof path !== "string" || path.length === 0) {
       throw new TypeError("Table names must be SQL identifiers and paths must be strings");
     }
     args.push(flag, `${table}=${path}`);
@@ -87,6 +87,9 @@ export class RustSpark {
       rows = JSON.parse(result.stdout, (_key, value) => {
         if (typeof value === "number" && !Number.isFinite(value)) {
           throw new RangeError("non-finite SQL JSON number");
+        }
+        if (typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+          throw new RangeError("SQL integer cannot be represented safely in JavaScript");
         }
         return value;
       });

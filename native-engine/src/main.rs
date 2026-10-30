@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -30,6 +30,21 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+}
+
+const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_sql_file(path: &Path) -> Result<String> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_SQL_FILE_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    let mut sql = String::new();
+    file.take(MAX_SQL_FILE_BYTES + 1).read_to_string(&mut sql)?;
+    if sql.len() as u64 > MAX_SQL_FILE_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    Ok(sql)
 }
 
 fn usage() -> &'static str {
@@ -128,7 +143,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_sql_file(&path)?,
         _ => return Err(Error::Parse("--sql or --sql-file is required".into())),
     };
     if sql.trim().is_empty() {
@@ -293,16 +308,12 @@ fn run_stream(args: &Args) -> Result<()> {
 const MAX_PARQUET_ROWS: usize = 1_000_000;
 
 fn read_parquet_bounded(path: &Path) -> Result<Batch> {
-    let mut schema: Option<Schema> = None;
+    let schema = parquet_scan::file_schema(path)?;
     let mut rows = Vec::new();
     for next in parquet_scan::scan(path, 4_096)? {
         let batch = next?;
-        if let Some(current) = &schema {
-            if current != batch.schema() {
-                return Err(Error::Schema("Parquet batch schema changed".into()));
-            }
-        } else {
-            schema = Some(batch.schema().clone());
+        if &schema != batch.schema() {
+            return Err(Error::Schema("Parquet batch schema changed".into()));
         }
         let total = rows.len().checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("Parquet row count overflow".into()))?;
@@ -311,7 +322,6 @@ fn read_parquet_bounded(path: &Path) -> Result<Batch> {
         }
         rows.extend(batch.rows()?);
     }
-    let schema = schema.ok_or_else(|| Error::Unsupported("empty Parquet data cannot yet be queried in the native CLI".into()))?;
     Batch::from_rows(schema, rows)
 }
 
@@ -424,6 +434,29 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+
+    #[test]
+    fn sql_file_admission_checks_size_before_parsing() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-sql-file-budget-{}-{unique}.sql", std::process::id()
+        ));
+        fs::write(&path, vec![b'x'; MAX_SQL_FILE_BYTES as usize + 1]).unwrap();
+        let args = vec![
+            "--csv".into(), "unused.csv".into(),
+            "--sql-file".into(), path.to_string_lossy().into_owned(),
+        ];
+        assert!(parse_args(args).is_err());
+        fs::write(&path, "SELECT 1 FROM data").unwrap();
+        let args = vec![
+            "--csv".into(), "unused.csv".into(),
+            "--sql-file".into(), path.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(parse_args(args).unwrap().unwrap().sql, "SELECT 1 FROM data");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
