@@ -35,6 +35,9 @@ pub struct PartitionWriter {
 }
 
 fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usize> {
+    if count == 0 {
+        return Err(Error::Execution("partition count must be positive".into()));
+    }
     let mut hash = crate::hash_partition::PartitionHasher::default();
     for &column in keys { batch.value(row, column)?.hash(&mut hash); }
     let hashed = hash.finish();
@@ -398,5 +401,19 @@ mod failed_partition_finish_cleanup_tests {
         assert!(!paths[0].exists(), "incomplete first shard leaked after failure");
         fs::remove_dir(&paths[1]).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod empty_partition_bucket_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn rejects_zero_buckets_without_panicking() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(7)]]).unwrap();
+        assert!(bucket(&batch, 0, &[0], 0).is_err());
+        assert_eq!(bucket(&batch, 0, &[0], 1).unwrap(), 0);
     }
 }
