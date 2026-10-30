@@ -1,36 +1,35 @@
 # Security policy
 
-RustSpark is an experimental Apache-2.0 SQL engine built on DataFusion.
-The current package is version 0.1.0. No production-grade security,
-availability, multi-tenant isolation, or vulnerability response SLA is
-promised by this repository.
+RustSpark is an **experimental native Rust SQL query engine**, currently version
+0.1.0. The default CLI and library have no DataFusion or Ballista fallback.
+RustSpark does not promise production-grade availability, authenticated access,
+tenant isolation, crash-safe persistence, or a vulnerability response SLA.
 
 ## Reporting a vulnerability
 
-Please use GitHub's **Report a vulnerability** private reporting feature
-under the repository's Security tab, if it is enabled. If private
-reporting is not available, contact a repository maintainer to establish
-a private reporting channel **before** sharing exploit details.
-Do not post credentials, sensitive files, private data or working
-exploit details in a public issue or pull request.
-
-Include a minimal reproduction using synthetic data, the RustSpark
-version or commit, host operating system, expected behavior and the
-security impact. Do not test third-party infrastructure without permission.
+Use GitHub's **Report a vulnerability** feature in the Security tab if enabled.
+Otherwise contact a maintainer privately before sharing a reproduction.
+Do not post credentials, private query inputs, or working exploits in public PRs.
+Use synthetic data and include the tested commit, OS, minimal reproduction,
+expected result, and security impact. Do not probe systems without permission.
 
 ## Current security boundaries
 
-- The CLI executes SQL with the filesystem access of its operating
-  system process. Do not let untrusted users execute arbitrary SQL.
-- The local persistent database is experimental and single-writer.
-  It does **not** guarantee full ACID transactions or power-loss
-  durability. Keep independent backups.
-- The optional distributed storage and Ballista integrations do not
-  provide a hardened, authenticated multi-tenant SQL service.
-- Use the principle of least privilege, isolate query inputs and
-  writable directories, and avoid granting access to secrets.
-- Do not expose example development UIs, gateways or agent tools
-  directly on the public internet.
+- **Local execution:** The CLI opens CSV, Parquet, and SQL files with its
+  operating-system privileges. It is not a sandbox for untrusted inputs.
+- **Storage:** The native catalog is in memory or references existing CSV and
+  Parquet files. The default CLI does not provide a durable SQL database,
+  transactions, WAL, automatic backups, or recovery on restart.
+- **Spills:** Streaming sort, join, and aggregation operators write temporary
+  query data to the configured scratch directory. Use a private, trusted
+  directory on protected storage and clear stale crash artifacts.
+- **Resource exhaustion:** The engine has some row, record, memory, and plan
+  limits. These are not a complete defense against adversarial SQL or datasets.
+- **Networking:** The default CLI is local, not an authenticated SQL server.
+  Experimental integrations are not hardened multi-tenant services.
+- **Dependencies:** RustSec audits help detect known advisories, but passing a
+  scanner does not establish a secure deployment.
 
-Dependency vulnerability checks are informative. Passing a scan
-does not mean RustSpark is safe to expose as a shared SQL service.
+Run RustSpark with minimal filesystem permissions. Do not allow untrusted users
+to submit queries to a privileged shared service or place secrets in shared
+scratch directories. Keep independent backups of input datasets.
