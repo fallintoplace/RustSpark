@@ -100,6 +100,11 @@ impl Batch {
         Ok(Self { schema, ..self })
     }
 
+    /// Consume a validated batch without cloning its column values.
+    pub(crate) fn into_parts(self) -> (Schema, Vec<Vec<Value>>, usize) {
+        (self.schema, self.columns, self.rows)
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
