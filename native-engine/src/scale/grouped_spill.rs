@@ -257,8 +257,10 @@ where I: IntoIterator<Item = Result<Batch>>
     let names = groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
     let mut writer = PartitionWriter::new(
         directory, schema.clone(), &names, partitions, io_batch_rows)?;
-    for incoming in input {
+    let mut input = input.into_iter();
+    loop {
         control.check()?;
+        let Some(incoming) = input.next() else { break };
         writer.write_batch(&incoming?, control)?;
     }
     let files = writer.finish()?;
@@ -443,5 +445,24 @@ mod grouped_spill_window_output_tests {
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod cancelled_grouped_spill_poll_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn cancelled_grouping_never_polls_upstream() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let source = std::iter::repeat_with(|| -> Result<Batch> { panic!("source polled") });
+        let control = QueryControl::default();
+        control.cancel();
+        let result = grouped_aggregate(source, schema, &[("n".into(), "n".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "total")],
+            std::env::temp_dir().as_path(), 1, 10, 4, &control);
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
