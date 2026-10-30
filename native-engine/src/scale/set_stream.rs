@@ -118,10 +118,10 @@ impl SetStream {
                 } else { !belongs };
                 if !wanted || self.emitted.contains(row) { false }
                 else {
-                    let bytes = footprint(row);
+                    let bytes = super::row_footprint::footprint(row.iter());
                     let next = self.retained_bytes.checked_add(bytes)
                         .filter(|total| *total <= self.max_bytes);
-                    if self.emitted.len() + self.right_counts.len() >= self.max_keys ||
+                    if self.emitted.len().saturating_add(self.right_counts.len()) >= self.max_keys ||
                         next.is_none() {
                         return Err(Error::Execution("stream set memory budget exceeded".into()));
                     }
