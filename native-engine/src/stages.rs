@@ -74,6 +74,24 @@ impl StageGraph {
 
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
+    /// Stable topological stage explanation for native query troubleshooting.
+    pub fn explain(&self) -> Result<String> {
+        use std::fmt::Write;
+        let mut by_id = vec![None; self.stages.len()];
+        for stage in &self.stages { by_id[stage.id] = Some(stage); }
+        let mut result = String::with_capacity(self.stages.len() * 64);
+        for id in self.execution_order()? {
+            let stage = by_id[id].expect("validated stage graph");
+            writeln!(&mut result,
+                "{id:04} {:?} inputs={:?} blocking={}",
+                stage.kind, stage.inputs, stage.kind.is_blocking(),
+            ).expect("formatting into a String cannot fail");
+        }
+        Ok(result)
+    }
+
+
+
     pub fn root(&self) -> Option<usize> {
         let mut referenced = vec![false; self.stages.len()];
         for stage in &self.stages {
@@ -313,5 +331,26 @@ mod dense_root_lookup_tests {
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
         ]).unwrap();
         assert_eq!(multiple.root(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_stage_explain_tests {
+    use super::*;
+
+    #[test]
+    fn explains_dependency_order_even_when_stages_are_not_in_storage_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 2, kind: StageKind::HashJoin, inputs: vec![0, 1] },
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        let text = graph.explain().unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("0000 Scan"));
+        assert!(lines[1].contains("0001 Scan"));
+        assert!(lines[2].contains("0002 HashJoin inputs=[0, 1] blocking=true"));
+        assert_eq!(StageGraph::new(vec![]).unwrap().explain().unwrap(), "");
     }
 }
