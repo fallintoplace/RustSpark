@@ -1,6 +1,10 @@
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
+pub(super) fn character_count(text: &str) -> usize {
+    if text.is_ascii() { text.len() } else { text.chars().count() }
+}
+
 fn output(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Text {
         Ok(DataType::Integer)
@@ -11,7 +15,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    let characters = if text.is_ascii() { text.len() } else { text.chars().count() };
+    let characters = character_count(text);
     let length = i64::try_from(characters)
         .map_err(|_| Error::Execution("character length overflow".into()))?;
     Ok(Value::Integer(length))
