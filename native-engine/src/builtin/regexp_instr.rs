@@ -13,14 +13,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
         let Some(index) = text.find(pattern) else { return Ok(Value::Integer(0)); };
         let prefix = &text[..index];
-        let count = if prefix.is_ascii() { prefix.len() } else { prefix.chars().count() };
+        let count = super::char_length::character_count(prefix);
         return i64::try_from(count + 1).map(Value::Integer)
             .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
     }
     let pattern = regex_support::compile(pattern)?;
     let Some(matched) = pattern.find(text) else { return Ok(Value::Integer(0)) };
     let prefix = &text[..matched.start()];
-    let offset = if prefix.is_ascii() { prefix.len() } else { prefix.chars().count() };
+    let offset = super::char_length::character_count(prefix);
     let position = offset.checked_add(1)
         .and_then(|n| i64::try_from(n).ok())
         .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
@@ -64,5 +64,18 @@ mod literal_regexp_instr_fast_path_tests {
         assert_eq!(evaluate(&[Value::Text("a123".into()),
             Value::Text("[0-9]+".into())]).unwrap(), Value::Integer(2));
         assert!(evaluate(&[Value::Text("hello".into()), Value::Text("(".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod regexp_instr_unicode_offset_tests {
+    use super::*;
+
+    #[test]
+    fn literal_and_regex_patterns_use_character_positions() {
+        for pattern in ["foo", "f.o"] {
+            let args = [Value::Text("🙂éfoo".into()), Value::Text(pattern.into())];
+            assert_eq!(evaluate(&args).unwrap(), Value::Integer(3));
+        }
     }
 }
