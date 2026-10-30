@@ -272,3 +272,160 @@ mod parquet_catalog_integration_tests {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+
+const MAX_CATALOG_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CATALOG_TABLES: usize = 4096;
+
+fn manifest_text<'a>(entry: &'a serde_json::Value, key: &str) -> Result<&'a str> {
+    entry.get(key).and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Error::Schema(format!("catalog manifest requires {key}")))
+}
+
+fn manifest_type(kind: &str) -> Result<crate::schema::DataType> {
+    use crate::schema::DataType;
+    match kind {
+        "boolean" => Ok(DataType::Boolean),
+        "integer" => Ok(DataType::Integer),
+        "float" => Ok(DataType::Float),
+        "text" => Ok(DataType::Text),
+        _ => Err(Error::Schema(format!("unsupported catalog manifest type: {kind}"))),
+    }
+}
+
+fn manifest_type_name(kind: crate::schema::DataType) -> &'static str {
+    use crate::schema::DataType;
+    match kind {
+        DataType::Boolean => "boolean",
+        DataType::Integer => "integer",
+        DataType::Float => "float",
+        DataType::Text => "text",
+    }
+}
+
+impl FileCatalog {
+    /// Encode the file table registry, not table contents. Paths are references
+    /// owned by the caller, and are interpreted relative to the process CWD.
+    pub fn export_manifest(&self) -> Result<String> {
+        let mut entries = Vec::new();
+        for name in self.list() {
+            if let Some(table) = self.tables.get(name) {
+                let path = table.path.to_str()
+                    .ok_or_else(|| Error::Schema("manifest path is not UTF-8".into()))?;
+                let fields = table.schema.fields().iter().map(|field| {
+                    serde_json::json!({
+                        "name": field.name,
+                        "type": manifest_type_name(field.data_type),
+                        "nullable": field.nullable
+                    })
+                }).collect::<Vec<_>>();
+                entries.push(serde_json::json!({
+                    "name": name, "format": "csv", "path": path,
+                    "max_record_bytes": table.max_record_bytes, "fields": fields
+                }));
+            } else if let Some(table) = self.parquet.get(name) {
+                let path = table.path.to_str()
+                    .ok_or_else(|| Error::Schema("manifest path is not UTF-8".into()))?;
+                entries.push(serde_json::json!({
+                    "name": name, "format": "parquet", "path": path
+                }));
+            }
+        }
+        if entries.len() > MAX_CATALOG_TABLES {
+            return Err(Error::Execution("catalog table count exceeds manifest budget".into()));
+        }
+        let text = serde_json::json!({"version": 1, "tables": entries}).to_string();
+        if text.len() > MAX_CATALOG_MANIFEST_BYTES {
+            return Err(Error::Execution("catalog manifest exceeds byte budget".into()));
+        }
+        Ok(text)
+    }
+
+    /// Restore a registry from validated metadata. Existing source files are
+    /// not copied. Parquet files are validated when registered.
+    pub fn import_manifest(text: &str) -> Result<Self> {
+        if text.len() > MAX_CATALOG_MANIFEST_BYTES {
+            return Err(Error::Execution("catalog manifest exceeds byte budget".into()));
+        }
+        let root: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| Error::Parse(format!("invalid catalog manifest: {error}")))?;
+        if root.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(Error::Schema("unsupported catalog manifest version".into()));
+        }
+        let tables = root.get("tables").and_then(serde_json::Value::as_array)
+            .ok_or_else(|| Error::Schema("catalog manifest needs tables array".into()))?;
+        if tables.len() > MAX_CATALOG_TABLES {
+            return Err(Error::Execution("catalog table count exceeds manifest budget".into()));
+        }
+        let mut catalog = Self::new();
+        for table in tables {
+            let name = manifest_text(table, "name")?;
+            let format = manifest_text(table, "format")?;
+            let path = manifest_text(table, "path")?;
+            if path.len() > 4096 {
+                return Err(Error::Schema("catalog manifest path too long".into()));
+            }
+            match format {
+                "csv" => {
+                    let max = table.get("max_record_bytes")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .filter(|&value| value > 0)
+                        .ok_or_else(|| Error::Schema("invalid catalog CSV byte limit".into()))?;
+                    let fields = table.get("fields").and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| Error::Schema("catalog CSV requires fields array".into()))?;
+                    if fields.is_empty() || fields.len() > 4096 {
+                        return Err(Error::Schema("catalog CSV field count out of range".into()));
+                    }
+                    let fields = fields.iter().map(|field| {
+                        let name = manifest_text(field, "name")?;
+                        let kind = manifest_type(manifest_text(field, "type")?)?;
+                        let nullable = field.get("nullable").and_then(serde_json::Value::as_bool)
+                            .ok_or_else(|| Error::Schema("catalog column nullability missing".into()))?;
+                        Ok(crate::schema::Field::new(name, kind, nullable))
+                    }).collect::<Result<Vec<_>>>()?;
+                    catalog.register_csv(name, path, Schema::new(fields)?, max)?;
+                }
+                "parquet" => catalog.register_parquet(name, path)?,
+                _ => return Err(Error::Schema("unknown catalog manifest table format".into())),
+            }
+        }
+        Ok(catalog)
+    }
+}
+
+#[cfg(test)]
+mod file_catalog_manifest_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn snapshots_are_stable_and_recover_csv_table_schema() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("Events", "somewhere/events.csv", schema.clone(), 8192).unwrap();
+        catalog.register_csv("Users", "somewhere/users.csv", schema, 4096).unwrap();
+        let manifest = catalog.export_manifest().unwrap();
+        let restored = FileCatalog::import_manifest(&manifest).unwrap();
+        assert_eq!(restored.export_manifest().unwrap(), manifest);
+        assert_eq!(restored.list(), ["events", "users"]);
+        assert_eq!(restored.get("EVENTS").unwrap().max_record_bytes, 8192);
+    }
+
+    #[test]
+    fn invalid_manifest_does_not_publish_partial_registry() {
+        for text in [
+            "{}",
+            r#"{"version":2,"tables":[]}"#,
+            r#"{"version":1,"tables":"wrong"}"#,
+            r#"{"version":1,"tables":[{"name":"one","format":"csv","path":"a.csv","max_record_bytes":1,"fields":[{"name":"x","type":"nonsense","nullable":true}]}]}"#,
+            r#"{"version":1,"tables":[{"name":"one","format":"csv","path":"a.csv","max_record_bytes":0,"fields":[]}]}"#,
+        ] {
+            assert!(FileCatalog::import_manifest(text).is_err(), "{text}");
+        }
+    }
+}
