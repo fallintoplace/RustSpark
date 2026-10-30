@@ -31,6 +31,14 @@ fn expression_nullable(expression: &Expr, schema: &Schema) -> Result<bool> {
 }
 
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
+    project_checked(batch, selections, || Ok(()))
+}
+
+/// Evaluate projections with periodic cancellation checks between scalar rows.
+pub fn project_checked(
+    batch: &Batch, selections: &[Selection], mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     let schema = Schema::new(
         selections
             .iter()
@@ -48,6 +56,7 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
         .map(|_| Vec::with_capacity(batch.num_rows()))
         .collect();
     for (column, selection) in columns.iter_mut().zip(selections) {
+        check()?;
         if let Expr::Column(name) = &selection.expression {
             let index = batch.schema().column(name)?;
             column.extend_from_slice(batch.column(index)?);
@@ -55,10 +64,12 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
             column.resize(batch.num_rows(), value.clone());
         } else {
             for row in 0..batch.num_rows() {
+                if row % 1024 == 0 { check()?; }
                 column.push(selection.expression.evaluate(batch, row)?);
             }
         }
     }
+    check()?;
     Batch::new_with_row_count(schema, columns, batch.num_rows())
 }
 
@@ -220,5 +231,30 @@ mod projection_fast_paths_perf_tests {
             vec![Value::Null, Value::Null, Value::Integer(7), Value::Null],
         ]);
         assert_eq!(project(&Batch::empty(input.schema().clone()), &selections).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod projected_expression_cancellation_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field}};
+
+    #[test]
+    fn computed_projection_observes_cancellation_within_large_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..2050)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let expr = Expr::binary(Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)));
+        let selection = [Selection::new(expr, "n_plus_one")];
+        let mut checks = 0;
+        let result = project_checked(&batch, &selection, || {
+            checks += 1;
+            if checks == 4 { Err(crate::Error::Execution("projection cancelled".into())) }
+            else { Ok(()) }
+        });
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(checks, 4);
+        assert_eq!(project(&batch, &selection).unwrap().num_rows(), 2050);
     }
 }
