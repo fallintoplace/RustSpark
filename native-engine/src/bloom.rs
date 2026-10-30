@@ -52,6 +52,17 @@ impl BloomFilter {
         })
     }
 
+    /// Admit a native column's keys without materializing row tuples.
+    pub fn insert_batch(&mut self, keys: &[Value]) {
+        for key in keys { self.insert(key); }
+    }
+
+    /// Return one membership bit per input key in the original row order.
+    /// A true bit means a possible match, never a confirmed exact match.
+    pub fn probe_batch(&self, keys: &[Value]) -> Vec<bool> {
+        keys.iter().map(|key| self.might_contain(key)).collect()
+    }
+
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
 
     /// Number of active bits for monitoring filter saturation.
@@ -176,5 +187,25 @@ mod bloom_occupancy_metrics_tests {
         bloom.union_with(&copy).unwrap();
         assert_eq!(bloom.bits_set(), bits);
         assert_eq!(bloom.estimated_false_positive_rate(), fpr);
+    }
+}
+
+#[cfg(test)]
+mod native_bloom_batch_operator_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_membership_preserves_input_order_and_sql_key_hashes() {
+        let keys = vec![
+            Value::Integer(1), Value::Integer(2), Value::Null,
+            Value::Float(-0.0), Value::Integer(2),
+        ];
+        let mut bloom = BloomFilter::new(65_536, 5).unwrap();
+        bloom.insert_batch(&keys);
+        assert_eq!(bloom.probe_batch(&keys), vec![true; keys.len()]);
+        assert!(bloom.might_contain(&Value::Float(0.0)));
+        assert_eq!(bloom.probe_batch(&[]), Vec::<bool>::new());
+        let empty = BloomFilter::new(65_536, 5).unwrap();
+        assert_eq!(empty.probe_batch(&keys), vec![false; keys.len()]);
     }
 }
