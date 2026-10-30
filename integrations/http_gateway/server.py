@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import math
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -29,7 +30,17 @@ def _reject_duplicate_json_fields(pairs):
 
 
 def parse_result_rows(text: str) -> list[dict]:
-    rows = json.loads(text)
+    def finite_float(number):
+        parsed = float(number)
+        if not math.isfinite(parsed):
+            raise ValueError("Nonfinite SQL result number")
+        return parsed
+
+    def reject_constant(value):
+        raise ValueError(f"Nonfinite SQL result constant: {value}")
+
+    rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
+                      parse_constant=reject_constant, parse_float=finite_float)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL result must be a list of objects")
     return rows

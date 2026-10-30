@@ -55,5 +55,14 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(list_query_templates(queries), ["first", "second"])
 
 
+class InvalidBackendJSONTests(unittest.TestCase):
+    def test_rejects_nonfinite_numbers_and_duplicate_result_keys(self):
+        for payload in ('[{"n":NaN}]', '[{"n":Infinity}]', '[{"n":1e999}]',
+                        '[{"id":1,"id":2}]', '[{"nested":{"x":1,"x":2}}]'):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                parse_result_rows(payload)
+        self.assertEqual(parse_result_rows('[{"n":1.25}]'), [{"n": 1.25}])
+
+
 if __name__ == "__main__":
     unittest.main()
