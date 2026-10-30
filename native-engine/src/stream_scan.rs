@@ -66,6 +66,19 @@ impl Iterator for ScanCursor<'_> {
             if result.is_err() { self.failed = true; }
             return Some(result);
         }
+        if self.predicate.is_none() {
+            if self.next_row == self.source.num_rows() { return None; }
+            let end = self.next_row.saturating_add(self.target_rows).min(self.source.num_rows());
+            let result = self.columns.iter().map(|&index| {
+                Ok(self.source.column(index)?[self.next_row..end].to_vec())
+            }).collect::<Result<Vec<_>>>()
+                .and_then(|columns| Batch::new_with_row_count(
+                    self.output_schema.clone(), columns, end - self.next_row,
+                ));
+            self.next_row = end;
+            if result.is_err() { self.failed = true; }
+            return Some(result);
+        }
         let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
@@ -266,5 +279,30 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod contiguous_projection_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn projects_selected_columns_in_order_and_bounded_chunks() {
+        let input = Batch::from_rows(
+            Schema::new(vec![
+                Field::new("a", DataType::Integer, false),
+                Field::new("b", DataType::Text, true),
+            ]).unwrap(),
+            vec![vec![Value::Integer(1), Value::Null],
+                 vec![Value::Integer(2), Value::Text("x".into())],
+                 vec![Value::Integer(3), Value::Text("y".into())]],
+        ).unwrap();
+        let chunks = scan(&input, None, &["b"], 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(chunks.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            vec![vec![Value::Null], vec![Value::Text("x".into())],
+                 vec![Value::Text("y".into())]]);
     }
 }
