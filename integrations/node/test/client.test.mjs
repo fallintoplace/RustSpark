@@ -84,6 +84,18 @@ test("rejects oversized or excessive named parameters before spawning", () => {
   }), RangeError);
 });
 
+test("rejects empty named input file paths before invoking the CLI", () => {
+  const client = new RustSpark({ runner: () => { throw new Error("should not run"); } });
+  for (const option of ["csvTables", "parquetTables", "jsonTables"]) {
+    assert.throws(() => client.query("SELECT 1", {
+      [option]: { sales: "" },
+    }), TypeError, option);
+  }
+  assert.throws(() => client.query("SELECT 1", {
+    csvTables: { sales: null },
+  }), TypeError);
+});
+
 test("rejects int64 SQL results that JSON.parse would round", () => {
   for (const stdout of [
     '[{"id":9007199254740993}]',

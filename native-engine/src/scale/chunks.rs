@@ -1,11 +1,15 @@
 //! Convert fallible row streams into independently validated bounded batches.
 use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
 
+const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
 pub struct RowBatcher<I> {
     input: I,
     schema: Schema,
     batch_rows: usize,
     pending_error: Option<Error>,
+    pending_row: Option<Vec<Value>>,
+    max_batch_bytes: usize,
     finished: bool,
 }
 
@@ -13,10 +17,21 @@ impl<I> RowBatcher<I>
 where I: Iterator<Item = Result<Vec<Value>>>
 {
     pub fn new(input: I, schema: Schema, batch_rows: usize) -> Result<Self> {
-        if batch_rows == 0 {
-            return Err(Error::Execution("batch size must be positive".into()));
+        Self::with_byte_budget(input, schema, batch_rows, MAX_BATCH_BYTES)
+    }
+
+    fn with_byte_budget(
+        input: I, schema: Schema, batch_rows: usize, max_batch_bytes: usize,
+    ) -> Result<Self> {
+        let minimum = schema.len().checked_mul(std::mem::size_of::<Value>())
+            .ok_or_else(|| Error::Execution("row batch width overflow".into()))?;
+        if batch_rows == 0 || max_batch_bytes == 0 || minimum > max_batch_bytes {
+            return Err(Error::Execution("invalid row batch size or byte budget".into()));
         }
-        Ok(Self { input, schema, batch_rows, pending_error: None, finished: false })
+        Ok(Self {
+            input, schema, batch_rows, pending_error: None,
+            pending_row: None, max_batch_bytes, finished: false,
+        })
     }
 }
 
@@ -32,7 +47,11 @@ where I: Iterator<Item = Result<Vec<Value>>>
             return Some(Err(error));
         }
 
-        let limit = self.batch_rows.min(65_536);
+        let row_width = self.schema.len().saturating_mul(std::mem::size_of::<Value>())
+            .max(1);
+        let limit = self.batch_rows.min(65_536)
+            .min((self.max_batch_bytes / row_width).max(1));
+        let mut retained_bytes = 0usize;
         // Exact or bounded iterators often have far fewer rows remaining than
         // the requested batch size. Avoid reserving tens of thousands of slots
         // for a tiny final batch.
@@ -41,7 +60,8 @@ where I: Iterator<Item = Result<Vec<Value>>>
             .map(|_| Vec::with_capacity(capacity)).collect::<Vec<Vec<Value>>>();
         let mut row_count = 0usize;
         while row_count < limit {
-            match self.input.next() {
+            let next = self.pending_row.take().map(Ok).or_else(|| self.input.next());
+            match next {
                 Some(Ok(row)) => {
                     if row.len() != self.schema.len() {
                         let error = Error::Schema("row width does not match schema".into());
@@ -52,6 +72,27 @@ where I: Iterator<Item = Result<Vec<Value>>>
                         self.pending_error = Some(error);
                         break;
                     }
+                    let row_bytes = row.iter().fold(row_width, |used, value| {
+                        used.saturating_add(match value {
+                            Value::Text(text) => text.len(),
+                            _ => 0,
+                        })
+                    });
+                    if row_bytes > self.max_batch_bytes {
+                        let error = Error::Execution("row exceeds native batch byte budget".into());
+                        if row_count == 0 {
+                            self.finished = true;
+                            return Some(Err(error));
+                        }
+                        self.pending_error = Some(error);
+                        break;
+                    }
+                    if row_count > 0 &&
+                        retained_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
+                        self.pending_row = Some(row);
+                        break;
+                    }
+                    retained_bytes += row_bytes;
                     for (column, value) in columns.iter_mut().zip(row) {
                         column.push(value);
                     }
@@ -232,5 +273,47 @@ mod native_columnar_row_batched_tests {
         assert_eq!(zero_chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
         assert!(zero_chunks[0].rows().unwrap().iter().all(Vec::is_empty));
         assert_eq!(chunks[0].schema(), &schema);
+    }
+}
+
+#[cfg(test)]
+mod row_batch_byte_admission_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn text_schema() -> Schema {
+        Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap()
+    }
+
+    #[test]
+    fn large_strings_split_batches_without_dropping_rows() {
+        let rows = (0..4).map(|i| Ok(vec![Value::Text(format!(
+            "{i}-{}", "x".repeat(60)
+        ))]));
+        let batches = RowBatcher::with_byte_budget(rows, text_schema(), 100, 100)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(),
+            vec![1, 1, 1, 1]);
+        let collected = batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(collected.len(), 4);
+        for (i, row) in collected.iter().enumerate() {
+            assert!(matches!(&row[0], Value::Text(text) if text.starts_with(&format!("{i}-"))));
+        }
+    }
+
+    #[test]
+    fn oversized_row_reports_error_after_valid_prefix() {
+        let rows = vec![
+            Ok(vec![Value::Text("ok".into())]),
+            Ok(vec![Value::Text("x".repeat(120))]),
+            Ok(vec![Value::Text("unreachable".into())]),
+        ];
+        let mut batches = RowBatcher::with_byte_budget(
+            rows.into_iter(), text_schema(), 100, 100
+        ).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap().num_rows(), 1);
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
     }
 }

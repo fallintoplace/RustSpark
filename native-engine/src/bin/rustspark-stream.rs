@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -11,6 +11,21 @@ use rustspark_native::{
     scale::{cancel::QueryControl, file_catalog::FileCatalog,
         stream_execute::{self, StreamOptions}},
 };
+
+const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_sql_file(path: &std::path::Path) -> Result<String> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_SQL_FILE_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    let mut sql = String::new();
+    file.take(MAX_SQL_FILE_BYTES + 1).read_to_string(&mut sql)?;
+    if sql.len() as u64 > MAX_SQL_FILE_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    Ok(sql)
+}
 
 struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, table: String, schema: Option<Schema>, sql: String,
@@ -83,7 +98,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_sql_file(&path)?,
         _ => return Err(Error::Parse("choose --sql or --sql-file".into())),
     };
     if sql.trim().is_empty() { return Err(Error::Parse("SQL cannot be empty".into())); }
@@ -179,6 +194,22 @@ mod tests {
         let mut output = Vec::new();
         write_csv(&schema, [Ok(data)], &mut output).unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "id,city\n1,\"A,\"\"B\"\"\"\n2,\n");
+    }
+
+
+    #[test]
+    fn streaming_sql_file_admission_bounds_memory() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-stream-sql-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
+        ));
+        fs::write(&path, vec![b'x'; MAX_SQL_FILE_BYTES as usize + 1]).unwrap();
+        assert!(read_sql_file(&path).is_err());
+        fs::write(&path, "SELECT * FROM data").unwrap();
+        assert_eq!(read_sql_file(&path).unwrap(), "SELECT * FROM data");
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
