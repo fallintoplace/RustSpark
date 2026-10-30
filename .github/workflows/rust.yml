@@ -3,14 +3,34 @@ name: Rust native
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
 
 jobs:
+  main-check:
+    name: Latest main compile check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check root targets
+        run: cargo check --all-targets
+      - name: Check native engine targets
+        run: cargo check --manifest-path native-engine/Cargo.toml --all-targets
+
   native:
+    if: github.event_name != 'push' && github.ref == 'refs/heads/main'
     name: Native Rust on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
