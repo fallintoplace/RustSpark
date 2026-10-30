@@ -9,10 +9,11 @@ fn output(types: &[DataType]) -> Result<DataType> {
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(index) = super::integer(&args[0])? else { return Ok(Value::Null) };
-    let Some(offset) = index.checked_sub(1).and_then(|n| usize::try_from(n).ok()) else {
+    // Index the argv directly, which also avoids offset + 1 overflow on 32-bit.
+    let Some(position) = usize::try_from(index).ok().filter(|&n| n > 0) else {
         return Ok(Value::Null);
     };
-    Ok(args.get(offset + 1).cloned().unwrap_or(Value::Null))
+    Ok(args.get(position).cloned().unwrap_or(Value::Null))
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "elt", min_args: 2, max_args: 128, result_type: output, call: evaluate,
@@ -27,6 +28,8 @@ mod tests {
         assert_eq!(evaluate(&args).unwrap(), Value::Text("b".into()));
         assert_eq!(evaluate(&[Value::Integer(0), Value::Text("a".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Integer(5), Value::Text("a".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Integer(i64::MAX), Value::Text("a".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Integer(i64::MIN), Value::Text("a".into())]).unwrap(), Value::Null);
         assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
         assert!(output(&[DataType::Text, DataType::Text]).is_err());
     }
