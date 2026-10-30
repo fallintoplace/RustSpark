@@ -87,7 +87,7 @@ class ArrowStreamCommandTests(unittest.TestCase):
 
 class NamedInputTextPathTests(unittest.TestCase):
     def test_rejects_bytes_and_empty_named_paths(self):
-        for source in (b"events.json", ""):
+        for source in (b"events.json", "", None, 123):
             with self.subTest(source=source), self.assertRaisesRegex(ValueError, "paths"):
                 build_command("SELECT 1", json_tables={"events": source})
         self.assertIn("events=events.json", build_command("SELECT 1", json_tables={"events": "events.json"}))
