@@ -30,6 +30,7 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    json_array: bool,
 }
 
 const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
@@ -61,13 +62,17 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut json_array = false;
+    let mut stdout_format_seen = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(None);
         }
         if arg == "--jsonl" {
-            if jsonl { return Err(Error::Parse("duplicate --jsonl".into())); }
+            if jsonl || stdout_format_seen {
+                return Err(Error::Parse("duplicate output format".into()));
+            }
             jsonl = true;
             continue;
         }
@@ -104,6 +109,18 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--stdout-format" => {
+                if stdout_format_seen || jsonl {
+                    return Err(Error::Parse("duplicate output format".into()));
+                }
+                stdout_format_seen = true;
+                match value.as_str() {
+                    "csv" => {},
+                    "json" | "jsonl" => jsonl = true,
+                    "json-array" => json_array = true,
+                    _ => return Err(Error::Parse("unsupported output format".into())),
+                }
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -149,7 +166,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, json_array }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -216,6 +233,48 @@ fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
         writeln!(output, "{}", serde_json::Value::Object(record))?;
     }
     Ok(())
+}
+
+struct JsonArrayPrinter<'a, W: Write> {
+    output: &'a mut W,
+    first: bool,
+}
+
+impl<'a, W: Write> JsonArrayPrinter<'a, W> {
+    fn new(output: &'a mut W) -> Result<Self> {
+        output.write_all(b"[")?;
+        Ok(Self { output, first: true })
+    }
+
+    fn print_batch(&mut self, batch: &Batch) -> Result<()> {
+        for row_index in 0..batch.num_rows() {
+            let row = batch.row(row_index)?;
+            let mut record = serde_json::Map::new();
+            for (field, value) in batch.schema().fields().iter().zip(&row) {
+                let json = match value {
+                    Value::Null => serde_json::Value::Null,
+                    Value::Boolean(value) => serde_json::Value::Bool(*value),
+                    Value::Integer(value) => serde_json::Value::Number((*value).into()),
+                    Value::Float(value) => serde_json::Number::from_f64(*value)
+                        .map(serde_json::Value::Number)
+                        .ok_or_else(|| Error::Execution(
+                            "nonfinite SQL float cannot be encoded as JSON".into()
+                        ))?,
+                    Value::Text(value) => serde_json::Value::String(value.clone()),
+                };
+                record.insert(field.name.clone(), json);
+            }
+            if !self.first { self.output.write_all(b",")?; }
+            write!(self.output, "{}", serde_json::Value::Object(record))?;
+            self.first = false;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<()> {
+        writeln!(self.output, "]")?;
+        Ok(())
+    }
 }
 
 fn parse_stream_schema(spec: &str) -> Result<Schema> {
@@ -297,11 +356,17 @@ fn run_stream(args: &Args) -> Result<()> {
 
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    if !args.jsonl { print_header(&output_schema, &mut output)?; }
-    for batch in pipeline {
-        let batch = batch?;
-        if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
-        else { print_csv_rows(&batch, &mut output)?; }
+    if args.json_array {
+        let mut printer = JsonArrayPrinter::new(&mut output)?;
+        for batch in pipeline { printer.print_batch(&batch?)?; }
+        printer.finish()?;
+    } else {
+        if !args.jsonl { print_header(&output_schema, &mut output)?; }
+        for batch in pipeline {
+            let batch = batch?;
+            if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
+            else { print_csv_rows(&batch, &mut output)?; }
+        }
     }
     output.flush()?;
     Ok(())
@@ -360,7 +425,11 @@ fn run() -> Result<()> {
     let batch = executor::execute(&plan, &catalog)?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
+    if args.json_array {
+        let mut printer = JsonArrayPrinter::new(&mut output)?;
+        printer.print_batch(&batch)?;
+        printer.finish()?;
+    } else if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
     else { print_csv(&batch, &mut output)?; }
     output.flush()?;
     Ok(())
@@ -479,6 +548,42 @@ mod tests {
         let mut output = Vec::new();
         print_jsonl_rows(&valid, &mut output).unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "{\"measure\":0.5}\n{\"measure\":null}\n");
+    }
+
+    #[test]
+    fn json_array_streams_across_batches_and_rejects_nan() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![vec![Value::Float(1.5)]]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![vec![Value::Null]]).unwrap();
+        let mut output = Vec::new();
+        let mut writer = JsonArrayPrinter::new(&mut output).unwrap();
+        writer.print_batch(&first).unwrap();
+        writer.print_batch(&second).unwrap();
+        writer.finish().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert_eq!(parsed[0]["n"], 1.5);
+        assert!(parsed[1]["n"].is_null());
+        let invalid = Batch::from_rows(schema, vec![vec![Value::Float(f64::INFINITY)]]).unwrap();
+        let mut output = Vec::new();
+        let mut writer = JsonArrayPrinter::new(&mut output).unwrap();
+        assert!(writer.print_batch(&invalid).is_err());
+    }
+
+    #[test]
+    fn stdout_format_accepts_json_array_and_rejects_conflicts() {
+        let args = ["--csv", "data.csv", "--sql", "SELECT * FROM data",
+            "--stdout-format", "json-array"];
+        assert!(parse_args(args.into_iter().map(String::from))
+            .unwrap().unwrap().json_array);
+        for args in [
+            vec!["--csv", "data.csv", "--sql", "SELECT * FROM data",
+                "--stdout-format", "xml"],
+            vec!["--csv", "data.csv", "--sql", "SELECT * FROM data",
+                "--jsonl", "--stdout-format", "csv"],
+        ] {
+            assert!(parse_args(args.into_iter().map(String::from)).is_err());
+        }
     }
 
     #[test]
