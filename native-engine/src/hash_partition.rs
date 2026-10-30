@@ -95,6 +95,22 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
         }
     }
 
+    if partitions == 1 {
+        // A single destination needs no hashing or row-coordinate buffers.
+        let total = input.iter().try_fold(0usize, |rows, batch| {
+            rows.checked_add(batch.num_rows())
+                .ok_or_else(|| Error::Execution("partition row count overflow".into()))
+        })?;
+        let mut columns = (0..schema.len()).map(|_| Vec::with_capacity(total))
+            .collect::<Vec<_>>();
+        for batch in input {
+            for (index, target) in columns.iter_mut().enumerate() {
+                target.extend_from_slice(batch.column(index)?);
+            }
+        }
+        return Ok(vec![Batch::new_with_row_count(schema.clone(), columns, total)?]);
+    }
+
     // Keep only row coordinates until all source batches have been partitioned.
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
     for (batch_index, batch) in input.iter().enumerate() {
@@ -235,5 +251,32 @@ mod one_partition_hash_shortcut_tests {
         assert!(partition(&input, &[], 1).is_err());
         assert_eq!(partition(&Batch::empty(input.schema().clone()), &["k"], 1)
             .unwrap()[0].num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod single_bucket_multi_batch_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn skips_hashing_but_keeps_every_row_in_input_order() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("é".into())],
+        ]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("long".repeat(500))],
+        ]).unwrap();
+        let output = partition_batches(&[first.clone(), second.clone()], &["id"], 1).unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].rows().unwrap(), first.rows().unwrap()
+            .into_iter().chain(second.rows().unwrap()).collect::<Vec<_>>());
+        assert_eq!(output[0].schema(), &schema);
+        assert!(partition_batches(&[first], &["missing"], 1).is_err());
     }
 }
