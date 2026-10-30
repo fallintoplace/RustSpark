@@ -80,6 +80,13 @@ impl<R: BufRead> Records<R> {
                     fields.push(decode(std::mem::take(&mut field))?);
                     state = State::Start;
                 }
+                (State::Start, b'\n' | b'\r') if fields.is_empty() && field.is_empty() => {
+                    // Mirror the in-memory CSV reader: an entirely blank physical
+                    // line is not a row. Quoted empty fields use AfterQuote and
+                    // must still be returned as a real record.
+                    if byte == b'\r' { self.skip_lf = true; }
+                    seen = false;
+                }
                 (State::Start | State::Unquoted | State::AfterQuote, b'\n' | b'\r') => {
                     if byte == b'\r' {
                         self.skip_lf = true;
@@ -370,5 +377,35 @@ mod bounded_csv_stream_batch_tests {
         let batches = CsvStream::new(Cursor::new(input), usize::MAX, 32)
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [65_536, 1]);
+    }
+}
+
+#[cfg(test)]
+mod native_csv_blank_line_regression_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn ignores_blank_physical_lines_but_retains_quoted_empty_records() {
+        let source = b"value\n\n\"\"\r\n\r\nhello\n\n";
+        let chunks = CsvStream::new(Cursor::new(source), 2, 128).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let rows = chunks.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Null],
+            vec![Value::Text("hello".into())],
+        ]);
+    }
+
+    #[test]
+    fn blank_lines_do_not_trigger_multi_column_width_errors() {
+        let source = b"id,name\r\n\r\n1,alice\n\n2,bob\r\n";
+        let rows = CsvStream::new(Cursor::new(source), 3, 128).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![Value::Text("1".into()), Value::Text("alice".into())]);
+        assert_eq!(rows[1], vec![Value::Text("2".into()), Value::Text("bob".into())]);
     }
 }
