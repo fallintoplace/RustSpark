@@ -113,9 +113,15 @@ fn execute_inner(
         },
         Plan::Aggregate { input, group_by, aggregates } => {
             if let Plan::Scan { table } = input.as_ref() {
-                aggregate::aggregate(catalog.get(table)?, group_by, aggregates)?
+                aggregate::aggregate_with_max_groups_checked(
+                    catalog.get(table)?, group_by, aggregates, 1_000_000,
+                    || guard.check(),
+                )?
             } else {
-                aggregate::aggregate(&descend(input)?, group_by, aggregates)?
+                aggregate::aggregate_with_max_groups_checked(
+                    &descend(input)?, group_by, aggregates, 1_000_000,
+                    || guard.check(),
+                )?
             }
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
