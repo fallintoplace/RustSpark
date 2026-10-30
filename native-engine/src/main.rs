@@ -380,7 +380,7 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         let file = fs::File::create(&path).unwrap();
-        let writer = ArrowWriter::try_new(file, arrow.schema(), None).unwrap();
+        let mut writer = ArrowWriter::try_new(file, arrow.schema(), None).unwrap();
         writer.close().unwrap();
         let result = read_parquet_bounded(&path).unwrap();
         assert_eq!(result.schema(), &schema);
