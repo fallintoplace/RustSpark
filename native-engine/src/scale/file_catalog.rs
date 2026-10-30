@@ -429,3 +429,91 @@ mod file_catalog_manifest_tests {
         }
     }
 }
+
+static CATALOG_SNAPSHOT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+struct IncompleteManifest(std::path::PathBuf);
+
+impl Drop for IncompleteManifest {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
+impl FileCatalog {
+    /// Atomically replace one local catalog snapshot. Intended for a single
+    /// writer; callers must coordinate concurrent writers separately.
+    pub fn save_manifest_atomic(&self, path: impl AsRef<Path>) -> Result<()> {
+        use std::io::Write;
+        let path = path.as_ref();
+        let contents = self.export_manifest()?;
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = path.file_name()
+            .ok_or_else(|| Error::Schema("catalog snapshot path needs a filename".into()))?;
+        let id = CATALOG_SNAPSHOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut filename = name.to_os_string();
+        filename.push(format!(".tmp-{}-{id}", std::process::id()));
+        let staged = IncompleteManifest(parent.join(filename));
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .open(&staged.0)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&staged.0, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Read only bounded manifest metadata. Referenced source files are not
+    /// implicitly copied into the catalog directory.
+    pub fn load_manifest_file(path: impl AsRef<Path>) -> Result<Self> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > MAX_CATALOG_MANIFEST_BYTES as u64 {
+            return Err(Error::Execution("catalog manifest exceeds byte budget".into()));
+        }
+        let mut contents = String::new();
+        file.take(MAX_CATALOG_MANIFEST_BYTES as u64 + 1).read_to_string(&mut contents)?;
+        Self::import_manifest(&contents)
+    }
+}
+
+#[cfg(test)]
+mod native_catalog_atomic_snapshot_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn snapshot_survives_reopening_and_replaces_previous_generation() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-catalog-snapshot-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("catalog.json");
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("first", "first.csv", schema.clone(), 128).unwrap();
+        catalog.save_manifest_atomic(&path).unwrap();
+        assert_eq!(FileCatalog::load_manifest_file(&path).unwrap().list(), ["first"]);
+        catalog.register_csv("second", "second.csv", schema, 128).unwrap();
+        catalog.save_manifest_atomic(&path).unwrap();
+        assert_eq!(FileCatalog::load_manifest_file(&path).unwrap().list(), ["first", "second"]);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_saved_snapshot_fails_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "native-invalid-catalog-{}-{}.json", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
+        ));
+        std::fs::write(&path, "{").unwrap();
+        assert!(FileCatalog::load_manifest_file(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
