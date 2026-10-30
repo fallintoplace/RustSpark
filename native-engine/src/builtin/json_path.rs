@@ -29,7 +29,7 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
             tail = &rest[end..];
         } else if let Some(rest) = tail.strip_prefix('[') {
             if rest.starts_with('\'') || rest.starts_with('"') {
-                let quote = rest.chars().next().expect("checked quoted key");
+                let quote = char::from(rest.as_bytes()[0]);
                 // A quoted key without escapes can be borrowed from the path.
                 if let Some(end) = rest[1..].find(quote) {
                     let key = &rest[1..end + 1];
