@@ -47,6 +47,23 @@ pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
 pub fn scan_columns(
     path: impl AsRef<Path>, batch_size: usize, columns: &[&str],
 ) -> Result<ParquetScan> {
+    scan_columns_internal(path, batch_size, columns, None)
+}
+
+/// Decode only the requested columns and row window before native conversion.
+pub fn scan_columns_window(
+    path: impl AsRef<Path>, batch_size: usize, columns: &[&str],
+    offset: usize, limit: usize,
+) -> Result<ParquetScan> {
+    offset.checked_add(limit)
+        .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
+    scan_columns_internal(path, batch_size, columns, Some((offset, limit)))
+}
+
+fn scan_columns_internal(
+    path: impl AsRef<Path>, batch_size: usize, columns: &[&str],
+    window: Option<(usize, usize)>,
+) -> Result<ParquetScan> {
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
@@ -67,7 +84,11 @@ pub fn scan_columns(
         selected.push(index);
     }
     let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
-    let inner = builder.with_projection(mask).with_batch_size(batch_size)
+    let mut builder = builder.with_projection(mask);
+    if let Some((offset, limit)) = window {
+        builder = builder.with_offset(offset).with_limit(limit);
+    }
+    let inner = builder.with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
     Ok(ParquetScan { inner })
 }
@@ -376,6 +397,38 @@ mod parquet_native_offset_limit_pushdown_tests {
         assert_eq!(scan_window(&path, 3, 0, 0).unwrap().count(), 0);
         assert_eq!(scan_window(&path, 3, 100, 5).unwrap().count(), 0);
         assert!(scan_window(&path, 3, usize::MAX, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod projected_window_pushdown_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn selected_columns_and_offset_limit_are_applied_before_decode() {
+        let path = std::env::temp_dir().join(format!("rustspark-proj-window-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("city", DataType::Text, true),
+        ]).unwrap(), (0..8).map(|n| vec![
+            Value::Integer(n), if n % 3 == 0 { Value::Null } else {
+                Value::Text(format!("city-{n}"))
+            },
+        ]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&input).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap(); writer.close().unwrap();
+        let output = scan_columns_window(&path, 2, &["city"], 3, 3).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(),
+            vec![vec![Value::Null], vec![Value::Text("city-4".into())],
+                vec![Value::Text("city-5".into())]]);
+        assert!(scan_columns_window(&path, 2, &["city"], usize::MAX, 1).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
