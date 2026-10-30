@@ -2,10 +2,19 @@ use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Re
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
+    filter_checked(batch, predicate, || Ok(()))
+}
+
+pub fn filter_checked(
+    batch: &Batch, predicate: &Expr, mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch.clone());
     }
-    batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
+    batch.take(&crate::vector_filter::select_indices_checked(
+        batch, predicate, || check(),
+    )?)
 }
 
 /// Filter an owned native batch. An always-true predicate can reuse all columns.
@@ -161,5 +170,29 @@ mod owned_filter_operator_tests {
         assert_eq!(filter_owned(batch.clone(), &Expr::Literal(Value::Boolean(true))).unwrap(), batch);
         assert_eq!(filter_owned(batch.clone(), &Expr::Literal(Value::Boolean(false))).unwrap().num_rows(), 0);
         assert!(filter_owned(batch, &Expr::Column("missing".into())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod filter_cancellation_midbatch_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{Field, Schema}};
+
+    #[test]
+    fn cancellable_filter_checks_within_typed_column_scans() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..3000)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(1500)));
+        let mut polls = 0;
+        let error = filter_checked(&batch, &predicate, || {
+            polls += 1;
+            if polls == 4 { Err(Error::Execution("filter cancelled".into())) }
+            else { Ok(()) }
+        }).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(polls, 4);
+        assert_eq!(filter(&batch, &predicate).unwrap().num_rows(), 1499);
     }
 }
