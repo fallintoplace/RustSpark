@@ -37,6 +37,44 @@ fn checksum(bytes: &[u8]) -> u32 {
     !value
 }
 
+/// Memory-bounded gate for stale shuffle task attempts.
+///
+/// A higher attempt replaces the tracked attempt. Multiple frames from the
+/// same attempt remain valid; a frame sequence ID would be needed to reject
+/// duplicate frames. Callers must commit task results exactly once.
+pub struct AttemptTracker {
+    attempts: std::collections::HashMap<(u64, u64), u32>,
+    max_tasks: usize,
+}
+
+impl AttemptTracker {
+    pub fn new(max_tasks: usize) -> Result<Self> {
+        if max_tasks == 0 {
+            return Err(Error::Execution("exchange task tracking budget must be positive".into()));
+        }
+        Ok(Self { attempts: std::collections::HashMap::new(), max_tasks })
+    }
+
+    pub fn accept(&mut self, frame: &Frame) -> Result<bool> {
+        let key = (frame.stage, frame.task);
+        let at_capacity = self.attempts.len() >= self.max_tasks;
+        match self.attempts.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if frame.attempt < *entry.get() { return Ok(false); }
+                if frame.attempt > *entry.get() { *entry.get_mut() = frame.attempt; }
+                Ok(true)
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if at_capacity {
+                    return Err(Error::Execution("exchange task tracking budget exceeded".into()));
+                }
+                entry.insert(frame.attempt);
+                Ok(true)
+            }
+        }
+    }
+}
+
 pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> Result<()> {
     if frame.payload.len() > max_bytes {
         return Err(Error::Execution("exchange frame exceeds memory budget".into()));
@@ -270,6 +308,33 @@ mod exchange_header_read_coalescing_tests {
         assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
         assert_eq!(reader.calls, 3);
         assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_shuffle_attempt_gate_tests {
+    use super::*;
+
+    #[test]
+    fn tracks_monotonic_attempts_without_accepting_replays() {
+        let mut gate = AttemptTracker::new(2).unwrap();
+        let mut frame = Frame { stage: 1, task: 7, attempt: 2, payload: vec![1] };
+        assert!(gate.accept(&frame).unwrap());
+        // One task attempt can emit several independent exchange frames.
+        assert!(gate.accept(&frame).unwrap());
+        frame.attempt = 1;
+        assert!(!gate.accept(&frame).unwrap());
+        frame.attempt = 3;
+        assert!(gate.accept(&frame).unwrap());
+        frame.stage = 2;
+        assert!(gate.accept(&frame).unwrap());
+        frame.task = 8;
+        assert!(gate.accept(&frame).is_err());
+        frame.stage = 1;
+        frame.task = 7;
+        frame.attempt = 4;
+        assert!(gate.accept(&frame).unwrap());
+        assert!(AttemptTracker::new(0).is_err());
     }
 }
 
