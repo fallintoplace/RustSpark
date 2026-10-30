@@ -47,8 +47,10 @@ impl CrossJoinStream {
         let mut right_rows = Vec::new();
         let mut right_bytes = Vec::new();
         let mut size = 0usize;
-        for next in right {
+        let mut right = right;
+        loop {
             control.check()?;
+            let Some(next) = right.next() else { break };
             let batch = next?;
             if batch.schema() != &right_schema {
                 return Err(Error::Schema("stream cross join right schema changed".into()));
@@ -172,5 +174,25 @@ mod tests {
             2, QueryControl::default(),
         ).unwrap();
         assert_eq!(stream.collect::<Result<Vec<_>>>().unwrap().len(), 0);
+    }
+}
+
+
+#[cfg(test)]
+mod cancelled_cross_join_build_poll_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn cancelled_cross_join_does_not_poll_build_side() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let left: BatchStream = Box::new(std::iter::empty());
+        let right: BatchStream = Box::new(std::iter::repeat_with(
+            || -> Result<Batch> { panic!("build source polled") }
+        ));
+        let control = QueryControl::default();
+        control.cancel();
+        let result = CrossJoinStream::new(left, right, schema.clone(), schema, 2, control);
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
