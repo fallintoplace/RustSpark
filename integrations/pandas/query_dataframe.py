@@ -67,7 +67,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
         raise ValueError("Invalid SQL parameter name or parameter count")
     for name in sorted(params):
         value = params[name]
-        if not isinstance(value, str) or ":" not in value or len(value) > 8192:
+        if not isinstance(value, str) or ":" not in value or len(value.encode("utf-8")) > 8192:
             raise ValueError("SQL parameters must be bounded typed values")
         command.extend(["--named-param", f"{name}={value}"])
     return command
