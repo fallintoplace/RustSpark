@@ -132,6 +132,11 @@ impl Batch {
         if let Some(&invalid) = indices.iter().find(|&&row| row >= self.rows) {
             return Err(Error::Execution(format!("row index out of bounds: {invalid}")));
         }
+        if let Some(&start) = indices.first() {
+            if indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+                return self.slice_rows(start, start + indices.len());
+            }
+        }
         let mut columns = Vec::with_capacity(self.columns.len());
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
@@ -336,5 +341,31 @@ mod schema_widen_without_copy_tests {
         assert!(with_null.into_widened_schema(required).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
         assert_eq!(zero.into_widened_schema(Schema::new(vec![]).unwrap()).unwrap().num_rows(), 5);
+    }
+}
+
+#[cfg(test)]
+mod contiguous_take_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn consecutive_gathers_and_arbitrary_gathers_match_expected_rows() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Integer(0)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text("c".into()), Value::Integer(2)],
+            vec![Value::Text("d".into()), Value::Integer(3)],
+        ]).unwrap();
+        assert_eq!(input.take(&[1, 2, 3]).unwrap(), input.slice_rows(1, 4).unwrap());
+        assert_eq!(input.take(&[0]).unwrap(), input.slice_rows(0, 1).unwrap());
+        assert_eq!(input.take(&[2, 0, 2]).unwrap().rows().unwrap(), vec![
+            input.row(2).unwrap(), input.row(0).unwrap(), input.row(2).unwrap(),
+        ]);
+        assert_eq!(input.take(&[]).unwrap().num_rows(), 0);
+        assert!(input.take(&[4]).is_err());
     }
 }
