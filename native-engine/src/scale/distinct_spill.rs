@@ -48,8 +48,10 @@ where I: IntoIterator<Item = Result<Batch>>
         .map(|field| field.name.as_str()).collect::<Vec<_>>();
     let mut writer = PartitionWriter::new(
         directory, schema.clone(), &keys, partitions, io_batch_rows)?;
-    for incoming in input {
+    let mut input = input.into_iter();
+    loop {
         control.check()?;
+        let Some(incoming) = input.next() else { break };
         writer.write_batch(&incoming?, control)?;
     }
     let input_files = writer.finish()?;
@@ -161,5 +163,22 @@ mod sparse_distinct_result_shards_tests {
         assert!(empty.paths().is_empty());
         drop(empty);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cancelled_distinct_input_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn cancelled_distinct_does_not_poll_source() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let source = std::iter::repeat_with(|| -> Result<Batch> { panic!("source polled") });
+        let control = QueryControl::default();
+        control.cancel();
+        let result = distinct_to_disk(source, schema, std::env::temp_dir().as_path(),
+            1, 10, 4, &control);
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
