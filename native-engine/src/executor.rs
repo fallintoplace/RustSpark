@@ -127,7 +127,9 @@ fn execute_inner(
             right_key,
             *kind,
         )?,
-        Plan::CrossJoin { left, right } => join::cross_join(&descend(left)?, &descend(right)?)?,
+        Plan::CrossJoin { left, right } => join::cross_join_with_max_rows(
+            &descend(left)?, &descend(right)?, options.max_output_rows
+        )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
         Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
