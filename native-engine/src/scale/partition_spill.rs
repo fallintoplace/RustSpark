@@ -52,7 +52,7 @@ fn write_shard(
 ) -> Result<()> {
     let slot = &mut writers[index];
     if slot.is_none() {
-        let file = OpenOptions::new().write(true).create_new(true).open(&paths[index])?;
+        let file = open_private_spill(&paths[index])?;
         *slot = Some(SpillWriter::new(BufWriter::new(file), schema.clone())?);
     }
     slot.as_mut().expect("shard writer initialized").write_batch(&batch.take(rows)?)
@@ -91,8 +91,7 @@ impl PartitionWriter {
             control.check()?;
             let slot = &mut writers[0];
             if slot.is_none() {
-                let file = OpenOptions::new().write(true).create_new(true)
-                    .open(&owned.paths[0])?;
+                let file = open_private_spill(&owned.paths[0])?;
                 *slot = Some(SpillWriter::new(BufWriter::new(file), owned.schema.clone())?);
             }
             let mut start = 0;
@@ -145,8 +144,7 @@ impl PartitionWriter {
             } else {
                 // Readers expect one schema-checked file per partition,
                 // including untouched partitions.
-                let file = OpenOptions::new().write(true).create_new(true)
-                    .open(&owned.paths[index])?;
+                let file = open_private_spill(&owned.paths[index])?;
                 SpillWriter::new(BufWriter::new(file), owned.schema.clone())?.finish()?;
             }
         }
@@ -367,5 +365,36 @@ mod single_shard_partition_zero_copy_tests {
         drop(reader);
         drop(files);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+fn open_private_spill(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(all(test, unix))]
+mod private_spill_permissions_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_files_are_not_world_readable() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-private-partition_spill-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = open_private_spill(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }
