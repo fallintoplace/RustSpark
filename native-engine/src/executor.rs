@@ -106,9 +106,9 @@ fn execute_inner(
         },
         Plan::Project { input, selections } => {
             if let Plan::Scan { table } = input.as_ref() {
-                project::project(catalog.get(table)?, selections)?
+                project::project_checked(catalog.get(table)?, selections, || guard.check())?
             } else {
-                project::project(&descend(input)?, selections)?
+                project::project_checked(&descend(input)?, selections, || guard.check())?
             }
         },
         Plan::Aggregate { input, group_by, aggregates } => {
