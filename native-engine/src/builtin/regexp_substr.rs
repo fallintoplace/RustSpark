@@ -7,6 +7,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
+    if pattern.len() <= 4096 && pattern.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || byte == b'_') {
+        return Ok(text.find(pattern)
+            .map_or(Value::Null, |_| Value::Text(pattern.to_owned())));
+    }
     let pattern = regex_support::compile(pattern)?;
     Ok(pattern.find(text).map_or(Value::Null, |m| Value::Text(m.as_str().to_string())))
 }
@@ -36,5 +41,24 @@ mod empty_regex_substr_perf_tests {
         assert_eq!(evaluate(&[Value::Text("".into()), Value::Text("".into())])
             .unwrap(), Value::Text("".into()));
         assert_eq!(evaluate(&[Value::Null, Value::Text("".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod literal_regex_substr_tests {
+    use super::*;
+
+    #[test]
+    fn literal_fast_path_preserves_null_and_match_results() {
+        for (text, pattern, expected) in [
+            ("éfoo_bar", "foo", Value::Text("foo".into())),
+            ("foofoo", "foo", Value::Text("foo".into())),
+            ("no match", "xyz", Value::Null),
+            ("", "foo", Value::Null),
+            ("abc", "", Value::Text(String::new())),
+        ] {
+            let args = [Value::Text(text.into()), Value::Text(pattern.into())];
+            assert_eq!(evaluate(&args).unwrap(), expected);
+        }
     }
 }
