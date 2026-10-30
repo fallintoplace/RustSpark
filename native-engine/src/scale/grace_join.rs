@@ -74,6 +74,16 @@ where L: IntoIterator<Item = Result<Batch>>,
         return Err(Error::Type("join key types must match".into()));
     }
 
+    let result_schema = join::hash_join(
+        &Batch::empty(left_schema.clone()), &Batch::empty(right_schema.clone()),
+        left_key, right_key, kind
+    )?.schema().clone();
+    if result_schema.len() > 4096 ||
+        io_batch_rows.checked_mul(result_schema.len())
+            .is_none_or(|cells| cells > 4_000_000) {
+        return Err(Error::Execution("join output exceeds spill wire cell budget".into()));
+    }
+
     let mut lhs = PartitionWriter::new(
         directory, left_schema.clone(), &[left_key], partitions, io_batch_rows)?;
     let mut rhs = PartitionWriter::new(
@@ -88,10 +98,6 @@ where L: IntoIterator<Item = Result<Batch>>,
     }
     let lhs_files = lhs.finish()?;
     let rhs_files = rhs.finish()?;
-    let result_schema = join::hash_join(
-        &Batch::empty(left_schema.clone()), &Batch::empty(right_schema.clone()),
-        left_key, right_key, kind
-    )?.schema().clone();
     let mut output = JoinFiles { paths: Vec::new(), schema: result_schema.clone() };
 
     for (left_path, right_path) in lhs_files.paths().iter().zip(rhs_files.paths()) {
@@ -419,5 +425,26 @@ mod empty_build_grace_join_short_circuit_tests {
             drop(files);
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod join_result_width_preflight_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn oversized_join_width_rejects_before_polling_sources() {
+        let left = Schema::new((0..2050).map(|n|
+            Field::new(format!("l{n}"), DataType::Integer, false)
+        ).collect()).unwrap();
+        let right = Schema::new((0..2050).map(|n|
+            Field::new(format!("r{n}"), DataType::Integer, false)
+        ).collect()).unwrap();
+        let source = || std::iter::repeat_with(|| -> Result<Batch> { panic!("source polled") });
+        let result = grace_join(source(), source(), left, right,
+            "l0", "r0", JoinKind::Inner, std::env::temp_dir().as_path(),
+            1, 10, 8, &QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
