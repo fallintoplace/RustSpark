@@ -95,15 +95,38 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
         }
     }
 
+    if partitions == 1 {
+        // A single destination needs no hashing or row-coordinate buffers.
+        let total = input.iter().try_fold(0usize, |rows, batch| {
+            rows.checked_add(batch.num_rows())
+                .ok_or_else(|| Error::Execution("partition row count overflow".into()))
+        })?;
+        let mut columns = (0..schema.len()).map(|_| Vec::with_capacity(total))
+            .collect::<Vec<_>>();
+        for batch in input {
+            for (index, target) in columns.iter_mut().enumerate() {
+                target.extend_from_slice(batch.column(index)?);
+            }
+        }
+        return Ok(vec![Batch::new_with_row_count(schema.clone(), columns, total)?]);
+    }
+
     // Keep only row coordinates until all source batches have been partitioned.
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
+        let key_slices = key_columns.iter().map(|&column| batch.column(column))
+            .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
             let mut hasher = PartitionHasher::default();
-            for &column in &key_columns {
-                batch.value(row, column)?.hash(&mut hasher);
+            for values in &key_slices {
+                values[row].hash(&mut hasher);
             }
-            let bucket = (hasher.finish() % partitions as u64) as usize;
+            let hash = hasher.finish();
+            let bucket = match mask {
+                Some(mask) => (hash as usize) & mask,
+                None => (hash % partitions as u64) as usize,
+            };
             buckets[bucket].push((batch_index, row));
         }
     }
@@ -235,5 +258,83 @@ mod one_partition_hash_shortcut_tests {
         assert!(partition(&input, &[], 1).is_err());
         assert_eq!(partition(&Batch::empty(input.schema().clone()), &["k"], 1)
             .unwrap()[0].num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod single_bucket_multi_batch_fast_path_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn skips_hashing_but_keeps_every_row_in_input_order() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("é".into())],
+        ]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("long".repeat(500))],
+        ]).unwrap();
+        let output = partition_batches(&[first.clone(), second.clone()], &["id"], 1).unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].rows().unwrap(), first.rows().unwrap()
+            .into_iter().chain(second.rows().unwrap()).collect::<Vec<_>>());
+        assert_eq!(output[0].schema(), &schema);
+        assert!(partition_batches(&[first], &["missing"], 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod multi_batch_bitmask_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn bucket_assignment_matches_single_batch_for_both_fanouts() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let parts = (0..3).map(|part| Batch::from_rows(schema.clone(),
+            (0..45).map(|n| vec![if n % 11 == 0 { Value::Null }
+                else { Value::Integer((part + n) % 13) }]).collect()).unwrap()).collect::<Vec<_>>();
+        for fanout in [1, 2, 8, 32, 63, 127] {
+            let actual = partition_batches(&parts, &["id"], fanout).unwrap();
+            for bucket in 0..fanout {
+                let expected = parts.iter().flat_map(|part| partition(part, &["id"], fanout).unwrap()[bucket].rows().unwrap()).collect::<Vec<_>>();
+                assert_eq!(actual[bucket].rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prebound_multi_batch_keys_tests {
+    use super::*;
+    use crate::{schema::{Schema, Field, DataType}, scalar::Value};
+
+    #[test]
+    fn hashes_multiple_nullable_keys_into_identical_buckets() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Integer, true),
+            Field::new("b", DataType::Text, true),
+        ]).unwrap();
+        let data = (0..25).map(|n| vec![
+            if n % 3 == 0 { Value::Null } else { Value::Integer(n % 7) },
+            if n % 5 == 0 { Value::Null } else { Value::Text(format!("s{}", n % 4)) },
+        ]).collect::<Vec<_>>();
+        let first = Batch::from_rows(schema.clone(), data[..12].to_vec()).unwrap();
+        let second = Batch::from_rows(schema, data[12..].to_vec()).unwrap();
+        for count in [2, 8, 9] {
+            let actual = partition_batches(&[first.clone(), second.clone()], &["a", "b"], count).unwrap();
+            let reference = (0..count).map(|bucket| {
+                [first.clone(), second.clone()].iter().flat_map(|batch|
+                    partition(batch, &["a", "b"], count).unwrap()[bucket].rows().unwrap()
+                ).collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+            for (batch, expected) in actual.iter().zip(reference) {
+                assert_eq!(batch.rows().unwrap(), expected);
+            }
+        }
     }
 }

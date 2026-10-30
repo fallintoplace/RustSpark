@@ -73,12 +73,12 @@ impl<W: Write> SpillWriter<W> {
         if schema.len() > MAX_FIELDS {
             return Err(Error::Execution("spill schema exceeds field limit".into()));
         }
+        if schema.fields().iter().any(|field| field.name.len() > MAX_NAME_BYTES) {
+            return Err(Error::Execution("spill field name too long".into()));
+        }
         output.write_all(MAGIC)?;
         write_u32(&mut output, schema.len())?;
         for field in schema.fields() {
-            if field.name.len() > MAX_NAME_BYTES {
-                return Err(Error::Execution("spill field name too long".into()));
-            }
             write_u32(&mut output, field.name.len())?;
             output.write_all(field.name.as_bytes())?;
             output.write_all(&[type_code(field.data_type), u8::from(field.nullable)])?;
@@ -126,19 +126,27 @@ impl<W: Write> SpillWriter<W> {
                     Value::Boolean(false) => self.output.write_all(&[1])?,
                     Value::Boolean(true) => self.output.write_all(&[2])?,
                     Value::Integer(value) => {
-                        self.output.write_all(&[3])?;
-                        self.output.write_all(&value.to_le_bytes())?;
+                        let mut wire = [0u8; 9];
+                        wire[0] = 3;
+                        wire[1..].copy_from_slice(&value.to_le_bytes());
+                        self.output.write_all(&wire)?;
                     }
                     Value::Float(value) => {
-                        self.output.write_all(&[4])?;
-                        self.output.write_all(&value.to_bits().to_le_bytes())?;
+                        let mut wire = [0u8; 9];
+                        wire[0] = 4;
+                        wire[1..].copy_from_slice(&value.to_bits().to_le_bytes());
+                        self.output.write_all(&wire)?;
                     }
                     Value::Text(value) => {
                         if value.len() > MAX_TEXT_BYTES {
                             return Err(Error::Execution("spill text value too long".into()));
                         }
-                        self.output.write_all(&[5])?;
-                        write_u32(&mut self.output, value.len())?;
+                        let mut prefix = [0u8; 5];
+                        prefix[0] = 5;
+                        let len = u32::try_from(value.len())
+                            .map_err(|_| Error::Execution("spill text length exceeds u32".into()))?;
+                        prefix[1..].copy_from_slice(&len.to_le_bytes());
+                        self.output.write_all(&prefix)?;
                         self.output.write_all(value.as_bytes())?;
                     }
                 }
@@ -374,5 +382,58 @@ mod spill_window_write_tests {
         assert_eq!(left, batch.slice_rows(2, 5).unwrap());
         assert_eq!(right, batch.slice_rows(7, 11).unwrap());
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod coalesced_spill_write_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[derive(Default)]
+    struct CountingWriter { bytes: Vec<u8>, writes: usize }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn numeric_and_text_wire_prefixes_use_single_write_calls() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("f", DataType::Float, false),
+            Field::new("t", DataType::Text, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(-1), Value::Float(-0.0), Value::Text("é".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(CountingWriter::default(), schema).unwrap();
+        let header_writes = writer.output.writes;
+        writer.write_batch(&input).unwrap();
+        assert_eq!(writer.output.writes - header_writes, 5);
+        let output = writer.finish().unwrap();
+        let mut reader = SpillReader::new(output.bytes.as_slice(), 2).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), input);
+    }
+}
+
+#[cfg(test)]
+mod spill_header_preflight_atomicity_tests {
+    use super::*;
+
+    #[test]
+    fn bad_schema_cannot_write_partial_spill_signature() {
+        let schema = Schema::new(vec![
+            Field::new("x".repeat(MAX_NAME_BYTES + 1), DataType::Text, true),
+        ]).unwrap();
+        let mut output = Vec::new();
+        assert!(SpillWriter::new(&mut output, schema).is_err());
+        assert!(output.is_empty());
     }
 }

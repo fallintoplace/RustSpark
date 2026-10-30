@@ -19,6 +19,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { 1 };
     if group > 100 { return Err(Error::Execution("REGEXP_EXTRACT group budget exceeded".into())); }
     regex_support::check_input(text)?;
+    if group == 0 && !pattern.is_empty() && pattern.len() <= 4096 &&
+        pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Ok(Value::Text(text.find(pattern).map_or("", |_| pattern).to_owned()));
+    }
     let re = regex_support::compile(pattern)?;
     if group >= re.captures_len() {
         return Err(Error::Execution("REGEXP_EXTRACT group index exceeds regex capture count".into()));
@@ -94,5 +99,26 @@ mod spark_default_regexp_extract_group_tests {
         assert_eq!(value("order-123", "order-([0-9]+)", Some(1)).unwrap(), Value::Text("123".into()));
         assert_eq!(value("missing", "([0-9]+)", None).unwrap(), Value::Text(String::new()));
         assert!(value("order-123", "[0-9]+", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod regexp_extract_group_zero_literal_tests {
+    use super::*;
+    #[test]
+    fn extracts_whole_literal_match_without_changing_capture_semantics() {
+        assert_eq!(evaluate(&[Value::Text("éuser_123🙂".into()),
+            Value::Text("user_123".into()), Value::Integer(0)]).unwrap(),
+            Value::Text("user_123".into()));
+        assert_eq!(evaluate(&[Value::Text("hello".into()),
+            Value::Text("absent".into()), Value::Integer(0)]).unwrap(),
+            Value::Text("".into()));
+        assert_eq!(evaluate(&[Value::Text("hello123".into()),
+            Value::Text("[0-9]+".into()), Value::Integer(0)]).unwrap(),
+            Value::Text("123".into()));
+        assert!(evaluate(&[Value::Text("hello".into()),
+            Value::Text("hello".into())]).is_err());
+        assert_eq!(evaluate(&[Value::Null, Value::Text("hello".into()),
+            Value::Integer(0)]).unwrap(), Value::Null);
     }
 }

@@ -37,11 +37,24 @@ pub struct TaskCounts {
 
 impl TaskScheduler {
     pub fn new(tasks: impl IntoIterator<Item = u64>, max_attempts: u32) -> Result<Self> {
+        Self::with_task_limit(tasks, max_attempts, 1_000_000)
+    }
+
+    /// Admit bounded task IDs before beginning native worker scheduling.
+    pub fn with_task_limit(
+        tasks: impl IntoIterator<Item = u64>, max_attempts: u32, max_tasks: usize,
+    ) -> Result<Self> {
         if max_attempts == 0 {
             return Err(Error::Execution("task retry budget must be positive".into()));
         }
+        if max_tasks == 0 {
+            return Err(Error::Execution("task admission limit must be positive".into()));
+        }
         let mut entries = BTreeMap::new();
         for id in tasks {
+            if entries.len() >= max_tasks {
+                return Err(Error::Execution("native task admission limit exceeded".into()));
+            }
             if entries.insert(id, Task {
                 attempts: 0, status: TaskStatus::Queued,
             }).is_some() {
@@ -353,5 +366,20 @@ mod scheduler_ready_task_inspection_tests {
         assert_eq!(scheduler.counts().leased, 1);
         assert!(scheduler.cancel_task(3));
         assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
+    }
+}
+
+#[cfg(test)]
+mod native_scheduler_admission_limit_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_oversized_worklists_without_leasing() {
+        assert!(TaskScheduler::with_task_limit([1, 2, 3], 2, 2).is_err());
+        assert!(TaskScheduler::with_task_limit([], 2, 0).is_err());
+        let mut queue = TaskScheduler::with_task_limit([2, 1], 2, 2).unwrap();
+        assert_eq!(queue.counts().queued, 2);
+        assert_eq!(queue.lease(9, Instant::now(), Duration::from_secs(5))
+            .unwrap().unwrap().task, 1);
     }
 }

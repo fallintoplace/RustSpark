@@ -24,7 +24,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             let mut result = value.to_string();
             if digits > 0 {
                 result.push('.');
-                result.push_str(&"0".repeat(digits));
+                const ZEROS: &str = "000000000000000";
+                result.push_str(&ZEROS[..digits]);
             }
             result
         }
@@ -90,4 +91,17 @@ mod grouped_number_single_output_perf_tests {
             Value::Text("-9,223,372,036,854,775,808".into()));
     }
 
+}
+
+#[cfg(test)]
+mod integer_format_zero_suffix_tests {
+    use super::*;
+    #[test]
+    fn precision_zero_and_fifteen_preserve_bigint_exactness() {
+        assert_eq!(evaluate(&[Value::Integer(9_007_199_254_740_993), Value::Integer(15)]).unwrap(),
+            Value::Text("9,007,199,254,740,993.000000000000000".into()));
+        assert_eq!(evaluate(&[Value::Integer(-1), Value::Integer(1)]).unwrap(),
+            Value::Text("-1.0".into()));
+        assert!(evaluate(&[Value::Integer(1), Value::Integer(16)]).is_err());
+    }
 }

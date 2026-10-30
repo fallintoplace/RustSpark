@@ -1,7 +1,13 @@
 //! Bounded worker execution for independent native partitions.
-use std::{collections::VecDeque, panic::{AssertUnwindSafe, catch_unwind},
+use std::{panic::{AssertUnwindSafe, catch_unwind},
     sync::{Mutex, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
+
+const MAX_OS_WORKERS: usize = 256;
+
+fn worker_count(partitions: usize, requested: usize) -> usize {
+    partitions.min(requested).min(MAX_OS_WORKERS)
+}
 
 /// Execute a partition-local physical operator across at most max_workers
 /// OS threads. Results are emitted in input order irrespective of completion order.
@@ -22,19 +28,19 @@ where
         }
         return Ok(results);
     }
-    let tasks = Mutex::new(input.into_iter().enumerate().collect::<VecDeque<_>>());
+    let tasks = Mutex::new(input.into_iter().enumerate());
     let failed = AtomicBool::new(false);
     let output: Mutex<Vec<Option<Result<Batch>>>> =
         Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
     std::thread::scope(|scope| {
-        for _ in 0..max_workers.min(count) {
+        for _ in 0..worker_count(count, max_workers) {
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
             let failed = &failed;
             scope.spawn(move || loop {
                 if failed.load(Ordering::Acquire) { break; }
-                let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).next();
                 let Some((index, batch)) = next else { break; };
                 let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                     .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
@@ -68,6 +74,13 @@ mod tests {
     }
 
     #[test]
+    fn bounds_worker_spawns_for_untrusted_concurrency_settings() {
+        assert_eq!(worker_count(1_000_000, usize::MAX), MAX_OS_WORKERS);
+        assert_eq!(worker_count(4, usize::MAX), 4);
+        assert_eq!(worker_count(100, 3), 3);
+    }
+
+    #[test]
     fn maintains_partition_order_with_parallel_workers() {
         let input = (0..100).map(batch).collect();
         let output = map_partitions(input, 4, |batch| Ok(batch)).unwrap();
@@ -85,6 +98,25 @@ mod tests {
 }
 
  
+/// Run independent native partitions with cooperative query deadlines and cancellation.
+pub fn map_partitions_guarded<F>(
+    input: Vec<Batch>, max_workers: usize,
+    guard: &crate::cancel::QueryGuard, operator: F,
+) -> Result<Vec<Batch>>
+where
+    F: Fn(Batch) -> Result<Batch> + Sync,
+{
+    guard.check()?;
+    let output = map_partitions(input, max_workers, |batch| {
+        guard.check()?;
+        let output = operator(batch)?;
+        guard.check()?;
+        Ok(output)
+    })?;
+    guard.check()?;
+    Ok(output)
+}
+
 /// Apply an independent SQL predicate to every partition in parallel.
 pub fn filter_partitions(
     input: Vec<Batch>,
@@ -157,5 +189,31 @@ mod serial_worker_fast_path_tests {
         });
         assert!(result.unwrap_err().to_string().contains("stop"));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[cfg(test)]
+mod native_cancellable_parallel_worker_tests {
+    use super::*;
+    use crate::{cancel::{Cancellation, QueryGuard}, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn cancellation_rejects_work_before_dispatch_and_after_execution() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(3)]]).unwrap();
+        let cancellation = Cancellation::new();
+        let guard = QueryGuard::new(cancellation.clone());
+        assert_eq!(map_partitions_guarded(vec![batch.clone()], 1, &guard, Ok).unwrap(),
+            vec![batch.clone()]);
+        cancellation.cancel();
+        assert!(map_partitions_guarded(vec![batch.clone()], 1, &guard, Ok).is_err());
+        let token = Cancellation::new();
+        let running = QueryGuard::new(token.clone());
+        let result = map_partitions_guarded(vec![batch], 1, &running, |batch| {
+            token.cancel();
+            Ok(batch)
+        });
+        assert!(result.is_err());
     }
 }
