@@ -67,6 +67,35 @@ impl DictionaryColumn {
         }
     }
 
+    /// Materialize selected dictionary codes in requested order under a byte budget.
+    pub fn decode_selected_with_budget(
+        &self, selected: &[usize], max_bytes: usize
+    ) -> Result<Vec<Value>> {
+        let mut used = selected.len()
+            .checked_mul(std::mem::size_of::<Value>())
+            .ok_or_else(|| Error::Execution("dictionary decoded size overflow".into()))?;
+        if used > max_bytes {
+            return Err(Error::Execution("dictionary decode budget exceeded".into()));
+        }
+        let mut values = Vec::with_capacity(selected.len());
+        for &row in selected {
+            let code = self.indices.get(row)
+                .ok_or_else(|| Error::Execution("dictionary index out of bounds".into()))?;
+            values.push(match code {
+                None => Value::Null,
+                Some(id) => {
+                    let text = self.dictionary.get(*id as usize)
+                        .ok_or_else(|| Error::Execution("invalid dictionary code".into()))?;
+                    used = used.checked_add(text.len())
+                        .filter(|bytes| *bytes <= max_bytes)
+                        .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+                    Value::Text(text.clone())
+                }
+            });
+        }
+        Ok(values)
+    }
+
     pub fn decode(&self) -> Result<Vec<Value>> {
         self.decode_with_budget(64 * 1024 * 1024)
     }
@@ -255,5 +284,30 @@ mod budget_before_decode_allocation_tests {
         let baseline = 3 * std::mem::size_of::<Value>();
         assert!(dict.decode_with_budget(baseline + 8_191).is_err());
         assert_eq!(dict.decode_with_budget(baseline + 8_192).unwrap(), vec![Value::Text(large.clone()), Value::Null, Value::Text(large)]);
+    }
+}
+
+#[cfg(test)]
+mod dictionary_selected_materialization_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn selected_rows_support_reordering_repeats_and_nulls() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("long".into())], vec![Value::Null],
+                 vec![Value::Text("x".into())], vec![Value::Text("long".into())]]
+        ).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&input, "s", 2, 5, 4).unwrap();
+        let positions = [3, 1, 2, 3];
+        let baseline = positions.len() * std::mem::size_of::<Value>();
+        let output = dictionary.decode_selected_with_budget(&positions, baseline + 9).unwrap();
+        assert_eq!(output, vec![
+            Value::Text("long".into()), Value::Null, Value::Text("x".into()),
+            Value::Text("long".into())
+        ]);
+        assert!(dictionary.decode_selected_with_budget(&positions, baseline + 8).is_err());
+        assert!(dictionary.decode_selected_with_budget(&[4], usize::MAX).is_err());
     }
 }
