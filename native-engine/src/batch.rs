@@ -142,6 +142,22 @@ impl Batch {
         Ok(Self { schema: self.schema.clone(), columns, rows: indices.len() })
     }
 
+    /// Select rows from a columnar batch using a boolean mask.
+    pub fn take_mask(&self, mask: &[bool]) -> Result<Self> {
+        if mask.len() != self.rows {
+            return Err(Error::Execution("selection mask length does not match batch".into()));
+        }
+        let selected = mask.iter().filter(|&&keep| keep).count();
+        let columns = self.columns.iter().map(|source| {
+            let mut output = Vec::with_capacity(selected);
+            output.extend(source.iter().zip(mask).filter_map(|(value, &keep)|
+                keep.then(|| value.clone())
+            ));
+            output
+        }).collect();
+        Ok(Self { schema: self.schema.clone(), columns, rows: selected })
+    }
+
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
         let mut rows = (0..self.rows)
             .map(|_| Vec::with_capacity(self.columns.len()))
@@ -336,5 +352,31 @@ mod schema_widen_without_copy_tests {
         assert!(with_null.into_widened_schema(required).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
         assert_eq!(zero.into_widened_schema(Schema::new(vec![]).unwrap()).unwrap().num_rows(), 5);
+    }
+}
+
+#[cfg(test)]
+mod boolean_selection_mask_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn mask_preserves_order_and_null_values() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("name", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("A".into())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("C".into())],
+        ]).unwrap();
+        assert_eq!(input.take_mask(&[false, true, true]).unwrap(),
+            input.take(&[1, 2]).unwrap());
+        assert_eq!(input.take_mask(&[false, false, false]).unwrap().num_rows(), 0);
+        assert!(input.take_mask(&[true]).is_err());
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        let result = zero.take_mask(&[true, false, true]).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.rows().unwrap(), vec![vec![], vec![]]);
     }
 }
