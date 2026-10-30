@@ -26,6 +26,20 @@ impl ColumnStatistics {
         Ok(stats)
     }
 
+    /// Collect named column summaries for a native batch, including empty columns.
+    /// The result is directly consumable by multi-column predicate pruning.
+    pub fn all_columns(batch: &Batch) -> Result<std::collections::HashMap<String, Self>> {
+        let mut columns = std::collections::HashMap::with_capacity(batch.schema().len());
+        for (index, field) in batch.schema().fields().iter().enumerate() {
+            let mut stats = Self::default();
+            for value in batch.column(index)? {
+                stats.observe(value)?;
+            }
+            columns.insert(field.name.clone(), stats);
+        }
+        Ok(columns)
+    }
+
     pub fn observe(&mut self, value: &Value) -> Result<()> {
         let rows = self.rows.checked_add(1)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
@@ -221,5 +235,32 @@ mod direct_multibatch_stats_perf_tests {
         let mut merged = ColumnStatistics::default();
         for batch in &batches { merged.merge(&ColumnStatistics::from_batch(batch, "x").unwrap()).unwrap(); }
         assert_eq!(ColumnStatistics::from_batches(&batches, "x").unwrap(), merged);
+    }
+}
+
+#[cfg(test)]
+mod all_native_column_statistics_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, pruning,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn summaries_support_multicolumn_pruning() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(10), Value::Null],
+            vec![Value::Integer(20), Value::Text("a".into())],
+        ]).unwrap();
+        let stats = ColumnStatistics::all_columns(&batch).unwrap();
+        assert_eq!(stats["id"].rows, 2);
+        assert_eq!(stats["label"].nulls, 1);
+        let predicate = Expr::binary(Expr::Column("id".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(25)));
+        assert!(pruning::can_skip_columns(&stats, &predicate));
+        let empty = ColumnStatistics::all_columns(&Batch::empty(schema)).unwrap();
+        assert_eq!(empty["label"].rows, 0);
     }
 }
