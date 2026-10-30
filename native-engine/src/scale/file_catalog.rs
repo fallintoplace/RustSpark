@@ -28,7 +28,7 @@ impl ParquetTable {
     pub fn schema(&self) -> &Schema { &self.schema }
     pub fn path(&self) -> &Path { &self.path }
     pub fn open(&self, batch_rows: usize) -> Result<crate::parquet_scan::ParquetScan> {
-        crate::parquet_scan::scan(&self.path, batch_rows)
+        crate::parquet_scan::scan_checked(&self.path, batch_rows, &self.schema)
     }
 }
 
@@ -270,5 +270,40 @@ mod parquet_catalog_integration_tests {
         assert_eq!(rows, vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
         assert!(catalog.unregister_parquet("events").is_ok());
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod replaced_parquet_schema_regressions {
+    use super::*;
+    use crate::{arrow_bridge, batch::Batch, scalar::Value, schema::{DataType, Field}};
+    use parquet::arrow::ArrowWriter;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
+    fn write_table(path: &Path, field: Field, value: Value) {
+        let schema = Schema::new(vec![field]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![value]]).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn replaced_file_cannot_change_registered_table_schema() {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-replaced-parquet-{}-{unique}.parquet", std::process::id()
+        ));
+        write_table(&path, Field::new("id", DataType::Integer, false), Value::Integer(5));
+        let mut catalog = FileCatalog::new();
+        catalog.register_parquet("events", &path).unwrap();
+        assert_eq!(catalog.get_parquet("events").unwrap().unwrap().open(4).unwrap()
+            .next().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(5)]);
+
+        write_table(&path, Field::new("id", DataType::Text, false), Value::Text("changed".into()));
+        let error = catalog.get_parquet("events").unwrap().unwrap().open(4).err().unwrap();
+        assert!(error.to_string().contains("schema changed"));
+        fs::remove_file(path).unwrap();
     }
 }
