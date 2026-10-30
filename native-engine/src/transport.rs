@@ -55,6 +55,31 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
     Ok(())
 }
 
+/// Write a validated batch of exchange frames without partially emitting bad budgets.
+pub fn write_frames_limited(
+    output: &mut impl Write, frames: &[Frame], max_frame_bytes: usize,
+    max_total_bytes: usize, max_frames: usize
+) -> Result<()> {
+    if frames.len() > max_frames {
+        return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
+    }
+    let mut total = 0usize;
+    for frame in frames {
+        if frame.payload.len() > max_frame_bytes ||
+            u32::try_from(frame.payload.len()).is_err()
+        {
+            return Err(Error::Execution("exchange frame exceeds wire or memory budget".into()));
+        }
+        total = total.checked_add(frame.payload.len())
+            .filter(|&bytes| bytes <= max_total_bytes)
+            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
+    }
+    for frame in frames {
+        write_frame(output, frame, max_frame_bytes)?;
+    }
+    Ok(())
+}
+
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
     let mut header = [0u8; 32];
@@ -245,5 +270,27 @@ mod exchange_header_read_coalescing_tests {
         assert_eq!(read_frame(&mut reader, 48).unwrap(), Some(frame));
         assert_eq!(reader.calls, 3);
         assert_eq!(read_frame(&mut reader, 48).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_bounded_exchange_writes_tests {
+    use super::*;
+
+    #[test]
+    fn validates_all_frames_before_writing_and_roundtrips() {
+        let messages = vec![
+            Frame { stage: 1, task: 1, attempt: 0, payload: vec![1, 2, 3] },
+            Frame { stage: 1, task: 2, attempt: 0, payload: vec![4, 5] },
+        ];
+        let mut output = Vec::new();
+        assert!(write_frames_limited(&mut output, &messages, 4, 4, 2).is_err());
+        assert!(output.is_empty());
+        assert!(write_frames_limited(&mut output, &messages, 2, 10, 2).is_err());
+        assert!(output.is_empty());
+        assert!(write_frames_limited(&mut output, &messages, 4, 10, 1).is_err());
+        assert!(output.is_empty());
+        write_frames_limited(&mut output, &messages, 4, 5, 2).unwrap();
+        assert_eq!(read_frames_limited(&mut output.as_slice(), 4, 5, 2).unwrap(), messages);
     }
 }
