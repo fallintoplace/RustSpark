@@ -169,6 +169,49 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if value.is_null() == select_null { selected.push(row); }
         }
+    } else if let Expr::Like { value, pattern, escape: None } = predicate {
+        if let (Expr::Column(name), Expr::Literal(Value::Text(pattern))) =
+            (value.as_ref(), pattern.as_ref())
+        {
+            let index = batch.schema().column(name)?;
+            if batch.schema().field(index)?.data_type == DataType::Text
+                && !pattern.contains(['_', '\\'])
+                && pattern.matches('%').count() <= 2
+                && (pattern.matches('%').count() == 0
+                    || pattern.starts_with('%') || pattern.ends_with('%'))
+            {
+                let matcher = if pattern.starts_with('%') && pattern.ends_with('%') {
+                    Some((2_u8, pattern.strip_prefix('%').unwrap().strip_suffix('%').unwrap()))
+                } else if let Some(prefix) = pattern.strip_suffix('%') {
+                    Some((0_u8, prefix))
+                } else if let Some(suffix) = pattern.strip_prefix('%') {
+                    Some((1_u8, suffix))
+                } else if !pattern.contains('%') {
+                    Some((3_u8, pattern.as_str()))
+                } else {
+                    None
+                };
+                if let Some((kind, literal)) = matcher {
+                    for (row, value) in batch.column(index)?.iter().enumerate() {
+                        if let Value::Text(text) = value {
+                            let matches = match kind {
+                                0 => text.starts_with(literal),
+                                1 => text.ends_with(literal),
+                                2 => text.contains(literal),
+                                _ => text == literal,
+                            };
+                            if matches { selected.push(row); }
+                        }
+                    }
+                    return Ok(selected);
+                }
+            }
+        }
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
+                selected.push(row);
+            }
+        }
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Text(lhs) = value {
@@ -385,5 +428,32 @@ mod null_column_fast_filter_tests {
         }
         assert!(select_indices(&input,
             &Expr::IsNull(Box::new(Expr::Column("missing".into())))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_like_literal_scan_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn simple_patterns_match_scalar_with_unicode_and_null() {
+        let source = Batch::from_rows(
+            Schema::new(vec![Field::new("txt", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("東京🙂".into())], vec![Value::Null],
+                vec![Value::Text("prefix_text".into())],
+                vec![Value::Text("any-tail".into())], vec![Value::Text("exact".into())]]
+        ).unwrap();
+        for pattern in ["東京%", "%🙂", "%fix%", "exact", "%", "foo_bar", r"foo\%"] {
+            let predicate = Expr::Like {
+                value: Box::new(Expr::Column("txt".into())),
+                pattern: Box::new(Expr::Literal(Value::Text(pattern.into()))),
+                escape: None,
+            };
+            let expected = (0..source.num_rows()).filter(|&row|
+                predicate.evaluate(&source, row).unwrap().as_boolean().unwrap() == Some(true)
+            ).collect::<Vec<_>>();
+            assert_eq!(select_indices(&source, &predicate).unwrap(), expected);
+        }
     }
 }
