@@ -8,12 +8,13 @@ use rustspark_native::{
     batch::Batch, scalar::Value,
     schema::{DataType, Field, Schema},
     sql, Error, Result,
-    scale::{cancel::QueryControl, file_catalog::FileCatalog,
+    scale::{cancel::QueryControl, file_catalog::FileCatalog, manifest_storage,
         stream_execute::{self, StreamOptions}},
 };
 
 struct Args {
-    csv: Option<PathBuf>, parquet: Option<PathBuf>, table: String, schema: Option<Schema>, sql: String,
+    csv: Option<PathBuf>, parquet: Option<PathBuf>, catalog_file: Option<PathBuf>,
+    table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
 }
 
@@ -42,6 +43,7 @@ fn parse_schema(text: &str) -> Result<Schema> {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
+    let mut catalog_file = None;
     let mut table = "data".to_string();
     let mut schema = None;
     let mut sql = None;
@@ -66,6 +68,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
             },
             "--table" => table = value,
+            "--catalog-file" => {
+                if catalog_file.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --catalog-file".into()));
+                }
+            },
             "--schema" => schema = Some(parse_schema(&value)?),
             "--sql" => sql = Some(value),
             "--sql-file" => sql_file = Some(PathBuf::from(value)),
@@ -87,16 +94,18 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
         _ => return Err(Error::Parse("choose --sql or --sql-file".into())),
     };
     if sql.trim().is_empty() { return Err(Error::Parse("SQL cannot be empty".into())); }
-    if csv.is_some() == parquet.is_some() {
-        return Err(Error::Parse("choose --csv or --parquet".into()));
+    let source_count = usize::from(csv.is_some()) + usize::from(parquet.is_some())
+        + usize::from(catalog_file.is_some());
+    if source_count != 1 {
+        return Err(Error::Parse("choose one of --csv, --parquet, or --catalog-file".into()));
     }
     if csv.is_some() && schema.is_none() {
         return Err(Error::Parse("--schema required for CSV".into()));
     }
-    if parquet.is_some() && schema.is_some() {
-        return Err(Error::Parse("Parquet schema comes from file metadata".into()));
+    if (parquet.is_some() || catalog_file.is_some()) && schema.is_some() {
+        return Err(Error::Parse("explicit schema is only valid for CSV input".into()));
     }
-    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch }))
+    Ok(Some(Args { csv, parquet, catalog_file, table, schema, sql, batch_rows, record_bytes, scratch }))
 }
 
 fn escape(text: &str) -> String {
@@ -136,10 +145,14 @@ fn write_csv(
 
 fn run() -> Result<()> {
     let Some(args) = parse_args(env::args().skip(1))? else {
-        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE) --sql QUERY");
+        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE | --catalog-file MANIFEST) --sql QUERY");
         return Ok(());
     };
-    let mut catalog = FileCatalog::new();
+    let mut catalog = if let Some(path) = &args.catalog_file {
+        manifest_storage::open(path)?
+    } else {
+        FileCatalog::new()
+    };
     if let Some(path) = &args.csv {
         catalog.register_csv(&args.table, path,
             args.schema.ok_or_else(|| Error::Parse("CSV schema required".into()))?, args.record_bytes)?;
