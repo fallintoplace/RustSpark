@@ -66,6 +66,22 @@ impl Iterator for ScanCursor<'_> {
             if result.is_err() { self.failed = true; }
             return Some(result);
         }
+        if self.predicate.is_none() {
+            // Projection-only scans can copy contiguous column slices directly.
+            // No row-index buffer or per-row gather is needed.
+            if self.next_row == self.source.num_rows() { return None; }
+            let start = self.next_row;
+            let end = start.saturating_add(self.target_rows).min(self.source.num_rows());
+            self.next_row = end;
+            let output = self.columns.iter().map(|&column| {
+                self.source.column(column).map(|values| values[start..end].to_vec())
+            }).collect::<Result<Vec<_>>>()
+                .and_then(|columns| Batch::new_with_row_count(
+                    self.output_schema.clone(), columns, end - start,
+                ));
+            if output.is_err() { self.failed = true; }
+            return Some(output);
+        }
         let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
@@ -266,5 +282,32 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod projection_only_scan_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn projects_reordered_columns_without_filter_gather_buffers() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("name", DataType::Text, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]).unwrap();
+        let rows = (0..5).map(|n| vec![
+            Value::Integer(n),
+            if n % 2 == 0 { Value::Null } else { Value::Text(format!("v{n}")) },
+            Value::Boolean(n > 2),
+        ]).collect();
+        let input = Batch::from_rows(schema, rows).unwrap();
+        let output = scan(&input, None, &["name", "n"], 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 2, 1]);
+        assert_eq!(output[0].schema().fields()[0].name, "name");
+        assert_eq!(output[0].row(0).unwrap(), vec![Value::Null, Value::Integer(0)]);
+        assert_eq!(output[2].row(0).unwrap(), vec![Value::Null, Value::Integer(4)]);
     }
 }
