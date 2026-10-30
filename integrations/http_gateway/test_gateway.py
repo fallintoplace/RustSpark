@@ -1,8 +1,10 @@
 import json
 import unittest
 import tempfile
+import subprocess
+import sys
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params, parse_result_rows
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend
 
 
 class GatewayTests(unittest.TestCase):
@@ -63,6 +65,25 @@ class InvalidBackendJSONTests(unittest.TestCase):
                 parse_result_rows(payload)
         self.assertEqual(parse_result_rows('[{"n":1.25}]'), [{"n": 1.25}])
 
+
+
+class BoundedBackendTests(unittest.TestCase):
+    def test_backend_output_budget_and_timeout(self):
+        valid = run_bounded_backend(
+            [sys.executable, "-c", "print('ok')"], timeout=5, max_bytes=32
+        )
+        self.assertEqual(valid.stdout, "ok\\n")
+        self.assertEqual(valid.returncode, 0)
+        with self.assertRaisesRegex(ValueError, "budget"):
+            run_bounded_backend(
+                [sys.executable, "-c", "print('x' * 1024)"],
+                timeout=5, max_bytes=32,
+            )
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded_backend(
+                [sys.executable, "-c", "import time; time.sleep(2)"],
+                timeout=0.1, max_bytes=32,
+            )
 
 if __name__ == "__main__":
     unittest.main()
