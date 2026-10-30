@@ -64,7 +64,25 @@ fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crat
 }
 
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 || right.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.len() == 1 {
+        let mut right_values = HashSet::<&Value>::new();
+        for value in right.column(0)? {
+            if right_values.len() >= MAX_DISTINCT_SET_KEYS && !right_values.contains(value) {
+                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            }
+            right_values.insert(value);
+        }
+        let mut emitted = HashSet::<&Value>::new();
+        let mut rows = Vec::new();
+        for (index, value) in left.column(0)?.iter().enumerate() {
+            if right_values.contains(value) && emitted.insert(value) { rows.push(index); }
+        }
+        return left.take(&rows)?.relabel(schema);
+    }
     let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
@@ -78,7 +96,25 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 }
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.len() == 1 {
+        let mut right_values = HashSet::<&Value>::new();
+        for value in right.column(0)? {
+            if right_values.len() >= MAX_DISTINCT_SET_KEYS && !right_values.contains(value) {
+                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            }
+            right_values.insert(value);
+        }
+        let mut emitted = HashSet::<&Value>::new();
+        let mut rows = Vec::new();
+        for (index, value) in left.column(0)?.iter().enumerate() {
+            if !right_values.contains(value) && emitted.insert(value) { rows.push(index); }
+        }
+        return left.take(&rows)?.relabel(schema);
+    }
     let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
     let mut rows = Vec::new();
@@ -117,7 +153,28 @@ fn right_counts(
 
 /// Keep each left row up to its multiplicity in the right input.
 pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 || right.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.len() == 1 {
+        let mut counts = HashMap::<&Value, usize>::new();
+        for value in right.column(0)? {
+            if counts.len() >= MAX_DISTINCT_SET_KEYS && !counts.contains_key(value) {
+                return Err(Error::Execution("multiset distinct-key budget exceeded".into()));
+            }
+            let count = counts.entry(value).or_insert(0);
+            *count = count.checked_add(1)
+                .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+        }
+        let mut selected = Vec::new();
+        for (index, value) in left.column(0)?.iter().enumerate() {
+            if let Some(remaining) = counts.get_mut(value) {
+                if *remaining > 0 { *remaining -= 1; selected.push(index); }
+            }
+        }
+        return left.take(&selected)?.relabel(schema);
+    }
     let mut counts = right_counts(&right, MAX_DISTINCT_SET_KEYS)?;
     let mut rows = Vec::new();
     for index in 0..left.num_rows() {
@@ -134,7 +191,29 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
 
 /// Keep left occurrences after subtracting right row multiplicities.
 pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.len() == 1 {
+        let mut counts = HashMap::<&Value, usize>::new();
+        for value in right.column(0)? {
+            if counts.len() >= MAX_DISTINCT_SET_KEYS && !counts.contains_key(value) {
+                return Err(Error::Execution("multiset distinct-key budget exceeded".into()));
+            }
+            let count = counts.entry(value).or_insert(0);
+            *count = count.checked_add(1)
+                .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+        }
+        let mut selected = Vec::new();
+        for (index, value) in left.column(0)?.iter().enumerate() {
+            if let Some(remaining) = counts.get_mut(value) {
+                if *remaining > 0 { *remaining -= 1; continue; }
+            }
+            selected.push(index);
+        }
+        return left.take(&selected)?.relabel(schema);
+    }
     let mut counts = right_counts(right, MAX_DISTINCT_SET_KEYS)?;
     let mut rows = Vec::new();
     for index in 0..left.num_rows() {
@@ -256,5 +335,85 @@ mod bounded_multiset_state_tests {
         ]).unwrap();
         assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 3);
         assert_eq!(except_all(&left, &right).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod native_single_column_set_operator_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn borrowed_keys_preserve_distinct_and_null_semantics() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)],
+            vec![Value::Integer(1)], vec![Value::Integer(3)], vec![Value::Null]
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Integer(2)], vec![Value::Integer(2)]
+        ]).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(2)]]);
+        assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]);
+    }
+}
+
+#[cfg(test)]
+mod native_one_column_multiset_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn counts_duplicate_and_null_occurrences_in_input_order() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3)], vec![Value::Null],
+            vec![Value::Integer(3)], vec![Value::Integer(3)],
+            vec![Value::Null], vec![Value::Integer(8)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(3)], vec![Value::Null],
+            vec![Value::Integer(3)], vec![Value::Integer(3)],
+            vec![Value::Integer(3)]
+        ]).unwrap();
+        assert_eq!(intersect_all(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Null],
+            vec![Value::Integer(3)], vec![Value::Integer(3)]
+        ]);
+        assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Null], vec![Value::Integer(8)]
+        ]);
+    }
+}
+
+#[cfg(test)]
+mod typed_empty_set_short_circuits_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn empty_inputs_keep_widened_result_schema_without_scanning_rows() {
+        let integers = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        let doubles = Batch::from_rows(Schema::new(vec![
+            Field::new("other", DataType::Float, true),
+        ]).unwrap(), vec![vec![Value::Float(10.0)]]).unwrap();
+        for result in [
+            intersect_distinct(&integers, &doubles).unwrap(),
+            intersect_all(&doubles, &integers).unwrap(),
+            except_distinct(&integers, &doubles).unwrap(),
+            except_all(&integers, &doubles).unwrap(),
+        ] {
+            assert_eq!(result.num_rows(), 0);
+            assert_eq!(result.schema().fields()[0].data_type, DataType::Float);
+            assert!(result.schema().fields()[0].nullable);
+        }
+        let invalid = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Text, false),
+        ]).unwrap());
+        assert!(intersect_distinct(&integers, &invalid).is_err());
     }
 }

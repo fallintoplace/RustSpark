@@ -79,18 +79,20 @@ impl DictionaryColumn {
         if used > max_bytes {
             return Err(Error::Execution("dictionary decode budget exceeded".into()));
         }
+        // Fail before allocating any decoded strings when a compact column
+        // expands past its caller's budget.
+        for id in self.indices.iter().flatten() {
+            let text = self.dictionary.get(*id as usize)
+                .ok_or_else(|| Error::Execution("invalid dictionary code".into()))?;
+            used = used.checked_add(text.len())
+                .filter(|bytes| *bytes <= max_bytes)
+                .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+        }
         let mut rows = Vec::with_capacity(self.indices.len());
         for code in &self.indices {
             let value = match code {
                 None => Value::Null,
-                Some(id) => {
-                    let text = self.dictionary.get(*id as usize)
-                        .ok_or_else(|| Error::Execution("invalid dictionary code".into()))?;
-                    used = used.checked_add(text.len())
-                        .filter(|bytes| *bytes <= max_bytes)
-                        .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
-                    Value::Text(text.clone())
-                }
+                Some(id) => Value::Text(self.dictionary[*id as usize].clone()),
             };
             rows.push(value);
         }
@@ -255,5 +257,20 @@ mod budget_before_decode_allocation_tests {
         let baseline = 3 * std::mem::size_of::<Value>();
         assert!(dict.decode_with_budget(baseline + 8_191).is_err());
         assert_eq!(dict.decode_with_budget(baseline + 8_192).unwrap(), vec![Value::Text(large.clone()), Value::Null, Value::Text(large)]);
+    }
+}
+
+#[cfg(test)]
+mod dictionary_preflight_rejects_late_overflow_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+    #[test]
+    fn budget_rejection_preserves_existing_dictionary_for_retry() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Text("abc".into())]; 4096]).unwrap();
+        let encoded = DictionaryColumn::from_batch(&batch, "text", 1, 3, 4096).unwrap();
+        let base = 4096 * std::mem::size_of::<Value>();
+        assert!(encoded.decode_with_budget(base + 4096 * 3 - 1).is_err());
+        assert_eq!(encoded.decode_with_budget(base + 4096 * 3).unwrap().len(), 4096);
     }
 }

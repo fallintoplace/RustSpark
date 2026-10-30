@@ -1,5 +1,5 @@
 //! External merge sort over Arrow IPC runs, independent from DataFusion.
-use std::{cmp::Ordering, path::Path};
+use std::{borrow::Cow, cmp::Ordering, path::Path};
 
 use crate::{
     batch::Batch,
@@ -69,8 +69,19 @@ fn compare_runs(left: &Run, right: &Run, keys: &[SortKey]) -> Result<Ordering> {
     let a = left.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
     let b = right.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
     for key in keys {
-        let x = key.expression.evaluate(a, left.position)?;
-        let y = key.expression.evaluate(b, right.position)?;
+        // Most external sorts use bare column keys. Borrow these values
+        // directly from the resident run batch rather than constructing two
+        // owned Values for every comparison and output row.
+        let x: Cow<'_, crate::scalar::Value> = match &key.expression {
+            crate::expr::Expr::Column(name) =>
+                Cow::Borrowed(a.value(left.position, a.schema().column(name)?)?),
+            _ => Cow::Owned(key.expression.evaluate(a, left.position)?),
+        };
+        let y: Cow<'_, crate::scalar::Value> = match &key.expression {
+            crate::expr::Expr::Column(name) =>
+                Cow::Borrowed(b.value(right.position, b.schema().column(name)?)?),
+            _ => Cow::Owned(key.expression.evaluate(b, right.position)?),
+        };
         let order = crate::sort::compare_values(&x, &y, key.descending, key.nulls_first);
         if order != Ordering::Equal { return Ok(order); }
     }
@@ -179,5 +190,35 @@ mod output_allocation_tests {
         let mut output = external_sort(Vec::<Batch>::new(), &schema, &[],
             std::env::temp_dir(), 1, usize::MAX).unwrap();
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod external_sort_borrowed_column_keys_tests {
+    use super::*;
+    use crate::{
+        expr::Expr, scalar::Value, schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn column_key_merges_preserve_wide_text_nulls_and_stable_ties() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Integer, false),
+        ]).unwrap();
+        let prefix = "é🙂".repeat(1024);
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(format!("{prefix}c")), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text(format!("{prefix}a")), Value::Integer(3)],
+            vec![Value::Text(format!("{prefix}b")), Value::Integer(4)],
+        ]).unwrap();
+        let keys = vec![SortKey::ascending(Expr::Column("key".into()))];
+        let result = external_sort(vec![batch.clone()], &schema, &keys,
+            std::env::temp_dir(), 2, 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let merged = result.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
+        let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
+        assert_eq!(merged, expected);
     }
 }

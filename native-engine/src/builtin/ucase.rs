@@ -1,18 +1,28 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Text)
 }
 
+fn uppercase_bounded(text: &str, limit: usize) -> Result<String> {
+    if text.len() > limit { return Err(Error::Execution("UCASE input exceeds byte limit".into())); }
+    if text.is_ascii() { return Ok(text.to_ascii_uppercase()); }
+    let mut result = String::with_capacity(text.len());
+    for character in text.chars() {
+        for upper in character.to_uppercase() {
+            if upper.len_utf8() > limit.saturating_sub(result.len()) {
+                return Err(Error::Execution("UCASE output exceeds byte limit".into()));
+            }
+            result.push(upper);
+        }
+    }
+    Ok(result)
+}
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    Ok(Value::Text(if text.is_ascii() {
-        text.to_ascii_uppercase()
-    } else {
-        text.to_uppercase()
-    }))
+    Ok(Value::Text(uppercase_bounded(text, 16 * 1024 * 1024)?))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -32,5 +42,17 @@ mod tests {
             Value::Text("STRASSE".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         assert!(output(&[DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_uppercase_tests {
+    use super::*;
+    #[test]
+    fn case_expansion_keeps_unicode_and_limits() {
+        assert_eq!(uppercase_bounded("straße", 16).unwrap(), "STRASSE");
+        assert!(uppercase_bounded("straße", 5).is_err());
+        assert_eq!(uppercase_bounded("abc", 3).unwrap(), "ABC");
+        assert!(uppercase_bounded("abcd", 3).is_err());
     }
 }

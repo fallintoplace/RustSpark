@@ -10,6 +10,10 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
         let Some(characters) = super::string(&args[1])? else { return Ok(Value::Null); };
         Some(characters)
     } else { None };
+    // Explicit empty trim sets cannot match any character.
+    if characters == Some("") {
+        return Ok(Value::Text(text.to_owned()));
+    }
     let ascii_set = characters
         .filter(|chars| chars.len() >= 8 && chars.is_ascii())
         .map(|chars| {
@@ -53,6 +57,20 @@ fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
 }
 fn normalize_space(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.is_ascii() {
+        let mut output = String::with_capacity(input.len());
+        let mut pending = false;
+        for &byte in input.as_bytes() {
+            if byte.is_ascii_whitespace() {
+                pending = !output.is_empty();
+            } else {
+                if pending { output.push(' '); }
+                pending = false;
+                output.push(char::from(byte));
+            }
+        }
+        return Ok(Value::Text(output));
+    }
     let mut output = String::with_capacity(input.len());
     let mut pending = false;
     for character in input.chars() {
@@ -128,5 +146,33 @@ mod normalize_space_extension_tests {
         assert_eq!(normalize_space(&[Value::Text(" \t A\u{00A0} B \n".into())]).unwrap(), Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Text(" \t ".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod empty_trim_character_set_tests {
+    use super::*;
+    #[test]
+    fn empty_set_preserves_whitespace_and_unicode() {
+        let text = Value::Text("  é🙂  ".into());
+        for trim in [btrim as fn(&[Value]) -> Result<Value>, ltrim, rtrim] {
+            assert_eq!(trim(&[text.clone(), Value::Text(String::new())]).unwrap(), text);
+        }
+        assert_eq!(btrim(&[Value::Text("  a  ".into())]).unwrap(), Value::Text("a".into()));
+        assert_eq!(btrim(&[Value::Null, Value::Text(String::new())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod normalize_ascii_whitespace_tests {
+    use super::*;
+    #[test]
+    fn collapses_many_ascii_fields_without_changing_unicode() {
+        let text = " a\t\t b\n c  ".repeat(2000);
+        let actual = normalize_space(&[Value::Text(text)]).unwrap();
+        let Value::Text(text) = actual else { panic!("text"); };
+        assert_eq!(text.split_whitespace().count(), 6000);
+        assert!(text.starts_with("a b c a b c"));
+        assert_eq!(normalize_space(&[Value::Text("a\u{00a0} b".into())]).unwrap(), Value::Text("a b".into()));
     }
 }
