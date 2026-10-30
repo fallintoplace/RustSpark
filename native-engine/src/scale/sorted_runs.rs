@@ -50,8 +50,10 @@ where I: IntoIterator<Item = Result<Batch>>
         key.expression.output_type(&schema)?;
     }
     let mut runs = RunSet { files: Vec::new(), schema: schema.clone() };
-    for incoming in input {
+    let mut input = input.into_iter();
+    loop {
         control.check()?;
+        let Some(incoming) = input.next() else { break };
         let incoming = incoming?;
         if incoming.schema() != &schema {
             return Err(Error::Schema("external sort input schema changed".into()));
@@ -155,5 +157,24 @@ mod sorted_run_key_prevalidation_tests {
         assert!(write_sorted_runs(
             Vec::<Result<Batch>>::new(), schema, &[computed], &directory, 4, &control
         ).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod cancelled_source_poll_sort_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+
+    #[test]
+    fn cancelled_sort_does_not_poll_source() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let control = QueryControl::default();
+        control.cancel();
+        let source = std::iter::repeat_with(|| -> Result<Batch> { panic!("source polled") });
+        let result = write_sorted_runs(source, schema, &keys,
+            std::env::temp_dir().as_path(), 8, &control);
+        assert!(matches!(result, Err(Error::Execution(_))));
     }
 }
