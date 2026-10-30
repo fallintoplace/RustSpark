@@ -407,6 +407,11 @@ fn lower(
         }
         Plan::Project { input, selections } =>
             Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Limit { count: Some(0), .. } => {
+            // execute() already validated the complete plan and output schema.
+            // A zero-row result does not need to open CSV files or allocate spills.
+            Ok(Box::new(std::iter::empty()))
+        }
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
@@ -778,5 +783,32 @@ mod stream_distinct_single_probe_perf_tests {
         let source: BatchStream = Box::new([Ok(overflowing)].into_iter());
         assert!(DistinctOutput::new(source, QueryControl::default(), 1, 4096)
             .next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_limit_without_source_io_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, sql};
+    use std::fs;
+
+    #[test]
+    fn zero_limit_validates_schema_but_never_opens_missing_input() {
+        let mut catalog = FileCatalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register_csv("t", "this-rustspark-file-does-not-exist.csv",
+            schema, 128).unwrap();
+        let options = StreamOptions::default();
+        for query in [
+            "SELECT n FROM t LIMIT 0",
+            "SELECT n FROM t WHERE n > 0 ORDER BY n LIMIT 0",
+        ] {
+            let plan = sql::parse_sql(query).unwrap();
+            assert!(execute(&plan, &catalog, &options,
+                QueryControl::default()).unwrap().next().is_none());
+        }
+        let invalid = sql::parse_sql("SELECT missing FROM t LIMIT 0").unwrap();
+        assert!(execute(&invalid, &catalog, &options, QueryControl::default()).is_err());
+        assert!(!fs::metadata("this-rustspark-file-does-not-exist.csv").is_ok());
     }
 }
