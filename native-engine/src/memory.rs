@@ -85,6 +85,18 @@ impl Reservation {
         Ok(Self { pool: Arc::clone(&self.pool), bytes })
     }
 
+    /// Consolidate ownership of memory already charged to the same pool.
+    pub fn absorb(&mut self, other: &mut Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.pool, &other.pool) {
+            return Err(Error::Execution("cannot combine reservations from different pools".into()));
+        }
+        let total = self.bytes.checked_add(other.bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
+        self.bytes = total;
+        other.bytes = 0;
+        Ok(())
+    }
+
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
@@ -229,5 +241,36 @@ mod memory_pool_available_capacity_tests {
         assert_eq!(pool.remaining(), 100);
         let zero = MemoryPool::new(0);
         assert_eq!(zero.remaining(), 0);
+    }
+}
+
+#[cfg(test)]
+mod reservation_consolidation_tests {
+    use super::*;
+
+    #[test]
+    fn combines_same_pool_guards_without_double_charge_or_early_release() {
+        let pool = MemoryPool::new(100);
+        let mut first = pool.reserve(30).unwrap();
+        let mut second = pool.reserve(50).unwrap();
+        first.absorb(&mut second).unwrap();
+        assert_eq!(first.bytes(), 80);
+        assert_eq!(second.bytes(), 0);
+        assert_eq!(pool.used(), 80);
+        drop(second);
+        assert_eq!(pool.used(), 80);
+        drop(first);
+        assert_eq!(pool.used(), 0);
+    }
+
+    #[test]
+    fn rejects_other_pools_without_mutating_reservations() {
+        let first_pool = MemoryPool::new(10);
+        let second_pool = MemoryPool::new(10);
+        let mut a = first_pool.reserve(4).unwrap();
+        let mut b = second_pool.reserve(5).unwrap();
+        assert!(a.absorb(&mut b).is_err());
+        assert_eq!((a.bytes(), b.bytes()), (4, 5));
+        assert_eq!((first_pool.used(), second_pool.used()), (4, 5));
     }
 }
