@@ -50,8 +50,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut record_bytes = 8 * 1024 * 1024;
     let mut scratch = env::temp_dir();
     let mut args = args.into_iter();
+    let mut seen = std::collections::HashSet::new();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
+        if !seen.insert(flag.clone()) {
+            return Err(Error::Parse(format!("duplicate option: {flag}")));
+        }
         let value = args.next()
             .ok_or_else(|| Error::Parse(format!("missing value for {flag}")))?;
         match flag.as_str() {
@@ -191,5 +195,33 @@ mod tests {
         assert!(parse_args(parquet.into_iter().map(String::from)).unwrap().unwrap().parquet.is_some());
         let invalid = ["--parquet", "data.parquet", "--schema", "n:int", "--sql", "SELECT * FROM data"];
         assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod duplicate_option_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_streaming_flags_do_not_silently_override_configuration() {
+        for (flag, first, second) in [
+            ("--schema", "n:int", "n:text"),
+            ("--table", "a", "b"),
+            ("--batch-rows", "1", "2"),
+            ("--max-record-bytes", "100", "200"),
+            ("--scratch-dir", "/tmp/a", "/tmp/b"),
+            ("--sql", "SELECT n FROM data", "SELECT * FROM data"),
+            ("--sql-file", "a.sql", "b.sql"),
+        ] {
+            let options = ["--csv".to_owned(), "data.csv".to_owned(),
+                "--schema".to_owned(), "n:int".to_owned(),
+                "--sql".to_owned(), "SELECT n FROM data".to_owned()];
+            let mut options = options.to_vec();
+            options.push(flag.to_owned());
+            options.push(first.to_owned());
+            options.push(flag.to_owned());
+            options.push(second.to_owned());
+            assert!(parse_args(options).is_err(), "{flag}");
+        }
     }
 }
