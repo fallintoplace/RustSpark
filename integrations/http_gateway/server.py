@@ -14,10 +14,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_RESULT_BYTES = 8 * 1024 * 1024
 
 
 def _reject_duplicate_json_fields(pairs):
@@ -136,14 +138,20 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.send_json(404, {"error": "Unknown query"})
                 return
             try:
-                result = subprocess.run(
-                    command_for_template(binary, database, template, params, max_rows, timeout),
-                    capture_output=True, text=True, timeout=timeout + 10, check=False,
-                )
-                if result.returncode:
-                    self.send_json(422, {"error": "Query failed"})
-                    return
-                rows = parse_result_rows(result.stdout)
+                with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
+                    result = subprocess.run(
+                        command_for_template(binary, database, template, params, max_rows, timeout),
+                        stdout=output, stderr=subprocess.DEVNULL,
+                        timeout=timeout + 10, check=False,
+                    )
+                    if result.returncode:
+                        self.send_json(422, {"error": "Query failed"})
+                        return
+                    if output.tell() > MAX_RESULT_BYTES:
+                        self.send_json(502, {"error": "Query result too large"})
+                        return
+                    output.seek(0)
+                    rows = parse_result_rows(output.read())
                 self.send_json(200, {"rows": rows})
             except subprocess.TimeoutExpired:
                 self.send_json(504, {"error": "Query timeout"})
