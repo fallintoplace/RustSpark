@@ -24,6 +24,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(i64::try_from(count)
             .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
     }
+    if pattern.len() <= 4096 && pattern.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || byte == b'_') {
+        let count = text.match_indices(pattern).count();
+        return Ok(Value::Integer(i64::try_from(count)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
+    }
     let re = regex_support::compile(pattern)?;
     let count = re.find_iter(text).count();
     Ok(Value::Integer(i64::try_from(count)
@@ -81,5 +87,22 @@ mod ascii_empty_regexp_count_tests {
         assert_eq!(evaluate(&[Value::Text(ascii), Value::Text(String::new())]).unwrap(), Value::Integer(100_001));
         assert_eq!(evaluate(&[Value::Text("é🙂".into()), Value::Text(String::new())]).unwrap(), Value::Integer(3));
         assert_eq!(evaluate(&[Value::Null, Value::Text(String::new())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod literal_regex_count_tests {
+    use super::*;
+
+    #[test]
+    fn counts_non_overlapping_literals_like_regex() {
+        for (text, pattern) in [
+            ("aaaaa", "aa"), ("foofoo", "foo"), ("éfoo_foo", "foo"),
+            ("abc", "xyz"), ("", "a"),
+        ] {
+            let args = [Value::Text(text.into()), Value::Text(pattern.into())];
+            let expected = regex_support::compile(pattern).unwrap().find_iter(text).count();
+            assert_eq!(evaluate(&args).unwrap(), Value::Integer(expected as i64));
+        }
     }
 }
