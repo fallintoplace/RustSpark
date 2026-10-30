@@ -59,6 +59,7 @@ impl MemoryPool {
     }
 
     fn charge(&self, bytes: usize) -> Result<()> {
+        if bytes == 0 { return Ok(()); }
         let mut current = self.used.load(Ordering::Relaxed);
         loop {
             let next = current
@@ -104,6 +105,7 @@ impl Reservation {
     }
 
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
+        if new_bytes == self.bytes { return Ok(()); }
         if new_bytes > self.bytes {
             let extra = new_bytes - self.bytes;
             self.pool.charge(extra)?;
@@ -226,6 +228,21 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod zero_charge_fast_path_tests {
+    use super::*;
+    #[test]
+    fn zero_byte_reservations_work_at_full_budget() {
+        let pool = MemoryPool::new(4);
+        let _full = pool.reserve(4).unwrap();
+        let mut empty = pool.reserve(0).unwrap();
+        empty.resize(0).unwrap();
+        assert_eq!(pool.used(), 4);
+        drop(empty);
+        assert_eq!(pool.used(), 4);
     }
 }
 
