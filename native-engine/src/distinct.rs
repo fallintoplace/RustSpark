@@ -10,7 +10,13 @@ pub fn distinct(batch: &Batch) -> Result<Batch> {
 
 /// Deduplicate complete rows with an explicit key-cardinality admission limit.
 pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
+    distinct_with_budget(batch, max_keys, usize::MAX)
+}
+
+/// Deduplicate with independent key-cardinality and estimated byte budgets.
+pub fn distinct_with_budget(batch: &Batch, max_keys: usize, max_bytes: usize) -> Result<Batch> {
     let mut seen = HashMap::<Vec<crate::scalar::Value>, ()>::new();
+    let mut used = 0usize;
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
         let key = batch.row(row)?;
@@ -21,6 +27,18 @@ pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
                 if at_limit {
                     return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
                 }
+                let base = 64usize.checked_add(entry.key().len()
+                    .checked_mul(std::mem::size_of::<crate::scalar::Value>())
+                    .ok_or_else(|| crate::Error::Execution("DISTINCT byte budget overflow".into()))?)
+                    .ok_or_else(|| crate::Error::Execution("DISTINCT byte budget overflow".into()))?;
+                let footprint = entry.key().iter().try_fold(base, |total, value|
+                    total.checked_add(match value {
+                        crate::scalar::Value::Text(text) => text.len(),
+                        _ => 0,
+                    })).ok_or_else(|| crate::Error::Execution("DISTINCT byte budget overflow".into()))?;
+                used = used.checked_add(footprint)
+                    .filter(|bytes| *bytes <= max_bytes)
+                    .ok_or_else(|| crate::Error::Execution("DISTINCT byte budget exceeded".into()))?;
                 entry.insert(());
                 indices.push(row);
             }
@@ -120,5 +138,27 @@ mod distinct_on_feature_tests {
         assert_eq!(distinct_with_limit(&batch, 2).unwrap_err().to_string(),
             "execution: DISTINCT key limit exceeded");
         assert_eq!(distinct_with_limit(&batch, 3).unwrap().num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod bounded_distinct_text_memory_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn duplicate_long_strings_use_only_one_key_budget() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let text = "é".repeat(500);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(text.clone())],
+            vec![Value::Text(text.clone())],
+            vec![Value::Null],
+        ]).unwrap();
+        let per_key = 64 + std::mem::size_of::<Value>();
+        assert_eq!(distinct_with_budget(&batch, 2, 2 * per_key + text.len())
+            .unwrap().num_rows(), 2);
+        assert!(distinct_with_budget(&batch, 2, per_key).is_err());
+        assert_eq!(distinct_with_limit(&batch, 2).unwrap().num_rows(), 2);
     }
 }

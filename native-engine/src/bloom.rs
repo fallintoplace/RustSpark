@@ -53,6 +53,17 @@ impl BloomFilter {
     }
 
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
+
+    /// Number of active bits for monitoring filter saturation.
+    pub fn bits_set(&self) -> usize {
+        self.words.iter().map(|word| word.count_ones() as usize).sum()
+    }
+
+    /// Approximate false-positive chance from observed occupancy.
+    /// This is an estimate, not a guarantee about a particular key distribution.
+    pub fn estimated_false_positive_rate(&self) -> f64 {
+        (self.bits_set() as f64 / self.bits as f64).powi(self.hashes as i32)
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +150,31 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_occupancy_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn estimates_saturation_without_mutating_filter_membership() {
+        let mut bloom = BloomFilter::new(4096, 5).unwrap();
+        assert_eq!(bloom.bits_set(), 0);
+        assert_eq!(bloom.estimated_false_positive_rate(), 0.0);
+        for n in 0..100 {
+            bloom.insert(&Value::Integer(n));
+        }
+        let bits = bloom.bits_set();
+        assert!(bits > 0 && bits <= 4096);
+        let fpr = bloom.estimated_false_positive_rate();
+        assert!(fpr > 0.0 && fpr <= 1.0);
+        for n in 0..100 {
+            assert!(bloom.might_contain(&Value::Integer(n)));
+        }
+        let copy = bloom.clone();
+        bloom.union_with(&copy).unwrap();
+        assert_eq!(bloom.bits_set(), bits);
+        assert_eq!(bloom.estimated_false_positive_rate(), fpr);
     }
 }

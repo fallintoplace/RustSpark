@@ -66,14 +66,24 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
-        if let Err(error) = self.control.check() {
-            self.stopped = true;
-            return Some(Err(error));
+        loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                return Some(Err(error));
+            }
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
+            match next.and_then(|batch| project::project(&batch, &self.selections)) {
+                Ok(batch) if batch.num_rows() == 0 => continue,
+                Ok(batch) => return Some(Ok(batch)),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
         }
-        let next = self.input.next()?;
-        let result = next.and_then(|batch| project::project(&batch, &self.selections));
-        if result.is_err() { self.stopped = true; }
-        Some(result)
     }
 }
 
@@ -233,5 +243,28 @@ mod whole_limit_stream_batch_perf_tests {
         assert_eq!(result.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
         assert_eq!(result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>(),
             (3..8).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod projection_empty_batch_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn empty_rows_are_skipped_but_zero_column_rows_remain() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let data = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let mut stream = ProjectStream::new(
+            [Ok(Batch::empty(schema)), Ok(data)].into_iter(),
+            vec![Selection::new(Expr::Column("n".into()), "value")],
+            QueryControl::default(),
+        );
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next().is_none());
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        let output = ProjectStream::new([Ok(zero)].into_iter(), vec![],
+            QueryControl::default()).next().unwrap().unwrap();
+        assert_eq!(output.num_rows(), 3);
     }
 }
