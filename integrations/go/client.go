@@ -33,6 +33,13 @@ func (output *boundedOutput) Write(chunk []byte) (int, error) {
     return output.Buffer.Write(chunk)
 }
 
+// Keep child diagnostics bounded even if a backend crashes in a tight loop.
+const maxStderrBytes = 64 * 1024
+
+func boundedStderr() boundedOutput {
+    return boundedOutput{limit: maxStderrBytes}
+}
+
 // Client calls an installed RustSpark binary without a shell.
 type Client struct {
     Binary      string
@@ -130,7 +137,7 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     command := exec.CommandContext(ctx, binary, args...)
     output := boundedOutput{limit: opts.MaxOutputBytes}
     if output.limit == 0 { output.limit = 64 * 1024 * 1024 }
-    var stderr bytes.Buffer
+    stderr := boundedStderr()
     command.Stdout, command.Stderr = &output, &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return nil, ctx.Err() }
@@ -199,7 +206,7 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     if binary == "" { binary = "rustspark" }
     command := exec.CommandContext(ctx, binary, args...)
     command.Stdout = output
-    var stderr bytes.Buffer
+    stderr := boundedStderr()
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return ctx.Err() }
