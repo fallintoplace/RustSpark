@@ -65,9 +65,8 @@ fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         let candidate = ColumnCandidate { row, columns: &columns, options: &options };
         if heap.len() < k {
             heap.push(candidate);
-        } else if heap.peek().is_some_and(|worst| candidate < *worst) {
-            heap.pop();
-            heap.push(candidate);
+        } else if let Some(mut worst) = heap.peek_mut() {
+            if candidate < *worst { *worst = candidate; }
         }
     }
     let mut retained = heap.into_vec();
@@ -262,6 +261,32 @@ mod column_topk_perf_tests {
         let computed = [SortKey::ascending(Expr::binary(Expr::Column("n".into()), BinaryOp::Add, Expr::Literal(Value::Integer(1))))];
         assert_eq!(top_k(&numbers, &computed, 2).unwrap(),
             crate::sort::sort(&numbers, &computed).unwrap().slice_rows(0, 2).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod column_topk_heap_root_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+    #[test]
+    fn column_heap_replacement_matches_full_stable_sort_with_many_updates() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let rows = (0..2000).map(|id| vec![
+            if id % 13 == 0 { Value::Null }
+            else { Value::Integer(((id * 113) % 101) as i64) },
+            Value::Integer(id as i64),
+        ]).collect();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let keys = [SortKey { expression: Expr::Column("score".into()),
+            descending: true, nulls_first: false }];
+        let sorted = crate::sort::sort(&batch, &keys).unwrap();
+        for count in [1, 3, 32, 513, 1999] {
+            assert_eq!(top_k(&batch, &keys, count).unwrap(),
+                sorted.slice_rows(0, count).unwrap());
+        }
     }
 }
 
