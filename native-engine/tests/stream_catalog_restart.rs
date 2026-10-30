@@ -28,3 +28,29 @@ fn streaming_cli_loads_published_catalog_in_a_new_process() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "id\n2\n3\n");
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn streaming_cli_persists_registered_source_after_successful_query() {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "rustspark-native-register-{}-{nanos}", std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let input = directory.join("events.csv");
+    let manifest = directory.join("catalog.json");
+    fs::write(&input, "id\n10\n20\n").unwrap();
+    let created = Command::new(env!("CARGO_BIN_EXE_rustspark-stream")).args([
+        "--csv", input.to_str().unwrap(), "--schema", "id:int!",
+        "--table", "events", "--sql", "SELECT id FROM events",
+        "--save-catalog", manifest.to_str().unwrap(),
+    ]).output().unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    assert!(manifest.is_file());
+    let reopened = Command::new(env!("CARGO_BIN_EXE_rustspark-stream")).args([
+        "--catalog-file", manifest.to_str().unwrap(),
+        "--sql", "SELECT id FROM events WHERE id >= 20",
+    ]).output().unwrap();
+    assert!(reopened.status.success(), "{}", String::from_utf8_lossy(&reopened.stderr));
+    assert_eq!(String::from_utf8(reopened.stdout).unwrap(), "id\n20\n");
+    fs::remove_dir_all(directory).unwrap();
+}
