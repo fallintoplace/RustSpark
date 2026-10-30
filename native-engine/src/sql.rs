@@ -35,8 +35,14 @@ fn rewrite_order_aliases(expr: Expr, selections: &[Selection]) -> Expr {
         },
         Expr::Not(value) => Expr::Not(visit(value)),
         Expr::IsNull(value) => Expr::IsNull(visit(value)),
-        Expr::Like { value, pattern } => Expr::Like {
-            value: visit(value), pattern: visit(pattern),
+        Expr::Like { value, pattern, escape } => Expr::Like {
+            value: visit(value), pattern: visit(pattern), escape: escape.map(visit),
+        },
+        Expr::InList { needle, choices, negated } => Expr::InList {
+            needle: visit(needle),
+            choices: choices.into_iter()
+                .map(|expr| rewrite_order_aliases(expr, selections)).collect(),
+            negated,
         },
         Expr::Case { branches, else_expr } => Expr::Case {
             branches: branches.into_iter().map(|(condition, value)| (
@@ -1038,10 +1044,21 @@ fn rewrite_having(
             Ok(Expr::Not(Box::new(rewrite_having(*expr, group_by, selections, aggregates)?))),
         Expr::IsNull(expr) =>
             Ok(Expr::IsNull(Box::new(rewrite_having(*expr, group_by, selections, aggregates)?))),
-        Expr::Like { value, pattern } =>
+        Expr::Like { value, pattern, escape } =>
             Ok(Expr::Like {
                 value: Box::new(rewrite_having(*value, group_by, selections, aggregates)?),
                 pattern: Box::new(rewrite_having(*pattern, group_by, selections, aggregates)?),
+                escape: escape.map(|expr|
+                    rewrite_having(*expr, group_by, selections, aggregates).map(Box::new)
+                ).transpose()?,
+            }),
+        Expr::InList { needle, choices, negated } =>
+            Ok(Expr::InList {
+                needle: Box::new(rewrite_having(*needle, group_by, selections, aggregates)?),
+                choices: choices.into_iter()
+                    .map(|expr| rewrite_having(expr, group_by, selections, aggregates))
+                    .collect::<Result<Vec<_>>>()?,
+                negated,
             }),
         Expr::IsDistinctFrom { left, right, negated } =>
             Ok(Expr::IsDistinctFrom {
@@ -1469,6 +1486,64 @@ mod parser_token_move_perf_tests {
         assert_eq!(parser.next(), Some(Token::Word("sales".into())));
         assert_eq!(parser.next(), None);
         assert!(parse_sql("SELECT city FROM sales").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod escape_and_inlist_rewrite_regressions {
+    use super::*;
+
+    #[test]
+    fn order_aliases_are_rewritten_within_like_escapes_and_in_lists() {
+        let selections = vec![
+            Selection::new(Expr::Column("city".into()), "alias"),
+            Selection::new(Expr::Literal(Value::Text("!%".into())), "pat"),
+            Selection::new(Expr::Literal(Value::Text("!".into())), "esc"),
+        ];
+        let expression = Expr::Like {
+            value: Box::new(Expr::Column("alias".into())),
+            pattern: Box::new(Expr::Column("pat".into())),
+            escape: Some(Box::new(Expr::Column("esc".into()))),
+        };
+        let rewritten = rewrite_order_aliases(expression, &selections);
+        assert!(matches!(rewritten,
+            Expr::Like { value, pattern, escape: Some(escape) }
+                if *value == Expr::Column("city".into())
+                && *pattern == Expr::Literal(Value::Text("!%".into()))
+                && *escape == Expr::Literal(Value::Text("!".into()))
+        ));
+        let list = Expr::InList {
+            needle: Box::new(Expr::Column("alias".into())),
+            choices: vec![Expr::Column("pat".into())], negated: false,
+        };
+        assert!(matches!(rewrite_order_aliases(list, &selections),
+            Expr::InList { needle, choices, .. }
+                if *needle == Expr::Column("city".into())
+                && choices == vec![Expr::Literal(Value::Text("!%".into()))]
+        ));
+    }
+
+    #[test]
+    fn having_rewrite_preserves_escape_and_in_list_structure() {
+        let groups = [(Expr::Column("city".into()), "grouped".into())];
+        let like = Expr::Like {
+            value: Box::new(Expr::Column("city".into())),
+            pattern: Box::new(Expr::Literal(Value::Text("A!%".into()))),
+            escape: Some(Box::new(Expr::Literal(Value::Text("!".into()))),
+        };
+        let mut items = Vec::new();
+        let rewritten = rewrite_having(like, &groups, &[], &mut items).unwrap();
+        assert!(matches!(rewritten, Expr::Like { value, escape: Some(escape), .. }
+            if *value == Expr::Column("grouped".into())
+            && *escape == Expr::Literal(Value::Text("!".into()))));
+        let list = Expr::InList {
+            needle: Box::new(Expr::Column("city".into())),
+            choices: vec![Expr::Literal(Value::Text("Berlin".into()))], negated: true,
+        };
+        let rewritten = rewrite_having(list, &groups, &[], &mut items).unwrap();
+        assert!(matches!(rewritten, Expr::InList { needle, choices, negated: true }
+            if *needle == Expr::Column("grouped".into())
+            && choices == vec![Expr::Literal(Value::Text("Berlin".into()))]));
     }
 }
 
