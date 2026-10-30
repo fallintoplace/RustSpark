@@ -66,7 +66,7 @@ where I: IntoIterator<Item = Result<Batch>>
             let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
             let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());
             let path = directory.join(filename);
-            let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+            let file = open_private_spill(&path)?;
             runs.files.push(path);
             let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
             writer.write_batch(&sorted)?;
@@ -155,5 +155,36 @@ mod sorted_run_key_prevalidation_tests {
         assert!(write_sorted_runs(
             Vec::<Result<Batch>>::new(), schema, &[computed], &directory, 4, &control
         ).is_err());
+    }
+}
+
+fn open_private_spill(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(all(test, unix))]
+mod private_spill_permissions_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_files_are_not_world_readable() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-private-sorted_runs-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = open_private_spill(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }
