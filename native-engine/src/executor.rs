@@ -110,7 +110,7 @@ fn execute_inner(
             if let Plan::Scan { table } = input.as_ref() {
                 limit::limit(catalog.get(table)?, *offset, *count)?
             } else {
-                limit::limit(&descend(input)?, *offset, *count)?
+                limit::limit_owned(descend(input)?, *offset, *count)?
             }
         },
         Plan::Distinct { input } => distinct::distinct(&descend(input)?)?,
@@ -265,5 +265,26 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod native_owned_execution_limit_tests {
+    use super::*;
+    use crate::{catalog::Catalog, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn limits_intermediate_native_results_without_losing_rows() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text("payload".repeat(512))], vec![Value::Null],
+        ]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", source.clone()).unwrap();
+        let intermediate = Plan::Distinct { input: Box::new(Plan::scan("t")) };
+        let plan = intermediate.limit(0, Some(30));
+        assert_eq!(execute(&plan, &catalog).unwrap(), source);
+        assert!(execute(&Plan::scan("t").limit(usize::MAX, Some(1)), &catalog).is_err());
     }
 }
