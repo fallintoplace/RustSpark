@@ -72,7 +72,7 @@ class BoundedMcpBackendTests(unittest.TestCase):
 
         good = run_bounded([sys.executable, "-c", "print('ok')"],
                            timeout=5, max_bytes=128)
-        self.assertEqual(good.stdout, "ok\\n")
+        self.assertEqual(good.stdout, "ok\n")
         with self.assertRaisesRegex(ValueError, "budget"):
             run_bounded([sys.executable, "-c", "print('x' * 65536)"],
                         timeout=5, max_bytes=128)
