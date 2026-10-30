@@ -77,12 +77,17 @@ impl StageGraph {
     }
 
     pub fn ready(&self, completed: &HashSet<u64>) -> Vec<u64> {
+        self.ready_up_to(completed, usize::MAX)
+    }
+
+    /// Select a bounded number of runnable stages in topological order.
+    pub fn ready_up_to(&self, completed: &HashSet<u64>, limit: usize) -> Vec<u64> {
         self.order_indices.iter().filter_map(|&index| {
             let stage = &self.stages[index];
             (!completed.contains(&stage.id) &&
                 stage.dependencies.iter().all(|dependency| completed.contains(dependency)))
                 .then_some(stage.id)
-        }).collect()
+        }).take(limit).collect()
     }
 
     pub fn stages(&self) -> &[Stage] {
@@ -176,5 +181,25 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_ready_stage_tests {
+    use super::*;
+
+    #[test]
+    fn runnable_windows_preserve_dependency_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 4, dependencies: vec![1, 2], partitions: 1 },
+            Stage { id: 1, dependencies: vec![], partitions: 1 },
+            Stage { id: 2, dependencies: vec![], partitions: 1 },
+            Stage { id: 3, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        let completed = HashSet::new();
+        assert!(graph.ready_up_to(&completed, 0).is_empty());
+        assert_eq!(graph.ready_up_to(&completed, 2), [1, 2]);
+        assert_eq!(graph.ready_up_to(&completed, 100), graph.ready(&completed));
+        assert_eq!(graph.ready_up_to(&HashSet::from([1, 2]), 1), [3]);
     }
 }
