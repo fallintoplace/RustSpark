@@ -38,8 +38,11 @@ impl AggregateItem {
 
     fn output_type(&self, schema: &Schema) -> Result<DataType> {
         match &self.op {
-            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_) =>
-                Ok(DataType::Integer),
+            AggregateOp::CountAll => Ok(DataType::Integer),
+            AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) => {
+                expr.output_type(schema)?;
+                Ok(DataType::Integer)
+            },
             AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) => {
                 let kind = expr.output_type(schema)?;
                 match kind {
@@ -441,5 +444,31 @@ mod bound_group_columns_perf_tests {
             BinaryOp::Add, Expr::Literal(Value::Integer(1)));
         assert_eq!(aggregate_with_max_groups(&batch,
             &[(computed, "key".into())], &[], 2).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod count_argument_preflight_regressions {
+    use super::*;
+
+    #[test]
+    fn count_arguments_are_checked_even_on_empty_input() {
+        let batch = Batch::empty(Schema::new(vec![
+            Field::new("valid", DataType::Text, true)
+        ]).unwrap());
+        for op in [
+            AggregateOp::Count(Expr::Column("missing".into())),
+            AggregateOp::CountDistinct(Expr::Column("missing".into())),
+        ] {
+            assert!(aggregate(&batch, &[], &[AggregateItem::new(op, "count")]).is_err());
+        }
+        for op in [
+            AggregateOp::Count(Expr::Column("valid".into())),
+            AggregateOp::CountDistinct(Expr::Column("valid".into())),
+            AggregateOp::CountAll,
+        ] {
+            assert_eq!(aggregate(&batch, &[], &[AggregateItem::new(op, "count")])
+                .unwrap().row(0).unwrap(), vec![Value::Integer(0)]);
+        }
     }
 }
