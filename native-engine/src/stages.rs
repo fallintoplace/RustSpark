@@ -13,6 +13,7 @@ pub enum StageKind {
     Limit,
     Distinct,
     HashJoin,
+    CrossJoin,
     UnionAll,
     Intersect,
     Except,
@@ -20,7 +21,7 @@ pub enum StageKind {
 
 impl StageKind {
     pub fn is_blocking(self) -> bool {
-        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::Intersect | Self::Except)
+        matches!(self, Self::Aggregate | Self::Sort | Self::Distinct | Self::HashJoin | Self::CrossJoin | Self::Intersect | Self::Except)
     }
 }
 
@@ -60,7 +61,7 @@ impl StageGraph {
                 StageKind::Scan => 0,
                 StageKind::Filter | StageKind::Project | StageKind::Aggregate |
                 StageKind::Sort | StageKind::Limit | StageKind::Distinct => 1,
-                StageKind::HashJoin | StageKind::UnionAll | StageKind::Intersect |
+                StageKind::HashJoin | StageKind::CrossJoin | StageKind::UnionAll | StageKind::Intersect |
                 StageKind::Except => 2,
             };
             if stage.inputs.len() != required_inputs {
@@ -140,7 +141,7 @@ impl StageGraph {
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
                 Plan::CrossJoin { left, right } => (
-                    StageKind::HashJoin,
+                    StageKind::CrossJoin,
                     vec![visit(left, stages, depth + 1)?, visit(right, stages, depth + 1)?],
                 ),
                 Plan::UnionAll { left, right } => (
@@ -313,5 +314,23 @@ mod dense_root_lookup_tests {
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
         ]).unwrap();
         assert_eq!(multiple.root(), None);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_stage_kind_tests {
+    use super::*;
+
+    #[test]
+    fn cross_join_is_not_mislabeled_as_hash_join() {
+        let plan = Plan::CrossJoin {
+            left: Box::new(Plan::scan("left")),
+            right: Box::new(Plan::scan("right")),
+        };
+        let graph = StageGraph::from_plan(&plan).unwrap();
+        let root = &graph.stages()[graph.root().unwrap()];
+        assert_eq!(root.kind, StageKind::CrossJoin);
+        assert_eq!(root.inputs.len(), 2);
+        assert!(root.kind.is_blocking());
     }
 }
