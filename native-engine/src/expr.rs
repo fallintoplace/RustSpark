@@ -78,7 +78,14 @@ impl Expr {
                 }
                 Ok(DataType::Boolean)
             },
-            Self::Not(_) | Self::IsNull(_) | Self::Like { .. }
+            Self::Not(inner) => {
+                if !matches!(inner.as_ref(), Self::Literal(Value::Null))
+                    && inner.output_type(schema)? != DataType::Boolean {
+                    return Err(Error::Type("NOT requires a boolean operand".into()));
+                }
+                Ok(DataType::Boolean)
+            },
+            Self::IsNull(_) | Self::Like { .. }
             | Self::IsDistinctFrom { .. } => Ok(DataType::Boolean),
             Self::TryCast { target, .. } | Self::Cast { target, .. } => Ok(*target),
             Self::Call { name, args } => crate::functions::output_type(name, args, schema),
@@ -458,5 +465,27 @@ mod like_rolling_buffer_perf_tests {
         assert!(sql_like_escape("a%b", "a\\%b", '\\').unwrap());
         assert!(sql_like_escape("", "%%", '\\').unwrap());
         assert!(!sql_like_escape("", "_%", '\\').unwrap());
+    }
+}
+
+#[cfg(test)]
+mod not_expression_static_type_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn rejects_not_of_integer_even_with_no_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("enabled", DataType::Boolean, true),
+        ]).unwrap();
+        let invalid = Expr::Not(Box::new(Expr::Column("n".into())));
+        assert!(invalid.output_type(&schema).is_err());
+        assert!(Expr::Not(Box::new(Expr::Column("missing".into())))
+            .output_type(&schema).is_err());
+        let valid = Expr::Not(Box::new(Expr::Column("enabled".into())));
+        assert_eq!(valid.output_type(&schema).unwrap(), DataType::Boolean);
+        let nullable = Expr::Not(Box::new(Expr::Literal(Value::Null)));
+        assert_eq!(nullable.output_type(&schema).unwrap(), DataType::Boolean);
     }
 }
