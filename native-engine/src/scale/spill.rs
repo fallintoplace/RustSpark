@@ -73,12 +73,12 @@ impl<W: Write> SpillWriter<W> {
         if schema.len() > MAX_FIELDS {
             return Err(Error::Execution("spill schema exceeds field limit".into()));
         }
+        if schema.fields().iter().any(|field| field.name.len() > MAX_NAME_BYTES) {
+            return Err(Error::Execution("spill field name too long".into()));
+        }
         output.write_all(MAGIC)?;
         write_u32(&mut output, schema.len())?;
         for field in schema.fields() {
-            if field.name.len() > MAX_NAME_BYTES {
-                return Err(Error::Execution("spill field name too long".into()));
-            }
             write_u32(&mut output, field.name.len())?;
             output.write_all(field.name.as_bytes())?;
             output.write_all(&[type_code(field.data_type), u8::from(field.nullable)])?;
@@ -374,5 +374,20 @@ mod spill_window_write_tests {
         assert_eq!(left, batch.slice_rows(2, 5).unwrap());
         assert_eq!(right, batch.slice_rows(7, 11).unwrap());
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod spill_header_preflight_atomicity_tests {
+    use super::*;
+
+    #[test]
+    fn bad_schema_cannot_write_partial_spill_signature() {
+        let schema = Schema::new(vec![
+            Field::new("x".repeat(MAX_NAME_BYTES + 1), DataType::Text, true),
+        ]).unwrap();
+        let mut output = Vec::new();
+        assert!(SpillWriter::new(&mut output, schema).is_err());
+        assert!(output.is_empty());
     }
 }
