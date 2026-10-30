@@ -64,6 +64,9 @@ fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crat
 }
 
 pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 || right.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
@@ -93,6 +96,9 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 }
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
@@ -147,6 +153,9 @@ fn right_counts(
 
 /// Keep each left row up to its multiplicity in the right input.
 pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 || right.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
     if schema.len() == 1 {
         let mut counts = HashMap::<&Value, usize>::new();
@@ -182,6 +191,9 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
 
 /// Keep left occurrences after subtracting right row multiplicities.
 pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    if left.num_rows() == 0 {
+        return Ok(Batch::empty(compatible_schema(left, right)?));
+    }
     let (left, right, schema) = align_set_inputs(left, right)?;
     if schema.len() == 1 {
         let mut counts = HashMap::<&Value, usize>::new();
@@ -373,5 +385,35 @@ mod native_one_column_multiset_perf_tests {
         assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(), vec![
             vec![Value::Null], vec![Value::Integer(8)]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod typed_empty_set_short_circuits_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn empty_inputs_keep_widened_result_schema_without_scanning_rows() {
+        let integers = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        let doubles = Batch::from_rows(Schema::new(vec![
+            Field::new("other", DataType::Float, true),
+        ]).unwrap(), vec![vec![Value::Float(10.0)]]).unwrap();
+        for result in [
+            intersect_distinct(&integers, &doubles).unwrap(),
+            intersect_all(&doubles, &integers).unwrap(),
+            except_distinct(&integers, &doubles).unwrap(),
+            except_all(&integers, &doubles).unwrap(),
+        ] {
+            assert_eq!(result.num_rows(), 0);
+            assert_eq!(result.schema().fields()[0].data_type, DataType::Float);
+            assert!(result.schema().fields()[0].nullable);
+        }
+        let invalid = Batch::empty(Schema::new(vec![
+            Field::new("id", DataType::Text, false),
+        ]).unwrap());
+        assert!(intersect_distinct(&integers, &invalid).is_err());
     }
 }
