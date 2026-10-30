@@ -12,7 +12,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null) };
-    Ok(Value::Boolean(value > 0 && value.is_power_of_two()))
+    Ok(Value::Boolean(value > 0 && (value as u64).is_power_of_two()))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
