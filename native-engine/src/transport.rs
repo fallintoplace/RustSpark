@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 
 use crate::{Error, Result};
 
-const MAGIC: &[u8; 4] = b"RSP1";
+const MAGIC: &[u8; 4] = b"RSP2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -28,13 +28,18 @@ const CRC32_TABLE: [u32; 256] = {
     table
 };
 
-fn checksum(bytes: &[u8]) -> u32 {
+fn checksum_parts(header: &[u8], payload: &[u8]) -> u32 {
     let mut value = !0u32;
-    for &byte in bytes {
+    for &byte in header.iter().chain(payload) {
         let index = ((value ^ u32::from(byte)) & 0xff) as usize;
         value = (value >> 8) ^ CRC32_TABLE[index];
     }
     !value
+}
+
+#[cfg(test)]
+fn checksum(bytes: &[u8]) -> u32 {
+    checksum_parts(&[], bytes)
 }
 
 /// Memory-bounded gate for stale shuffle task attempts.
@@ -87,7 +92,8 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
     header[12..20].copy_from_slice(&frame.task.to_le_bytes());
     header[20..24].copy_from_slice(&frame.attempt.to_le_bytes());
     header[24..28].copy_from_slice(&len.to_le_bytes());
-    header[28..32].copy_from_slice(&checksum(&frame.payload).to_le_bytes());
+    let frame_checksum = checksum_parts(&header[..28], &frame.payload);
+    header[28..32].copy_from_slice(&frame_checksum.to_le_bytes());
     output.write_all(&header)?;
     output.write_all(&frame.payload)?;
     Ok(())
@@ -136,7 +142,7 @@ pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Fram
     }
     let mut payload = vec![0; len];
     input.read_exact(&mut payload)?;
-    if checksum(&payload) != expected_checksum {
+    if checksum_parts(&header[..28], &payload) != expected_checksum {
         return Err(Error::Execution("exchange frame checksum mismatch".into()));
     }
     Ok(Some(Frame { stage, task, attempt, payload }))
@@ -436,5 +442,27 @@ mod bounded_native_exchange_writer_tests {
         let mut wire = Vec::new();
         write_frames_limited(&mut wire, &[], 0, 0, 0).unwrap();
         assert!(wire.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shuffle_header_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn routing_header_corruption_never_redirects_a_valid_payload() {
+        let frame = Frame { stage: 17, task: 93, attempt: 2, payload: b"dataset".to_vec() };
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &frame, 128).unwrap();
+        assert_eq!(&encoded[..4], b"RSP2");
+        for offset in [4, 11, 12, 19, 20, 23] {
+            let mut corrupted = encoded.clone();
+            corrupted[offset] ^= 0x01;
+            assert!(read_frame(&mut corrupted.as_slice(), 128).unwrap_err()
+                .to_string().contains("checksum"), "header byte {offset}");
+        }
+        let mut legacy = encoded;
+        legacy[..4].copy_from_slice(b"RSP1");
+        assert!(read_frame(&mut legacy.as_slice(), 128).is_err());
     }
 }

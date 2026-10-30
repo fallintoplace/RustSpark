@@ -43,13 +43,37 @@ pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
 }
 
 pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
+    scan_with_expected_schema(path, batch_size, None)
+}
+
+/// Validate a registered table's schema using the same file handle used for
+/// scanning. Replacing a Parquet file must not silently change result columns.
+pub fn scan_checked(
+    path: impl AsRef<Path>, batch_size: usize, expected: &crate::schema::Schema,
+) -> Result<ParquetScan> {
+    scan_with_expected_schema(path, batch_size, Some(expected))
+}
+
+fn scan_with_expected_schema(
+    path: impl AsRef<Path>, batch_size: usize,
+    expected: Option<&crate::schema::Schema>,
+) -> Result<ParquetScan> {
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
     let file = File::open(path)?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?
-        .with_batch_size(batch_size)
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    if let Some(expected) = expected {
+        let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
+        let actual = arrow_bridge::from_arrow(&empty)?.schema().clone();
+        if &actual != expected {
+            return Err(Error::Schema(
+                "registered Parquet table schema changed since registration".into()
+            ));
+        }
+    }
+    let reader = builder.with_batch_size(batch_size)
         .build()
         .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
     Ok(ParquetScan { inner: reader, finished: false })
