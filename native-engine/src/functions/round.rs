@@ -30,8 +30,14 @@ pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
             .map_err(|_| Error::Execution("ROUND integer overflow".into()));
     }
     let Value::Float(number) = number else { return Err(Error::Type("ROUND requires numeric input".into())); };
-    let factor = 10f64.powi(precision);
-    let result = (number * factor).round() / factor;
+    let factor = 10f64.powi(precision.abs());
+    let result = if precision >= 0 {
+        // Scaling large finite values can overflow before rounding.
+        if number.abs() > f64::MAX / factor { number }
+        else { (number * factor).round() / factor }
+    } else {
+        (number / factor).round() * factor
+    };
     if !result.is_finite() {
         return Err(Error::Execution("ROUND non-finite result".into()));
     }
@@ -51,5 +57,26 @@ mod bigint_round_sql_tests {
         assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Integer(9_007_199_254_740_990));
         assert_eq!(eval(&args, &batch, 1).unwrap(), Value::Integer(-130));
         assert_eq!(eval(&[Expr::Column("n".into())], &batch, 0).unwrap(), Value::Integer(9_007_199_254_740_993));
+    }
+}
+
+#[cfg(test)]
+mod finite_round_extreme_tests {
+    use super::*;
+    #[test]
+    fn sql_round_handles_extreme_finite_float_values() {
+        let batch = Batch::empty(Schema::new(vec![]).unwrap());
+        for value in [f64::MAX, -f64::MAX] {
+            let args = [
+                Expr::Literal(Value::Float(value)),
+                Expr::Literal(Value::Integer(15)),
+            ];
+            assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Float(value));
+        }
+        let args = [
+            Expr::Literal(Value::Float(149.0)),
+            Expr::Literal(Value::Integer(-2)),
+        ];
+        assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Float(100.0));
     }
 }
