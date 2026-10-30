@@ -82,6 +82,7 @@ impl CrossJoinStream {
             if output.len() % 256 == 0 { self.control.check()?; }
             if self.current_left.is_none() {
                 loop {
+                    self.control.check()?;
                     if let Some(batch) = &self.left_batch {
                         if self.left_row < batch.num_rows() {
                             self.current_left = Some(batch.row(self.left_row)?);
@@ -172,5 +173,30 @@ mod tests {
             2, QueryControl::default(),
         ).unwrap();
         assert_eq!(stream.collect::<Result<Vec<_>>>().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_empty_input_cancellation_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn repeated_empty_probe_batches_stop_once_cancelled() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let control = QueryControl::default();
+        let cancel_on_poll = control.clone();
+        let schema_for_left = schema.clone();
+        let mut polled = false;
+        let left: BatchStream = Box::new(std::iter::repeat_with(move || {
+            assert!(!polled, "probe polled after cancellation");
+            polled = true;
+            cancel_on_poll.cancel();
+            Ok(Batch::empty(schema_for_left.clone()))
+        }));
+        let right_batch = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)]]).unwrap();
+        let right: BatchStream = Box::new([Ok(right_batch)].into_iter());
+        let mut join = CrossJoinStream::new(left, right, schema.clone(), schema, 4, control).unwrap();
+        assert!(join.next().unwrap().is_err());
     }
 }
