@@ -1,11 +1,15 @@
 use crate::{batch::Batch, Error, Result};
 
-pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
+fn validate_window(offset: usize, count: Option<usize>) -> Result<()> {
     if let Some(count) = count {
-        offset
-            .checked_add(count)
+        offset.checked_add(count)
             .ok_or_else(|| Error::Execution("LIMIT + OFFSET overflow".into()))?;
     }
+    Ok(())
+}
+
+pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
+    validate_window(offset, count)?;
     let start = offset.min(batch.num_rows());
     let end = count.map_or(batch.num_rows(), |count| {
         start.saturating_add(count).min(batch.num_rows())
@@ -19,10 +23,7 @@ pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch
 /// Apply LIMIT to an owned native batch, avoiding a deep copy when
 /// the requested window covers all its rows.
 pub fn limit_owned(batch: Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
-    if let Some(count) = count {
-        offset.checked_add(count)
-            .ok_or_else(|| Error::Execution("LIMIT + OFFSET overflow".into()))?;
-    }
+    validate_window(offset, count)?;
     if offset == 0 && count.is_none_or(|count| count >= batch.num_rows()) {
         return Ok(batch);
     }
