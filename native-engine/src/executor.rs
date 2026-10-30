@@ -112,7 +112,11 @@ fn execute_inner(
             }
         },
         Plan::Aggregate { input, group_by, aggregates } => {
-            aggregate::aggregate(&descend(input)?, group_by, aggregates)?
+            if let Plan::Scan { table } = input.as_ref() {
+                aggregate::aggregate(catalog.get(table)?, group_by, aggregates)?
+            } else {
+                aggregate::aggregate(&descend(input)?, group_by, aggregates)?
+            }
         }
         Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
@@ -346,5 +350,28 @@ mod catalog_projection_borrow_tests {
         assert_eq!(result.rows().unwrap(),
             vec![vec![Value::Text("hello".into())], vec![Value::Null]]);
         assert_eq!(result.schema().field(0).unwrap().name, "alias");
+    }
+}
+
+#[cfg(test)]
+mod catalog_aggregate_borrow_tests {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp},
+        schema::{DataType, Field, Schema}, scalar::Value};
+    #[test]
+    fn counts_a_large_catalog_with_a_single_row_output_budget() {
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..100).map(|n| vec![Value::Integer(n)]).collect()
+        ).unwrap()).unwrap();
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("source")),
+            group_by: vec![],
+            aggregates: vec![AggregateItem::new(AggregateOp::CountAll, "rows")],
+        };
+        let result = execute_with_options(&plan, &catalog,
+            ExecutionOptions { max_output_rows: 1, ..ExecutionOptions::default() }).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![vec![Value::Integer(100)]]);
     }
 }
