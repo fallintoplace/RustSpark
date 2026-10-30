@@ -165,6 +165,13 @@ impl TaskScheduler {
         counts
     }
 
+    /// View a bounded, deterministic list of ready task IDs without leasing.
+    pub fn queued_tasks(&self, limit: usize) -> Vec<u64> {
+        self.tasks.iter().filter_map(|(&id, task)|
+            (task.status == TaskStatus::Queued).then_some(id)
+        ).take(limit).collect()
+    }
+
     pub fn status(&self, task: u64) -> Option<&TaskStatus> {
         self.tasks.get(&task).map(|entry| &entry.status)
     }
@@ -326,5 +333,25 @@ mod proactive_task_lease_expiry_tests {
         assert_eq!(retryable.expire_leases(now + ttl), 1);
         assert_eq!(retryable.status(1), Some(&TaskStatus::Queued));
         assert_eq!(retryable.lease(5, now + ttl, ttl).unwrap().unwrap().attempt, 2);
+    }
+}
+
+#[cfg(test)]
+mod scheduler_ready_task_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn lists_ready_tasks_in_sorted_order_without_claiming_them() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([9, 1, 5, 3], 2).unwrap();
+        assert_eq!(scheduler.queued_tasks(2), vec![1, 3]);
+        assert_eq!(scheduler.queued_tasks(0), vec![]);
+        let first = scheduler.lease(4, now, Duration::from_secs(10))
+            .unwrap().unwrap();
+        assert_eq!(first.task, 1);
+        assert_eq!(scheduler.queued_tasks(10), vec![3, 5, 9]);
+        assert_eq!(scheduler.counts().leased, 1);
+        assert!(scheduler.cancel_task(3));
+        assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
     }
 }
