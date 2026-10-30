@@ -120,6 +120,48 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.query_one("SELECT id FROM t", max_rows=1)
 
+    def test_mixed_type_named_table_keys_raise_value_error(self):
+        for invalid in (None, 3):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "Invalid table name"):
+                RustSpark().query("SELECT 1", csv_tables={"good": "good.csv", invalid: "bad.csv"})
+
+
+
+class DeterministicNamedParamsTests(unittest.TestCase):
+    @patch("rustspark_local.subprocess.run")
+    def test_parameter_order_is_stable_and_invalid_types_fail_early(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        RustSpark().query("SELECT 1", named_params={"z": "int64:9", "a": "int64:1"})
+        argv = run.call_args.args[0]
+        self.assertLess(argv.index("a=int64:1"), argv.index("z=int64:9"))
+        with self.assertRaises(ValueError):
+            RustSpark().query("SELECT 1", named_params={1: "int64:1"})
+
+
+
+class TypedParameterAdmissionTests(unittest.TestCase):
+    @patch("rustspark_local.subprocess.run")
+    def test_bounded_parameter_payloads(self, run):
+        client = RustSpark()
+        with self.assertRaisesRegex(ValueError, "64"):
+            client.query("SELECT 1", named_params={
+                f"p{i}": "int64:1" for i in range(65)
+            })
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            client.query("SELECT 1", named_params={
+                "payload": "utf8:" + "x" * 8192
+            })
+        run.assert_not_called()
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        self.assertEqual(client.query("SELECT 1", named_params={
+            "payload": "utf8:" + "x" * (8192 - len("utf8:"))
+        }), [])
+
+
+    def test_named_table_paths_are_nonempty_text_paths(self):
+        for path in ("", b"/tmp/events.json", 17):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Named source paths"):
+                RustSpark().query("SELECT 1", json_tables={"events": path})
 
 if __name__ == "__main__":
     unittest.main()

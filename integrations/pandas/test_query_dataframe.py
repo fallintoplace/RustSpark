@@ -74,5 +74,19 @@ class DataFrameCommandTests(unittest.TestCase):
                 query_dataframe("SELECT 1", process_timeout=3)
 
 
+class NamedJsonPandasTests(unittest.TestCase):
+    def test_named_json_tables_are_bound_as_cli_arguments(self):
+        command = build_command("SELECT * FROM events", Path("out.arrow"),
+                                json_tables={"events": "/tmp/my events.json"})
+        self.assertIn("--json-table", command)
+        self.assertIn("events=/tmp/my events.json", command)
+        with self.assertRaisesRegex(ValueError, "Named and unnamed"):
+            build_command("SELECT 1", Path("out.arrow"), csv="input.csv",
+                          json_tables={"events": "events.json"})
+        with self.assertRaises(ValueError):
+            build_command("SELECT 1", Path("out.arrow"),
+                          json_tables={"invalid-name": "events.json"})
+
+
 if __name__ == "__main__":
     unittest.main()

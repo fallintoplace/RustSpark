@@ -28,6 +28,7 @@ fn round(args: &[Value]) -> Result<Value> {
     let Some(number) = super::number(&args[0])? else { return Ok(Value::Null) };
     let scale = 10_f64.powi(digits.unsigned_abs() as i32);
     let result = if digits >= 0 {
+        if number.abs() > f64::MAX / scale { return super::finite(number); }
         (number * scale).round() / scale
     } else {
         (number / scale).round() * scale
@@ -89,5 +90,16 @@ mod bigint_round_exactness_tests {
         assert_eq!(round(&[Value::Integer(-125), Value::Integer(-1)]).unwrap(), Value::Integer(-130));
         assert_eq!(round(&[Value::Integer(-149), Value::Integer(-2)]).unwrap(), Value::Integer(-100));
         assert_eq!(round(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod large_finite_round_float_tests {
+    use super::*;
+    #[test]
+    fn large_finite_values_do_not_overflow_decimal_scaling() {
+        assert_eq!(round(&[Value::Float(f64::MAX), Value::Integer(2)]).unwrap(), Value::Float(f64::MAX));
+        assert_eq!(round(&[Value::Float(-f64::MAX), Value::Integer(15)]).unwrap(), Value::Float(-f64::MAX));
+        assert_eq!(round(&[Value::Float(12.345), Value::Integer(2)]).unwrap(), Value::Float(12.35));
     }
 }

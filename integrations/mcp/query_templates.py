@@ -45,8 +45,10 @@ def make_command(binary: str, database_dir: Path, template: Path,
         "--stdout-format", "json-array", "--max-rows", str(max_rows),
         "--query-timeout", str(query_timeout),
     ]
+    if any(not isinstance(key, str) or not PARAM_NAME.fullmatch(key) for key in parameters):
+        raise ValueError("Invalid SQL parameter name")
     for key, value in sorted(parameters.items()):
-        if not PARAM_NAME.fullmatch(key) or not isinstance(value, str) or ":" not in value or len(value) > 4096:
+        if not isinstance(value, str) or ":" not in value or len(value) > 4096:
             raise ValueError("Parameters must be typed values, e.g. int64:42")
         arguments.extend(["--named-param", f"{key}={value}"])
     return arguments
@@ -62,8 +64,16 @@ def parse_query_rows(text: str) -> list[dict]:
             raise ValueError("Nonfinite SQL JSON number")
         return parsed
 
-    rows = json.loads(text, parse_constant=reject_nonfinite,
-                      parse_float=parse_finite_float)
+    def unique_fields(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError(f"Duplicate SQL result key: {key}")
+            fields[key] = value
+        return fields
+
+    rows = json.loads(text, object_pairs_hook=unique_fields,
+                      parse_constant=reject_nonfinite, parse_float=parse_finite_float)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL template results must be an array of row objects")
     return rows

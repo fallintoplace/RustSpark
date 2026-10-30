@@ -8,13 +8,18 @@ use crate::{
     metrics::QueryMetrics,
 };
 
+enum Step {
+    Filter(Expr),
+    Project(Vec<Selection>),
+}
+
 pub struct Pipeline<I> {
     source: I,
-    predicates: Vec<Expr>,
-    projections: Vec<Vec<Selection>>,
+    steps: Vec<Step>,
     skip: usize,
     remaining: Option<usize>,
     invalid_limit: bool,
+    stopped: bool,
     guard: QueryGuard,
     metrics: Option<QueryMetrics>,
 }
@@ -23,23 +28,23 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
     pub fn new(source: I) -> Self {
         Self {
             source,
-            predicates: Vec::new(),
-            projections: Vec::new(),
+            steps: Vec::new(),
             skip: 0,
             remaining: None,
             invalid_limit: false,
+            stopped: false,
             guard: QueryGuard::default(),
             metrics: None,
         }
     }
 
     pub fn with_filter(mut self, predicate: Expr) -> Self {
-        self.predicates.push(predicate);
+        self.steps.push(Step::Filter(predicate));
         self
     }
 
     pub fn with_projection(mut self, selections: Vec<Selection>) -> Self {
-        self.projections.push(selections);
+        self.steps.push(Step::Project(selections));
         self
     }
 
@@ -71,6 +76,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
         if self.invalid_limit {
             self.invalid_limit = false;
             self.remaining = Some(0);
@@ -84,17 +90,24 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 self.remaining = Some(0);
                 return Some(Err(error));
             }
-            let input = self.source.next()?;
+            let Some(input) = self.source.next() else {
+                // A generic source is not guaranteed to be fused: once a
+                // pipeline reports EOF, never poll its source again.
+                self.stopped = true;
+                return None;
+            };
             let result: Result<Batch> = (|| {
                 let mut batch = input?;
                 if let Some(metrics) = &self.metrics {
                     metrics.record_input(batch.num_rows() as u64)?;
                 }
-                for predicate in &self.predicates {
-                    batch = filter::filter(&batch, predicate)?;
-                }
-                for selections in &self.projections {
-                    batch = project::project(&batch, selections)?;
+                // Respect operator order for aliases introduced by an earlier
+                // projection and referenced by a later filter.
+                for step in &self.steps {
+                    batch = match step {
+                        Step::Filter(predicate) => filter::filter(&batch, predicate)?,
+                        Step::Project(selections) => project::project(&batch, selections)?,
+                    };
                 }
                 let start = self.skip.min(batch.num_rows());
                 self.skip -= start;
@@ -226,5 +239,70 @@ mod consolidated_pipeline_regression_tests {
         let result = Pipeline::new([Ok(sample())].into_iter())
             .with_limit(usize::MAX, Some(2)).next().unwrap();
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod fused_pipeline_eof_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn pipeline_does_not_poll_a_nonfused_source_after_eof() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let source = std::iter::from_fn(move || {
+            let n = observed.fetch_add(1, Ordering::Relaxed);
+            if n == 0 { None::<Result<Batch>> }
+            else { panic!("polled non-fused source after EOF") }
+        });
+        let mut pipeline = Pipeline::new(source);
+        assert!(pipeline.next().is_none());
+        assert!(pipeline.next().is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod pipeline_operator_order_tests {
+    use super::*;
+    use crate::{
+        expr::BinaryOp,
+        scalar::Value,
+        schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn filter_after_projection_can_use_its_alias() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap(),
+            (0..5).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap();
+        let projected = vec![Selection::new(Expr::Column("value".into()), "renamed")];
+        let filter = Expr::binary(
+            Expr::Column("renamed".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(2)),
+        );
+        let output = Pipeline::new([Ok(input)].into_iter())
+            .with_projection(projected)
+            .with_filter(filter)
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output[0].rows().unwrap(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(4)],
+        ]);
+    }
+
+    #[test]
+    fn intervening_filter_does_not_jump_ahead_of_projection() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)]],
+        ).unwrap();
+        let output = Pipeline::new([Ok(input)].into_iter())
+            .with_projection(vec![Selection::new(Expr::Column("x".into()), "y")])
+            .with_filter(Expr::Literal(Value::Boolean(true)))
+            .with_projection(vec![Selection::new(Expr::Column("y".into()), "z")])
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output[0].schema().fields()[0].name, "z");
     }
 }

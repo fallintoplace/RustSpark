@@ -12,6 +12,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("TRANSLATE input exceeds memory budget".into()));
     }
     if from.is_empty() { return Ok(Value::Text(text.to_owned())); }
+    // Identical source and replacement positions cannot change output.
+    // Preserve the Unicode mapping cardinality budget for oversized patterns.
+    if from == to && (from.is_ascii() || from.chars().count() <= 4096) {
+        return Ok(Value::Text(text.to_owned()));
+    }
     if text.is_ascii() && from.is_ascii() && to.is_ascii() {
         const UNMAPPED: i16 = -1;
         const REMOVE: i16 = -2;
@@ -111,5 +116,20 @@ mod ascii_translate_fast_path_tests {
         assert_eq!(translated("cab", "ab", "Z"), Value::Text("cZ".into()));
         assert_eq!(translated("café", "é", "e"), Value::Text("cafe".into()));
         assert_eq!(translated("abc", "", "x"), Value::Text("abc".into()));
+    }
+}
+
+#[cfg(test)]
+mod identity_translate_fast_path_tests {
+    use super::*;
+    #[test]
+    fn leaves_text_unchanged_for_identity_mappings() {
+        let input = Value::Text("café🙂東京abc".into());
+        assert_eq!(evaluate(&[input.clone(), Value::Text("é🙂東京".into()),
+            Value::Text("é🙂東京".into())]).unwrap(), input);
+        assert_eq!(evaluate(&[Value::Text("aaa".into()), Value::Text("aa".into()),
+            Value::Text("aa".into())]).unwrap(), Value::Text("aaa".into()));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("x".into()),
+            Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }

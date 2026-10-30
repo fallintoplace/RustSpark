@@ -14,6 +14,7 @@ pub struct StageGraph {
     stages: Vec<Stage>,
     order: Vec<u64>,
     order_indices: Vec<usize>,
+    longest_chain: usize,
 }
 
 impl StageGraph {
@@ -56,10 +57,12 @@ impl StageGraph {
         }
         let mut order = Vec::with_capacity(stages.len());
         let mut order_indices = Vec::with_capacity(stages.len());
+        let mut depth = vec![1usize; stages.len()];
         while let Some(position) = ready.pop_front() {
             order.push(stages[position].id);
             order_indices.push(position);
             for &successor in &successors[position] {
+                depth[successor] = depth[successor].max(depth[position] + 1);
                 indegree[successor] -= 1;
                 if indegree[successor] == 0 {
                     ready.push_back(successor);
@@ -69,7 +72,8 @@ impl StageGraph {
         if order.len() != stages.len() {
             return Err(Error::Execution("execution stage graph contains a cycle".into()));
         }
-        Ok(Self { stages, order, order_indices })
+        let longest_chain = depth.into_iter().max().unwrap_or(0);
+        Ok(Self { stages, order, order_indices, longest_chain })
     }
 
     pub fn topological_order(&self) -> &[u64] {
@@ -77,12 +81,78 @@ impl StageGraph {
     }
 
     pub fn ready(&self, completed: &HashSet<u64>) -> Vec<u64> {
+        self.ready_excluding(completed, &HashSet::new())
+    }
+
+    /// Runnable stages that have not already been dispatched.
+    pub fn ready_excluding(
+        &self, completed: &HashSet<u64>, running: &HashSet<u64>
+    ) -> Vec<u64> {
         self.order_indices.iter().filter_map(|&index| {
             let stage = &self.stages[index];
-            (!completed.contains(&stage.id) &&
+            (!completed.contains(&stage.id) && !running.contains(&stage.id) &&
                 stage.dependencies.iter().all(|dependency| completed.contains(dependency)))
                 .then_some(stage.id)
         }).collect()
+    }
+
+    /// Dependency-ready stages ordered by longest remaining downstream chain.
+    pub fn ready_by_critical_path(&self, completed: &HashSet<u64>) -> Vec<u64> {
+        let mut successors = HashMap::<u64, Vec<u64>>::new();
+        for stage in &self.stages {
+            for &dependency in &stage.dependencies {
+                successors.entry(dependency).or_default().push(stage.id);
+            }
+        }
+        let mut depth = HashMap::<u64, usize>::new();
+        for &index in self.order_indices.iter().rev() {
+            let stage = &self.stages[index];
+            let children = successors.get(&stage.id)
+                .into_iter().flat_map(|children| children.iter());
+            let max_child = children.filter_map(|id| depth.get(id).copied())
+                .max().unwrap_or(0);
+            depth.insert(stage.id, max_child + 1);
+        }
+        let mut ready = self.ready(completed);
+        ready.sort_by_key(|id| (std::cmp::Reverse(depth[id]), *id));
+        ready
+    }
+
+    /// Return runnable stages in topology order without exceeding worker capacity.
+    /// A stage is scheduled only when all of its partitions fit the budget.
+    pub fn ready_with_partition_budget(
+        &self, completed: &HashSet<u64>, max_partitions: usize,
+    ) -> Vec<u64> {
+        let mut remaining = max_partitions;
+        self.order_indices.iter().filter_map(|&index| {
+            let stage = &self.stages[index];
+            if completed.contains(&stage.id)
+                || !stage.dependencies.iter().all(|id| completed.contains(id))
+                || stage.partitions > remaining
+            {
+                return None;
+            }
+            remaining -= stage.partitions;
+            Some(stage.id)
+        }).collect()
+    }
+
+    /// Enumerate runnable partition tasks in topological order without exceeding
+    /// the caller's scheduling window. Completed stages are not rescheduled.
+    pub fn ready_tasks(&self, completed: &HashSet<u64>, max_tasks: usize) -> Vec<(u64, usize)> {
+        let mut tasks = Vec::new();
+        for &index in &self.order_indices {
+            let stage = &self.stages[index];
+            if completed.contains(&stage.id)
+                || !stage.dependencies.iter().all(|dependency| completed.contains(dependency)) {
+                continue;
+            }
+            for partition in 0..stage.partitions {
+                if tasks.len() == max_tasks { return tasks; }
+                tasks.push((stage.id, partition));
+            }
+        }
+        tasks
     }
 
     pub fn stages(&self) -> &[Stage] {
@@ -131,16 +201,7 @@ mod tests {
 impl StageGraph {
     /// Number of stages in the longest dependency chain (zero for an empty graph).
     pub fn longest_dependency_chain(&self) -> usize {
-        let by_id: HashMap<u64, &Stage> = self.stages.iter().map(|stage| (stage.id, stage)).collect();
-        let mut depth = HashMap::new();
-        for id in &self.order {
-            let stage = by_id[id];
-            let longest_parent = stage.dependencies.iter()
-                .map(|parent| depth.get(parent).copied().unwrap_or(0))
-                .max().unwrap_or(0);
-            depth.insert(*id, longest_parent + 1);
-        }
-        depth.values().copied().max().unwrap_or(0)
+        self.longest_chain
     }
 }
 
@@ -176,5 +237,104 @@ mod ready_topology_tests {
         assert_eq!(available, graph.topological_order().iter().copied()
             .filter(|id| *id != 8).collect::<Vec<_>>());
         assert_eq!(graph.ready(&HashSet::from([1, 9])), [8]);
+    }
+}
+
+#[cfg(test)]
+mod partition_budget_ready_tests {
+    use super::*;
+
+    #[test]
+    fn excludes_incomplete_and_oversized_stages_without_starving_smaller_ones() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 4 },
+            Stage { id: 2, dependencies: vec![], partitions: 7 },
+            Stage { id: 3, dependencies: vec![], partitions: 2 },
+            Stage { id: 4, dependencies: vec![1], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_with_partition_budget(&HashSet::new(), 6), [1, 3]);
+        assert_eq!(graph.ready_with_partition_budget(&HashSet::from([1]), 2), [3]);
+        assert_eq!(graph.ready_with_partition_budget(&HashSet::from([1, 3]), 1), [4]);
+        assert!(graph.ready_with_partition_budget(&HashSet::new(), 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod native_critical_path_ready_tests {
+    use super::*;
+
+    #[test]
+    fn favors_longest_unblocked_path_with_deterministic_ties() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 50, dependencies: vec![40], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 1 },
+            Stage { id: 40, dependencies: vec![30], partitions: 1 },
+            Stage { id: 30, dependencies: vec![10], partitions: 1 },
+            Stage { id: 10, dependencies: vec![], partitions: 1 },
+            Stage { id: 21, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_by_critical_path(&HashSet::new()), [10, 20, 21]);
+        assert_eq!(graph.ready_by_critical_path(&HashSet::from([10])),
+            [30, 20, 21]);
+        assert_eq!(graph.ready_by_critical_path(&HashSet::from([10, 30, 40])),
+            [20, 21, 50]);
+        assert!(StageGraph::new(vec![]).unwrap()
+            .ready_by_critical_path(&HashSet::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cached_stage_chain_depth_tests {
+    use super::*;
+    #[test]
+    fn longest_path_tracks_diamond_dependencies() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 10, dependencies: vec![8, 9], partitions: 1 },
+            Stage { id: 8, dependencies: vec![4], partitions: 1 },
+            Stage { id: 9, dependencies: vec![4], partitions: 1 },
+            Stage { id: 4, dependencies: vec![], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.longest_dependency_chain(), 3);
+        assert_eq!(graph.longest_dependency_chain(), 3);
+        assert_eq!(StageGraph::new(vec![]).unwrap().longest_dependency_chain(), 0);
+    }
+}
+
+#[cfg(test)]
+mod inflight_stage_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn running_tasks_are_not_dispatched_again() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 30, dependencies: vec![10, 20], partitions: 3 },
+            Stage { id: 10, dependencies: vec![], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 2 },
+        ]).unwrap();
+        assert_eq!(graph.ready_excluding(&HashSet::new(), &HashSet::from([10])), [20]);
+        assert!(graph.ready_excluding(&HashSet::new(), &HashSet::from([10, 20])).is_empty());
+        assert_eq!(graph.ready_excluding(&HashSet::from([10, 20]), &HashSet::new()), [30]);
+        assert!(graph.ready_excluding(&HashSet::from([10, 20]), &HashSet::from([30])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bounded_stage_partition_tasks_tests {
+    use super::*;
+
+    #[test]
+    fn enumerates_ready_partition_tasks_in_topological_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 9, dependencies: vec![2], partitions: 3 },
+            Stage { id: 2, dependencies: vec![], partitions: 2 },
+            Stage { id: 4, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_tasks(&HashSet::new(), 3), vec![(2, 0), (2, 1), (4, 0)]);
+        assert_eq!(graph.ready_tasks(&HashSet::new(), 0), vec![]);
+        assert_eq!(graph.ready_tasks(&HashSet::from([2]), 8), vec![
+            (4, 0), (9, 0), (9, 1), (9, 2)
+        ]);
+        assert!(graph.ready_tasks(&HashSet::from([2, 4, 9]), 8).is_empty());
     }
 }

@@ -22,6 +22,7 @@ pub struct Snapshot {
 }
 
 fn charge(counter: &AtomicU64, amount: u64) -> Result<()> {
+    if amount == 0 { return Ok(()); }
     counter.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
         current.checked_add(amount)
     }).map_err(|_| Error::Execution("native query metric overflow".into()))?;
@@ -97,6 +98,18 @@ mod tests {
 }
 
 impl Snapshot {
+    /// Derive nonnegative metric changes since an earlier snapshot.
+    pub fn delta_since(self, earlier: Self) -> Result<Self> {
+        let subtract = |current: u64, old: u64| current.checked_sub(old)
+            .ok_or_else(|| Error::Execution("query metrics moved backwards".into()));
+        Ok(Self {
+            input_rows: subtract(self.input_rows, earlier.input_rows)?,
+            output_rows: subtract(self.output_rows, earlier.output_rows)?,
+            input_batches: subtract(self.input_batches, earlier.input_batches)?,
+            output_batches: subtract(self.output_batches, earlier.output_batches)?,
+        })
+    }
+
     /// Combine independent stage snapshots, rejecting counter overflow.
     pub fn merge(self, other: Self) -> Result<Self> {
         let add = |a: u64, b: u64| a.checked_add(b)
@@ -122,5 +135,42 @@ mod metrics_merge_feature_tests {
             input_rows: 105, output_rows: 22, input_batches: 4, output_batches: 2,
         });
         assert!(Snapshot { input_rows: u64::MAX, ..first }.merge(second).is_err());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_metric_deltas_tests {
+    use super::*;
+
+    #[test]
+    fn computes_interval_deltas_and_rejects_counter_regressions() {
+        let metrics = QueryMetrics::new();
+        metrics.record_input(100).unwrap();
+        let before = metrics.snapshot();
+        metrics.record_input(25).unwrap();
+        metrics.record_output(15).unwrap();
+        let after = metrics.snapshot();
+        assert_eq!(after.delta_since(before).unwrap(), Snapshot {
+            input_rows: 25, output_rows: 15, input_batches: 1, output_batches: 1,
+        });
+        assert!(before.delta_since(after).is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_row_metrics_fast_path_tests {
+    use super::*;
+    #[test]
+    fn empty_batches_increment_only_batch_counters() {
+        let metrics = QueryMetrics::new();
+        metrics.record_input(0).unwrap();
+        metrics.record_output(0).unwrap();
+        assert_eq!(metrics.snapshot(), Snapshot {
+            input_rows: 0, output_rows: 0,
+            input_batches: 1, output_batches: 1,
+        });
+        metrics.0.input_rows.store(u64::MAX, Ordering::Release);
+        metrics.record_input(0).unwrap();
+        assert_eq!(metrics.snapshot().input_batches, 2);
     }
 }

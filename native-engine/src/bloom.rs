@@ -33,7 +33,15 @@ impl BloomFilter {
     }
 
     fn probe(&self, first: u64, step: u64, seed: u32) -> usize {
-        (first.wrapping_add(u64::from(seed).wrapping_mul(step)) % self.bits as u64) as usize
+        let hash = first.wrapping_add(u64::from(seed).wrapping_mul(step));
+        // Power-of-two bitsets are common for join filters. Masking avoids
+        // a variable integer division for every Bloom probe.
+        let bit = if self.bits.is_power_of_two() {
+            hash & (self.bits as u64 - 1)
+        } else {
+            hash % self.bits as u64
+        };
+        bit as usize
     }
 
     pub fn insert(&mut self, key: &Value) {
@@ -52,7 +60,29 @@ impl BloomFilter {
         })
     }
 
+    /// Admit a native column's keys without materializing row tuples.
+    pub fn insert_batch(&mut self, keys: &[Value]) {
+        for key in keys { self.insert(key); }
+    }
+
+    /// Return one membership bit per input key in the original row order.
+    /// A true bit means a possible match, never a confirmed exact match.
+    pub fn probe_batch(&self, keys: &[Value]) -> Vec<bool> {
+        keys.iter().map(|key| self.might_contain(key)).collect()
+    }
+
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
+
+    /// Number of active bits for monitoring filter saturation.
+    pub fn bits_set(&self) -> usize {
+        self.words.iter().map(|word| word.count_ones() as usize).sum()
+    }
+
+    /// Approximate false-positive chance from observed occupancy.
+    /// This is an estimate, not a guarantee about a particular key distribution.
+    pub fn estimated_false_positive_rate(&self) -> f64 {
+        (self.bits_set() as f64 / self.bits as f64).powi(self.hashes as i32)
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +169,72 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod power_of_two_bloom_probe_tests {
+    use super::*;
+
+    #[test]
+    fn masked_and_modulo_probes_agree_for_all_hash_seeds() {
+        for bits in [1, 2, 63, 64, 65, 128, 1024, 2048] {
+            let mut filter = BloomFilter::new(bits, 7).unwrap();
+            for n in 0..128 { filter.insert(&Value::Integer(n)); }
+            for n in 0..128 { assert!(filter.might_contain(&Value::Integer(n))); }
+            let first = u64::MAX - 2;
+            let step = u64::MAX - 4;
+            for seed in 0..7 {
+                let expected = (first.wrapping_add(u64::from(seed).wrapping_mul(step))
+                    % bits as u64) as usize;
+                assert_eq!(filter.probe(first, step, seed), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bloom_occupancy_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn estimates_saturation_without_mutating_filter_membership() {
+        let mut bloom = BloomFilter::new(4096, 5).unwrap();
+        assert_eq!(bloom.bits_set(), 0);
+        assert_eq!(bloom.estimated_false_positive_rate(), 0.0);
+        for n in 0..100 {
+            bloom.insert(&Value::Integer(n));
+        }
+        let bits = bloom.bits_set();
+        assert!(bits > 0 && bits <= 4096);
+        let fpr = bloom.estimated_false_positive_rate();
+        assert!(fpr > 0.0 && fpr <= 1.0);
+        for n in 0..100 {
+            assert!(bloom.might_contain(&Value::Integer(n)));
+        }
+        let copy = bloom.clone();
+        bloom.union_with(&copy).unwrap();
+        assert_eq!(bloom.bits_set(), bits);
+        assert_eq!(bloom.estimated_false_positive_rate(), fpr);
+    }
+}
+
+#[cfg(test)]
+mod native_bloom_batch_operator_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_membership_preserves_input_order_and_sql_key_hashes() {
+        let keys = vec![
+            Value::Integer(1), Value::Integer(2), Value::Null,
+            Value::Float(-0.0), Value::Integer(2),
+        ];
+        let mut bloom = BloomFilter::new(65_536, 5).unwrap();
+        bloom.insert_batch(&keys);
+        assert_eq!(bloom.probe_batch(&keys), vec![true; keys.len()]);
+        assert!(bloom.might_contain(&Value::Float(0.0)));
+        assert_eq!(bloom.probe_batch(&[]), Vec::<bool>::new());
+        let empty = BloomFilter::new(65_536, 5).unwrap();
+        assert_eq!(empty.probe_batch(&keys), vec![false; keys.len()]);
     }
 }

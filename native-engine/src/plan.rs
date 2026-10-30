@@ -71,6 +71,63 @@ pub enum Plan {
 }
 
 impl Plan {
+    /// Count nodes in an owned native logical tree without recursive walking.
+    pub fn operator_count(&self) -> usize {
+        let mut pending = vec![self];
+        let mut count = 0usize;
+        while let Some(plan) = pending.pop() {
+            count += 1;
+            match plan {
+                Self::Scan { .. } => {}
+                Self::Filter { input, .. }
+                | Self::Project { input, .. }
+                | Self::Aggregate { input, .. }
+                | Self::Sort { input, .. }
+                | Self::Limit { input, .. }
+                | Self::Distinct { input } => pending.push(input),
+                Self::Join { left, right, .. }
+                | Self::CrossJoin { left, right }
+                | Self::UnionAll { left, right }
+                | Self::Intersect { left, right }
+                | Self::IntersectAll { left, right }
+                | Self::ExceptAll { left, right }
+                | Self::Except { left, right } => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+            }
+        }
+        count
+    }
+
+    /// Return all distinct native table scan dependencies in lexical order.
+    pub fn scanned_tables(&self) -> Vec<&str> {
+        let mut pending = vec![self];
+        let mut names = std::collections::BTreeSet::new();
+        while let Some(plan) = pending.pop() {
+            match plan {
+                Self::Scan { table } => { names.insert(table.as_str()); }
+                Self::Filter { input, .. }
+                | Self::Project { input, .. }
+                | Self::Aggregate { input, .. }
+                | Self::Sort { input, .. }
+                | Self::Limit { input, .. }
+                | Self::Distinct { input } => pending.push(input),
+                Self::Join { left, right, .. }
+                | Self::CrossJoin { left, right }
+                | Self::UnionAll { left, right }
+                | Self::Intersect { left, right }
+                | Self::IntersectAll { left, right }
+                | Self::ExceptAll { left, right }
+                | Self::Except { left, right } => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+            }
+        }
+        names.into_iter().collect()
+    }
+
     pub fn scan(table: impl Into<String>) -> Self {
         Self::Scan {
             table: table.into(),
@@ -115,5 +172,24 @@ mod tests {
                 count: Some(5),
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod native_plan_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn counts_operations_and_deduplicates_scan_dependencies() {
+        let plan = Plan::UnionAll {
+            left: Box::new(Plan::scan("sales").limit(0, Some(10))),
+            right: Box::new(Plan::CrossJoin {
+                left: Box::new(Plan::scan("customers")),
+                right: Box::new(Plan::scan("sales")),
+            }),
+        };
+        assert_eq!(plan.operator_count(), 6);
+        assert_eq!(plan.scanned_tables(), vec!["customers", "sales"]);
+        assert_eq!(Plan::scan("alone").operator_count(), 1);
     }
 }

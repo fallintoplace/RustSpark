@@ -24,6 +24,15 @@ fn word_count_type(types: &[DataType]) -> Result<DataType> {
 }
 fn word_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.is_ascii() {
+        let mut count = 0_i64;
+        let mut in_word = false;
+        for byte in input.bytes() {
+            if byte.is_ascii_whitespace() { in_word = false; }
+            else if !in_word { count += 1; in_word = true; }
+        }
+        return Ok(Value::Integer(count));
+    }
     let count = i64::try_from(input.split_whitespace().count())
         .map_err(|_| Error::Execution("WORD_COUNT overflow".into()))?;
     Ok(Value::Integer(count))
@@ -59,6 +68,19 @@ mod word_count_extension_tests {
         assert_eq!(word_count(&[Value::Text(" one\t two \n three ".into())]).unwrap(), Value::Integer(3));
         assert_eq!(word_count(&[Value::Text("".into())]).unwrap(), Value::Integer(0));
         assert_eq!(word_count(&[Value::Text("東京\u{00A0}é".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_word_count_scan_tests {
+    use super::*;
+    #[test]
+    fn whitespace_and_utf8_word_counts_stay_equivalent() {
+        let repeated = "one\t two\r\nthree ".repeat(20_000);
+        assert_eq!(word_count(&[Value::Text(repeated)]).unwrap(), Value::Integer(60_000));
+        assert_eq!(word_count(&[Value::Text(" a\x0bb\x0cc ".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(word_count(&[Value::Text("東京\u{00a0}é".into())]).unwrap(), Value::Integer(2));
         assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
     }
 }
