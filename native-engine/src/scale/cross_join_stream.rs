@@ -8,16 +8,6 @@ const MAX_BUILD_ROWS: usize = 100_000;
 const MAX_BUILD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OUTPUT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
-fn bytes(values: &[Value]) -> usize {
-    values.iter().fold(
-        64usize.saturating_add(values.len().saturating_mul(std::mem::size_of::<Value>())),
-        |size, value| match value {
-            Value::Text(text) => size.saturating_add(text.len()),
-            _ => size,
-        },
-    )
-}
-
 pub struct CrossJoinStream {
     left: BatchStream,
     left_schema: Schema,
@@ -59,7 +49,7 @@ impl CrossJoinStream {
                     return Err(Error::Execution("stream cross join build row budget exceeded".into()));
                 }
                 let values = batch.row(row)?;
-                let footprint = bytes(&values);
+                let footprint = super::row_footprint::footprint(values.iter());
                 size = size.checked_add(footprint)
                     .filter(|size| *size <= MAX_BUILD_BYTES)
                     .ok_or_else(|| Error::Execution("stream cross join build byte budget exceeded".into()))?;
@@ -102,7 +92,8 @@ impl CrossJoinStream {
                 }
             }
             let left = self.current_left.as_ref().expect("initialized left row");
-            let next_bytes = bytes(left).saturating_add(self.right_bytes[self.right_row]);
+            let next_bytes = super::row_footprint::footprint(left.iter())
+                .saturating_add(self.right_bytes[self.right_row]);
             if next_bytes > MAX_OUTPUT_BATCH_BYTES {
                 return Err(Error::Execution("stream cross join output row byte budget exceeded".into()));
             }

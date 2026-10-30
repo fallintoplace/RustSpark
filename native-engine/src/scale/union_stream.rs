@@ -170,13 +170,8 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     self.stopped = true;
                     return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
                 }
-                let footprint = columns.iter().fold(
-                    64usize.saturating_add(columns.len().saturating_mul(
-                        std::mem::size_of::<crate::scalar::Value>())),
-                    |total, column| match &column[row] {
-                        crate::scalar::Value::Text(text) => total.saturating_add(text.len()),
-                        _ => total,
-                    }
+                let footprint = super::row_footprint::footprint(
+                    columns.iter().map(|column| &column[row])
                 );
                 let next_total = self.retained_bytes.checked_add(footprint);
                 if next_total.is_none_or(|bytes| bytes > self.max_bytes) {

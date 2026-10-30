@@ -40,16 +40,6 @@ fn convert_row(batch: &Batch, index: usize, schema: &Schema) -> Result<Vec<Value
     Ok(values)
 }
 
-fn footprint(values: &[Value]) -> usize {
-    values.iter().fold(
-        64usize.saturating_add(values.len().saturating_mul(std::mem::size_of::<Value>())),
-        |total, value| match value {
-            Value::Text(text) => total.saturating_add(text.len()),
-            _ => total,
-        },
-    )
-}
-
 pub struct SetStream {
     left: BatchStream,
     left_schema: Schema,
@@ -92,7 +82,7 @@ impl SetStream {
                         *entry.get_mut() = next;
                     }
                     Entry::Vacant(entry) => {
-                        let bytes = footprint(entry.key());
+                        let bytes = super::row_footprint::footprint(entry.key().iter());
                         retained_bytes = retained_bytes.checked_add(bytes)
                             .filter(|size| *size <= max_bytes && !at_limit)
                             .ok_or_else(|| Error::Execution("stream set memory budget exceeded".into()))?;
