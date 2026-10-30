@@ -457,7 +457,9 @@ mod encoded_wire_budget_regression_tests {
 
         let mut bytes = 0;
         charge_wire_bytes(&mut bytes, 5).unwrap();
-        let mut stream = &2_u32.to_le_bytes()[..];
+        assert_eq!(bytes, 5);
+        let length = 2_u32.to_le_bytes();
+        let mut stream = &length[..];
         let error = read_text_bounded(&mut stream, &mut used).unwrap_err();
         assert!(error.to_string().contains("spill batch exceeds byte limit"));
     }
