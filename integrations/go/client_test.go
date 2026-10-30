@@ -108,3 +108,16 @@ func TestQueryOneBoundsCardinality(t *testing.T) {
         t.Fatal("expected error for multiple rows")
     }
 }
+
+func TestStderrBudgetStopsUnboundedDiagnostics(t *testing.T) {
+    output := boundedStderr()
+    if _, err := output.Write(bytes.Repeat([]byte("x"), maxStderrBytes)); err != nil {
+        t.Fatal(err)
+    }
+    if _, err := output.Write([]byte("z")); !errors.Is(err, errOutputLimit) {
+        t.Fatalf("expected stderr limit error, got %v", err)
+    }
+    if output.Len() != maxStderrBytes {
+        t.Fatalf("expected %d buffered diagnostic bytes, got %d", maxStderrBytes, output.Len())
+    }
+}
