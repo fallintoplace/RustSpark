@@ -126,7 +126,9 @@ fn execute_inner(
             };
             let source = execute_inner(source, catalog, options, depth + 2, guard)?;
             guard.check()?;
-            crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            crate::topk::top_k_offset_checked(
+                &source, keys, *offset, *count, || guard.check(),
+            )?
         },
         Plan::Limit { input, offset, count } => {
             // A LIMIT over a scan must not materialize and budget the whole input.
