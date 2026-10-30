@@ -11,6 +11,10 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
         return true;
     }
     match predicate {
+        // WHERE FALSE and WHERE NULL cannot return rows regardless of bounds.
+        Expr::Literal(Value::Boolean(false) | Value::Null) => true,
+        Expr::Not(inner) if matches!(&**inner,
+            Expr::Literal(Value::Boolean(true) | Value::Null)) => true,
         Expr::IsNull(inner) if matches!(&**inner, Expr::Column(name) if name.eq_ignore_ascii_case(column)) => {
             stats.nulls == 0
         }
@@ -108,6 +112,12 @@ pub fn can_skip_columns(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
     predicate: &Expr,
 ) -> bool {
+    // Constant false/unknown predicates do not need any metadata.
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) ||
+        matches!(predicate, Expr::Not(inner)
+            if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
+        return true;
+    }
     // Inconsistent metadata is not proof that any row can be skipped.
     if let Some(first) = stats.values().next() {
         if stats.values().any(|column| column.rows != first.rows) {
@@ -165,5 +175,27 @@ mod inconsistent_column_statistics_tests {
         let predicate = Expr::binary(Expr::Column("value".into()),
             BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(2)));
         assert!(!can_skip_columns(&stats, &predicate));
+    }
+}
+
+#[cfg(test)]
+mod constant_false_partition_pruning_tests {
+    use super::*;
+
+    #[test]
+    fn constants_skip_without_statistics_but_true_never_skips() {
+        let empty = std::collections::HashMap::new();
+        let false_predicate = Expr::Literal(Value::Boolean(false));
+        let null_predicate = Expr::Literal(Value::Null);
+        let true_predicate = Expr::Literal(Value::Boolean(true));
+        assert!(can_skip_columns(&empty, &false_predicate));
+        assert!(can_skip_columns(&empty, &null_predicate));
+        assert!(!can_skip_columns(&empty, &true_predicate));
+        let not_true = Expr::Not(Box::new(true_predicate.clone()));
+        assert!(can_skip_columns(&empty, &not_true));
+        let and = Expr::binary(true_predicate.clone(), BinaryOp::And, false_predicate);
+        assert!(can_skip_columns(&empty, &and));
+        let or = Expr::binary(true_predicate, BinaryOp::Or, null_predicate);
+        assert!(!can_skip_columns(&empty, &or));
     }
 }

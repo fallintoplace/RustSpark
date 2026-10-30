@@ -27,6 +27,11 @@ impl MemoryPool {
         self.used.load(Ordering::Acquire)
     }
 
+    /// Snapshot of unreserved capacity. Concurrent reservations may change it.
+    pub fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.used())
+    }
+
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation> {
         self.charge(bytes)?;
         Ok(Reservation {
@@ -203,5 +208,26 @@ mod atomic_reservation_consolidation_tests {
         let big = MemoryPool::new(usize::MAX);
         assert!(reserve_many(&big, &[usize::MAX, 1]).is_err());
         assert_eq!(big.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod memory_pool_available_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn remaining_capacity_tracks_reserve_resize_and_release() {
+        let pool = MemoryPool::new(100);
+        assert_eq!(pool.remaining(), 100);
+        let mut guard = pool.reserve(60).unwrap();
+        assert_eq!(pool.remaining(), 40);
+        guard.resize(75).unwrap();
+        assert_eq!(pool.remaining(), 25);
+        assert!(guard.resize(101).is_err());
+        assert_eq!(pool.remaining(), 25);
+        drop(guard);
+        assert_eq!(pool.remaining(), 100);
+        let zero = MemoryPool::new(0);
+        assert_eq!(zero.remaining(), 0);
     }
 }

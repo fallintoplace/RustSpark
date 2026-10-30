@@ -24,7 +24,9 @@ pub struct FileCatalog {
 }
 
 fn normalized(name: &str) -> Result<Cow<'_, str>> {
-    if name.is_empty() || !name.bytes().all(|c|
+    if !name.as_bytes().first().is_some_and(|byte|
+        byte.is_ascii_alphabetic() || *byte == b'_'
+    ) || !name.bytes().all(|c|
         c.is_ascii_alphanumeric() || c == b'_'
     ) {
         return Err(Error::Schema("expected simple ASCII table identifier".into()));
@@ -159,5 +161,23 @@ mod borrowed_file_catalog_key_perf_tests {
         catalog.register_csv("SALES", "unused.csv", schema, 100).unwrap();
         assert!(catalog.get("sales").is_ok());
         assert!(catalog.get("Sales").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod catalog_identifier_prefix_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn rejects_digit_prefixes_that_sql_cannot_name() {
+        let mut catalog = FileCatalog::new();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        for invalid in ["1table", "2026", "", "-invalid"] {
+            assert!(catalog.register_csv(invalid, "unused.csv",
+                schema.clone(), 100).is_err());
+        }
+        catalog.register_csv("_2026", "unused.csv", schema, 100).unwrap();
+        assert!(catalog.get("_2026").is_ok());
     }
 }
