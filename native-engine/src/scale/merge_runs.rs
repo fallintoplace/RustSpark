@@ -54,6 +54,24 @@ fn compare_value(a: &Value, b: &Value, key: &Key) -> Ordering {
     crate::sort::compare_values(a, b, key.descending, key.nulls_first)
 }
 
+fn bind_sort_keys(schema: &Schema, keys: &[SortKey]) -> Result<Vec<Key>> {
+    if keys.is_empty() {
+        return Err(Error::Execution("external merge needs at least one sort key".into()));
+    }
+    let mut selected = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Expr::Column(name) = &key.expression else {
+            return Err(Error::Unsupported("external merge requires column sort keys".into()));
+        };
+        selected.push(Key {
+            column: schema.column(name)?,
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        });
+    }
+    Ok(selected)
+}
+
 pub struct RunMerger {
     runs: Vec<InputRun>,
     schema: Schema,
@@ -75,20 +93,7 @@ impl RunMerger {
             input_batch_rows > 65_536 || output_batch_rows > 65_536 {
             return Err(Error::Execution("invalid external sort fan-in or batch size".into()));
         }
-        if keys.is_empty() {
-            return Err(Error::Execution("external merge needs at least one sort key".into()));
-        }
-        let mut selected = Vec::new();
-        for key in keys {
-            let Expr::Column(name) = &key.expression else {
-                return Err(Error::Unsupported("external merge requires column sort keys".into()));
-            };
-            selected.push(Key {
-                column: schema.column(name)?,
-                descending: key.descending,
-                nulls_first: key.nulls_first,
-            });
-        }
+        let selected = bind_sort_keys(&schema, keys)?;
         let mut runs = Vec::new();
         for path in paths {
             let reader = SpillReader::new(
