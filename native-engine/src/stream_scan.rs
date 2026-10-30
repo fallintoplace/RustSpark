@@ -185,7 +185,7 @@ impl Iterator for WindowedScan<'_> {
             let offset = self.skip;
             self.skip = 0;
             self.remaining -= count;
-            return Some(crate::limit::limit(&batch, offset, Some(count)));
+            return Some(crate::limit::limit_owned(batch, offset, Some(count)));
         }
     }
 }
@@ -266,5 +266,30 @@ mod constant_true_scan_perf_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(constant, unfiltered);
         assert_eq!(constant.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 1]);
+    }
+}
+
+#[cfg(test)]
+mod native_owned_window_scan_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn full_and_partial_windows_preserve_nullable_text() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text("first".repeat(512))],
+            vec![Value::Null],
+            vec![Value::Text("last".into())],
+        ]).unwrap();
+        let windows = scan_window(&batch, None, &[], 2, 0, 3).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(windows.iter().flat_map(|b| b.rows().unwrap())
+            .collect::<Vec<_>>(), batch.rows().unwrap());
+        let middle = scan_window(&batch, None, &[], 2, 1, 1).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(middle.iter().flat_map(|b| b.rows().unwrap())
+            .collect::<Vec<_>>(), vec![vec![Value::Null]]);
     }
 }
