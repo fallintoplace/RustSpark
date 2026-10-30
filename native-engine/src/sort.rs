@@ -49,12 +49,27 @@ pub(crate) fn compare_values(left: &Value, right: &Value, descending: bool, null
 }
 
 pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
+    sort_checked(batch, keys, || Ok(()))
+}
+
+pub fn sort_checked(
+    batch: &Batch, keys: &[SortKey], mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     if keys.is_empty() { return Ok(batch.clone()); }
-    sort_range(batch, keys, 0, batch.num_rows())
+    sort_range_checked(batch, keys, 0, batch.num_rows(), || check())
 }
 
 /// Sort a bounded row window without copying the input batch first.
 pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Result<Batch> {
+    sort_range_checked(batch, keys, start, end, || Ok(()))
+}
+
+pub fn sort_range_checked(
+    batch: &Batch, keys: &[SortKey], start: usize, end: usize,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    check()?;
     if start > end || end > batch.num_rows() {
         return Err(crate::Error::Execution("invalid sort row window".into()));
     }
@@ -81,12 +96,14 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
             }
             Ordering::Equal
         });
+        check()?;
         return batch.take(&indices);
     }
     let mut key_columns = Vec::with_capacity(keys.len());
     for key in keys {
         let mut values = Vec::with_capacity(end - start);
         for row in start..end {
+            if (row - start) % 1024 == 0 { check()?; }
             values.push(key.expression.evaluate(batch, row)?);
         }
         key_columns.push(values);
@@ -102,6 +119,7 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
         Ordering::Equal
     });
     for index in &mut indices { *index += start; }
+    check()?;
     batch.take(&indices)
 }
 
@@ -291,5 +309,31 @@ mod singleton_column_sort_tests {
         assert!(sort_range(&batch,
             &[SortKey::ascending(Expr::Column("unknown".into()))], 1, 1).is_err());
         assert_eq!(sort_range(&Batch::empty(schema), &keys, 0, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod native_sort_key_cancellation_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_sort_key_checks_cancellation_during_materialization() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..3000)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let key = SortKey::ascending(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)),
+        ));
+        let mut polls = 0;
+        let err = sort_checked(&batch, &[key.clone()], || {
+            polls += 1;
+            if polls == 3 { Err(crate::Error::Execution("sort cancelled".into())) }
+            else { Ok(()) }
+        }).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+        assert_eq!(polls, 3);
+        assert_eq!(sort(&batch, &[key]).unwrap().num_rows(), 3000);
     }
 }
