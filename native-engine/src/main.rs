@@ -168,9 +168,13 @@ fn print_header(schema: &Schema, output: &mut impl Write) -> Result<()> {
 
 fn print_csv_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
     for row_idx in 0..batch.num_rows() {
-        let row = batch.row(row_idx)?;
-        let line = row.iter().map(csv_value).collect::<Vec<_>>().join(",");
-        writeln!(output, "{line}")?;
+        // Read borrowed column values instead of cloning a full row and
+        // building a second vector of rendered fields for every output row.
+        for index in 0..batch.schema().len() {
+            if index > 0 { output.write_all(b",")?; }
+            output.write_all(csv_value(batch.value(row_idx, index)?).as_bytes())?;
+        }
+        output.write_all(b"\n")?;
     }
     Ok(())
 }
@@ -424,6 +428,23 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+    #[test]
+    fn columnar_csv_output_preserves_escaping_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("Hello, \"world\"".into()), Value::Integer(7)],
+            vec![Value::Null, Value::Integer(-2)],
+            vec![Value::Text("line1\nline2".into()), Value::Integer(0)],
+        ]).unwrap();
+        let mut output = Vec::new();
+        print_csv_rows(&batch, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(),
+            "\"Hello, \"\"world\"\"\",7\n,-2\n\"line1\nline2\",0\n");
     }
 
     #[test]
