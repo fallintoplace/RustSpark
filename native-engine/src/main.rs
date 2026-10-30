@@ -191,7 +191,9 @@ fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
                 Value::Integer(value) => serde_json::Value::Number((*value).into()),
                 Value::Float(value) => serde_json::Number::from_f64(*value)
                     .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                    .ok_or_else(|| Error::Execution(
+                        "nonfinite SQL float cannot be encoded as JSON".into()
+                    ))?,
                 Value::Text(value) => serde_json::Value::String(value.clone()),
             };
             record.insert(field.name.clone(), json);
@@ -424,6 +426,27 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+
+    #[test]
+    fn json_lines_reject_nonfinite_floats_instead_of_losing_values() {
+        let schema = Schema::new(vec![Field::new("measure", DataType::Float, true)]).unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let batch = Batch::from_rows(
+                schema.clone(), vec![vec![Value::Float(value)]]
+            ).unwrap();
+            let mut output = Vec::new();
+            let error = print_jsonl_rows(&batch, &mut output).unwrap_err();
+            assert!(error.to_string().contains("nonfinite SQL float"));
+            assert!(output.is_empty());
+        }
+        let valid = Batch::from_rows(
+            schema, vec![vec![Value::Float(0.5)], vec![Value::Null]]
+        ).unwrap();
+        let mut output = Vec::new();
+        print_jsonl_rows(&valid, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "{\"measure\":0.5}\n{\"measure\":null}\n");
     }
 
     #[test]
