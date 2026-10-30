@@ -10,6 +10,7 @@ use super::{
     chunks::RowBatcher, file_catalog::FileCatalog,
     stream_ops::{FilterStream, ProjectStream, LimitStream},
     union_stream::{UnionAllStream, UnionDistinctStream},
+    cross_join_stream::CrossJoinStream,
     sorted_runs::write_sorted_runs,
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
@@ -271,6 +272,13 @@ fn infer(
         }
         Plan::Limit { input, .. } |
         Plan::Distinct { input } => child(input),
+        Plan::CrossJoin { left, right } => {
+            let left_schema = child(left)?;
+            let right_schema = child(right)?;
+            Ok(join::cross_join(
+                &Batch::empty(left_schema), &Batch::empty(right_schema)
+            )?.schema().clone())
+        }
         Plan::Join { left, right, left_key, right_key, kind } => {
             let left_schema = child(left)?;
             let right_schema = child(right)?;
@@ -394,6 +402,14 @@ fn lower(
         Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
             child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
         ))),
+        Plan::CrossJoin { left, right } => {
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            Ok(Box::new(CrossJoinStream::new(
+                child(left)?, child(right)?, left_schema, right_schema,
+                options.batch_rows, control.clone(),
+            )?))
+        }
         Plan::Join { left, right, left_key, right_key, kind } => {
             // Partitioned grace_join already tracks matched build keys across
             // all probe batches. Do not downgrade RIGHT/FULL to an inner join.
