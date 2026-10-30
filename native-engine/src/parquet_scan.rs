@@ -72,6 +72,28 @@ pub fn scan_columns(
     Ok(ParquetScan { inner })
 }
 
+/// Restrict decoding to validated row-group indices.
+pub fn scan_row_groups(
+    path: impl AsRef<Path>, batch_size: usize, row_groups: &[usize],
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let count = builder.metadata().num_row_groups();
+    let mut seen = std::collections::HashSet::new();
+    for &index in row_groups {
+        if index >= count || !seen.insert(index) {
+            return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+        }
+    }
+    let inner = builder.with_row_groups(row_groups.to_vec()).with_batch_size(batch_size)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner })
+}
+
 impl Iterator for ParquetScan {
     type Item = Result<Batch>;
 
@@ -271,6 +293,40 @@ mod parquet_projection_pushdown_tests {
         assert!(scan_columns(&path, 1, &[]).is_err());
         assert!(scan_columns(&path, 1, &["label", "LABEL"]).is_err());
         assert!(scan_columns(&path, 1, &["missing"]).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_row_group_selection_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn skips_unselected_row_groups_before_reading() {
+        let path = std::env::temp_dir().join(format!("rustspark-groups-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), (0..6).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&batch).unwrap();
+        let props = WriterProperties::builder().set_max_row_group_size(2).build();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            arrow.schema(), Some(props)).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let output = scan_row_groups(&path, 2, &[0, 2]).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let rows = output.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(0)], vec![Value::Integer(1)],
+            vec![Value::Integer(4)], vec![Value::Integer(5)],
+        ]);
+        assert!(scan_row_groups(&path, 2, &[3]).is_err());
+        assert!(scan_row_groups(&path, 2, &[1, 1]).is_err());
+        assert!(scan_row_groups(&path, 0, &[0]).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
