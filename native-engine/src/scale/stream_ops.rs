@@ -78,7 +78,9 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
                 self.stopped = true;
                 return None;
             };
-            match next.and_then(|batch| project::project(&batch, &self.selections)) {
+            match next.and_then(|batch| project::project_checked(
+                &batch, &self.selections, || self.control.check(),
+            )) {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
                 Err(error) => {
@@ -337,5 +339,35 @@ mod fused_stream_operator_eof_tests {
         assert!(limited.next().is_none());
         assert!(limited.next().is_none());
         assert_eq!(limited_polls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod stream_project_after_pull_cancellation_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn cancellation_during_source_poll_stops_computed_projection() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..5000)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let control = QueryControl::default();
+        let after_pull = control.clone();
+        let input = std::iter::once_with(move || {
+            after_pull.cancel();
+            Ok(batch)
+        });
+        let projection = vec![Selection::new(
+            Expr::binary(Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1))),
+            "computed",
+        )];
+        let mut stream = ProjectStream::new(input, projection, control);
+        let error = stream.next().unwrap().unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert!(stream.next().is_none());
     }
 }
