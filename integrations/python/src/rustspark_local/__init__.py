@@ -107,7 +107,12 @@ class RustSpark:
                 if not isinstance(table, str) or not IDENTIFIER.fullmatch(table):
                     raise ValueError(f"Invalid table name: {table!r}")
             for table, path in sorted(values.items()):
-                command.extend([f"--{flag}", f"{table}={os.fspath(path)}"])
+                if not isinstance(path, (str, os.PathLike)):
+                    raise ValueError("Named source paths must be text paths")
+                file_path = os.fspath(path)
+                if not isinstance(file_path, str) or not file_path:
+                    raise ValueError("Named source paths must be nonempty text paths")
+                command.extend([f"--{flag}", f"{table}={file_path}"])
         params = named_params or {}
         if len(params) > 64:
             raise ValueError("At most 64 typed SQL parameters are supported")

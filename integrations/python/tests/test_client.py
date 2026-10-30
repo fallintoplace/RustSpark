@@ -158,5 +158,10 @@ class TypedParameterAdmissionTests(unittest.TestCase):
         }), [])
 
 
+    def test_named_table_paths_are_nonempty_text_paths(self):
+        for path in ("", b"/tmp/events.json", 17):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Named source paths"):
+                RustSpark().query("SELECT 1", json_tables={"events": path})
+
 if __name__ == "__main__":
     unittest.main()
