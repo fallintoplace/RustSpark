@@ -103,6 +103,8 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                                        check=False, timeout=process_timeout)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
+        except OSError as error:
+            raise RuntimeError("Unable to launch RustSpark Arrow export") from error
         if completed.returncode:
             raise RuntimeError(completed.stderr.strip() or "RustSpark query failed")
         yield pl.scan_ipc(result)
