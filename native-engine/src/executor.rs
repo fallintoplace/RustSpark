@@ -161,8 +161,12 @@ fn execute_inner(
         )?,
         Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
-        Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
-        Plan::ExceptAll { left, right } => set_ops::except_all(&descend(left)?, &descend(right)?)?,
+        Plan::IntersectAll { left, right } => set_ops::intersect_all_with_max_rows(
+            &descend(left)?, &descend(right)?, options.max_output_rows,
+        )?,
+        Plan::ExceptAll { left, right } => set_ops::except_all_with_max_rows(
+            &descend(left)?, &descend(right)?, options.max_output_rows,
+        )?,
         Plan::Except { left, right } => set_ops::except_distinct(&descend(left)?, &descend(right)?)?,
     };
     guard.check()?;
