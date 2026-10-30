@@ -55,7 +55,7 @@ fn stream_cli_queries_tables_reloaded_from_atomic_manifest() {
     std::fs::create_dir(&dir).unwrap();
     let source = dir.join("events.csv");
     let manifest = dir.join("catalog.json");
-    std::fs::write(&source, "id\\n1\\n2\\n").unwrap();
+    std::fs::write(&source, "id\n1\n2\n").unwrap();
     let mut catalog = FileCatalog::new();
     let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
     catalog.register_csv("events", &source, schema, 1024).unwrap();
@@ -65,6 +65,6 @@ fn stream_cli_queries_tables_reloaded_from_atomic_manifest() {
             "--sql", "SELECT id FROM events ORDER BY id"])
         .output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "id\\n1\\n2\\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "id\n1\n2\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
