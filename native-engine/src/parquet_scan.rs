@@ -17,6 +17,17 @@ pub struct ParquetSummary {
     pub columns: usize,
 }
 
+/// Read the native schema without decoding any Parquet data pages.
+pub fn file_schema(path: impl AsRef<Path>) -> Result<crate::schema::Schema> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    // Reuse native Arrow type validation with an empty batch. This also handles
+    // empty Parquet files that never yield a record batch.
+    let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
+    Ok(arrow_bridge::from_arrow(&empty)?.schema().clone())
+}
+
 pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -376,6 +387,44 @@ mod parquet_native_offset_limit_pushdown_tests {
         assert_eq!(scan_window(&path, 3, 0, 0).unwrap().count(), 0);
         assert_eq!(scan_window(&path, 3, 100, 5).unwrap().count(), 0);
         assert!(scan_window(&path, 3, usize::MAX, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod streaming_parquet_schema_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value, expr::{Expr, BinaryOp},
+        pipeline::Pipeline};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn metadata_schema_drives_bounded_native_parquet_pipeline() {
+        let path = std::env::temp_dir().join(format!(
+            "native-parquet-stream-cli-{}-{}.parquet", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let data = Batch::from_rows(schema.clone(),
+            (0..10).map(|n| vec![Value::Integer(n), Value::Text("x".into())]).collect()
+        ).unwrap();
+        let arrow = arrow_bridge::to_arrow(&data).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        assert_eq!(file_schema(&path).unwrap(), schema);
+        let rows = Pipeline::new(scan(&path, 3).unwrap())
+            .with_filter(Expr::binary(Expr::Column("n".into()), BinaryOp::GreaterEqual,
+                Expr::Literal(Value::Integer(5))))
+            .with_limit(1, Some(2))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>(),
+            vec![Value::Integer(6), Value::Integer(7)]);
         std::fs::remove_file(path).unwrap();
     }
 }

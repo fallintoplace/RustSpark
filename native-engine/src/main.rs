@@ -33,7 +33,7 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over CSV batches only.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -110,6 +110,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if csv_schema.is_some() && !stream {
         return Err(Error::Parse("--csv-schema requires --stream".into()));
     }
+    if csv_schema.is_some() && parquet.is_some() {
+        return Err(Error::Parse("--csv-schema cannot be used with Parquet input".into()));
+    }
     if sql.is_some() && sql_file.is_some() {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
@@ -122,9 +125,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     if stream && !sources.is_empty() {
         return Err(Error::Unsupported("--stream does not yet support multiple file sources".into()));
-    }
-    if stream && parquet.is_some() {
-        return Err(Error::Unsupported("--stream currently supports CSV input only".into()));
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
@@ -247,20 +247,27 @@ fn run_stream(args: &Args) -> Result<()> {
         return Err(Error::Schema(format!("unknown table: {table}")));
     }
 
-    let path = args.csv.as_ref().ok_or_else(|| Error::Unsupported("streaming requires CSV input".into()))?;
-    let input = BufReader::new(fs::File::open(path)?);
-    let csv = if let Some(spec) = &args.csv_schema {
-        CsvStream::new_typed(input, 4_096, 1024 * 1024, parse_stream_schema(spec)?)?
-    } else {
-        CsvStream::new(input, 4_096, 1024 * 1024)?
-    };
+    let (source_schema, batches): (Schema, Box<dyn Iterator<Item = Result<Batch>>>) =
+        if let Some(path) = &args.parquet {
+            (parquet_scan::file_schema(path)?, Box::new(parquet_scan::scan(path, 4096)?))
+        } else {
+            let path = args.csv.as_ref()
+                .ok_or_else(|| Error::Unsupported("streaming requires CSV or Parquet input".into()))?;
+            let input = BufReader::new(fs::File::open(path)?);
+            let csv = if let Some(spec) = &args.csv_schema {
+                CsvStream::new_typed(input, 4_096, 1024 * 1024, parse_stream_schema(spec)?)?
+            } else {
+                CsvStream::new(input, 4_096, 1024 * 1024)?
+            };
+            (csv.schema().clone(), Box::new(csv))
+        };
     let output_schema = if let Some(ref selections) = projection {
-        project::project(&Batch::empty(csv.schema().clone()), selections)?
+        project::project(&Batch::empty(source_schema.clone()), selections)?
             .schema().clone()
     } else {
-        csv.schema().clone()
+        source_schema
     };
-    let mut pipeline = Pipeline::new(csv);
+    let mut pipeline = Pipeline::new(batches);
     if let Some(predicate) = predicate {
         pipeline = pipeline.with_filter(predicate);
     }
@@ -372,7 +379,9 @@ mod tests {
         let args = ["--parquet", "data.parquet", "--csv", "data.csv", "--sql", "SELECT * FROM data"];
         assert!(parse_args(args.into_iter().map(String::from)).is_err());
         let args = ["--parquet", "data.parquet", "--sql", "SELECT * FROM data", "--stream"];
-        assert!(parse_args(args.into_iter().map(String::from)).is_err());
+        assert!(parse_args(args.into_iter().map(String::from)).unwrap().unwrap().stream);
+        let bad = ["--parquet", "data.parquet", "--stream", "--csv-schema", "x:int64", "--sql", "SELECT * FROM data"];
+        assert!(parse_args(bad.into_iter().map(String::from)).is_err());
     }
 
     #[test]
