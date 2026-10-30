@@ -30,6 +30,7 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    max_rows: Option<usize>,
 }
 
 fn usage() -> &'static str {
@@ -46,6 +47,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut max_rows = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -89,6 +91,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--max-rows" => {
+                let rows = value.parse::<usize>()
+                    .map_err(|_| Error::Parse("--max-rows requires a nonnegative integer".into()))?;
+                if max_rows.replace(rows).is_some() {
+                    return Err(Error::Parse("duplicate --max-rows".into()));
+                }
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -134,7 +143,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, max_rows }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -277,6 +286,9 @@ fn run_stream(args: &Args) -> Result<()> {
     if let Some((offset, count)) = limit {
         pipeline = pipeline.with_limit(offset, count);
     }
+    if let Some(rows) = args.max_rows {
+        pipeline = pipeline.with_limit(0, Some(rows));
+    }
 
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
@@ -346,6 +358,9 @@ fn run() -> Result<()> {
     }
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
+    let batch = if let Some(rows) = args.max_rows {
+        batch.slice_rows(0, rows.min(batch.num_rows()))?
+    } else { batch };
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
@@ -424,6 +439,23 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+
+    #[test]
+    fn native_cli_row_cap_parses_and_rejects_invalid_counts() {
+        let valid = parse_args([
+            "--csv", "unused.csv", "--sql", "SELECT * FROM data", "--max-rows", "0"
+        ].into_iter().map(String::from)).unwrap().unwrap();
+        assert_eq!(valid.max_rows, Some(0));
+        for count in ["-1", "not-a-number", "1.5"] {
+            let args = ["--csv", "unused.csv", "--sql", "SELECT * FROM data",
+                "--max-rows", count];
+            assert!(parse_args(args.into_iter().map(String::from)).is_err());
+        }
+        let duplicate = ["--csv", "unused.csv", "--sql", "SELECT * FROM data",
+            "--max-rows", "1", "--max-rows", "2"];
+        assert!(parse_args(duplicate.into_iter().map(String::from)).is_err());
     }
 
     #[test]
