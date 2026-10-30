@@ -105,7 +105,7 @@ where L: IntoIterator<Item = Result<Batch>>,
         }
         let id = JOIN_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-join-{}-{id}.rspill", std::process::id()));
-        let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+        let file = open_private_spill(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
         // With no build rows, these join kinds cannot emit a match. The
@@ -419,5 +419,36 @@ mod empty_build_grace_join_short_circuit_tests {
             drop(files);
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+fn open_private_spill(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(all(test, unix))]
+mod private_spill_permissions_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_files_are_not_world_readable() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-private-grace_join-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let file = open_private_spill(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }
