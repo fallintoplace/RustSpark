@@ -66,6 +66,10 @@ impl PartitionWriter {
         if count == 0 || count > 4096 || batch_rows == 0 || keys.is_empty() {
             return Err(Error::Execution("invalid hash partition count, keys or batch size".into()));
         }
+        if batch_rows > 65_536 ||
+            batch_rows.checked_mul(schema.len()).is_none_or(|cells| cells > 4_000_000) {
+            return Err(Error::Execution("partition spill batch exceeds row or cell budget".into()));
+        }
         let key_columns = keys.iter().map(|name| schema.column(name))
             .collect::<Result<Vec<_>>>()?;
         let mut owned = PartitionFiles { paths: Vec::with_capacity(count), schema };
@@ -367,5 +371,25 @@ mod single_shard_partition_zero_copy_tests {
         drop(reader);
         drop(files);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod partition_spill_preflight_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn wide_or_unbounded_batches_fail_before_creating_files() {
+        let schema = Schema::new((0..64).map(|n|
+            Field::new(format!("c{n}"), DataType::Integer, false)
+        ).collect()).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "nonexistent-native-partition-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        assert!(PartitionWriter::new(&directory, schema.clone(), &["c0"], 1, 65_536).is_err());
+        assert!(PartitionWriter::new(&directory, schema, &["c0"], 1, usize::MAX).is_err());
+        assert!(!directory.exists());
     }
 }
