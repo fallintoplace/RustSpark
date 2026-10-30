@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 use crate::{Error, Result};
 
 const MAGIC: &[u8; 4] = b"RSP2";
+const HEADER_BYTES: usize = 32;
+const CHECKSUM_OFFSET: usize = 28;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -86,14 +88,14 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
     }
     let len = u32::try_from(frame.payload.len())
         .map_err(|_| Error::Execution("exchange frame exceeds wire length".into()))?;
-    let mut header = [0u8; 32];
+    let mut header = [0u8; HEADER_BYTES];
     header[..4].copy_from_slice(MAGIC);
     header[4..12].copy_from_slice(&frame.stage.to_le_bytes());
     header[12..20].copy_from_slice(&frame.task.to_le_bytes());
     header[20..24].copy_from_slice(&frame.attempt.to_le_bytes());
-    header[24..28].copy_from_slice(&len.to_le_bytes());
-    let frame_checksum = checksum_parts(&header[..28], &frame.payload);
-    header[28..32].copy_from_slice(&frame_checksum.to_le_bytes());
+    header[24..CHECKSUM_OFFSET].copy_from_slice(&len.to_le_bytes());
+    let frame_checksum = checksum_parts(&header[..CHECKSUM_OFFSET], &frame.payload);
+    header[CHECKSUM_OFFSET..].copy_from_slice(&frame_checksum.to_le_bytes());
     output.write_all(&header)?;
     output.write_all(&frame.payload)?;
     Ok(())
@@ -126,7 +128,7 @@ pub fn write_frames_limited(
 
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
-    let mut header = [0u8; 32];
+    let mut header = [0u8; HEADER_BYTES];
     if input.read(&mut header[..1])? == 0 { return Ok(None); }
     input.read_exact(&mut header[1..])?;
     if &header[..4] != MAGIC {
@@ -135,14 +137,14 @@ pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Fram
     let stage = u64::from_le_bytes(header[4..12].try_into().expect("fixed u64 header"));
     let task = u64::from_le_bytes(header[12..20].try_into().expect("fixed u64 header"));
     let attempt = u32::from_le_bytes(header[20..24].try_into().expect("fixed u32 header"));
-    let len = u32::from_le_bytes(header[24..28].try_into().expect("fixed u32 header")) as usize;
-    let expected_checksum = u32::from_le_bytes(header[28..32].try_into().expect("fixed u32 header"));
+    let len = u32::from_le_bytes(header[24..CHECKSUM_OFFSET].try_into().expect("fixed u32 header")) as usize;
+    let expected_checksum = u32::from_le_bytes(header[CHECKSUM_OFFSET..].try_into().expect("fixed u32 header"));
     if len > max_bytes {
         return Err(Error::Execution("received exchange frame exceeds memory budget".into()));
     }
     let mut payload = vec![0; len];
     input.read_exact(&mut payload)?;
-    if checksum_parts(&header[..28], &payload) != expected_checksum {
+    if checksum_parts(&header[..CHECKSUM_OFFSET], &payload) != expected_checksum {
         return Err(Error::Execution("exchange frame checksum mismatch".into()));
     }
     Ok(Some(Frame { stage, task, attempt, payload }))
