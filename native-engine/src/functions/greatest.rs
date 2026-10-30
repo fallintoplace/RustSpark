@@ -1,44 +1,11 @@
 use super::*;
 
 pub(super) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
-    check_arity("GREATEST", args, 2, 64)?;
-    let mut output = None;
-    for expression in args {
-        if matches!(expression, Expr::Literal(Value::Null)) { continue; }
-        let next = expression.output_type(schema)?;
-        output = Some(match (output, next) {
-            (None, kind) => kind,
-            (Some(kind), next) if kind == next => kind,
-            (Some(DataType::Integer), DataType::Float)
-            | (Some(DataType::Float), DataType::Integer) => DataType::Float,
-            _ => return Err(Error::Type("GREATEST values require compatible types".into())),
-        });
-    }
-    Ok(output.unwrap_or(DataType::Text))
+    super::extrema::output_type("GREATEST", args, schema)
 }
 
 pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
-    let target = output_type(args, batch.schema())?;
-    let mut greatest: Option<Value> = None;
-    for arg in args {
-        let candidate = arg.evaluate(batch, row)?;
-        if candidate.is_null() { continue; }
-        match &mut greatest {
-            Some(value) => {
-                let comparison = candidate.sql_compare(value)?
-                    .ok_or_else(|| Error::Type("GREATEST cannot order NaN".into()))?;
-                if comparison == std::cmp::Ordering::Greater {
-                    *value = candidate;
-                }
-            }
-            None => greatest = Some(candidate),
-        }
-    }
-    let value = greatest.unwrap_or(Value::Null);
-    Ok(match (target, value) {
-        (DataType::Float, Value::Integer(n)) => Value::Float(n as f64),
-        (_, value) => value,
-    })
+    super::extrema::eval("GREATEST", std::cmp::Ordering::Greater, args, batch, row)
 }
 
 #[cfg(test)]
