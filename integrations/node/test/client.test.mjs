@@ -79,6 +79,7 @@ test("SQL file and deterministic table and parameter ordering", () => {
 test("rejects oversized or excessive named parameters before spawning", () => {
   const client = new RustSpark({ runner: () => { throw Error("should not run"); } });
   assert.throws(() => client.query("SELECT 1", { namedParams: { p: "utf8:" + "x".repeat(8192) } }), TypeError);
+  assert.throws(() => client.query("SELECT 1", { namedParams: { p: "utf8:" + "é".repeat(4500) } }), TypeError);
   assert.throws(() => client.query("SELECT 1", {
     namedParams: Object.fromEntries(Array.from({ length: 65 }, (_, index) => ["p" + index, "int64:1"])),
   }), RangeError);
@@ -112,4 +113,16 @@ test("rejects int64 SQL results that JSON.parse would round", () => {
   assert.deepEqual(valid.query("SELECT id FROM t"), [
     { id: 9007199254740991 }, { id: -9007199254740991 }, { float: 1.25 },
   ]);
+});
+
+test("named parameter length is measured in UTF-8 bytes", () => {
+  let argv;
+  const client = new RustSpark({ runner: (_binary, args) => {
+    argv = args;
+    return { status: 0, stdout: "[]" };
+  } });
+  const largest = "utf8:" + "é".repeat(4093);
+  assert.equal(Buffer.byteLength(largest, "utf8"), 8191);
+  assert.deepEqual(client.query("SELECT 1", { namedParams: { p: largest } }), []);
+  assert.ok(argv.includes("p=" + largest));
 });
