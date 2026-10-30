@@ -175,6 +175,7 @@ impl Parser {
             Token::Operator(op) if op == "-" => Some((BinaryOp::Subtract, 4)),
             Token::Symbol('*') => Some((BinaryOp::Multiply, 5)),
             Token::Operator(op) if op == "/" => Some((BinaryOp::Divide, 5)),
+            Token::Operator(op) if op == "%" => Some((BinaryOp::Modulo, 5)),
             _ => None,
         }
     }
@@ -1468,5 +1469,25 @@ mod parser_token_move_perf_tests {
         assert_eq!(parser.next(), Some(Token::Word("sales".into())));
         assert_eq!(parser.next(), None);
         assert!(parse_sql("SELECT city FROM sales").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod native_sql_modulo_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn parses_and_executes_integer_modulo_with_precedence() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(7)], vec![Value::Integer(-7)],
+        ]).unwrap();
+        catalog.register("numbers", input).unwrap();
+        let plan = parse_sql("SELECT n % 3 + 1 AS answer FROM numbers").unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)], vec![Value::Integer(0)]]);
     }
 }
