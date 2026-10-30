@@ -14,6 +14,11 @@ fn factorial(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(FACTORIALS[value as usize]))
 }
 
+fn gcd_magnitude(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 { (a, b) = (b, a % b); }
+    a
+}
+
 fn lcm_type(types: &[DataType]) -> Result<DataType> {
     if types.iter().all(|kind| *kind == DataType::Integer) { Ok(DataType::Integer) }
     else { Err(Error::Type("LCM requires integer inputs".into())) }
@@ -22,11 +27,10 @@ fn lcm(args: &[Value]) -> Result<Value> {
     let Some(a) = super::integer(&args[0])? else { return Ok(Value::Null); };
     let Some(b) = super::integer(&args[1])? else { return Ok(Value::Null); };
     if a == 0 || b == 0 { return Ok(Value::Integer(0)); }
-    let a = u128::from(a.unsigned_abs());
-    let b = u128::from(b.unsigned_abs());
-    let (mut x, mut y) = (a, b);
-    while y != 0 { (x, y) = (y, x % y); }
-    let multiple = (a / x).checked_mul(b)
+    let a = a.unsigned_abs();
+    let b = b.unsigned_abs();
+    let divisor = u128::from(gcd_magnitude(a, b));
+    let multiple = (u128::from(a) / divisor).checked_mul(u128::from(b))
         .ok_or_else(|| Error::Execution("LCM integer overflow".into()))?;
     i64::try_from(multiple).map(Value::Integer)
         .map_err(|_| Error::Execution("LCM result exceeds BIGINT range".into()))
@@ -39,9 +43,8 @@ fn gcd_type(types: &[DataType]) -> Result<DataType> {
 fn gcd(args: &[Value]) -> Result<Value> {
     let Some(a) = super::integer(&args[0])? else { return Ok(Value::Null); };
     let Some(b) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
-    while b != 0 { (a, b) = (b, a % b); }
-    i64::try_from(a).map(Value::Integer)
+    let divisor = gcd_magnitude(a.unsigned_abs(), b.unsigned_abs());
+    i64::try_from(divisor).map(Value::Integer)
         .map_err(|_| Error::Execution("GCD exceeds BIGINT range".into()))
 }
 
@@ -96,5 +99,22 @@ mod gcd_native_feature_tests {
         assert!(gcd(&[Value::Integer(i64::MIN), Value::Integer(0)]).is_err());
         assert_eq!(gcd(&[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
         assert!(gcd_type(&[DataType::Text, DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gcd_shared_math_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_gcd_lcm_signs_and_overflow_errors() {
+        assert_eq!(gcd(&[Value::Integer(-12), Value::Integer(18)]).unwrap(),
+            Value::Integer(6));
+        assert_eq!(lcm(&[Value::Integer(-12), Value::Integer(18)]).unwrap(),
+            Value::Integer(36));
+        assert_eq!(gcd(&[Value::Integer(0), Value::Integer(0)]).unwrap(),
+            Value::Integer(0));
+        assert!(gcd(&[Value::Integer(i64::MIN), Value::Integer(0)]).is_err());
+        assert!(lcm(&[Value::Integer(i64::MAX), Value::Integer(2)]).is_err());
     }
 }
