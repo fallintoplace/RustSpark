@@ -10,6 +10,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
     let Some(count) = super::integer(&args[2])? else { return Ok(Value::Null) };
     if count == 0 || delimiter.is_empty() { return Ok(Value::Text(String::new())); }
+    if count.unsigned_abs() > u64::try_from(text.len()).unwrap_or(u64::MAX) {
+        return Ok(Value::Text(text.to_owned()));
+    }
     if count == 1 {
         return Ok(Value::Text(text.split_once(delimiter).map_or(text, |(head, _)| head).to_owned()));
     }
@@ -78,6 +81,18 @@ mod split_count_extension_tests {
         assert_eq!(split_count(&[Value::Text("abc".into()), Value::Text(",".into())]).unwrap(), Value::Integer(1));
         assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text("".into())]).unwrap(), Value::Integer(2));
         assert_eq!(split_count(&[Value::Null, Value::Text(",".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod huge_substring_index_count_tests {
+    use super::*;
+    #[test]
+    fn impossible_counts_return_unmodified_text() {
+        for count in [i64::MAX, i64::MIN] {
+            assert_eq!(evaluate(&[Value::Text("a🙂b🙂c".into()), Value::Text("🙂".into()), Value::Integer(count)]).unwrap(), Value::Text("a🙂b🙂c".into()));
+        }
+        assert_eq!(evaluate(&[Value::Text("a..b".into()), Value::Text(".".into()), Value::Integer(2)]).unwrap(), Value::Text("a.".into()));
     }
 }
 
