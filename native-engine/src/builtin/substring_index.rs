@@ -10,6 +10,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
     let Some(count) = super::integer(&args[2])? else { return Ok(Value::Null) };
     if count == 0 || delimiter.is_empty() { return Ok(Value::Text(String::new())); }
+    if count.unsigned_abs() > u64::try_from(text.len()).unwrap_or(u64::MAX) {
+        return Ok(Value::Text(text.to_owned()));
+    }
     if count == 1 {
         return Ok(Value::Text(text.split_once(delimiter).map_or(text, |(head, _)| head).to_owned()));
     }
@@ -35,8 +38,15 @@ fn split_count_type(types: &[DataType]) -> Result<DataType> {
 fn split_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
-    let count = if delimiter.is_empty() { input.chars().count() }
-        else { input.match_indices(delimiter).count().saturating_add(1) };
+    let count = if delimiter.is_empty() {
+        if input.is_ascii() { input.len() } else { input.chars().count() }
+    } else if delimiter.len() == 1 && delimiter.is_ascii() {
+        let needle = delimiter.as_bytes()[0];
+        input.as_bytes().iter().filter(|&&byte| byte == needle)
+            .count().saturating_add(1)
+    } else {
+        input.match_indices(delimiter).count().saturating_add(1)
+    };
     Ok(Value::Integer(i64::try_from(count)
         .map_err(|_| Error::Execution("SPLIT_COUNT overflow".into()))?))
 }
@@ -75,5 +85,45 @@ mod split_count_extension_tests {
         assert_eq!(split_count(&[Value::Text("abc".into()), Value::Text(",".into())]).unwrap(), Value::Integer(1));
         assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text("".into())]).unwrap(), Value::Integer(2));
         assert_eq!(split_count(&[Value::Null, Value::Text(",".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod huge_substring_index_count_tests {
+    use super::*;
+    #[test]
+    fn impossible_counts_return_unmodified_text() {
+        for count in [i64::MAX, i64::MIN] {
+            assert_eq!(evaluate(&[Value::Text("a🙂b🙂c".into()), Value::Text("🙂".into()), Value::Integer(count)]).unwrap(), Value::Text("a🙂b🙂c".into()));
+        }
+        assert_eq!(evaluate(&[Value::Text("a..b".into()), Value::Text(".".into()), Value::Integer(2)]).unwrap(), Value::Text("a.".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_empty_delimiter_split_count_tests {
+    use super::*;
+    #[test]
+    fn empty_separator_counts_ascii_bytes_but_unicode_characters() {
+        assert_eq!(split_count(&[Value::Text("z".repeat(200_000)), Value::Text("".into())]).unwrap(), Value::Integer(200_000));
+        assert_eq!(split_count(&[Value::Text("é🙂".into()), Value::Text("".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(split_count(&[Value::Text("".into()), Value::Text("".into())]).unwrap(), Value::Integer(0));
+        assert_eq!(split_count(&[Value::Text("a,b,".into()), Value::Text(",".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(split_count(&[Value::Null, Value::Text("".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod single_byte_split_count_fast_path_tests {
+    use super::*;
+    #[test]
+    fn counts_ascii_separator_bytes_in_unicode_text() {
+        let f = |text: &str, separator: &str| split_count(&[
+            Value::Text(text.into()), Value::Text(separator.into()),
+        ]).unwrap();
+        assert_eq!(f("a,b,c,", ","), Value::Integer(4));
+        assert_eq!(f("é,🙂,東京", ","), Value::Integer(3));
+        assert_eq!(f("é🙂é", "é"), Value::Integer(3));
+        assert_eq!(f("hello", ","), Value::Integer(1));
     }
 }

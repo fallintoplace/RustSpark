@@ -25,6 +25,18 @@ func TestCommandEscapesNothingThroughShell(t *testing.T) {
     }
 }
 
+func TestIdentifiersRejectNewlinesAndNonASCII(t *testing.T) {
+    c := Client{}
+    for _, name := range []string{"bad\n", "bad-name", "é", "1start"} {
+        if _, err := c.arguments("SELECT 1", Options{CSVTables: map[string]string{name: "file.csv"}}); err == nil {
+            t.Fatalf("expected invalid table identifier %q to be rejected", name)
+        }
+        if _, err := c.arguments("SELECT 1", Options{NamedParams: map[string]string{name: "int64:1"}}); err == nil {
+            t.Fatalf("expected invalid parameter identifier %q to be rejected", name)
+        }
+    }
+}
+
 func TestRejectsConflictingAndInvalidInputs(t *testing.T) {
     c := Client{}
     cases := []Options{
@@ -94,5 +106,38 @@ func TestQueryOneBoundsCardinality(t *testing.T) {
     if err != nil || row["id"] != 1 { t.Fatalf("unexpected row %v: %v", row, err) }
     if _, err := oneRow([]map[string]any{{"id": 1}, {"id": 2}}); err == nil {
         t.Fatal("expected error for multiple rows")
+    }
+}
+
+func TestDecodeRowsRejectsNullAndNonObjectRows(t *testing.T) {
+    for _, raw := range []string{
+        "null", "[null]", "[{},null]", "{}", "[1]", "[true]",
+        "[{}] []", "[{}] garbage",
+    } {
+        if rows, err := decodeRows(strings.NewReader(raw)); err == nil {
+            t.Fatalf("accepted non-object JSON result %q: %#v", raw, rows)
+        }
+    }
+    for _, raw := range []string{"[]", "[{}]", "[{\"n\":1234567890123456789}]"} {
+        rows, err := decodeRows(strings.NewReader(raw))
+        if err != nil {
+            t.Fatalf("rejected valid rows %q: %v", raw, err)
+        }
+        if len(rows) == 0 && raw != "[]" {
+            t.Fatalf("unexpected empty result for %q", raw)
+        }
+    }
+}
+
+func TestStderrBudgetStopsUnboundedDiagnostics(t *testing.T) {
+    output := boundedStderr()
+    if _, err := output.Write(bytes.Repeat([]byte("x"), maxStderrBytes)); err != nil {
+        t.Fatal(err)
+    }
+    if _, err := output.Write([]byte("z")); !errors.Is(err, errOutputLimit) {
+        t.Fatalf("expected stderr limit error, got %v", err)
+    }
+    if output.Len() != maxStderrBytes {
+        t.Fatalf("expected %d buffered diagnostic bytes, got %d", maxStderrBytes, output.Len())
     }
 }

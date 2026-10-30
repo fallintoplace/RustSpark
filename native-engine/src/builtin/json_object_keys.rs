@@ -3,6 +3,25 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+fn serialize_keys(map: &serde_json::Map<String, serde_json::Value>, limit: usize) -> Result<String> {
+    let mut output = String::from("[");
+    for (index, key) in map.keys().enumerate() {
+        let encoded = serde_json::to_string(key)
+            .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
+        let required = encoded.len().saturating_add(usize::from(index != 0)).saturating_add(1);
+        if required > limit.saturating_sub(output.len()) {
+            return Err(Error::Execution("JSON_OBJECT_KEYS output exceeds native byte limit".into()));
+        }
+        if index != 0 { output.push(','); }
+        output.push_str(&encoded);
+    }
+    if output.len() >= limit {
+        return Err(Error::Execution("JSON_OBJECT_KEYS output exceeds native byte limit".into()));
+    }
+    output.push(']');
+    Ok(output)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let path = if args.len() == 2 {
@@ -19,10 +38,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     match json_path::lookup(Some(&doc), path)? {
         None | Some(serde_json::Value::Null) => Ok(Value::Null),
         Some(serde_json::Value::Object(map)) => {
-            let keys = map.keys().collect::<Vec<_>>();
-            let encoded = serde_json::to_string(&keys)
-                .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
-            Ok(Value::Text(encoded))
+            Ok(Value::Text(serialize_keys(map, 16 * 1024 * 1024)?))
         }
         _ => Ok(Value::Null),
     }
@@ -87,5 +103,17 @@ mod invalid_json_object_keys_tests {
             assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(), Value::Null);
         }
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod json_object_keys_budget_tests {
+    use super::*;
+    #[test]
+    fn serializes_key_order_and_stops_before_budget() {
+        let document = serde_json::json!({"a":1,"long":2});
+        let map = document.as_object().unwrap();
+        assert_eq!(serialize_keys(map, 100).unwrap(), "[\"a\",\"long\"]");
+        assert!(serialize_keys(map, 8).is_err());
     }
 }

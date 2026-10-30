@@ -99,6 +99,62 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     else { Value::Boolean(values.value(row)) }
                 }).collect())
             }
+            ArrowType::Int8 => {
+                let values = array.as_any().downcast_ref::<Int8Array>()
+                    .ok_or_else(|| Error::Type("invalid Int8 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(i64::from(values.value(row))) }
+                }).collect())
+            }
+            ArrowType::Int16 => {
+                let values = array.as_any().downcast_ref::<Int16Array>()
+                    .ok_or_else(|| Error::Type("invalid Int16 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(i64::from(values.value(row))) }
+                }).collect())
+            }
+            ArrowType::Int32 => {
+                let values = array.as_any().downcast_ref::<Int32Array>()
+                    .ok_or_else(|| Error::Type("invalid Int32 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(i64::from(values.value(row))) }
+                }).collect())
+            }
+            ArrowType::UInt8 => {
+                let values = array.as_any().downcast_ref::<UInt8Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt8 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(i64::from(values.value(row))) }
+                }).collect())
+            }
+            ArrowType::UInt16 => {
+                let values = array.as_any().downcast_ref::<UInt16Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt16 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(i64::from(values.value(row))) }
+                }).collect())
+            }
+            ArrowType::UInt32 => {
+                let values = array.as_any().downcast_ref::<UInt32Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt32 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Integer(i64::from(values.value(row))) }
+                }).collect())
+            }
+            ArrowType::Float32 => {
+                let values = array.as_any().downcast_ref::<Float32Array>()
+                    .ok_or_else(|| Error::Type("invalid Float32 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Float(f64::from(values.value(row))) }
+                }).collect())
+            }
             ArrowType::Int64 => {
                 let values = array.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| Error::Type("invalid Int64 Arrow array".into()))?;
@@ -314,5 +370,28 @@ mod nullable_arrow_dictionary_value_tests {
         assert_eq!(native.column(0).unwrap(), &[
             Value::Text("known".into()), Value::Null, Value::Null,
         ]);
+    }
+}
+
+#[cfg(test)]
+mod arrow_narrow_batch_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn vector_decoding_preserves_narrow_values_and_nulls() {
+        let record = RecordBatch::try_from_iter(vec![
+            ("i32", Arc::new(Int32Array::from(vec![Some(-123), None, Some(42)])) as ArrayRef),
+            ("u32", Arc::new(UInt32Array::from(vec![Some(u32::MAX), None, Some(0)])) as ArrayRef),
+            ("f32", Arc::new(Float32Array::from(vec![Some(1.25), None, Some(-0.0)])) as ArrayRef),
+        ]).unwrap();
+        let batch = from_arrow(&record).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.row(0).unwrap(), vec![
+            Value::Integer(-123),
+            Value::Integer(i64::from(u32::MAX)),
+            Value::Float(1.25),
+        ]);
+        assert_eq!(batch.row(1).unwrap(), vec![Value::Null; 3]);
+        assert_eq!(batch.value(2, 2).unwrap(), &Value::Float(-0.0));
     }
 }

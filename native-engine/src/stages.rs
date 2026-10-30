@@ -40,6 +40,10 @@ pub struct StageGraph {
 
 impl StageGraph {
     pub fn new(stages: Vec<Stage>) -> Result<Self> {
+        // Enforce the same bound as logical-plan lowering for direct graph users.
+        if stages.len() > 4096 {
+            return Err(Error::Execution("native stage graph exceeds safety limits".into()));
+        }
         let mut present = vec![false; stages.len()];
         for stage in &stages {
             if stage.id >= stages.len() || std::mem::replace(&mut present[stage.id], true) {
@@ -314,6 +318,23 @@ mod dense_root_lookup_tests {
             Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
         ]).unwrap();
         assert_eq!(multiple.root(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_direct_stage_budget_tests {
+    use super::*;
+
+    #[test]
+    fn direct_stage_graphs_cannot_bypass_lowering_limit() {
+        let oversized = (0..4097).map(|id| Stage {
+            id, kind: StageKind::Scan, inputs: vec![],
+        }).collect();
+        assert!(StageGraph::new(oversized).is_err());
+        let accepted = StageGraph::new(vec![
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(accepted.execution_order().unwrap(), [0]);
     }
 }
 

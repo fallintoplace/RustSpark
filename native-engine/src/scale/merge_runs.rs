@@ -167,8 +167,10 @@ impl Iterator for RunMerger {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        // Reserve common small batches without preallocating a full large output budget.
+        let capacity = self.output_batch_rows.min(256);
         let mut columns: Vec<Vec<Value>> =
-            (0..self.schema.len()).map(|_| Vec::new()).collect();
+            (0..self.schema.len()).map(|_| Vec::with_capacity(capacity)).collect();
         let mut rows = 0usize;
         while rows < self.output_batch_rows {
             match self.append_next(&mut columns) {

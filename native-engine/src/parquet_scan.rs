@@ -1,12 +1,13 @@
 //! Bounded Parquet scans using Apache Parquet and Arrow, never DataFusion.
 use std::{fs::File, path::Path};
 
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::{ProjectionMask, arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder}};
 
 use crate::{arrow_bridge, batch::Batch, Error, Result};
 
 pub struct ParquetScan {
     inner: ParquetRecordBatchReader,
+    finished: bool,
 }
 
 /// File metadata for planning scans without decoding any row batches.
@@ -15,6 +16,17 @@ pub struct ParquetSummary {
     pub rows: u64,
     pub row_groups: usize,
     pub columns: usize,
+}
+
+/// Read the native schema without decoding any Parquet data pages.
+pub fn file_schema(path: impl AsRef<Path>) -> Result<crate::schema::Schema> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    // Reuse native Arrow type validation with an empty batch. This also handles
+    // empty Parquet files that never yield a record batch.
+    let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
+    Ok(arrow_bridge::from_arrow(&empty)?.schema().clone())
 }
 
 pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
@@ -31,16 +43,40 @@ pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
 }
 
 pub fn scan(path: impl AsRef<Path>, batch_size: usize) -> Result<ParquetScan> {
+    scan_with_expected_schema(path, batch_size, None)
+}
+
+/// Validate a registered table's schema using the same file handle used for
+/// scanning. Replacing a Parquet file must not silently change result columns.
+pub fn scan_checked(
+    path: impl AsRef<Path>, batch_size: usize, expected: &crate::schema::Schema,
+) -> Result<ParquetScan> {
+    scan_with_expected_schema(path, batch_size, Some(expected))
+}
+
+fn scan_with_expected_schema(
+    path: impl AsRef<Path>, batch_size: usize,
+    expected: Option<&crate::schema::Schema>,
+) -> Result<ParquetScan> {
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
     let file = File::open(path)?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?
-        .with_batch_size(batch_size)
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    if let Some(expected) = expected {
+        let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
+        let actual = arrow_bridge::from_arrow(&empty)?.schema().clone();
+        if &actual != expected {
+            return Err(Error::Schema(
+                "registered Parquet table schema changed since registration".into()
+            ));
+        }
+    }
+    let reader = builder.with_batch_size(batch_size)
         .build()
         .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner: reader })
+    Ok(ParquetScan { inner: reader, finished: false })
 }
 
 /// Decode only named Parquet columns. Output follows the file's column order.
@@ -69,7 +105,7 @@ pub fn scan_columns(
     let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
     let inner = builder.with_projection(mask).with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner })
+    Ok(ParquetScan { inner, finished: false })
 }
 
 /// Restrict decoding to validated row-group indices.
@@ -91,7 +127,7 @@ pub fn scan_row_groups(
     }
     let inner = builder.with_row_groups(row_groups.to_vec()).with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner })
+    Ok(ParquetScan { inner, finished: false })
 }
 
 /// Skip and limit decoded rows in the Parquet reader instead of materializing
@@ -111,18 +147,23 @@ pub fn scan_window(
         .with_limit(limit)
         .with_batch_size(batch_size)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
-    Ok(ParquetScan { inner })
+    Ok(ParquetScan { inner, finished: false })
 }
 
 impl Iterator for ParquetScan {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|result| {
+        if self.finished { return None; }
+        let result = self.inner.next().map(|result| {
             let record = result
                 .map_err(|e| Error::Execution(format!("Parquet decode: {e}")))?;
             arrow_bridge::from_arrow(&record)
-        })
+        });
+        if result.as_ref().is_none_or(Result::is_err) {
+            self.finished = true;
+        }
+        result
     }
 }
 
@@ -376,6 +417,76 @@ mod parquet_native_offset_limit_pushdown_tests {
         assert_eq!(scan_window(&path, 3, 0, 0).unwrap().count(), 0);
         assert_eq!(scan_window(&path, 3, 100, 5).unwrap().count(), 0);
         assert!(scan_window(&path, 3, usize::MAX, 1).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod streaming_parquet_schema_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value, expr::{Expr, BinaryOp},
+        pipeline::Pipeline};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn metadata_schema_drives_bounded_native_parquet_pipeline() {
+        let path = std::env::temp_dir().join(format!(
+            "native-parquet-stream-cli-{}-{}.parquet", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let data = Batch::from_rows(schema.clone(),
+            (0..10).map(|n| vec![Value::Integer(n), Value::Text("x".into())]).collect()
+        ).unwrap();
+        let arrow = arrow_bridge::to_arrow(&data).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        assert_eq!(file_schema(&path).unwrap(), schema);
+        let rows = Pipeline::new(scan(&path, 3).unwrap())
+            .with_filter(Expr::binary(Expr::Column("n".into()), BinaryOp::GreaterEqual,
+                Expr::Literal(Value::Integer(5))))
+            .with_limit(1, Some(2))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>(),
+            vec![Value::Integer(6), Value::Integer(7)]);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_scan_terminal_decode_errors_tests {
+    use super::*;
+    use arrow_array::{ArrayRef, Date32Array, RecordBatch};
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    #[test]
+    fn unsupported_arrow_columns_fail_once_and_stop_the_scan() {
+        let path = std::env::temp_dir().join(format!(
+            "native-parquet-fuse-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let record = RecordBatch::try_from_iter(vec![
+            ("date", Arc::new(Date32Array::from(vec![1, 2])) as ArrayRef),
+        ]).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), record.schema(), None,
+        ).unwrap();
+        writer.write(&record).unwrap();
+        writer.close().unwrap();
+
+        let mut source = scan(&path, 1).unwrap();
+        assert!(source.next().unwrap().is_err());
+        assert!(source.next().is_none());
+        assert!(source.next().is_none());
+        drop(source);
         std::fs::remove_file(path).unwrap();
     }
 }

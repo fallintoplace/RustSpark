@@ -82,6 +82,7 @@ mod quote;
 mod cot;
 mod csc;
 mod sec;
+mod md5_digest;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -276,8 +277,21 @@ pub fn finite(value: f64) -> Result<Value> {
 pub fn output_type(name: &str, arguments: &[Expr], schema: &Schema) -> Result<DataType> {
     let function = lookup(name)?;
     check_arity(function, arguments.len())?;
-    let types = arguments.iter().map(|expression| expression.output_type(schema))
+    let mut types = arguments.iter().map(|expression| expression.output_type(schema))
         .collect::<Result<Vec<_>>>()?;
+    if name.eq_ignore_ascii_case("if") {
+        if matches!(arguments[0], Expr::Literal(Value::Null)) {
+            types[0] = DataType::Boolean;
+        }
+        let branch_type = (1..3).find(|&index|
+            !matches!(arguments[index], Expr::Literal(Value::Null)))
+            .map(|index| types[index]).unwrap_or(DataType::Text);
+        for index in 1..3 {
+            if matches!(arguments[index], Expr::Literal(Value::Null)) {
+                types[index] = branch_type;
+            }
+        }
+    }
     if name.eq_ignore_ascii_case("coalesce") {
         let not_null = arguments.iter().zip(&types).filter_map(|(expr, kind)| {
             if matches!(expr, Expr::Literal(Value::Null)) { None } else { Some(*kind) }
@@ -344,6 +358,7 @@ mod tests {
         assert_eq!(executor::execute(&plan, &catalog).unwrap().row(0).unwrap()[0], Value::Integer(9));
         assert!(sql::parse_sql("SELECT COALESCE(n,) FROM t").is_err());
         assert!(supports("LeVeNsHtEiN"));
+        assert!(supports("md5"));
         assert!(!supports("no_such_native_function"));
     }
 }
@@ -385,5 +400,28 @@ mod builtin_stack_storage_regression_tests {
             Value::Text("a-b-c".into()));
         assert_eq!(evaluate("concat_ws", &[arg("-"), arg("a"), arg("b"), arg("c"), arg("d")], &batch, 0).unwrap(),
             Value::Text("a-b-c-d".into()));
+    }
+}
+
+#[cfg(test)]
+mod nullable_if_branch_type_tests {
+    use super::*;
+
+    #[test]
+    fn null_condition_and_branches_have_spark_types() {
+        let schema = Schema::new(vec![]).unwrap();
+        let literal = Expr::Literal;
+        let args = [literal(Value::Null), literal(Value::Integer(1)),
+                    literal(Value::Null)];
+        assert_eq!(output_type("if", &args, &schema).unwrap(), DataType::Integer);
+        let empty = Batch::from_rows(schema.clone(), vec![vec![]]).unwrap();
+        assert_eq!(evaluate("if", &args, &empty, 0).unwrap(), Value::Null);
+        let args = [literal(Value::Boolean(false)), literal(Value::Null),
+                    literal(Value::Text("ok".into()))];
+        assert_eq!(output_type("if", &args, &schema).unwrap(), DataType::Text);
+        assert_eq!(evaluate("if", &args, &empty, 0).unwrap(), Value::Text("ok".into()));
+        let args = [literal(Value::Boolean(true)), literal(Value::Integer(1)),
+                    literal(Value::Text("bad".into()))];
+        assert!(output_type("if", &args, &schema).is_err());
     }
 }
