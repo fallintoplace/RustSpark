@@ -15,6 +15,7 @@ use rustspark_native::{
 struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
+    max_output_bytes: u64,
 }
 
 fn parse_schema(text: &str) -> Result<Schema> {
@@ -49,6 +50,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut batch_rows = 4096;
     let mut record_bytes = 8 * 1024 * 1024;
     let mut scratch = env::temp_dir();
+    let mut max_output_bytes = 256 * 1024 * 1024u64;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
@@ -74,12 +76,17 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--max-record-bytes" => record_bytes = value.parse()
                 .map_err(|_| Error::Parse("invalid --max-record-bytes".into()))?,
             "--scratch-dir" => scratch = PathBuf::from(value),
+            "--max-output-bytes" => max_output_bytes = value.parse::<u64>()
+                .map_err(|_| Error::Parse("invalid --max-output-bytes".into()))?,
             _ => return Err(Error::Parse(format!("unknown option: {flag}"))),
         }
     }
     if batch_rows == 0 || batch_rows > 65_536 ||
         record_bytes == 0 || record_bytes > 64 * 1024 * 1024 {
         return Err(Error::Execution("streaming input limit out of bounds".into()));
+    }
+    if max_output_bytes == 0 || max_output_bytes > 16 * 1024 * 1024 * 1024 {
+        return Err(Error::Execution("result byte limit must be within 1..=16 GiB".into()));
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
@@ -96,7 +103,27 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if parquet.is_some() && schema.is_some() {
         return Err(Error::Parse("Parquet schema comes from file metadata".into()));
     }
-    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch }))
+    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch, max_output_bytes }))
+}
+
+struct OutputBudget<W> {
+    writer: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for OutputBudget<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(io::Error::other("streaming result exceeds output byte limit"));
+        }
+        let written = self.writer.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 fn escape(text: &str) -> String {
@@ -154,7 +181,10 @@ fn run() -> Result<()> {
     let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
     let input = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
     let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
+    let mut output = OutputBudget {
+        writer: io::BufWriter::new(stdout.lock()),
+        remaining: args.max_output_bytes,
+    };
     write_csv(&schema, input, &mut output)
 }
 
@@ -191,5 +221,28 @@ mod tests {
         assert!(parse_args(parquet.into_iter().map(String::from)).unwrap().unwrap().parquet.is_some());
         let invalid = ["--parquet", "data.parquet", "--schema", "n:int", "--sql", "SELECT * FROM data"];
         assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod result_budget_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_exact_output_budget_without_writing_an_extra_byte() {
+        let mut out = OutputBudget { writer: Vec::new(), remaining: 6 };
+        out.write_all(b"abcdef").unwrap();
+        assert_eq!(out.remaining, 0);
+        assert!(out.write_all(b"x").is_err());
+        assert_eq!(out.writer, b"abcdef");
+    }
+
+    #[test]
+    fn malformed_or_zero_limits_fail_argument_validation() {
+        for limit in ["0", "not-a-number", "17179869185"] {
+            let flags = ["--csv", "a.csv", "--schema", "n:int", "--sql",
+                "SELECT n FROM data", "--max-output-bytes", limit];
+            assert!(parse_args(flags.into_iter().map(String::from)).is_err());
+        }
     }
 }
