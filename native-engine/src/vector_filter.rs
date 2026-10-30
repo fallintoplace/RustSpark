@@ -180,12 +180,15 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 && (pattern.matches('%').count() == 0
                     || pattern.starts_with('%') || pattern.ends_with('%'))
             {
-                let matcher = if pattern.starts_with('%') && pattern.ends_with('%') {
-                    Some((2_u8, pattern.strip_prefix('%').unwrap().strip_suffix('%').unwrap()))
+                let matcher = if pattern == "%" {
+                    Some((0_u8, ""))
+                } else if pattern.starts_with('%') && pattern.ends_with('%') {
+                    pattern[1..pattern.len()-1].contains('%').then_some(())
+                        .map(|_| None).unwrap_or_else(|| Some((2_u8, &pattern[1..pattern.len()-1])))
                 } else if let Some(prefix) = pattern.strip_suffix('%') {
-                    Some((0_u8, prefix))
+                    (!prefix.contains('%')).then_some((0_u8, prefix))
                 } else if let Some(suffix) = pattern.strip_prefix('%') {
-                    Some((1_u8, suffix))
+                    (!suffix.contains('%')).then_some((1_u8, suffix))
                 } else if !pattern.contains('%') {
                     Some((3_u8, pattern.as_str()))
                 } else {
