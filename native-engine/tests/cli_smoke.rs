@@ -44,7 +44,7 @@ fn native_cli_json_array_produces_parseable_sql_rows() {
     let path = std::env::temp_dir().join(format!(
         "rustspark-native-json-array-{}-{unique}.csv", std::process::id()
     ));
-    fs::write(&path, "id\\n1\\n2\\n3\\n").unwrap();
+    fs::write(&path, "id\n1\n2\n3\n").unwrap();
     for flags in [vec![], vec!["--stream"]] {
         let mut args = vec!["--csv", path.to_str().unwrap(),
             "--sql", "SELECT id FROM data", "--stdout-format", "json-array"];
