@@ -71,31 +71,35 @@ pub enum Plan {
 }
 
 impl Plan {
+    fn push_children<'a>(&'a self, pending: &mut Vec<&'a Self>) {
+        match self {
+            Self::Scan { .. } => {}
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::Aggregate { input, .. }
+            | Self::Sort { input, .. }
+            | Self::Limit { input, .. }
+            | Self::Distinct { input } => pending.push(input.as_ref()),
+            Self::Join { left, right, .. }
+            | Self::CrossJoin { left, right }
+            | Self::UnionAll { left, right }
+            | Self::Intersect { left, right }
+            | Self::IntersectAll { left, right }
+            | Self::ExceptAll { left, right }
+            | Self::Except { left, right } => {
+                pending.push(right.as_ref());
+                pending.push(left.as_ref());
+            }
+        }
+    }
+
     /// Count nodes in an owned native logical tree without recursive walking.
     pub fn operator_count(&self) -> usize {
         let mut pending = vec![self];
         let mut count = 0usize;
         while let Some(plan) = pending.pop() {
             count += 1;
-            match plan {
-                Self::Scan { .. } => {}
-                Self::Filter { input, .. }
-                | Self::Project { input, .. }
-                | Self::Aggregate { input, .. }
-                | Self::Sort { input, .. }
-                | Self::Limit { input, .. }
-                | Self::Distinct { input } => pending.push(input),
-                Self::Join { left, right, .. }
-                | Self::CrossJoin { left, right }
-                | Self::UnionAll { left, right }
-                | Self::Intersect { left, right }
-                | Self::IntersectAll { left, right }
-                | Self::ExceptAll { left, right }
-                | Self::Except { left, right } => {
-                    pending.push(right);
-                    pending.push(left);
-                }
-            }
+            plan.push_children(&mut pending);
         }
         count
     }
@@ -105,25 +109,10 @@ impl Plan {
         let mut pending = vec![self];
         let mut names = std::collections::BTreeSet::new();
         while let Some(plan) = pending.pop() {
-            match plan {
-                Self::Scan { table } => { names.insert(table.as_str()); }
-                Self::Filter { input, .. }
-                | Self::Project { input, .. }
-                | Self::Aggregate { input, .. }
-                | Self::Sort { input, .. }
-                | Self::Limit { input, .. }
-                | Self::Distinct { input } => pending.push(input),
-                Self::Join { left, right, .. }
-                | Self::CrossJoin { left, right }
-                | Self::UnionAll { left, right }
-                | Self::Intersect { left, right }
-                | Self::IntersectAll { left, right }
-                | Self::ExceptAll { left, right }
-                | Self::Except { left, right } => {
-                    pending.push(right);
-                    pending.push(left);
-                }
+            if let Self::Scan { table } = plan {
+                names.insert(table.as_str());
             }
+            plan.push_children(&mut pending);
         }
         names.into_iter().collect()
     }
