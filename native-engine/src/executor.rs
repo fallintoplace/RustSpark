@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::{
     aggregate, catalog::Catalog, distinct, filter, join, limit,
     plan::Plan, project, sort, union, set_ops,
@@ -76,6 +78,21 @@ pub fn execute_with_guard(
     execute_inner(&optimized, catalog, &options, 0, guard)
 }
 
+/// Borrow an existing catalog scan instead of cloning it for binary operators.
+fn execute_operand<'a>(
+    plan: &Plan, catalog: &'a Catalog, options: &ExecutionOptions,
+    depth: usize, guard: &QueryGuard,
+) -> Result<Cow<'a, Batch>> {
+    guard.check()?;
+    if depth >= options.max_plan_depth {
+        return Err(Error::Execution("query plan exceeds maximum depth".into()));
+    }
+    match plan {
+        Plan::Scan { table } => Ok(Cow::Borrowed(catalog.get(table)?)),
+        _ => Ok(Cow::Owned(execute_inner(plan, catalog, options, depth, guard)?)),
+    }
+}
+
 fn execute_inner(
     plan: &Plan,
     catalog: &Catalog,
@@ -120,19 +137,41 @@ fn execute_inner(
             left_key,
             right_key,
             kind,
-        } => join::hash_join(
-            &descend(left)?,
-            &descend(right)?,
-            left_key,
-            right_key,
-            *kind,
-        )?,
-        Plan::CrossJoin { left, right } => join::cross_join(&descend(left)?, &descend(right)?)?,
-        Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
-        Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
-        Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
-        Plan::ExceptAll { left, right } => set_ops::except_all(&descend(left)?, &descend(right)?)?,
-        Plan::Except { left, right } => set_ops::except_distinct(&descend(left)?, &descend(right)?)?,
+        } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            join::hash_join(lhs.as_ref(), rhs.as_ref(), left_key, right_key, *kind)?
+        },
+        Plan::CrossJoin { left, right } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            join::cross_join(lhs.as_ref(), rhs.as_ref())?
+        },
+        Plan::UnionAll { left, right } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            union::union_all(lhs.as_ref(), rhs.as_ref())?
+        },
+        Plan::Intersect { left, right } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            set_ops::intersect_distinct(lhs.as_ref(), rhs.as_ref())?
+        },
+        Plan::IntersectAll { left, right } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            set_ops::intersect_all(lhs.as_ref(), rhs.as_ref())?
+        },
+        Plan::ExceptAll { left, right } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            set_ops::except_all(lhs.as_ref(), rhs.as_ref())?
+        },
+        Plan::Except { left, right } => {
+            let lhs = execute_operand(left, catalog, options, depth + 1, guard)?;
+            let rhs = execute_operand(right, catalog, options, depth + 1, guard)?;
+            set_ops::except_distinct(lhs.as_ref(), rhs.as_ref())?
+        },
     };
     guard.check()?;
     if batch.num_rows() > options.max_output_rows {
@@ -265,5 +304,36 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod binary_operator_borrow_catalog_tests {
+    use super::*;
+    use crate::{join::JoinKind, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn selective_join_and_intersection_handle_catalogs_larger_than_output_budget() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("l", Batch::from_rows(schema.clone(),
+            (0..100).map(|n| vec![Value::Integer(n)]).collect()).unwrap()).unwrap();
+        catalog.register("r", Batch::from_rows(schema,
+            (99..199).map(|n| vec![Value::Integer(n)]).collect()).unwrap()).unwrap();
+        let small = ExecutionOptions { max_output_rows: 1, ..ExecutionOptions::default() };
+        let join = Plan::Join {
+            left: Box::new(Plan::scan("l")), right: Box::new(Plan::scan("r")),
+            left_key: "id".into(), right_key: "id".into(), kind: JoinKind::Inner,
+        };
+        assert_eq!(execute_with_options(&join, &catalog, small).unwrap().num_rows(), 1);
+        let intersect = Plan::Intersect {
+            left: Box::new(Plan::scan("l")), right: Box::new(Plan::scan("r")),
+        };
+        assert_eq!(execute_with_options(&intersect, &catalog, small).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(99)]]);
+        let except = Plan::Except {
+            left: Box::new(Plan::scan("l")), right: Box::new(Plan::scan("r")),
+        };
+        assert!(execute_with_options(&except, &catalog, small).is_err());
     }
 }
