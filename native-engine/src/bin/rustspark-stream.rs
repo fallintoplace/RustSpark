@@ -15,6 +15,7 @@ use rustspark_native::{
 struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
+    timeout_ms: Option<u64>,
 }
 
 fn parse_schema(text: &str) -> Result<Schema> {
@@ -49,6 +50,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut batch_rows = 4096;
     let mut record_bytes = 8 * 1024 * 1024;
     let mut scratch = env::temp_dir();
+    let mut timeout_ms = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
@@ -74,12 +76,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--max-record-bytes" => record_bytes = value.parse()
                 .map_err(|_| Error::Parse("invalid --max-record-bytes".into()))?,
             "--scratch-dir" => scratch = PathBuf::from(value),
+            "--timeout-ms" => {
+                if timeout_ms.replace(value.parse::<u64>()
+                    .map_err(|_| Error::Parse("invalid --timeout-ms".into()))?).is_some() {
+                    return Err(Error::Parse("duplicate --timeout-ms".into()));
+                }
+            },
             _ => return Err(Error::Parse(format!("unknown option: {flag}"))),
         }
     }
     if batch_rows == 0 || batch_rows > 65_536 ||
         record_bytes == 0 || record_bytes > 64 * 1024 * 1024 {
         return Err(Error::Execution("streaming input limit out of bounds".into()));
+    }
+    if timeout_ms.is_some_and(|ms| ms == 0 || ms > 86_400_000) {
+        return Err(Error::Execution("streaming timeout must be in 1..=86400000 ms".into()));
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
@@ -96,7 +107,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if parquet.is_some() && schema.is_some() {
         return Err(Error::Parse("Parquet schema comes from file metadata".into()));
     }
-    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch }))
+    Ok(Some(Args { csv, parquet, table, schema, sql, batch_rows, record_bytes, scratch, timeout_ms }))
 }
 
 fn escape(text: &str) -> String {
@@ -146,13 +157,18 @@ fn run() -> Result<()> {
     } else if let Some(path) = &args.parquet {
         catalog.register_parquet(&args.table, path)?;
     }
+    let control = match args.timeout_ms {
+        Some(ms) => QueryControl::with_timeout(std::time::Duration::from_millis(ms))?,
+        None => QueryControl::default(),
+    };
+    control.check()?;
     let plan = sql::parse_sql(&args.sql)?;
     let options = StreamOptions {
         batch_rows: args.batch_rows, scratch_directory: args.scratch,
         ..StreamOptions::default()
     };
     let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
-    let input = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
+    let input = stream_execute::execute(&plan, &catalog, &options, control)?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     write_csv(&schema, input, &mut output)
@@ -191,5 +207,23 @@ mod tests {
         assert!(parse_args(parquet.into_iter().map(String::from)).unwrap().unwrap().parquet.is_some());
         let invalid = ["--parquet", "data.parquet", "--schema", "n:int", "--sql", "SELECT * FROM data"];
         assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_timeout_flags_tests {
+    use super::*;
+
+    #[test]
+    fn query_timeout_must_be_positive_and_bounded() {
+        for value in ["0", "86400001", "not-a-number", "-1"] {
+            let flags = ["--csv", "x.csv", "--schema", "n:int",
+                "--sql", "SELECT n FROM data", "--timeout-ms", value];
+            assert!(parse_args(flags.into_iter().map(String::from)).is_err());
+        }
+        let flags = ["--csv", "x.csv", "--schema", "n:int",
+            "--sql", "SELECT n FROM data", "--timeout-ms", "250"];
+        let args = parse_args(flags.into_iter().map(String::from)).unwrap().unwrap();
+        assert_eq!(args.timeout_ms, Some(250));
     }
 }
