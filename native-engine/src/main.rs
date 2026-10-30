@@ -293,16 +293,14 @@ fn run_stream(args: &Args) -> Result<()> {
 const MAX_PARQUET_ROWS: usize = 1_000_000;
 
 fn read_parquet_bounded(path: &Path) -> Result<Batch> {
-    let mut schema: Option<Schema> = None;
+    // Valid Parquet tables may contain no row groups, so load their schema
+    // from file metadata instead of waiting for the first data batch.
+    let schema = parquet_scan::file_schema(path)?;
     let mut rows = Vec::new();
     for next in parquet_scan::scan(path, 4_096)? {
         let batch = next?;
-        if let Some(current) = &schema {
-            if current != batch.schema() {
-                return Err(Error::Schema("Parquet batch schema changed".into()));
-            }
-        } else {
-            schema = Some(batch.schema().clone());
+        if batch.schema() != &schema {
+            return Err(Error::Schema("Parquet batch schema changed".into()));
         }
         let total = rows.len().checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("Parquet row count overflow".into()))?;
@@ -311,7 +309,6 @@ fn read_parquet_bounded(path: &Path) -> Result<Batch> {
         }
         rows.extend(batch.rows()?);
     }
-    let schema = schema.ok_or_else(|| Error::Unsupported("empty Parquet data cannot yet be queried in the native CLI".into()))?;
     Batch::from_rows(schema, rows)
 }
 
@@ -424,6 +421,29 @@ mod tests {
         assert_eq!(rows[0]["name"], "a\\\"b");
         assert_eq!(rows[0]["count"], 4);
         assert!(rows[1]["count"].is_null());
+    }
+
+
+    #[test]
+    fn native_cli_can_query_empty_parquet_tables() {
+        use parquet::arrow::ArrowWriter;
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let record = rustspark_native::arrow_bridge::to_arrow(&Batch::empty(schema.clone())).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-empty-parquet-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let writer = ArrowWriter::try_new(fs::File::create(&path).unwrap(), record.schema(), None).unwrap();
+        writer.close().unwrap();
+        let result = read_parquet_bounded(&path);
+        fs::remove_file(&path).unwrap();
+        let batch = result.unwrap();
+        assert_eq!(batch.schema(), &schema);
+        assert_eq!(batch.num_rows(), 0);
     }
 
     #[test]
