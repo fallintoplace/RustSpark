@@ -11,6 +11,7 @@ use rustspark_native::{
     csv, csv_stream::CsvStream,
     parquet_scan,
     executor,
+    cancel::{Cancellation, QueryGuard},
     batch::Batch,
     expr::Expr,
     pipeline::Pipeline,
@@ -30,6 +31,7 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    timeout_ms: Option<u64>,
 }
 
 fn usage() -> &'static str {
@@ -46,6 +48,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut timeout_ms = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -89,6 +92,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--timeout-ms" => {
+                if timeout_ms.replace(value.parse::<u64>()
+                    .map_err(|_| Error::Parse("invalid --timeout-ms".into()))?).is_some() {
+                    return Err(Error::Parse("duplicate --timeout-ms".into()));
+                }
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -106,6 +115,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             }
             _ => return Err(Error::Parse(format!("unknown option: {arg}"))),
         }
+    }
+    if timeout_ms.is_some_and(|ms| ms == 0 || ms > 86_400_000) {
+        return Err(Error::Execution("query timeout must be in 1..=86400000 ms".into()));
+    }
+    if timeout_ms.is_some() && stream {
+        return Err(Error::Unsupported("--timeout-ms is not supported by the basic --stream pipeline".into()));
     }
     if csv_schema.is_some() && !stream {
         return Err(Error::Parse("--csv-schema requires --stream".into()));
@@ -134,7 +149,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, timeout_ms }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -345,7 +360,14 @@ fn run() -> Result<()> {
         }
     }
     let plan = sql::parse_sql(&args.sql)?;
-    let batch = executor::execute(&plan, &catalog)?;
+    let batch = if let Some(ms) = args.timeout_ms {
+        let guard = QueryGuard::with_timeout(
+            Cancellation::new(), std::time::Duration::from_millis(ms)
+        )?;
+        executor::execute_with_guard(&plan, &catalog, executor::ExecutionOptions::default(), &guard)?
+    } else {
+        executor::execute(&plan, &catalog)?
+    };
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
     if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
@@ -430,5 +452,26 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod native_timeout_option_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_query_deadlines_are_explicit_in_nonstream_mode() {
+        for value in ["0", "86400001", "not-a-number"] {
+            let flags = ["--csv", "data.csv", "--sql", "SELECT * FROM data",
+                "--timeout-ms", value];
+            assert!(parse_args(flags.into_iter().map(String::from)).is_err());
+        }
+        let flags = ["--csv", "data.csv", "--sql", "SELECT * FROM data",
+            "--timeout-ms", "100"];
+        assert_eq!(parse_args(flags.into_iter().map(String::from))
+            .unwrap().unwrap().timeout_ms, Some(100));
+        let incompatible = ["--csv", "data.csv", "--stream", "--sql", "SELECT * FROM data",
+            "--timeout-ms", "100"];
+        assert!(parse_args(incompatible.into_iter().map(String::from)).is_err());
     }
 }
