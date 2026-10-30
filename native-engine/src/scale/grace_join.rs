@@ -32,9 +32,18 @@ impl Drop for JoinFiles {
     }
 }
 
+const MAX_BUILD_BYTES: usize = 64 * 1024 * 1024;
+
 fn load_build(
     path: &Path, schema: &Schema, max_rows: usize, io_rows: usize,
     control: &QueryControl,
+) -> Result<Batch> {
+    load_build_with_byte_budget(path, schema, max_rows, io_rows, MAX_BUILD_BYTES, control)
+}
+
+fn load_build_with_byte_budget(
+    path: &Path, schema: &Schema, max_rows: usize, io_rows: usize,
+    max_bytes: usize, control: &QueryControl,
 ) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != schema {
@@ -42,14 +51,30 @@ fn load_build(
     }
     let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
     let mut rows = 0usize;
+    let mut used_bytes = 0usize;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
         let next = rows.checked_add(batch.num_rows())
             .filter(|total| *total <= max_rows)
             .ok_or_else(|| Error::Execution("join build partition exceeds row budget".into()))?;
+        let base = batch.num_rows().checked_mul(schema.len())
+            .and_then(|cells| cells.checked_mul(std::mem::size_of::<Value>()))
+            .ok_or_else(|| Error::Execution("join build size overflow".into()))?;
+        let mut next_bytes = used_bytes.checked_add(base)
+            .filter(|total| *total <= max_bytes)
+            .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         for (column, output) in columns.iter_mut().enumerate() {
-            output.extend_from_slice(batch.column(column)?);
+            let values = batch.column(column)?;
+            for value in values {
+                if let Value::Text(text) = value {
+                    next_bytes = next_bytes.checked_add(text.len())
+                        .filter(|total| *total <= max_bytes)
+                        .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
+                }
+            }
+            output.extend_from_slice(values);
         }
+        used_bytes = next_bytes;
         rows = next;
     }
     Batch::new_with_row_count(schema.clone(), columns, rows)
@@ -419,5 +444,36 @@ mod empty_build_grace_join_short_circuit_tests {
             drop(files);
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grace_join_memory_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn large_text_values_cannot_bypass_build_memory_limit() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-build-budget-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("build.rspill");
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(1000))],
+            vec![Value::Text("y".repeat(1000))],
+        ]).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        writer.write_batch(&input).unwrap();
+        writer.finish().unwrap();
+        let result = load_build_with_byte_budget(&path, &schema, 10, 2, 1024,
+            &QueryControl::default());
+        assert!(matches!(result, Err(Error::Execution(_))));
+        assert_eq!(load_build_with_byte_budget(&path, &schema, 10, 2, 4096,
+            &QueryControl::default()).unwrap(), input);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
