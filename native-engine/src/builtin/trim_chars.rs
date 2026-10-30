@@ -10,6 +10,10 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
         let Some(characters) = super::string(&args[1])? else { return Ok(Value::Null); };
         Some(characters)
     } else { None };
+    // Explicit empty trim sets cannot match any character.
+    if characters == Some("") {
+        return Ok(Value::Text(text.to_owned()));
+    }
     let ascii_set = characters
         .filter(|chars| chars.len() >= 8 && chars.is_ascii())
         .map(|chars| {
@@ -142,6 +146,20 @@ mod normalize_space_extension_tests {
         assert_eq!(normalize_space(&[Value::Text(" \t A\u{00A0} B \n".into())]).unwrap(), Value::Text("A B".into()));
         assert_eq!(normalize_space(&[Value::Text(" \t ".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod empty_trim_character_set_tests {
+    use super::*;
+    #[test]
+    fn empty_set_preserves_whitespace_and_unicode() {
+        let text = Value::Text("  é🙂  ".into());
+        for trim in [btrim as fn(&[Value]) -> Result<Value>, ltrim, rtrim] {
+            assert_eq!(trim(&[text.clone(), Value::Text(String::new())]).unwrap(), text);
+        }
+        assert_eq!(btrim(&[Value::Text("  a  ".into())]).unwrap(), Value::Text("a".into()));
+        assert_eq!(btrim(&[Value::Null, Value::Text(String::new())]).unwrap(), Value::Null);
     }
 }
 
