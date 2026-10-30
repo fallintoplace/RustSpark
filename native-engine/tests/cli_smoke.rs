@@ -77,3 +77,19 @@ fn native_cli_limits_output_rows_with_and_without_streaming() {
     }
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn native_cli_named_csv_source_executes_sql() {
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "rustspark-native-named-source-{}-{unique}.csv", std::process::id()
+    ));
+    fs::write(&path, "id\n1\n2\n").unwrap();
+    let source = format!("sales={}", path.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_rustspark-native"))
+        .args(["--csv-table", &source, "--sql", "SELECT id FROM sales"])
+        .output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "id\n1\n2\n");
+}
