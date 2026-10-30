@@ -82,6 +82,7 @@ mod quote;
 mod cot;
 mod csc;
 mod sec;
+mod fma;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -184,6 +185,7 @@ const MODULES: &[&[Function]] = &[
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
     &md5_digest::FUNCTIONS,
+    &fma::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
