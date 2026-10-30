@@ -34,8 +34,14 @@ pub fn execute_with_options(
 }
 
 fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
+    const MAX_NODES: usize = 4096;
     let mut pending = vec![(plan, 0_usize)];
+    let mut visited = 0usize;
     while let Some((node, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_NODES {
+            return Err(Error::Execution("query plan exceeds maximum node count".into()));
+        }
         if depth >= max_depth {
             return Err(Error::Execution("query plan exceeds maximum depth".into()));
         }
@@ -265,5 +271,26 @@ mod consolidated_sort_limit_fastpath_tests {
             keys: vec![SortKey::ascending(Expr::Column("n".into()))] }.limit(1, Some(2));
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod logical_plan_width_budget_tests {
+    use super::*;
+
+    fn balanced_plan(depth: usize) -> Plan {
+        if depth == 0 { return Plan::scan("source"); }
+        Plan::UnionAll {
+            left: Box::new(balanced_plan(depth - 1)),
+            right: Box::new(balanced_plan(depth - 1)),
+        }
+    }
+
+    #[test]
+    fn rejects_wide_logical_trees_before_optimizer_allocates() {
+        let oversized = balanced_plan(12);
+        let error = validate_depth(&oversized, 64).unwrap_err();
+        assert!(error.to_string().contains("node count"));
+        assert!(validate_depth(&balanced_plan(8), 64).is_ok());
     }
 }
