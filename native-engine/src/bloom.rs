@@ -33,7 +33,15 @@ impl BloomFilter {
     }
 
     fn probe(&self, first: u64, step: u64, seed: u32) -> usize {
-        (first.wrapping_add(u64::from(seed).wrapping_mul(step)) % self.bits as u64) as usize
+        let hash = first.wrapping_add(u64::from(seed).wrapping_mul(step));
+        // Power-of-two bitsets are common for join filters. Masking avoids
+        // a variable integer division for every Bloom probe.
+        let bit = if self.bits.is_power_of_two() {
+            hash & (self.bits as u64 - 1)
+        } else {
+            hash % self.bits as u64
+        };
+        bit as usize
     }
 
     pub fn insert(&mut self, key: &Value) {
@@ -161,6 +169,27 @@ mod bloom_intersection_tests {
         a.intersect_with(&b).unwrap();
         assert!(a.might_contain(&Value::Integer(5)));
         assert!(a.intersect_with(&BloomFilter::new(1024, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod power_of_two_bloom_probe_tests {
+    use super::*;
+
+    #[test]
+    fn masked_and_modulo_probes_agree_for_all_hash_seeds() {
+        for bits in [1, 2, 63, 64, 65, 128, 1024, 2048] {
+            let mut filter = BloomFilter::new(bits, 7).unwrap();
+            for n in 0..128 { filter.insert(&Value::Integer(n)); }
+            for n in 0..128 { assert!(filter.might_contain(&Value::Integer(n))); }
+            let first = u64::MAX - 2;
+            let step = u64::MAX - 4;
+            for seed in 0..7 {
+                let expected = (first.wrapping_add(u64::from(seed).wrapping_mul(step))
+                    % bits as u64) as usize;
+                assert_eq!(filter.probe(first, step, seed), expected);
+            }
+        }
     }
 }
 
