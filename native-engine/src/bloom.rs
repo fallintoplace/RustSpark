@@ -8,6 +8,7 @@ pub struct BloomFilter {
     words: Vec<u64>,
     bits: usize,
     hashes: u32,
+    occupied: usize,
 }
 
 impl BloomFilter {
@@ -15,7 +16,7 @@ impl BloomFilter {
         if bits == 0 || bits > 1 << 29 || !(1..=16).contains(&hashes) {
             return Err(Error::Execution("invalid Bloom filter sizing".into()));
         }
-        Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes })
+        Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes, occupied: 0 })
     }
 
     fn hash_pair(&self, key: &Value) -> (u64, u64) {
@@ -48,7 +49,12 @@ impl BloomFilter {
         let (first, step) = self.hash_pair(key);
         for seed in 0..self.hashes {
             let bit = self.probe(first, step, seed);
-            self.words[bit / 64] |= 1_u64 << (bit % 64);
+            let word = &mut self.words[bit / 64];
+            let mask = 1_u64 << (bit % 64);
+            if *word & mask == 0 {
+                *word |= mask;
+                self.occupied += 1;
+            }
         }
     }
 
@@ -74,9 +80,7 @@ impl BloomFilter {
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
 
     /// Number of active bits for monitoring filter saturation.
-    pub fn bits_set(&self) -> usize {
-        self.words.iter().map(|word| word.count_ones() as usize).sum()
-    }
+    pub fn bits_set(&self) -> usize { self.occupied }
 
     /// Approximate false-positive chance from observed occupancy.
     /// This is an estimate, not a guarantee about a particular key distribution.
@@ -114,9 +118,12 @@ impl BloomFilter {
         if self.bits != other.bits || self.hashes != other.hashes {
             return Err(Error::Execution("cannot merge incompatible Bloom filters".into()));
         }
+        let mut occupied = 0;
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
             *destination |= *source;
+            occupied += destination.count_ones() as usize;
         }
+        self.occupied = occupied;
         Ok(())
     }
 }
@@ -147,9 +154,12 @@ impl BloomFilter {
         if self.bits != other.bits || self.hashes != other.hashes {
             return Err(Error::Execution("cannot intersect incompatible Bloom filters".into()));
         }
+        let mut occupied = 0;
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
             *destination &= *source;
+            occupied += destination.count_ones() as usize;
         }
+        self.occupied = occupied;
         Ok(())
     }
 }
@@ -236,5 +246,37 @@ mod native_bloom_batch_operator_tests {
         assert_eq!(bloom.probe_batch(&[]), Vec::<bool>::new());
         let empty = BloomFilter::new(65_536, 5).unwrap();
         assert_eq!(empty.probe_batch(&keys), vec![false; keys.len()]);
+    }
+}
+
+#[cfg(test)]
+mod cached_bloom_occupancy_regressions {
+    use super::*;
+
+    fn count_words(filter: &BloomFilter) -> usize {
+        filter.words.iter().map(|word| word.count_ones() as usize).sum()
+    }
+
+    #[test]
+    fn occupancy_stays_exact_after_repeats_merges_and_intersections() {
+        let mut first = BloomFilter::new(1025, 7).unwrap();
+        let mut second = BloomFilter::new(1025, 7).unwrap();
+        for n in 0..1500 {
+            first.insert(&Value::Integer(n % 130));
+            second.insert(&Value::Integer(n % 300));
+        }
+        assert_eq!(first.bits_set(), count_words(&first));
+        assert_eq!(second.bits_set(), count_words(&second));
+
+        let mut merged = first.clone();
+        merged.union_with(&second).unwrap();
+        assert_eq!(merged.bits_set(), count_words(&merged));
+        merged.union_with(&second).unwrap();
+        assert_eq!(merged.bits_set(), count_words(&merged));
+        merged.intersect_with(&first).unwrap();
+        assert_eq!(merged.bits_set(), count_words(&merged));
+        merged.intersect_with(&first).unwrap();
+        assert_eq!(merged.bits_set(), count_words(&merged));
+        assert!(merged.estimated_false_positive_rate() <= 1.0);
     }
 }
