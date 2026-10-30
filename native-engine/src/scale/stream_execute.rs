@@ -177,11 +177,17 @@ impl Iterator for DistinctOutput {
                 self.stopped = true;
                 return Some(Err(error));
             }
-            let batch = match self.source.next()? {
-                Ok(batch) => batch,
-                Err(error) => {
+            let batch = match self.source.next() {
+                Some(Ok(batch)) => batch,
+                Some(Err(error)) => {
                     self.stopped = true;
                     return Some(Err(error));
+                }
+                None => {
+                    // An upstream Iterator need not itself be fused. Once
+                    // DISTINCT reports EOF it must never emit later rows.
+                    self.stopped = true;
+                    return None;
                 }
             };
             let mut selected = Vec::new();
@@ -845,6 +851,27 @@ mod stream_distinct_single_probe_perf_tests {
         let source: BatchStream = Box::new([Ok(overflowing)].into_iter());
         assert!(DistinctOutput::new(source, QueryControl::default(), 1, 4096)
             .next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod distinct_stream_end_of_input_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn does_not_poll_upstream_after_first_end_of_stream() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&polls);
+        let source = std::iter::from_fn(move || {
+            let call = observed.fetch_add(1, Ordering::Relaxed);
+            if call == 0 { None } else { panic!("distinct polled exhausted source") }
+        });
+        let mut distinct = DistinctOutput::new(Box::new(source),
+            QueryControl::default(), 100, 4096);
+        assert!(distinct.next().is_none());
+        assert!(distinct.next().is_none());
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
     }
 }
 
