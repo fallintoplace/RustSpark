@@ -40,6 +40,10 @@ fn split_count(args: &[Value]) -> Result<Value> {
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
     let count = if delimiter.is_empty() {
         if input.is_ascii() { input.len() } else { input.chars().count() }
+    } else if delimiter.len() == 1 && delimiter.is_ascii() {
+        let needle = delimiter.as_bytes()[0];
+        input.as_bytes().iter().filter(|&&byte| byte == needle)
+            .count().saturating_add(1)
     } else {
         input.match_indices(delimiter).count().saturating_add(1)
     };
@@ -106,5 +110,20 @@ mod ascii_empty_delimiter_split_count_tests {
         assert_eq!(split_count(&[Value::Text("".into()), Value::Text("".into())]).unwrap(), Value::Integer(0));
         assert_eq!(split_count(&[Value::Text("a,b,".into()), Value::Text(",".into())]).unwrap(), Value::Integer(3));
         assert_eq!(split_count(&[Value::Null, Value::Text("".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod single_byte_split_count_fast_path_tests {
+    use super::*;
+    #[test]
+    fn counts_ascii_separator_bytes_in_unicode_text() {
+        let f = |text: &str, separator: &str| split_count(&[
+            Value::Text(text.into()), Value::Text(separator.into()),
+        ]).unwrap();
+        assert_eq!(f("a,b,c,", ","), Value::Integer(4));
+        assert_eq!(f("é,🙂,東京", ","), Value::Integer(3));
+        assert_eq!(f("é🙂é", "é"), Value::Integer(3));
+        assert_eq!(f("hello", ","), Value::Integer(1));
     }
 }
