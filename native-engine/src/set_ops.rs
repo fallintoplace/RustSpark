@@ -153,6 +153,12 @@ fn right_counts(
 
 /// Keep each left row up to its multiplicity in the right input.
 pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    intersect_all_with_max_rows(left, right, usize::MAX)
+}
+
+pub fn intersect_all_with_max_rows(
+    left: &Batch, right: &Batch, max_output_rows: usize,
+) -> Result<Batch> {
     if left.num_rows() == 0 || right.num_rows() == 0 {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
@@ -170,7 +176,13 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
         let mut selected = Vec::new();
         for (index, value) in left.column(0)?.iter().enumerate() {
             if let Some(remaining) = counts.get_mut(value) {
-                if *remaining > 0 { *remaining -= 1; selected.push(index); }
+                if *remaining > 0 {
+                    if selected.len() >= max_output_rows {
+                        return Err(Error::Execution("INTERSECT ALL output row limit exceeded".into()));
+                    }
+                    *remaining -= 1;
+                    selected.push(index);
+                }
             }
         }
         return left.take(&selected)?.relabel(schema);
@@ -181,6 +193,9 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
         let row = left.row(index)?;
         if let Some(remaining) = counts.get_mut(&row) {
             if *remaining > 0 {
+                if rows.len() >= max_output_rows {
+                    return Err(Error::Execution("INTERSECT ALL output row limit exceeded".into()));
+                }
                 *remaining -= 1;
                 rows.push(row);
             }
@@ -191,6 +206,12 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
 
 /// Keep left occurrences after subtracting right row multiplicities.
 pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    except_all_with_max_rows(left, right, usize::MAX)
+}
+
+pub fn except_all_with_max_rows(
+    left: &Batch, right: &Batch, max_output_rows: usize,
+) -> Result<Batch> {
     if left.num_rows() == 0 {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
@@ -210,6 +231,9 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
             if let Some(remaining) = counts.get_mut(value) {
                 if *remaining > 0 { *remaining -= 1; continue; }
             }
+            if selected.len() >= max_output_rows {
+                return Err(Error::Execution("EXCEPT ALL output row limit exceeded".into()));
+            }
             selected.push(index);
         }
         return left.take(&selected)?.relabel(schema);
@@ -223,6 +247,9 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
                 *remaining -= 1;
                 continue;
             }
+        }
+        if rows.len() >= max_output_rows {
+            return Err(Error::Execution("EXCEPT ALL output row limit exceeded".into()));
         }
         rows.push(row);
     }
@@ -415,5 +442,35 @@ mod typed_empty_set_short_circuits_tests {
             Field::new("id", DataType::Text, false),
         ]).unwrap());
         assert!(intersect_distinct(&integers, &invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod multiset_output_budget_regression_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn intersect_and_except_all_count_emitted_rows_not_unique_keys() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        assert!(intersect_all_with_max_rows(&left, &right, 1)
+            .unwrap_err().to_string().contains("row limit"));
+        assert!(except_all_with_max_rows(&left, &right, 1)
+            .unwrap_err().to_string().contains("row limit"));
+        assert_eq!(intersect_all_with_max_rows(&left, &right, 2)
+            .unwrap().rows().unwrap(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)],
+            ]);
+        assert_eq!(except_all_with_max_rows(&left, &right, 2)
+            .unwrap().rows().unwrap(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(3)],
+            ]);
     }
 }
