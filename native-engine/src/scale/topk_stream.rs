@@ -12,6 +12,7 @@ struct Candidate {
     keys: Vec<Value>,
     row: Vec<Value>,
     ordinal: usize,
+    bytes: usize,
     options: Arc<Vec<(bool, bool)>>,
 }
 
@@ -33,6 +34,17 @@ impl PartialEq for Candidate {
 }
 impl Eq for Candidate {}
 
+fn candidate_size(keys: &[Value], row: &[Value]) -> usize {
+    keys.iter().chain(row).fold(
+        std::mem::size_of::<Candidate>().saturating_add(
+            keys.len().saturating_add(row.len()).saturating_mul(std::mem::size_of::<Value>())),
+        |size, value| match value {
+            Value::Text(text) => size.saturating_add(text.len()),
+            _ => size,
+        },
+    )
+}
+
 pub struct TopKOutput {
     batches: VecDeque<Batch>,
     control: QueryControl,
@@ -42,7 +54,8 @@ pub struct TopKOutput {
 impl TopKOutput {
     pub fn new(
         source: BatchStream, schema: Schema, keys: &[SortKey],
-        offset: usize, count: usize, batch_rows: usize, control: QueryControl,
+        offset: usize, count: usize, batch_rows: usize,
+        max_candidate_bytes: usize, control: QueryControl,
     ) -> Result<Self> {
         if batch_rows == 0 || batch_rows > 65_536 {
             return Err(Error::Execution("invalid Top-K output batch size".into()));
@@ -55,6 +68,7 @@ impl TopKOutput {
             (key.descending, key.nulls_first)).collect::<Vec<_>>());
         let mut heap = BinaryHeap::<Candidate>::with_capacity(target);
         let mut ordinal = 0usize;
+        let mut retained_bytes = 0usize;
         if target > 0 {
             for next in source {
                 control.check()?;
@@ -67,18 +81,28 @@ impl TopKOutput {
                     let keys = keys.iter().map(|key| key.expression.evaluate(&batch, row))
                         .collect::<Result<Vec<_>>>()?;
                     let candidate = Candidate {
-                        keys, row: Vec::new(), ordinal, options: Arc::clone(&options),
+                        keys, row: Vec::new(), ordinal, bytes: 0,
+                        options: Arc::clone(&options),
                     };
                     ordinal = ordinal.checked_add(1)
                         .ok_or_else(|| Error::Execution("stream Top-K ordinal overflow".into()))?;
-                    if heap.len() < target {
+                    let replacing = heap.len() == target;
+                    if !replacing || heap.peek().is_some_and(|worst| candidate < *worst) {
                         let mut candidate = candidate;
                         candidate.row = batch.row(row)?;
-                        heap.push(candidate);
-                    } else if heap.peek().is_some_and(|worst| candidate < *worst) {
-                        let mut candidate = candidate;
-                        candidate.row = batch.row(row)?;
-                        *heap.peek_mut().expect("nonempty Top-K heap") = candidate;
+                        candidate.bytes = candidate_size(&candidate.keys, &candidate.row);
+                        let previous = if replacing {
+                            heap.peek().expect("nonempty Top-K heap").bytes
+                        } else { 0 };
+                        retained_bytes = retained_bytes.checked_sub(previous)
+                            .and_then(|remaining| remaining.checked_add(candidate.bytes))
+                            .filter(|size| *size <= max_candidate_bytes)
+                            .ok_or_else(|| Error::Execution("stream Top-K byte budget exceeded".into()))?;
+                        if replacing {
+                            *heap.peek_mut().expect("nonempty Top-K heap") = candidate;
+                        } else {
+                            heap.push(candidate);
+                        }
                     }
                 }
             }
@@ -134,7 +158,7 @@ mod tests {
         let all = Batch::from_rows(schema.clone(), values.iter()
             .map(|n| vec![Value::Integer(*n)]).collect()).unwrap();
         let result = TopKOutput::new(Box::new([Ok(first), Ok(second)].into_iter()),
-            schema, &keys, 1, 3, 2, QueryControl::default()).unwrap()
+            schema, &keys, 1, 3, 2, 64 * 1024 * 1024, QueryControl::default()).unwrap()
             .collect::<Result<Vec<_>>>().unwrap();
         assert!(result.iter().all(|batch| batch.num_rows() <= 2));
         let rows = result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
@@ -151,12 +175,16 @@ mod tests {
             vec![Value::Integer(3)],
         ]).unwrap();
         let rows = TopKOutput::new(Box::new([Ok(input)].into_iter()),
-            schema(), &[key], 0, 2, 1, QueryControl::default()).unwrap()
+            schema(), &[key], 0, 2, 1, 64 * 1024 * 1024, QueryControl::default()).unwrap()
             .collect::<Result<Vec<_>>>().unwrap()
             .iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Value::Integer(4)], vec![Value::Integer(3)]]);
+        let short = [SortKey::ascending(Expr::Column("n".into()))];
+        let sample = Batch::from_rows(schema(), vec![vec![Value::Integer(1)]]).unwrap();
+        assert!(TopKOutput::new(Box::new([Ok(sample)].into_iter()), schema(),
+            &short, 0, 1, 10, 8, QueryControl::default()).is_err());
         let bad = [SortKey::ascending(Expr::Column("missing".into()))];
         assert!(TopKOutput::new(Box::new(std::iter::empty()), schema(),
-            &bad, 0, 0, 10, QueryControl::default()).is_err());
+            &bad, 0, 0, 10, 64 * 1024 * 1024, QueryControl::default()).is_err());
     }
 }
