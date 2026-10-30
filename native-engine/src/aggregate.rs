@@ -248,6 +248,53 @@ pub fn aggregate(
     aggregate_with_max_groups(batch, group_by, items, 1_000_000)
 }
 
+/// Derive the single-row result schema without scanning an input source.
+pub fn global_output_schema(input: &Schema, items: &[AggregateItem]) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(items.len());
+    for item in items {
+        if let AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) = &item.op {
+            expr.output_type(input)?;
+        }
+        let nullable = !matches!(&item.op,
+            AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
+        fields.push(Field::new(&item.alias, item.output_type(input)?, nullable));
+    }
+    Schema::new(fields)
+}
+
+/// Update native scalar aggregate states incrementally across input batches.
+/// DISTINCT aggregates need a separate bounded spill path and are rejected here.
+pub fn aggregate_global_stream(
+    source: impl Iterator<Item = Result<Batch>>,
+    input_schema: &Schema, items: &[AggregateItem],
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<Batch> {
+    if items.iter().any(|item| matches!(&item.op,
+        AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
+        AggregateOp::AvgDistinct(_))) {
+        return Err(Error::Unsupported("stream global DISTINCT aggregates require a spill path".into()));
+    }
+    let schema = global_output_schema(input_schema, items)?;
+    let mut states = items.iter().map(|item| State::new(&item.op))
+        .collect::<Vec<_>>();
+    for next in source {
+        check()?;
+        let batch = next?;
+        if batch.schema() != input_schema {
+            return Err(Error::Schema("stream aggregate input schema changed".into()));
+        }
+        for row in 0..batch.num_rows() {
+            if row % 1024 == 0 { check()?; }
+            for (state, item) in states.iter_mut().zip(items) {
+                state.update(&item.op, &batch, row)?;
+            }
+        }
+    }
+    check()?;
+    let row = states.into_iter().map(State::finish).collect::<Result<Vec<_>>>()?;
+    Batch::from_rows(schema, vec![row])
+}
+
 pub fn aggregate_with_max_groups(
     batch: &Batch,
     group_by: &[(Expr, String)],
@@ -459,6 +506,48 @@ mod bound_group_columns_perf_tests {
             BinaryOp::Add, Expr::Literal(Value::Integer(1)));
         assert_eq!(aggregate_with_max_groups(&batch,
             &[(computed, "key".into())], &[], 2).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod global_stream_native_aggregate_tests {
+    use super::*;
+    #[test]
+    fn combines_batches_and_empty_inputs_without_materializing_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let items = [
+            AggregateItem::new(AggregateOp::CountAll, "total"),
+            AggregateItem::new(AggregateOp::Count(Expr::Column("n".into())), "not_null"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("n".into())), "sum"),
+            AggregateItem::new(AggregateOp::Avg(Expr::Column("n".into())), "avg"),
+        ];
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null],
+        ]).unwrap();
+        let b = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(5)],
+        ]).unwrap();
+        let result = aggregate_global_stream([Ok(a), Ok(b)].into_iter(),
+            &schema, &items, || Ok(())).unwrap();
+        assert_eq!(result.row(0).unwrap(), vec![
+            Value::Integer(4), Value::Integer(3), Value::Integer(9),
+            Value::Float(3.0),
+        ]);
+        let empty = aggregate_global_stream(std::iter::empty(), &schema,
+            &items, || Ok(())).unwrap();
+        assert_eq!(empty.row(0).unwrap(), vec![
+            Value::Integer(0), Value::Integer(0), Value::Null, Value::Null,
+        ]);
+    }
+
+    #[test]
+    fn catches_unknown_count_columns_and_rejects_unbounded_distinct() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        assert!(global_output_schema(&schema, &[AggregateItem::new(
+            AggregateOp::Count(Expr::Column("missing".into())), "n")]).is_err());
+        assert!(aggregate_global_stream(std::iter::empty(), &schema,
+            &[AggregateItem::new(AggregateOp::CountDistinct(
+                Expr::Column("n".into())), "n")], || Ok(())).is_err());
     }
 }
 
