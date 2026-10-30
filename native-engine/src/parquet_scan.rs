@@ -1,7 +1,7 @@
 //! Bounded Parquet scans using Apache Parquet and Arrow, never DataFusion.
 use std::{fs::File, path::Path};
 
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::{ProjectionMask, arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder}};
 
 use crate::{arrow_bridge, batch::Batch, Error, Result};
 
