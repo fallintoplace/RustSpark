@@ -138,9 +138,15 @@ fn execute_inner(
         },
         Plan::Distinct { input } => {
             if let Plan::Scan { table } = input.as_ref() {
-                distinct::distinct(catalog.get(table)?)?
+                distinct::distinct_with_budget_checked(
+                    catalog.get(table)?, options.max_output_rows.min(1_000_000),
+                    64 * 1024 * 1024, || guard.check(),
+                )?
             } else {
-                distinct::distinct(&descend(input)?)?
+                distinct::distinct_with_budget_checked(
+                    &descend(input)?, options.max_output_rows.min(1_000_000),
+                    64 * 1024 * 1024, || guard.check(),
+                )?
             }
         },
         Plan::Join {
