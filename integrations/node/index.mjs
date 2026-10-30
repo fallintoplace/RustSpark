@@ -37,6 +37,9 @@ export class RustSpark {
     }
     const unnamed = { input, csv, parquet, json };
     const selected = Object.values(unnamed).filter((value) => value != null);
+    if (selected.some((value) => typeof value !== "string" || value.length === 0)) {
+      throw new TypeError("Unnamed file paths must be nonempty strings");
+    }
     const hasNamed = [csvTables, parquetTables, jsonTables]
       .some((tables) => tables && Object.keys(tables).length > 0);
     if (selected.length > 1 || (selected.length && hasNamed)) {
