@@ -72,6 +72,19 @@ pub fn hash_join(
     right_key: &str,
     kind: JoinKind,
 ) -> Result<Batch> {
+    hash_join_with_max_rows(left, right, left_key, right_key, kind, MAX_JOIN_ROWS)
+}
+
+/// Stop building join results when the query's output cardinality limit is reached.
+pub fn hash_join_with_max_rows(
+    left: &Batch,
+    right: &Batch,
+    left_key: &str,
+    right_key: &str,
+    kind: JoinKind,
+    max_output_rows: usize,
+) -> Result<Batch> {
+    let max_output_rows = max_output_rows.min(MAX_JOIN_ROWS);
     let left_column = left.schema().column(left_key)?;
     let right_column = right.schema().column(right_key)?;
     if left.schema().field(left_column)?.data_type != right.schema().field(right_column)?.data_type {
@@ -90,7 +103,7 @@ pub fn hash_join(
             let key = &left_keys[row];
             let found = joinable(key) && keys.contains(key);
             if (kind == JoinKind::Semi && found) || (kind == JoinKind::Anti && !found) {
-                if indices.len() >= MAX_JOIN_ROWS {
+                if indices.len() >= max_output_rows {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
                 indices.push(row);
@@ -143,7 +156,7 @@ pub fn hash_join(
                 if !matched_right.is_empty() {
                     matched_right[right_row] = true;
                 }
-                if output.len() >= MAX_JOIN_ROWS {
+                if output.len() >= max_output_rows {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
                 let mut row = if match_index + 1 == right_rows.len() {
@@ -155,7 +168,7 @@ pub fn hash_join(
                 output.push(row);
             }
         } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
-            if output.len() >= MAX_JOIN_ROWS {
+            if output.len() >= max_output_rows {
                 return Err(Error::Execution("join output exceeds safety limit".into()));
             }
             let mut row = left.row(left_row)?;
@@ -166,7 +179,7 @@ pub fn hash_join(
     if matches!(kind, JoinKind::Right | JoinKind::Full) {
         for right_row in 0..right.num_rows() {
             if !matched_right[right_row] {
-                if output.len() >= MAX_JOIN_ROWS {
+                if output.len() >= max_output_rows {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
                 let mut row = vec![Value::Null; left.schema().len()];
@@ -524,5 +537,28 @@ mod prepared_columnar_results_tests {
             let baseline = hash_join(&left, &right, "k", "k", kind).unwrap();
             assert_eq!(actual, baseline);
         }
+    }
+}
+
+#[cfg(test)]
+mod hash_join_row_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn enforces_row_budget_for_matched_outer_and_semi_joins() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null]
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]).unwrap();
+        assert!(hash_join_with_max_rows(&left, &right, "id", "id", JoinKind::Inner, 3).is_err());
+        assert_eq!(hash_join_with_max_rows(&left, &right, "id", "id", JoinKind::Inner, 4).unwrap().num_rows(), 4);
+        assert!(hash_join_with_max_rows(&left, &right, "id", "id", JoinKind::Right, 4).is_err());
+        assert!(hash_join_with_max_rows(&left, &right, "id", "id", JoinKind::Semi, 1).is_err());
+        assert_eq!(hash_join_with_max_rows(&left, &right, "id", "id", JoinKind::Semi, 2).unwrap().num_rows(), 2);
+        assert_eq!(hash_join_with_max_rows(&left, &right, "id", "id", JoinKind::Anti, 1).unwrap().num_rows(), 1);
     }
 }
