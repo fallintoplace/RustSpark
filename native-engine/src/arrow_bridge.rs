@@ -141,7 +141,11 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     if dictionary.is_null(row) { Value::Null }
                     else {
                         let code = dictionary.keys().value(row) as usize;
-                        Value::Text(values.value(code).into())
+                        if values.is_null(code) {
+                            Value::Null
+                        } else {
+                            Value::Text(values.value(code).into())
+                        }
                     }
                 }).collect())
             }
@@ -289,5 +293,26 @@ mod arrow_dictionary_utf8_decode_tests {
             Value::Text("Berlin".into()), Value::Text("東京".into()),
         ]);
         assert_eq!(from_arrow(&to_arrow(&native).unwrap()).unwrap(), native);
+    }
+}
+
+#[cfg(test)]
+mod nullable_arrow_dictionary_value_tests {
+    use super::*;
+
+    #[test]
+    fn dictionary_value_null_is_not_decoded_as_empty_text() {
+        let values = StringArray::from(vec![Some("known"), None]);
+        let keys = Int32Array::from(vec![Some(0), Some(1), None]);
+        let dictionary = DictionaryArray::<Int32Type>::try_new(
+            keys, Arc::new(values),
+        ).unwrap();
+        let record = RecordBatch::try_from_iter(vec![
+            ("city", Arc::new(dictionary) as ArrayRef),
+        ]).unwrap();
+        let native = from_arrow(&record).unwrap();
+        assert_eq!(native.column(0).unwrap(), &[
+            Value::Text("known".into()), Value::Null, Value::Null,
+        ]);
     }
 }
