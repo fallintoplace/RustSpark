@@ -355,3 +355,46 @@ mod scheduler_ready_task_inspection_tests {
         assert_eq!(scheduler.queued_tasks(10), vec![5, 9]);
     }
 }
+
+impl TaskScheduler {
+    /// Reclaim every active lease belonging to a disconnected worker.
+    /// Late acknowledgements are rejected because the lease is no longer active.
+    pub fn worker_disconnected(&mut self, worker: u64) -> usize {
+        let mut reclaimed = 0;
+        for task in self.tasks.values_mut() {
+            if matches!(&task.status, TaskStatus::Leased { worker: owner, .. } if *owner == worker) {
+                task.status = if task.attempts >= self.max_attempts {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Queued
+                };
+                reclaimed += 1;
+            }
+        }
+        reclaimed
+    }
+}
+
+#[cfg(test)]
+mod worker_disconnect_tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_reclaims_only_owned_leases_and_invalidates_late_results() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3], 2).unwrap();
+        let first = scheduler.lease(11, now, Duration::from_secs(60)).unwrap().unwrap();
+        let second = scheduler.lease(22, now, Duration::from_secs(60)).unwrap().unwrap();
+        assert_eq!(scheduler.worker_disconnected(11), 1);
+        assert_eq!(scheduler.worker_disconnected(11), 0);
+        assert_eq!(scheduler.status(first.task), Some(&TaskStatus::Queued));
+        assert!(!scheduler.finish_at(&first, true, now));
+        assert!(matches!(scheduler.status(second.task), Some(TaskStatus::Leased { .. })));
+        let retry = scheduler.lease(33, now, Duration::from_secs(60)).unwrap().unwrap();
+        assert_eq!(retry.task, first.task);
+        assert_eq!(retry.attempt, 2);
+        assert_eq!(scheduler.worker_disconnected(33), 1);
+        assert_eq!(scheduler.status(retry.task), Some(&TaskStatus::Failed));
+        assert!(scheduler.finish_at(&second, true, now));
+    }
+}
