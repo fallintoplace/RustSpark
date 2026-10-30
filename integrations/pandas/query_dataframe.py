@@ -109,6 +109,8 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
                                     check=False, timeout=process_timeout)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
+        except OSError as error:
+            raise RuntimeError("Unable to launch RustSpark Arrow export") from error
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "RustSpark query failed")
         with pa.memory_map(str(output), "r") as source:
