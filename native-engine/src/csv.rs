@@ -240,7 +240,10 @@ mod tests {
  
 /// Decode bounded CSV input using a declared schema and matching header order.
 pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
-    let mut records = parse_records(input.strip_prefix('\u{feff}').unwrap_or(input))?;
+    // Admission counts data rows; the header needs its own record slot.
+    let mut records = parse_records_with_limit(
+        input.strip_prefix('\u{feff}').unwrap_or(input), MAX_CSV_ROWS + 1,
+    )?;
     if records.is_empty() {
         return Err(Error::Parse("CSV input has no header".into()));
     }
@@ -279,6 +282,9 @@ mod typed_csv_feature_tests {
 
     #[test]
     fn strict_csv_preserves_type_and_required_column() {
+        // The record scanner accounts for the header separately from data rows.
+        assert!(parse_records_with_limit("id\\n1\\n2\\n", 3).is_ok());
+        assert!(parse_records_with_limit("id\\n1\\n2\\n", 2).is_err());
         let schema = Schema::new(vec![
             Field::new("id", DataType::Integer, false),
             Field::new("label", DataType::Text, true),
