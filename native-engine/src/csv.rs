@@ -19,8 +19,13 @@ fn finish_field(row: &mut Vec<String>, field: &mut String) {
     row.push(std::mem::take(field));
 }
 
-fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String) {
-    if row.is_empty() && field.is_empty() {
+fn finish_record(
+    records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String,
+    quoted_empty: bool,
+) {
+    // A blank physical line can be skipped, but an explicitly quoted empty
+    // field is still a real CSV row and must preserve its cardinality.
+    if row.is_empty() && field.is_empty() && !quoted_empty {
         return;
     }
     finish_field(row, field);
@@ -82,7 +87,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
                     if character == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    finish_record(&mut records, &mut row, &mut field);
+                    finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote);
                     if records.len() > max_records {
                         return Err(Error::Execution("CSV row count limit exceeded".into()));
                     }
@@ -104,7 +109,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
         return Err(Error::Parse("unterminated CSV quote".into()));
     }
     if !row.is_empty() || !field.is_empty() || state == State::AfterQuote {
-        finish_record(&mut records, &mut row, &mut field);
+        finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote);
     }
     if records.len() > max_records {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
@@ -360,5 +365,30 @@ mod csv_data_row_limit_accounting_tests {
         assert!(parse_records_with_limit(input, 2).is_err());
         assert_eq!(parse_records_with_limit(input, 3).unwrap().len(), 3);
         assert_eq!(from_csv_str(input).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod quoted_empty_row_preservation_tests {
+    use super::*;
+
+    #[test]
+    fn distinguishes_quoted_empty_fields_from_blank_physical_lines() {
+        assert_eq!(parse_records("\"\"\n").unwrap(), vec![vec![String::new()]]);
+        assert_eq!(parse_records("\"\"").unwrap(), vec![vec![String::new()]]);
+        assert_eq!(parse_records("\n\"\"\r\n\n").unwrap(), vec![vec![String::new()]]);
+        assert_eq!(parse_records("\n").unwrap(), Vec::<Vec<String>>::new());
+    }
+
+    #[test]
+    fn quoted_empty_csv_rows_survive_in_memory_and_typed_reads() {
+        let input = "v\n\"\"\nvalue\n";
+        let inferred = from_csv_str(input).unwrap();
+        assert_eq!(inferred.num_rows(), 2);
+        assert_eq!(inferred.row(0).unwrap(), vec![Value::Null]);
+        assert_eq!(inferred.row(1).unwrap(), vec![Value::Text("value".into())]);
+        let schema = Schema::new(vec![Field::new("v", DataType::Text, true)]).unwrap();
+        let typed = from_csv_str_typed(input, schema).unwrap();
+        assert_eq!(typed.num_rows(), 2);
     }
 }
