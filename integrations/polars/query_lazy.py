@@ -99,7 +99,8 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
             json_tables=json_tables,
         )
         try:
-            completed = subprocess.run(command, capture_output=True, text=True,
+            completed = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, text=True,
                                        check=False, timeout=process_timeout)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
