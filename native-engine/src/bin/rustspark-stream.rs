@@ -14,6 +14,7 @@ use rustspark_native::{
 
 struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, catalog_file: Option<PathBuf>,
+    save_catalog: Option<PathBuf>,
     table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
 }
@@ -44,6 +45,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
     let mut catalog_file = None;
+    let mut save_catalog = None;
     let mut table = "data".to_string();
     let mut schema = None;
     let mut sql = None;
@@ -68,6 +70,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
             },
             "--table" => table = value,
+            "--save-catalog" => {
+                if save_catalog.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --save-catalog".into()));
+                }
+            },
             "--catalog-file" => {
                 if catalog_file.replace(PathBuf::from(value)).is_some() {
                     return Err(Error::Parse("duplicate --catalog-file".into()));
@@ -99,13 +106,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if source_count != 1 {
         return Err(Error::Parse("choose one of --csv, --parquet, or --catalog-file".into()));
     }
+    if catalog_file.is_some() && save_catalog.is_some() {
+        return Err(Error::Parse("--save-catalog requires an input CSV or Parquet file".into()));
+    }
     if csv.is_some() && schema.is_none() {
         return Err(Error::Parse("--schema required for CSV".into()));
     }
     if (parquet.is_some() || catalog_file.is_some()) && schema.is_some() {
         return Err(Error::Parse("explicit schema is only valid for CSV input".into()));
     }
-    Ok(Some(Args { csv, parquet, catalog_file, table, schema, sql, batch_rows, record_bytes, scratch }))
+    Ok(Some(Args { csv, parquet, catalog_file, save_catalog, table, schema, sql, batch_rows, record_bytes, scratch }))
 }
 
 fn escape(text: &str) -> String {
@@ -168,7 +178,11 @@ fn run() -> Result<()> {
     let input = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    write_csv(&schema, input, &mut output)
+    write_csv(&schema, input, &mut output)?;
+    if let Some(path) = &args.save_catalog {
+        manifest_storage::publish(&catalog, path)?;
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
