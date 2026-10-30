@@ -1,5 +1,5 @@
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Error, Result};
+use crate::{scalar::Value, schema::DataType, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
@@ -7,18 +7,9 @@ fn output(types: &[DataType]) -> Result<DataType> {
 }
 
 fn uppercase_bounded(text: &str, limit: usize) -> Result<String> {
-    if text.len() > limit { return Err(Error::Execution("UCASE input exceeds byte limit".into())); }
-    if text.is_ascii() { return Ok(text.to_ascii_uppercase()); }
-    let mut result = String::with_capacity(text.len());
-    for character in text.chars() {
-        for upper in character.to_uppercase() {
-            if upper.len_utf8() > limit.saturating_sub(result.len()) {
-                return Err(Error::Execution("UCASE output exceeds byte limit".into()));
-            }
-            result.push(upper);
-        }
-    }
-    Ok(result)
+    super::case_conversion::convert_bounded(
+        text, limit, "UCASE", str::to_ascii_uppercase, char::to_uppercase,
+    )
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
