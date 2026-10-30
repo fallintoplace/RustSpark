@@ -136,7 +136,13 @@ fn execute_inner(
                 limit::limit(&descend(input)?, *offset, *count)?
             }
         },
-        Plan::Distinct { input } => distinct::distinct(&descend(input)?)?,
+        Plan::Distinct { input } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                distinct::distinct(catalog.get(table)?)?
+            } else {
+                distinct::distinct(&descend(input)?)?
+            }
+        },
         Plan::Join {
             left,
             right,
@@ -373,5 +379,26 @@ mod catalog_aggregate_borrow_tests {
         let result = execute_with_options(&plan, &catalog,
             ExecutionOptions { max_output_rows: 1, ..ExecutionOptions::default() }).unwrap();
         assert_eq!(result.rows().unwrap(), vec![vec![Value::Integer(100)]]);
+    }
+}
+
+#[cfg(test)]
+mod catalog_distinct_borrow_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+    #[test]
+    fn deduplicates_large_catalog_scan_to_small_budget() {
+        let mut catalog = Catalog::new();
+        catalog.register("source", Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap(),
+            (0..100).map(|n| vec![if n % 2 == 0 { Value::Null }
+                else { Value::Integer(7) }]).collect()
+        ).unwrap()).unwrap();
+        let result = execute_with_options(&Plan::Distinct {
+                input: Box::new(Plan::scan("source")),
+            }, &catalog, ExecutionOptions { max_output_rows: 2,
+                ..ExecutionOptions::default() }).unwrap();
+        assert_eq!(result.rows().unwrap(),
+            vec![vec![Value::Null], vec![Value::Integer(7)]]);
     }
 }
