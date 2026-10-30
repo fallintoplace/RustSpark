@@ -21,6 +21,31 @@ impl Hasher for PartitionHasher {
     }
 }
 
+/// Count native hash partition sizes without materializing output batches.
+pub fn partition_counts(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<usize>> {
+    if partitions == 0 || partitions > 4096 || keys.is_empty() {
+        return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
+    }
+    let indices = keys.iter().map(|key| batch.schema().column(key))
+        .collect::<Result<Vec<_>>>()?;
+    if partitions == 1 { return Ok(vec![batch.num_rows()]); }
+    let columns = indices.iter().map(|&index| batch.column(index))
+        .collect::<Result<Vec<_>>>()?;
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
+    let mut counts = vec![0usize; partitions];
+    for row in 0..batch.num_rows() {
+        let mut hasher = PartitionHasher::default();
+        for column in &columns { column[row].hash(&mut hasher); }
+        let hash = hasher.finish();
+        let index = match mask {
+            Some(mask) => (hash as usize) & mask,
+            None => (hash % partitions as u64) as usize,
+        };
+        counts[index] += 1;
+    }
+    Ok(counts)
+}
+
 pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
     if partitions == 0 || partitions > 4096 || keys.is_empty() {
         return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
@@ -235,5 +260,33 @@ mod one_partition_hash_shortcut_tests {
         assert!(partition(&input, &[], 1).is_err());
         assert_eq!(partition(&Batch::empty(input.schema().clone()), &["k"], 1)
             .unwrap()[0].num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod native_partition_cardinality_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn predicts_actual_partition_sizes_with_null_and_composite_keys() {
+        let schema = Schema::new(vec![
+            Field::new("k1", DataType::Integer, true),
+            Field::new("k2", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Null, Value::Text("a".into())],
+            vec![Value::Integer(2), Value::Text("a".into())],
+            vec![Value::Null, Value::Text("a".into())],
+            vec![Value::Integer(3), Value::Null],
+        ]).unwrap();
+        for buckets in [1, 2, 7, 16] {
+            let counted = partition_counts(&batch, &["k1", "k2"], buckets).unwrap();
+            let materialized = partition(&batch, &["k1", "k2"], buckets).unwrap();
+            assert_eq!(counted, materialized.iter().map(Batch::num_rows).collect::<Vec<_>>());
+            assert_eq!(counted.iter().sum::<usize>(), batch.num_rows());
+        }
+        assert!(partition_counts(&batch, &["missing"], 4).is_err());
+        assert!(partition_counts(&batch, &["k1"], 0).is_err());
     }
 }
