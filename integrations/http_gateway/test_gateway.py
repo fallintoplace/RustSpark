@@ -72,7 +72,7 @@ class BoundedBackendTests(unittest.TestCase):
         valid = run_bounded_backend(
             [sys.executable, "-c", "print('ok')"], timeout=5, max_bytes=32
         )
-        self.assertEqual(valid.stdout, "ok\\n")
+        self.assertEqual(valid.stdout, "ok\n")
         self.assertEqual(valid.returncode, 0)
         with self.assertRaisesRegex(ValueError, "budget"):
             run_bounded_backend(
