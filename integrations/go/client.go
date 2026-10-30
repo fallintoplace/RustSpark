@@ -136,11 +136,25 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
         if ctx.Err() != nil { return nil, ctx.Err() }
         return nil, fmt.Errorf("RustSpark query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
     }
-    decoder := json.NewDecoder(&output)
+    return decodeRows(&output)
+}
+
+// decodeRows validates the complete JSON result instead of accepting null rows
+// or a top-level null as a successful query response.
+func decodeRows(output io.Reader) ([]map[string]any, error) {
+    decoder := json.NewDecoder(output)
     decoder.UseNumber()
     var rows []map[string]any
     if err := decoder.Decode(&rows); err != nil {
         return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err)
+    }
+    if rows == nil {
+        return nil, errors.New("RustSpark JSON result must be an array")
+    }
+    for index, row := range rows {
+        if row == nil {
+            return nil, fmt.Errorf("RustSpark JSON result row %d must be an object", index)
+        }
     }
     var extra any
     if err := decoder.Decode(&extra); err != nil {
