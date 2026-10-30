@@ -50,6 +50,9 @@ impl Schema {
     pub fn new(fields: Vec<Field>) -> Result<Self> {
         let mut indices = HashMap::with_capacity(fields.len());
         for (index, field) in fields.iter().enumerate() {
+            if field.name.chars().any(char::is_control) {
+                return Err(Error::Schema("column names cannot contain control characters".into()));
+            }
             if field.name.trim().is_empty() {
                 return Err(Error::Schema("column names cannot be empty".into()));
             }
@@ -159,5 +162,17 @@ mod column_index_perf_tests {
             Field::new("ID", DataType::Integer, true),
             Field::new("id", DataType::Integer, true),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod invalid_column_name_tests {
+    use super::*;
+    #[test]
+    fn control_characters_are_rejected_without_restricting_unicode() {
+        for name in ["a\0b", "a\nb", "a\rb", "a\tb"] {
+            assert!(Schema::new(vec![Field::new(name, DataType::Text, true)]).is_err());
+        }
+        assert!(Schema::new(vec![Field::new("東京", DataType::Text, true)]).is_ok());
     }
 }
