@@ -1,4 +1,12 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
+
+fn normalized_name(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
 
 use crate::{scalar::Value, Error, Result};
 
@@ -53,7 +61,7 @@ impl Schema {
             if field.name.trim().is_empty() {
                 return Err(Error::Schema("column names cannot be empty".into()));
             }
-            if indices.insert(field.name.to_ascii_lowercase(), index).is_some() {
+            if indices.insert(normalized_name(&field.name).into_owned(), index).is_some() {
                 return Err(Error::Schema(format!("duplicate column: {}", field.name)));
             }
         }
@@ -73,11 +81,8 @@ impl Schema {
     }
 
     pub fn column(&self, name: &str) -> Result<usize> {
-        let index = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            self.indices.get(&name.to_ascii_lowercase())
-        } else {
-            self.indices.get(name)
-        };
+        let key = normalized_name(name);
+        let index = self.indices.get(key.as_ref());
         index.copied()
             .ok_or_else(|| Error::Schema(format!("unknown column: {name}")))
     }
