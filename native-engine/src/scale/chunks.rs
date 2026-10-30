@@ -37,23 +37,28 @@ where I: Iterator<Item = Result<Vec<Value>>>
         // the requested batch size. Avoid reserving tens of thousands of slots
         // for a tiny final batch.
         let capacity = self.input.size_hint().1.map_or(limit, |upper| upper.min(limit));
-        let mut rows = Vec::with_capacity(capacity);
-        while rows.len() < limit {
+        let mut columns = (0..self.schema.len())
+            .map(|_| Vec::with_capacity(capacity)).collect::<Vec<Vec<Value>>>();
+        let mut row_count = 0usize;
+        while row_count < limit {
             match self.input.next() {
                 Some(Ok(row)) => {
                     if row.len() != self.schema.len() {
                         let error = Error::Schema("row width does not match schema".into());
-                        if rows.is_empty() {
+                        if row_count == 0 {
                             self.finished = true;
                             return Some(Err(error));
                         }
                         self.pending_error = Some(error);
                         break;
                     }
-                    rows.push(row);
+                    for (column, value) in columns.iter_mut().zip(row) {
+                        column.push(value);
+                    }
+                    row_count += 1;
                 },
                 Some(Err(error)) => {
-                    if rows.is_empty() {
+                    if row_count == 0 {
                         self.finished = true;
                         return Some(Err(error));
                     }
@@ -66,8 +71,8 @@ where I: Iterator<Item = Result<Vec<Value>>>
                 }
             }
         }
-        if rows.is_empty() { return None; }
-        let batch = Batch::from_rows(self.schema.clone(), rows);
+        if row_count == 0 { return None; }
+        let batch = Batch::new_with_row_count(self.schema.clone(), columns, row_count);
         if batch.is_err() { self.finished = true; }
         Some(batch)
     }
@@ -198,5 +203,34 @@ mod bounded_remaining_rows_capacity_tests {
         assert_eq!(batches[0].rows().unwrap(), vec![
             vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Integer(2)]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod native_columnar_row_batched_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn columnar_batched_stream_keeps_nullable_data_and_zero_width_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("s", DataType::Text, true),
+        ]).unwrap();
+        let rows = vec![
+            Ok(vec![Value::Integer(1), Value::Null]),
+            Ok(vec![Value::Integer(2), Value::Text("界".into())]),
+            Ok(vec![Value::Integer(3), Value::Null]),
+        ];
+        let chunks = RowBatcher::new(rows.into_iter(), schema.clone(), 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(chunks[0].column(1).unwrap(), [Value::Null, Value::Text("界".into())]);
+        let zero = Schema::new(vec![]).unwrap();
+        let zero_chunks = RowBatcher::new(vec![Ok(vec![]); 3].into_iter(), zero, 2).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(zero_chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), [2, 1]);
+        assert!(zero_chunks[0].rows().unwrap().iter().all(Vec::is_empty));
+        assert_eq!(chunks[0].schema(), &schema);
     }
 }
