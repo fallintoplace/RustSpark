@@ -15,6 +15,7 @@ pub struct StageGraph {
     order: Vec<u64>,
     order_indices: Vec<usize>,
     longest_chain: usize,
+    remaining_chain: Vec<usize>,
 }
 
 impl StageGraph {
@@ -73,7 +74,15 @@ impl StageGraph {
             return Err(Error::Execution("execution stage graph contains a cycle".into()));
         }
         let longest_chain = depth.into_iter().max().unwrap_or(0);
-        Ok(Self { stages, order, order_indices, longest_chain })
+        // Critical-path priority depends only on immutable topology.
+        // Cache it once instead of rebuilding a successor map each poll.
+        let mut remaining_chain = vec![1usize; stages.len()];
+        for &source in order_indices.iter().rev() {
+            for &child in &successors[source] {
+                remaining_chain[source] = remaining_chain[source].max(remaining_chain[child] + 1);
+            }
+        }
+        Ok(Self { stages, order, order_indices, longest_chain, remaining_chain })
     }
 
     pub fn topological_order(&self) -> &[u64] {
@@ -98,24 +107,15 @@ impl StageGraph {
 
     /// Dependency-ready stages ordered by longest remaining downstream chain.
     pub fn ready_by_critical_path(&self, completed: &HashSet<u64>) -> Vec<u64> {
-        let mut successors = HashMap::<u64, Vec<u64>>::new();
-        for stage in &self.stages {
-            for &dependency in &stage.dependencies {
-                successors.entry(dependency).or_default().push(stage.id);
-            }
-        }
-        let mut depth = HashMap::<u64, usize>::new();
-        for &index in self.order_indices.iter().rev() {
+        let mut ready = self.order_indices.iter().copied().filter(|&index| {
             let stage = &self.stages[index];
-            let children = successors.get(&stage.id)
-                .into_iter().flat_map(|children| children.iter());
-            let max_child = children.filter_map(|id| depth.get(id).copied())
-                .max().unwrap_or(0);
-            depth.insert(stage.id, max_child + 1);
-        }
-        let mut ready = self.ready(completed);
-        ready.sort_by_key(|id| (std::cmp::Reverse(depth[id]), *id));
-        ready
+            !completed.contains(&stage.id)
+                && stage.dependencies.iter().all(|dependency| completed.contains(dependency))
+        }).collect::<Vec<_>>();
+        ready.sort_by_key(|&index| (
+            std::cmp::Reverse(self.remaining_chain[index]), self.stages[index].id
+        ));
+        ready.into_iter().map(|index| self.stages[index].id).collect()
     }
 
     /// Return runnable stages in topology order without exceeding worker capacity.
@@ -336,5 +336,28 @@ mod bounded_stage_partition_tasks_tests {
             (4, 0), (9, 0), (9, 1), (9, 2)
         ]);
         assert!(graph.ready_tasks(&HashSet::from([2, 4, 9]), 8).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cached_critical_path_depth_tests {
+    use super::*;
+
+    #[test]
+    fn cached_priorities_match_diamond_and_parallel_chains() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 10, dependencies: vec![], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 1 },
+            Stage { id: 30, dependencies: vec![10], partitions: 1 },
+            Stage { id: 40, dependencies: vec![10], partitions: 1 },
+            Stage { id: 50, dependencies: vec![30, 40], partitions: 1 },
+            Stage { id: 60, dependencies: vec![20], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(graph.ready_by_critical_path(&HashSet::new()), vec![10, 20]);
+        assert_eq!(graph.ready_by_critical_path(&HashSet::from([10])),
+            vec![20, 30, 40]);
+        let done = HashSet::from([10, 30, 40]);
+        assert_eq!(graph.ready_by_critical_path(&done), vec![20, 50]);
+        assert_eq!(graph.ready_by_critical_path(&done), vec![20, 50]);
     }
 }
