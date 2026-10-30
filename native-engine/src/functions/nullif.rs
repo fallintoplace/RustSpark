@@ -11,6 +11,11 @@ pub(super) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
             (DataType::Integer, DataType::Float) | (DataType::Float, DataType::Integer)) {
         return Err(Error::Type("NULLIF requires comparable arguments".into()));
     }
+    if matches!(args[0], Expr::Literal(Value::Null)) {
+        // SQL NULL literals have no independent type. Preserve the type of the
+        // other argument so NULLIF(NULL, numeric) stays a numeric expression.
+        return Ok(second);
+    }
     Ok(first)
 }
 
@@ -38,5 +43,27 @@ mod nullif_numeric_sql_tests {
         assert_eq!(eval(&int_float, &batch, 0).unwrap(), Value::Integer(9_007_199_254_740_993));
         let incompatible = [Expr::Literal(Value::Text("1".into())), Expr::Literal(Value::Integer(1))];
         assert!(output_type(&incompatible, &schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod nullif_untyped_null_sql_tests {
+    use super::*;
+    #[test]
+    fn untyped_left_operand_infers_right_type() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        for (value, expected) in [
+            (Value::Integer(10), DataType::Integer),
+            (Value::Float(1.25), DataType::Float),
+            (Value::Text("hello".into()), DataType::Text),
+        ] {
+            let left = [Expr::Literal(Value::Null), Expr::Literal(value.clone())];
+            assert_eq!(output_type(&left, &schema).unwrap(), expected);
+            assert_eq!(eval(&left, &batch, 0).unwrap(), Value::Null);
+            let right = [Expr::Literal(value.clone()), Expr::Literal(Value::Null)];
+            assert_eq!(output_type(&right, &schema).unwrap(), expected);
+            assert_eq!(eval(&right, &batch, 0).unwrap(), value);
+        }
     }
 }
