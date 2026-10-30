@@ -27,7 +27,7 @@ pub(super) fn decode(text: &str) -> Result<String> {
             let high = bytes.get(index + 1).copied().and_then(hex);
             let low = bytes.get(index + 2).copied().and_then(hex);
             let (Some(high), Some(low)) = (high, low) else {
-                return Err(Error::Execution("invalid URL percent escape".into()));
+                return Err(Error::Parse("invalid URL percent escape".into()));
             };
             decoded.push(high << 4 | low);
             index += 3;
@@ -37,7 +37,7 @@ pub(super) fn decode(text: &str) -> Result<String> {
         }
     }
     String::from_utf8(decoded)
-        .map_err(|_| Error::Execution("URL_DECODE produced invalid UTF-8".into()))
+        .map_err(|_| Error::Type("URL_DECODE produced invalid UTF-8".into()))
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
