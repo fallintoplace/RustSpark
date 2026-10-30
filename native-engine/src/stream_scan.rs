@@ -302,8 +302,8 @@ mod scan_iterator_contract_tests {
         assert_eq!(cursor.size_hint(), (2, Some(2)));
         cursor.next().unwrap().unwrap();
         cursor.next().unwrap().unwrap();
-        assert_eq!(cursor.next().is_none(), true);
-        assert_eq!(cursor.next().is_none(), true);
+        assert!(cursor.next().is_none());
+        assert!(cursor.next().is_none());
         assert_eq!(cursor.size_hint(), (0, Some(0)));
     }
 
