@@ -7,6 +7,7 @@ use std::{
 
 use rustspark_native::{
     Error, Result,
+    output_file::AtomicOutput,
     catalog::Catalog,
     csv, csv_stream::CsvStream,
     parquet_scan,
@@ -30,6 +31,7 @@ struct Args {
     stream: bool,
     csv_schema: Option<String>,
     jsonl: bool,
+    output_path: Option<PathBuf>,
 }
 
 fn usage() -> &'static str {
@@ -46,6 +48,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut stream = false;
     let mut csv_schema = None;
     let mut jsonl = false;
+    let mut output_path = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--help" || arg == "-h" {
@@ -89,6 +92,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--output" => {
+                if output_path.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --output".into()));
+                }
+            },
             "--csv-schema" => {
                 if csv_schema.replace(value).is_some() {
                     return Err(Error::Parse("duplicate --csv-schema".into()));
@@ -134,7 +142,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl }))
+    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, output_path }))
 }
 
 fn escape_field(input: &str) -> String {
@@ -155,7 +163,7 @@ fn csv_value(value: &Value) -> String {
     }
 }
 
-fn print_header(schema: &Schema, output: &mut impl Write) -> Result<()> {
+fn print_header(schema: &Schema, output: &mut (impl Write + ?Sized)) -> Result<()> {
     let header = schema
         .fields()
         .iter()
@@ -166,7 +174,7 @@ fn print_header(schema: &Schema, output: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-fn print_csv_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
+fn print_csv_rows(batch: &Batch, output: &mut (impl Write + ?Sized)) -> Result<()> {
     for row_idx in 0..batch.num_rows() {
         let row = batch.row(row_idx)?;
         let line = row.iter().map(csv_value).collect::<Vec<_>>().join(",");
@@ -175,12 +183,12 @@ fn print_csv_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-fn print_csv(batch: &Batch, output: &mut impl Write) -> Result<()> {
+fn print_csv(batch: &Batch, output: &mut (impl Write + ?Sized)) -> Result<()> {
     print_header(batch.schema(), output)?;
     print_csv_rows(batch, output)
 }
 
-fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
+fn print_jsonl_rows(batch: &Batch, output: &mut (impl Write + ?Sized)) -> Result<()> {
     for row_index in 0..batch.num_rows() {
         let row = batch.row(row_index)?;
         let mut record = serde_json::Map::new();
@@ -199,6 +207,34 @@ fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
         writeln!(output, "{}", serde_json::Value::Object(record))?;
     }
     Ok(())
+}
+
+fn write_result(
+    args: &Args,
+    emit: impl FnOnce(&mut dyn Write) -> Result<()>,
+) -> Result<()> {
+    if let Some(target) = &args.output_path {
+        if let Ok(target_path) = fs::canonicalize(target) {
+            let input_paths = args.csv.iter().chain(args.parquet.iter())
+                .chain(args.sources.iter().map(|(_, path)| path));
+            for input in input_paths {
+                if fs::canonicalize(input).ok().as_ref() == Some(&target_path) {
+                    return Err(Error::Execution("result output path aliases an input file".into()));
+                }
+            }
+        }
+        let mut writer = io::BufWriter::new(AtomicOutput::create(target)?);
+        emit(&mut writer)?;
+        writer.flush()?;
+        let file = writer.into_inner().map_err(|error| Error::Io(error.to_string()))?;
+        file.commit()
+    } else {
+        let stdout = io::stdout();
+        let mut writer = io::BufWriter::new(stdout.lock());
+        emit(&mut writer)?;
+        writer.flush()?;
+        Ok(())
+    }
 }
 
 fn parse_stream_schema(spec: &str) -> Result<Schema> {
@@ -278,16 +314,15 @@ fn run_stream(args: &Args) -> Result<()> {
         pipeline = pipeline.with_limit(offset, count);
     }
 
-    let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
-    if !args.jsonl { print_header(&output_schema, &mut output)?; }
-    for batch in pipeline {
-        let batch = batch?;
-        if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
-        else { print_csv_rows(&batch, &mut output)?; }
-    }
-    output.flush()?;
-    Ok(())
+    write_result(args, |output| {
+        if !args.jsonl { print_header(&output_schema, output)?; }
+        for batch in pipeline {
+            let batch = batch?;
+            if args.jsonl { print_jsonl_rows(&batch, output)?; }
+            else { print_csv_rows(&batch, output)?; }
+        }
+        Ok(())
+    })
 }
 
 const MAX_PARQUET_ROWS: usize = 1_000_000;
@@ -346,12 +381,10 @@ fn run() -> Result<()> {
     }
     let plan = sql::parse_sql(&args.sql)?;
     let batch = executor::execute(&plan, &catalog)?;
-    let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
-    if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
-    else { print_csv(&batch, &mut output)?; }
-    output.flush()?;
-    Ok(())
+    write_result(&args, |output| {
+        if args.jsonl { print_jsonl_rows(&batch, output) }
+        else { print_csv(&batch, output) }
+    })
 }
 
 fn main() -> ExitCode {
@@ -430,5 +463,21 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod atomic_cli_export_flags_tests {
+    use super::*;
+
+    #[test]
+    fn result_file_flag_is_explicit_and_not_repeatable() {
+        let flags = ["--csv", "input.csv", "--sql", "SELECT * FROM data",
+            "--output", "result.csv"];
+        assert_eq!(parse_args(flags.into_iter().map(String::from)).unwrap()
+            .unwrap().output_path, Some(PathBuf::from("result.csv")));
+        let duplicate = ["--csv", "input.csv", "--sql", "SELECT * FROM data",
+            "--output", "a.csv", "--output", "b.csv"];
+        assert!(parse_args(duplicate.into_iter().map(String::from)).is_err());
     }
 }
