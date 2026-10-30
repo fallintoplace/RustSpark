@@ -105,12 +105,15 @@ func (c Client) arguments(sql string, opts Options) ([]string, error) {
     if args, err = addNamed(args, "--csv-table", opts.CSVTables); err != nil { return nil, err }
     if args, err = addNamed(args, "--parquet-table", opts.ParquetTables); err != nil { return nil, err }
     if args, err = addNamed(args, "--json-table", opts.JSONTables); err != nil { return nil, err }
+    if len(opts.NamedParams) > 64 {
+        return nil, errors.New("too many typed SQL parameters (maximum 64)")
+    }
     names := make([]string, 0, len(opts.NamedParams))
     for name := range opts.NamedParams { names = append(names, name) }
     sort.Strings(names)
     for _, name := range names {
         typedValue := opts.NamedParams[name]
-        if !identifier.MatchString(name) || !strings.Contains(typedValue, ":") {
+        if !identifier.MatchString(name) || !strings.Contains(typedValue, ":") || len(typedValue) > 8192 {
             return nil, fmt.Errorf("invalid typed parameter: %q", name)
         }
         args = append(args, "--named-param", name+"="+typedValue)
