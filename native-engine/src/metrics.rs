@@ -98,28 +98,27 @@ mod tests {
 }
 
 impl Snapshot {
+    fn combine_checked(
+        self, other: Self, operation: impl Fn(u64, u64) -> Result<u64>,
+    ) -> Result<Self> {
+        Ok(Self {
+            input_rows: operation(self.input_rows, other.input_rows)?,
+            output_rows: operation(self.output_rows, other.output_rows)?,
+            input_batches: operation(self.input_batches, other.input_batches)?,
+            output_batches: operation(self.output_batches, other.output_batches)?,
+        })
+    }
+
     /// Derive nonnegative metric changes since an earlier snapshot.
     pub fn delta_since(self, earlier: Self) -> Result<Self> {
-        let subtract = |current: u64, old: u64| current.checked_sub(old)
-            .ok_or_else(|| Error::Execution("query metrics moved backwards".into()));
-        Ok(Self {
-            input_rows: subtract(self.input_rows, earlier.input_rows)?,
-            output_rows: subtract(self.output_rows, earlier.output_rows)?,
-            input_batches: subtract(self.input_batches, earlier.input_batches)?,
-            output_batches: subtract(self.output_batches, earlier.output_batches)?,
-        })
+        self.combine_checked(earlier, |current, old| current.checked_sub(old)
+            .ok_or_else(|| Error::Execution("query metrics moved backwards".into())))
     }
 
     /// Combine independent stage snapshots, rejecting counter overflow.
     pub fn merge(self, other: Self) -> Result<Self> {
-        let add = |a: u64, b: u64| a.checked_add(b)
-            .ok_or_else(|| Error::Execution("merged metric overflow".into()));
-        Ok(Self {
-            input_rows: add(self.input_rows, other.input_rows)?,
-            output_rows: add(self.output_rows, other.output_rows)?,
-            input_batches: add(self.input_batches, other.input_batches)?,
-            output_batches: add(self.output_batches, other.output_batches)?,
-        })
+        self.combine_checked(other, |a, b| a.checked_add(b)
+            .ok_or_else(|| Error::Execution("merged metric overflow".into())))
     }
 }
 
