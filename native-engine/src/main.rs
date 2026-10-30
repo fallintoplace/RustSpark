@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -34,6 +34,17 @@ struct Args {
 
 fn usage() -> &'static str {
     "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+}
+
+const MAX_SQL_BYTES: u64 = 1024 * 1024;
+
+fn read_sql_limited(reader: impl Read) -> Result<String> {
+    let mut sql = String::new();
+    reader.take(MAX_SQL_BYTES + 1).read_to_string(&mut sql)?;
+    if sql.len() as u64 > MAX_SQL_BYTES {
+        return Err(Error::Execution("SQL file exceeds 1 MiB limit".into()));
+    }
+    Ok(sql)
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -128,9 +139,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => read_sql_limited(fs::File::open(path)?)?,
         _ => return Err(Error::Parse("--sql or --sql-file is required".into())),
     };
+    if sql.len() as u64 > MAX_SQL_BYTES {
+        return Err(Error::Execution("SQL statement exceeds 1 MiB limit".into()));
+    }
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
@@ -430,5 +444,26 @@ mod tests {
     fn quote_text_fields_for_csv_export() {
         assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_value(&Value::Null), "");
+    }
+}
+
+#[cfg(test)]
+mod bounded_sql_file_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn enforces_file_limit_without_reading_unbounded_sql() {
+        assert_eq!(read_sql_limited(Cursor::new("SELECT 1")).unwrap(), "SELECT 1");
+        assert!(read_sql_limited(Cursor::new("x".repeat(MAX_SQL_BYTES as usize))).is_ok());
+        let too_large = "x".repeat(MAX_SQL_BYTES as usize + 1);
+        assert!(read_sql_limited(Cursor::new(too_large)).is_err());
+    }
+
+    #[test]
+    fn direct_sql_is_bounded_too() {
+        let options = ["--csv".to_string(), "sample.csv".to_string(),
+            "--sql".to_string(), "x".repeat(MAX_SQL_BYTES as usize + 1)];
+        assert!(parse_args(options).is_err());
     }
 }
