@@ -26,6 +26,9 @@ fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
     let factor = 10_f64.powi(scale.unsigned_abs() as i32);
     let round = |value: f64| if round_up { value.ceil() } else { value.floor() };
     let result = if scale >= 0 {
+        // A sub-ULP decimal scale cannot change a large finite number.
+        // Avoid overflowing the intermediate multiplication to infinity.
+        if number.abs() > f64::MAX / factor { return super::finite(number); }
         round(number * factor) / factor
     } else {
         round(number / factor) * factor
@@ -76,5 +79,23 @@ mod tests {
         assert_eq!(ceil(&[Value::Integer(i64::MIN)]).unwrap(), Value::Integer(i64::MIN));
         assert_eq!(ceil(&[Value::Integer(9_007_199_254_740_993)]).unwrap(),
             Value::Integer(9_007_199_254_740_993));
+    }
+}
+
+#[cfg(test)]
+mod large_finite_scaled_rounding_tests {
+    use super::*;
+
+    #[test]
+    fn positive_precision_does_not_overflow_finite_values() {
+        for value in [f64::MAX, -f64::MAX] {
+            let input = [Value::Float(value), Value::Integer(15)];
+            assert_eq!(floor(&input).unwrap(), Value::Float(value));
+            assert_eq!(ceil(&input).unwrap(), Value::Float(value));
+        }
+        assert_eq!(
+            ceil(&[Value::Float(3.1411), Value::Integer(3)]).unwrap(),
+            Value::Float(3.142),
+        );
     }
 }
