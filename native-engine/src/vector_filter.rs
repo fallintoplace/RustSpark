@@ -199,6 +199,23 @@ fn fast_text_in_list<'a>(
     Ok(Some((batch.column(index)?, keys, *negated, has_null)))
 }
 
+/// Evaluate null-safe literal comparisons against a borrowed native column.
+/// Unlike scalar row evaluation this never clones the source TEXT payload.
+fn fast_distinct_literal<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], &'a Value, bool)>> {
+    let Expr::IsDistinctFrom { left, right, negated } = predicate else {
+        return Ok(None);
+    };
+    let (name, literal) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(name), Expr::Literal(literal)) |
+        (Expr::Literal(literal), Expr::Column(name)) => (name, literal),
+        _ => return Ok(None),
+    };
+    let index = batch.schema().column(name)?;
+    Ok(Some((batch.column(index)?, literal, *negated)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -315,6 +332,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
+        }
+    } else if let Some((column, literal, negated)) =
+        fast_distinct_literal(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            let distinct = match (value.is_null(), literal.is_null()) {
+                (true, true) => false,
+                (true, false) | (false, true) => true,
+                (false, false) => value.sql_equal(literal)?.map(|equal| !equal)
+                    .unwrap_or_else(|| value != literal),
+            };
+            if if negated { !distinct } else { distinct } {
+                selected.push(row);
+            }
         }
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -817,5 +847,68 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod literal_distinct_vector_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn check(kind: DataType, values: Vec<Value>, literals: Vec<Value>) {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("key", kind, true)]).unwrap(),
+            values.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        for literal in literals {
+            for negated in [true, false] {
+                for reversed in [true, false] {
+                    let (left, right) = if reversed {
+                        (Expr::Literal(literal.clone()), Expr::Column("key".into()))
+                    } else {
+                        (Expr::Column("key".into()), Expr::Literal(literal.clone()))
+                    };
+                    let predicate = Expr::IsDistinctFrom {
+                        left: Box::new(left), right: Box::new(right), negated,
+                    };
+                    let expected = (0..batch.num_rows()).filter(|&row|
+                        predicate.evaluate(&batch, row).unwrap()
+                            .as_boolean().unwrap() == Some(true)
+                    ).collect::<Vec<_>>();
+                    assert_eq!(select_indices(&batch, &predicate).unwrap(), expected,
+                        "{predicate:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn null_safe_text_comparisons_match_scalar_with_unicode_and_long_strings() {
+        let large = "東京🙂".repeat(4096);
+        check(DataType::Text, vec![
+            Value::Null, Value::Text("".into()), Value::Text(large.clone()),
+            Value::Text(large.clone()), Value::Text("é".into()),
+        ], vec![Value::Null, Value::Text(large), Value::Text("missing".into())]);
+    }
+
+    #[test]
+    fn float_nan_and_zero_and_cross_type_numeric_comparisons_match_scalar() {
+        check(DataType::Float, vec![
+            Value::Null, Value::Float(f64::NAN), Value::Float(-f64::NAN),
+            Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(1.25), Value::Float(f64::INFINITY),
+            Value::Float(9_007_199_254_740_992.0),
+        ], vec![Value::Null, Value::Float(f64::NAN), Value::Float(0.0),
+                Value::Integer(9_007_199_254_740_993)]);
+    }
+
+    #[test]
+    fn integer_and_boolean_domains_match_scalar_for_null_safe_comparisons() {
+        check(DataType::Integer, vec![
+            Value::Null, Value::Integer(-3), Value::Integer(0), Value::Integer(5),
+        ], vec![Value::Null, Value::Integer(0), Value::Integer(999)]);
+        check(DataType::Boolean, vec![
+            Value::Null, Value::Boolean(true), Value::Boolean(false),
+        ], vec![Value::Null, Value::Boolean(true)]);
     }
 }
