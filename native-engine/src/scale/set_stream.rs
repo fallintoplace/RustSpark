@@ -190,6 +190,19 @@ impl Iterator for SetStream {
             self.stopped = true;
             return Some(Err(error));
         }
+        // An empty INTERSECT build side cannot match any left row. For
+        // INTERSECT DISTINCT, removing admitted keys also lets us stop as
+        // soon as every possible distinct result has been emitted.
+        // Avoid scanning expensive remaining left partitions in either case.
+        if matches!(self.mode, SetMode::IntersectDistinct | SetMode::IntersectAll)
+            && self.right_counts.is_empty()
+        {
+            self.stopped = true;
+            return match self.control.check() {
+                Ok(()) => None,
+                Err(error) => Some(Err(error)),
+            };
+        }
         loop {
             if let Err(error) = self.control.check() {
                 self.stopped = true;
@@ -508,6 +521,48 @@ mod trusted_set_output_regressions {
                 vec![Value::Float(2.0)], vec![Value::Null],
             ]);
         assert_eq!(output[0].schema().fields()[0].data_type, DataType::Float);
+    }
+}
+
+#[cfg(test)]
+mod exhausted_intersect_short_circuit_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn empty_right_input_never_polls_left_for_either_intersection_mode() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        for mode in [SetMode::IntersectDistinct, SetMode::IntersectAll] {
+            let left: BatchStream = Box::new([
+                Err(Error::Execution("unreachable left source".into())),
+            ].into_iter());
+            let right: BatchStream = Box::new(std::iter::empty());
+            let mut stream = SetStream::new(
+                left, right, schema.clone(), schema.clone(), mode,
+                QueryControl::default(), 100, 4096,
+            ).unwrap();
+            assert!(stream.next().is_none());
+            assert!(stream.next().is_none());
+        }
+    }
+
+    #[test]
+    fn intersect_distinct_stops_when_last_build_key_is_emitted() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let value = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(17)],
+        ]).unwrap();
+        let left: BatchStream = Box::new([
+            Ok(value.clone()),
+            Err(Error::Execution("unreachable after all keys matched".into())),
+        ].into_iter());
+        let right: BatchStream = Box::new([Ok(value)].into_iter());
+        let mut stream = SetStream::new(
+            left, right, schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 100, 4096,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(17)]);
+        assert!(stream.next().is_none());
     }
 }
 
