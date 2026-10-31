@@ -44,9 +44,34 @@ fn validate_sort_keys(schema: &Schema, keys: &[SortKey]) -> Result<()> {
     Ok(())
 }
 
+fn flush_pending_run(
+    runs: &mut RunSet, pending: &mut Vec<Batch>, pending_rows: &mut usize,
+    schema: &Schema, keys: &[SortKey], directory: &Path,
+    max_rows_per_run: usize, control: &QueryControl,
+) -> Result<()> {
+    if *pending_rows == 0 { return Ok(()); }
+    control.check()?;
+    // Move complete incoming batches into a single run without re-cloning TEXT
+    // just to stitch together a stream of small source batches.
+    let input = crate::batch_utils::concat(
+        schema, std::mem::take(pending), max_rows_per_run,
+    )?;
+    let sorted = sort::sort_range(&input, keys, 0, input.num_rows())?;
+    *pending_rows = 0;
+    let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
+    let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());
+    let path = directory.join(filename);
+    let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    runs.files.push(path);
+    let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
+    writer.write_batch(&sorted)?;
+    writer.finish()?;
+    Ok(())
+}
+
 pub fn write_sorted_runs<I>(
     input: I, schema: Schema, keys: &[SortKey],
-    directory: &Path, max_rows_per_run: usize, control: &QueryControl
+    directory: &Path, max_rows_per_run: usize, control: &QueryControl,
 ) -> Result<RunSet>
 where I: IntoIterator<Item = Result<Batch>>
 {
@@ -55,29 +80,43 @@ where I: IntoIterator<Item = Result<Batch>>
     }
     validate_sort_keys(&schema, keys)?;
     let mut runs = RunSet { files: Vec::new(), schema: schema.clone() };
+    let mut pending = Vec::new();
+    let mut pending_rows = 0usize;
     for incoming in input {
         control.check()?;
         let incoming = incoming?;
         if incoming.schema() != &schema {
             return Err(Error::Schema("external sort input schema changed".into()));
         }
-        let mut start = 0;
-        while start < incoming.num_rows() {
-            control.check()?;
-            let end = start.saturating_add(max_rows_per_run).min(incoming.num_rows());
-            let sorted = sort::sort_range(&incoming, keys, start, end)?;
-            start = end;
-            if sorted.num_rows() == 0 { continue; }
-            let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
-            let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());
-            let path = directory.join(filename);
-            let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
-            runs.files.push(path);
-            let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
-            writer.write_batch(&sorted)?;
-            writer.finish()?;
+        if incoming.num_rows() == 0 { continue; }
+        if incoming.num_rows() <= max_rows_per_run - pending_rows {
+            pending_rows += incoming.num_rows();
+            pending.push(incoming);
+            if pending_rows == max_rows_per_run {
+                flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
+                    &schema, keys, directory, max_rows_per_run, control)?;
+            }
+        } else {
+            // Split only batches that cross run boundaries. Entire small
+            // batches are transferred, avoiding an extra per-row clone.
+            let mut start = 0;
+            while start < incoming.num_rows() {
+                control.check()?;
+                let take = (max_rows_per_run - pending_rows)
+                    .min(incoming.num_rows() - start);
+                let end = start + take;
+                pending.push(incoming.slice_rows(start, end)?);
+                pending_rows += take;
+                start = end;
+                if pending_rows == max_rows_per_run {
+                    flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
+                        &schema, keys, directory, max_rows_per_run, control)?;
+                }
+            }
         }
     }
+    flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
+        &schema, keys, directory, max_rows_per_run, control)?;
     Ok(runs)
 }
 
@@ -160,5 +199,64 @@ mod sorted_run_key_prevalidation_tests {
         assert!(write_sorted_runs(
             Vec::<Result<Batch>>::new(), schema, &[computed], &directory, 4, &control
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod coalesced_sorted_runs_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use crate::scale::spill::SpillReader;
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn one_row_batches_share_bounded_runs_and_keep_all_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-sort-coalesce-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = (0..27).rev().map(|n| {
+            Ok(Batch::from_rows(schema.clone(), vec![vec![Value::Integer(n)]]).unwrap())
+        });
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let runs = write_sorted_runs(input, schema.clone(), &keys, &dir, 8,
+            &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 4);
+        let mut all = Vec::new();
+        for path in runs.files() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 8).unwrap();
+            let rows = reader.next_batch().unwrap().unwrap().rows().unwrap();
+            assert!(rows.windows(2).all(|pair| pair[0][0].sql_compare(&pair[1][0])
+                .unwrap().unwrap().is_le()));
+            all.extend(rows.into_iter().map(|row| row[0].clone()));
+        }
+        all.sort_by(|a, b| a.sql_compare(b).unwrap().unwrap());
+        assert_eq!(all, (0..27).map(Value::Integer).collect::<Vec<_>>());
+        drop(runs);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn mixed_large_and_empty_batches_never_generate_empty_runs() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-sort-mixed-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = [
+            Ok(Batch::empty(schema.clone())),
+            Ok(Batch::from_rows(schema.clone(),
+                (0..13).map(|n| vec![Value::Integer(n)]).collect()).unwrap()),
+            Ok(Batch::from_rows(schema.clone(), vec![vec![Value::Integer(99)]]).unwrap()),
+        ];
+        let runs = write_sorted_runs(input, schema, &[SortKey::ascending(Expr::Column("n".into()))],
+            &dir, 5, &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 3);
+        drop(runs);
+        fs::remove_dir(dir).unwrap();
     }
 }
