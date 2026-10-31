@@ -81,7 +81,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
         }
         loop {
             if let Err(error) = self.guard.check() {
-                self.remaining = Some(0);
+                self.stopped = true;
                 return Some(Err(error));
             }
             let Some(input) = self.source.next() else {
@@ -99,8 +99,8 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 // projection and referenced by a later filter.
                 for step in &mut self.steps {
                     batch = match step {
-                        Step::Filter(predicate) => filter::filter(&batch, predicate)?,
-                        Step::Project(selections) => project::project(&batch, selections)?,
+                        Step::Filter(predicate) => filter::filter_owned(batch, predicate)?,
+                        Step::Project(selections) => project::project_owned(batch, selections)?,
                         Step::Limit { skip, remaining } => {
                             let start = (*skip).min(batch.num_rows());
                             *skip -= start;
@@ -110,7 +110,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                             if start == 0 && keep == batch.num_rows() {
                                 batch
                             } else {
-                                batch.slice_rows(start, start + keep)?
+                                batch.slice_rows_owned(start, start + keep)?
                             }
                         }
                     };
@@ -368,5 +368,38 @@ mod limit_operator_order_regressions {
             .collect::<Vec<_>>(), vec![
                 vec![Value::Integer(4)], vec![Value::Integer(5)]
             ]);
+    }
+}
+
+#[cfg(test)]
+mod owned_pipeline_fast_path_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn filter_project_limit_keep_selected_text_storage() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..6).map(|n| vec![
+            Value::Integer(n),
+            if n == 0 { Value::Null } else { Value::Text(format!("{n}-{}", "x".repeat(32768))) },
+        ]).collect()).unwrap();
+        let pointer = match input.value(2, 1).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        };
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(2)),
+        );
+        let actual = Pipeline::new([Ok(input)].into_iter())
+            .with_filter(predicate)
+            .with_projection(vec![Selection::new(Expr::Column("payload".into()), "text")])
+            .with_limit(0, Some(1)).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].num_rows(), 1);
+        assert_eq!(match actual[0].value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        }, pointer);
     }
 }
