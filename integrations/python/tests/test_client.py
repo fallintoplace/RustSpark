@@ -250,5 +250,50 @@ class BoundedProcessCaptureTests(unittest.TestCase):
         self.assertIsNotNone(started[0].poll(), "interrupted SQL child must be reaped")
 
 
+
+class StreamingPythonQueryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "helper binary requires POSIX shell")
+    def test_streams_typed_rows_without_buffering_the_result(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text(
+                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"id\\\":9223372036854775807}' "
+                "'{\\\"id\\\":2}'\\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o700)
+            rows = list(RustSpark(binary=str(script)).iter_rows("SELECT 1"))
+            self.assertEqual(rows, [{"id": 9223372036854775807}, {"id": 2}])
+
+    @unittest.skipUnless(os.name == "posix", "helper binary requires POSIX shell")
+    def test_invalid_rows_and_max_bytes_reject_without_hanging(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text(
+                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"x\\\":1,\\\"x\\\":2}'\\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o700)
+            with self.assertRaisesRegex(RustSparkError, "Invalid"):
+                list(RustSpark(binary=str(script)).iter_rows("SELECT 1"))
+            script.write_text(
+                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"x\\\":123456789}'\\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RustSparkError, "max_row_bytes"):
+                list(RustSpark(binary=str(script)).iter_rows("SELECT 1", max_row_bytes=5))
+
+    def test_invalid_streaming_budgets_reject_before_spawn(self):
+        for invalid in (-1, 0, True, 1.5, 64 * 1024 * 1024 + 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                list(RustSpark().iter_rows("SELECT 1", max_row_bytes=invalid))
+
+
 if __name__ == "__main__":
     unittest.main()
