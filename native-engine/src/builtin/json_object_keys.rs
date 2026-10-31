@@ -3,23 +3,34 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
-fn serialize_keys(map: &serde_json::Map<String, serde_json::Value>, limit: usize) -> Result<String> {
-    let mut output = String::from("[");
-    for (index, key) in map.keys().enumerate() {
-        let encoded = serde_json::to_string(key)
-            .map_err(|error| Error::Execution(format!("JSON_OBJECT_KEYS serialization failed: {error}")))?;
-        let required = encoded.len().saturating_add(usize::from(index != 0)).saturating_add(1);
-        if required > limit.saturating_sub(output.len()) {
-            return Err(Error::Execution("JSON_OBJECT_KEYS output exceeds native byte limit".into()));
+struct KeyOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for KeyOutput {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("JSON_OBJECT_KEYS output exceeds byte budget"));
         }
-        if index != 0 { output.push(','); }
-        output.push_str(&encoded);
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
     }
-    if output.len() >= limit {
-        return Err(Error::Execution("JSON_OBJECT_KEYS output exceeds native byte limit".into()));
-    }
-    output.push(']');
-    Ok(output)
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+fn serialize_keys(map: &serde_json::Map<String, serde_json::Value>, limit: usize) -> Result<String> {
+    use serde::ser::{SerializeSeq, Serializer};
+    let mut output = KeyOutput { bytes: Vec::new(), limit };
+    (|| -> serde_json::Result<()> {
+        let mut serializer = serde_json::Serializer::new(&mut output);
+        let mut keys = serializer.serialize_seq(Some(map.len()))?;
+        for key in map.keys() { keys.serialize_element(key)?; }
+        keys.end()
+    })().map_err(|error| Error::Execution(format!(
+        "JSON_OBJECT_KEYS serialization failed: {error}"
+    )))?;
+    Ok(String::from_utf8(output.bytes).expect("JSON serializer emits UTF-8"))
 }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
@@ -115,5 +126,7 @@ mod json_object_keys_budget_tests {
         let map = document.as_object().unwrap();
         assert_eq!(serialize_keys(map, 100).unwrap(), "[\"a\",\"long\"]");
         assert!(serialize_keys(map, 8).is_err());
+        let document = serde_json::json!({"\u{0000}\u{0000}\u{0000}": 1});
+        assert!(serialize_keys(document.as_object().unwrap(), 12).is_err());
     }
 }
