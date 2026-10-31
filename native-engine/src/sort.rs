@@ -96,25 +96,37 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         });
         return Ok(indices);
     }
-    let mut key_columns = Vec::with_capacity(keys.len());
-    for key in keys {
-        let mut values = Vec::with_capacity(end - start);
-        for row in start..end {
-            values.push(key.expression.evaluate(batch, row)?);
-        }
-        key_columns.push(values);
+    // Mixed sorts can borrow direct column keys. Only computed expressions
+    // need a temporary value vector, which matters for wide TEXT sort keys.
+    enum BoundKey<'a> {
+        Column(&'a [Value]),
+        Computed(Vec<Value>),
     }
-    let mut indices: Vec<usize> = (0..end - start).collect();
+    let mut bound_keys = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Expr::Column(name) = &key.expression {
+            bound_keys.push(BoundKey::Column(batch.column(batch.schema().column(name)?)?));
+        } else {
+            let mut values = Vec::with_capacity(end - start);
+            for row in start..end {
+                values.push(key.expression.evaluate(batch, row)?);
+            }
+            bound_keys.push(BoundKey::Computed(values));
+        }
+    }
+    let mut indices: Vec<usize> = (start..end).collect();
     indices.sort_by(|&left, &right| {
-        for (values, key) in key_columns.iter().zip(keys) {
-            let comparison = compare_values(
-                &values[left], &values[right], key.descending, key.nulls_first,
-            );
+        for (values, key) in bound_keys.iter().zip(keys) {
+            let (a, b) = match values {
+                BoundKey::Column(column) => (&column[left], &column[right]),
+                BoundKey::Computed(column) =>
+                    (&column[left - start], &column[right - start]),
+            };
+            let comparison = compare_values(a, b, key.descending, key.nulls_first);
             if comparison != Ordering::Equal { return comparison; }
         }
         Ordering::Equal
     });
-    for index in &mut indices { *index += start; }
     Ok(indices)
 }
 
@@ -360,5 +372,46 @@ mod owned_sort_permutation_regressions {
         assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), sort(&batch, &keys).unwrap());
         assert!(sort_owned(Batch::empty(schema),
             &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mixed_sort_key_borrow_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_primary_and_borrowed_text_secondary_keep_ties_and_windows() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, true),
+            Field::new("rank", DataType::Integer, false),
+        ]).unwrap();
+        let rows = vec![
+            vec![Value::Text("rocket".repeat(2048)), Value::Integer(3)],
+            vec![Value::Text("zeta".into()), Value::Integer(2)],
+            vec![Value::Text("alpha".into()), Value::Integer(2)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("tail".into()), Value::Integer(1)],
+        ];
+        let input = Batch::from_rows(schema.clone(), rows).unwrap();
+        let keys = vec![
+            SortKey::ascending(Expr::binary(
+                Expr::Column("rank".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(0)),
+            )),
+            SortKey::ascending(Expr::Column("label".into())),
+        ];
+        let sorted = sort_owned(input.clone(), &keys).unwrap();
+        let expected = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("tail".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("alpha".into()), Value::Integer(2)],
+            vec![Value::Text("zeta".into()), Value::Integer(2)],
+            vec![Value::Text("rocket".repeat(2048)), Value::Integer(3)],
+        ]).unwrap();
+        assert_eq!(sorted, expected);
+        assert_eq!(sort(&input, &keys).unwrap(), expected);
+        assert_eq!(sort_range(&input, &keys, 1, 5).unwrap(),
+            sort(&input.slice_rows(1, 5).unwrap(), &keys).unwrap());
     }
 }
