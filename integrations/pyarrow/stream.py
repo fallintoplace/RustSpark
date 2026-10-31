@@ -39,7 +39,7 @@ def build_command(
     parquet_tables: dict[str, str | Path] | None = None,
     json_tables: dict[str, str | Path] | None = None,
 ) -> list[str]:
-    if not sql.strip():
+    if not isinstance(sql, str) or not sql.strip():
         raise ValueError("SQL must not be empty")
     selected = [("csv", csv), ("parquet", parquet), ("json", json_input)]
     if sum(value is not None for _, value in selected) > 1:
