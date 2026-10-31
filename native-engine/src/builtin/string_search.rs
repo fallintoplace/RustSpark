@@ -29,9 +29,10 @@ fn split_part(args: &[Value]) -> Result<Value> {
         let result = text.rfind(delimiter).map_or(text, |position| &text[position + delimiter.len()..]);
         return Ok(Value::Text(result.to_owned()));
     }
-    // There cannot be more nonempty-delimiter fields than text bytes + 1.
-    // Skip a linear scan for impossible large positions.
-    if index.unsigned_abs() > u64::try_from(text.len()).unwrap_or(u64::MAX).saturating_add(1) {
+    // Nonoverlapping delimiters can produce at most one additional field
+    // per delimiter-width span. Byte lengths give a safe UTF-8 upper bound.
+    let possible_fields = text.len() / delimiter.len();
+    if index.unsigned_abs() > u64::try_from(possible_fields).unwrap_or(u64::MAX).saturating_add(1) {
         return Ok(Value::Text(String::new()));
     }
     let result = if index > 0 {
@@ -216,5 +217,34 @@ mod locate_ascii_match_offset_regressions {
             Value::Integer(3));
         assert_eq!(locate(&[Value::Text("absent".into()), Value::Text("abc".into())]).unwrap(),
             Value::Integer(0));
+    }
+}
+
+#[cfg(test)]
+mod delimiter_width_split_part_regressions {
+    use super::*;
+
+    #[test]
+    fn rejects_impossible_positive_and_negative_fields_without_changing_splits() {
+        let run = |text: &str, delimiter: &str, index: i64| {
+            split_part(&[
+                Value::Text(text.into()), Value::Text(delimiter.into()),
+                Value::Integer(index),
+            ]).unwrap()
+        };
+        for (text, delimiter) in [
+            ("aa::bb::cc", "::"), ("🙂é🙂é🙂", "🙂"),
+            ("abc", "abc"), ("", "::"), ("foofoofoo", "foo"),
+        ] {
+            let fields = text.split(delimiter).collect::<Vec<_>>();
+            for (i, value) in fields.iter().enumerate() {
+                assert_eq!(run(text, delimiter, i as i64 + 1), Value::Text((*value).into()));
+                assert_eq!(run(text, delimiter, -(i as i64) - 1),
+                    Value::Text(fields[fields.len() - 1 - i].into()));
+            }
+            assert_eq!(run(text, delimiter, 1_000_000), Value::Text(String::new()));
+            assert_eq!(run(text, delimiter, i64::MIN), Value::Text(String::new()));
+        }
+        assert_eq!(run("a|b", "", 1), Value::Text("a|b".into()));
     }
 }

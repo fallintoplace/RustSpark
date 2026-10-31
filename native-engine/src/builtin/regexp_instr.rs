@@ -9,6 +9,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
+    // A start-anchored identifier literal matches only at SQL position 1.
+    if let Some(prefix) = pattern.strip_prefix('^') {
+        if prefix.len() <= 4095 && prefix.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || byte == b'_') {
+            return Ok(Value::Integer(if text.starts_with(prefix) { 1 } else { 0 }));
+        }
+    }
     if pattern == "." {
         // Unlike a byte position, the SQL result counts Unicode scalars.
         let position = text.chars().position(|ch| ch != '\n')
@@ -104,5 +111,25 @@ mod dot_pattern_instr_tests {
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod anchored_literal_instr_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_positions_match_regex_on_unicode_haystacks() {
+        for text in ["", "foo", "foobar", "xfoo", "\nfoo", "éfoo", "foo\nfoo"] {
+            for pattern in ["^", "^foo", "^foo_bar", "^1", "^FOO", "^f.o", "(?m)^foo"] {
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or(0, |matched| text[..matched.start()].chars().count() + 1);
+                let actual = evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap();
+                assert_eq!(actual, Value::Integer(expected as i64),
+                    "pattern={pattern:?} text={text:?}");
+            }
+        }
     }
 }

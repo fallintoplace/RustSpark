@@ -11,6 +11,12 @@ fn worker_count(partitions: usize, requested: usize) -> usize {
     partitions.min(requested).min(MAX_OS_WORKERS)
 }
 
+// Keep enough work available for other workers when the input is small.
+// Large inputs still amortize the queue lock over up to 16 partitions.
+fn claim_batch_size(partitions: usize, workers: usize) -> usize {
+    TASK_CLAIM_BATCH.min(partitions.div_ceil(workers))
+}
+
 /// Execute a partition-local physical operator across at most max_workers
 /// OS threads. Results are emitted in input order irrespective of completion order.
 pub fn map_partitions<F>(input: Vec<Batch>, max_workers: usize, operator: F) -> Result<Vec<Batch>>
@@ -30,6 +36,8 @@ where
         }
         return Ok(results);
     }
+    let workers = worker_count(count, max_workers);
+    let claim_size = claim_batch_size(count, workers);
     let tasks = Mutex::new(input.into_iter().enumerate());
     let failed = AtomicBool::new(false);
     // Each task has a unique index, so results can be published without a
@@ -37,7 +45,7 @@ where
     let output: Vec<OnceLock<Result<Batch>>> =
         std::iter::repeat_with(OnceLock::new).take(count).collect();
     std::thread::scope(|scope| {
-        for _ in 0..worker_count(count, max_workers) {
+        for _ in 0..workers {
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
@@ -50,7 +58,7 @@ where
                 // for every claim, especially costly for tiny partitions.
                 let claimed: [Option<(usize, Batch)>; TASK_CLAIM_BATCH] = {
                     let mut queue = tasks.lock().unwrap_or_else(|e| e.into_inner());
-                    std::array::from_fn(|_| queue.next())
+                    std::array::from_fn(|index| if index < claim_size { queue.next() } else { None })
                 };
                 if claimed[0].is_none() { break; }
                 for (index, batch) in claimed.into_iter().flatten() {
@@ -91,6 +99,15 @@ mod tests {
         assert_eq!(worker_count(1_000_000, usize::MAX), MAX_OS_WORKERS);
         assert_eq!(worker_count(4, usize::MAX), 4);
         assert_eq!(worker_count(100, 3), 3);
+    }
+
+    #[test]
+    fn leaves_small_partition_sets_available_to_all_workers() {
+        assert_eq!(claim_batch_size(4, 4), 1);
+        assert_eq!(claim_batch_size(16, 4), 4);
+        assert_eq!(claim_batch_size(30, 4), 8);
+        assert_eq!(claim_batch_size(100, 4), 16);
+        assert_eq!(claim_batch_size(1_000_000, 256), 16);
     }
 
     #[test]
