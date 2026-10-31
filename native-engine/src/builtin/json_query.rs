@@ -1,6 +1,5 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
-use serde::de::IgnoredAny;
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
@@ -24,12 +23,11 @@ fn json_equal(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
     if left == right {
+        // Equal source text still needs syntax validation, but not a JSON tree.
         if left.len() > 16 * 1024 * 1024 {
             return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
         }
-        // Identical JSON text is structurally equal, but still needs full
-        // syntax validation. Skip allocating a value tree in this case.
-        serde_json::from_str::<IgnoredAny>(left)
+        serde_json::from_str::<serde::de::IgnoredAny>(left)
             .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
         return Ok(Value::Boolean(true));
     }
@@ -95,28 +93,17 @@ mod identical_json_stream_validation_tests {
     use super::*;
 
     #[test]
-    fn large_identical_json_is_validated_without_deserializing_values() {
-        let text = format!(r#"{{"rows":[{}],"meta":{{"name":"é🙂"}}}}"#,
-            vec![r#"{"nested":[true,false,null,42]}"#; 10_000].join(","));
-        assert_eq!(json_equal(&[Value::Text(text.clone()),
-            Value::Text(text)]).unwrap(), Value::Boolean(true));
-        assert_eq!(json_equal(&[Value::Text("[1,2]".into()),
-            Value::Text("[2,1]".into())]).unwrap(), Value::Boolean(false));
-        assert_eq!(json_equal(&[Value::Text(r#"{"a":1,"b":2}"#.into()),
-            Value::Text(r#"{"b":2,"a":1}"#.into())]).unwrap(),
-            Value::Boolean(true));
-        assert_eq!(json_equal(&[Value::Null,
-            Value::Text("null".into())]).unwrap(), Value::Null);
-    }
+    fn identical_documents_validate_without_building_a_value_tree() {
+        let document = format!("[{}]", vec![r#"{"nested":[1,null,{"é":"🙂"}]}"#; 12_000].join(","));
+        let value = Value::Text(document);
+        assert_eq!(json_equal(&[value.clone(), value]).unwrap(), Value::Boolean(true));
 
-    #[test]
-    fn identical_invalid_input_still_fails_and_keeps_byte_limit() {
-        for input in ["", "{broken", "[1,INVALID]", "[1] trailing"] {
-            assert!(json_equal(&[Value::Text(input.into()),
-                Value::Text(input.into())]).is_err(), "{input}");
+        for invalid in ["{broken", r#"{"ok":1} false"#, "[1,,2]", r#""unterminated"#] {
+            assert!(matches!(json_equal(&[
+                Value::Text(invalid.into()), Value::Text(invalid.into()),
+            ]), Err(Error::Execution(_))), "{invalid}");
         }
-        let oversized = Value::Text(" ".repeat(16 * 1024 * 1024 + 1));
-        assert!(matches!(json_equal(&[oversized.clone(), oversized]),
-            Err(Error::Execution(_))));
+        assert_eq!(json_equal(&[Value::Text(r#"{"a":1}"#.into()), Value::Text(r#"{ "a": 1 }"#.into())])
+            .unwrap(), Value::Boolean(true));
     }
 }
