@@ -139,9 +139,8 @@ impl ColumnStatistics {
                 return Err(Error::Type("statistics batches disagree on column type".into()));
             }
             expected_type = Some(field.data_type);
-            for value in batch.column(column)? {
-                combined.observe(value)?;
-            }
+            // Reuse the batch-local integer fast path and combine its summary.
+            combined.merge(&Self::from_batch(batch, name)?)?;
         }
         Ok(combined)
     }
@@ -263,5 +262,25 @@ mod typed_integer_stats_scan_tests {
         let empty = Batch::empty(schema);
         assert_eq!(ColumnStatistics::from_batch(&empty, "number").unwrap(),
             ColumnStatistics::default());
+    }
+}
+
+#[cfg(test)]
+mod merged_batch_stats_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn multi_batch_statistics_match_individual_integer_summaries() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap();
+        let batches = (0..8).map(|index| Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(index * 11)], vec![Value::Null],
+            vec![Value::Integer(-index)],
+        ]).unwrap()).collect::<Vec<_>>();
+        let mut expected = ColumnStatistics::default();
+        for batch in &batches {
+            expected.merge(&ColumnStatistics::from_batch(batch, "x").unwrap()).unwrap();
+        }
+        assert_eq!(ColumnStatistics::from_batches(&batches, "x").unwrap(), expected);
     }
 }
