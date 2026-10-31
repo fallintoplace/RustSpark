@@ -7,12 +7,28 @@ use crate::{
     scalar::Value,
 };
 
+// Calls and complex expressions may be volatile. Only fold predicates whose
+// evaluation cannot change between adjacent filter operators.
+fn repeatable_filter(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(_) | Expr::Literal(_) => true,
+        Expr::Binary { left, right, .. } =>
+            repeatable_filter(left) && repeatable_filter(right),
+        Expr::Not(inner) | Expr::IsNull(inner) => repeatable_filter(inner),
+        _ => false,
+    }
+}
+
 pub fn optimize(plan: Plan) -> Plan {
     match plan {
         Plan::OneRow | Plan::Scan { .. } | Plan::Values { .. } => plan,
         Plan::Filter { input, predicate } => {
             let input = optimize(*input);
             if matches!(&predicate, Expr::Literal(Value::Boolean(true))) {
+                input
+            } else if matches!(&input, Plan::Filter { predicate: inner, .. }
+                if inner == &predicate && repeatable_filter(&predicate)) {
+                // The inner predicate already admitted exactly these rows.
                 input
             } else {
                 Plan::Filter { input: Box::new(input), predicate }
@@ -213,5 +229,38 @@ mod native_identity_limit_optimizer_tests {
         assert_eq!(optimize(source.clone().limit(0, Some(0))), source.clone().limit(0, Some(0)));
         let nested = source.clone().limit(0, None).limit(1, Some(2));
         assert_eq!(optimize(nested), source.limit(1, Some(2)));
+    }
+}
+
+#[cfg(test)]
+mod repeated_pure_filter_regressions {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor,
+        expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn folds_adjacent_repeatable_filters_without_changing_results() {
+        let predicate = Expr::binary(Expr::Column("n".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(3)));
+        let plan = Plan::scan("t").filter(predicate.clone()).filter(predicate.clone());
+        let optimized = optimize(plan.clone());
+        assert_eq!(optimized, Plan::scan("t").filter(predicate));
+        let mut catalog = Catalog::new();
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, true)
+        ]).unwrap(), (0..10).map(|n| vec![Value::Integer(n)]).chain(
+            [vec![Value::Null]]).collect()).unwrap();
+        catalog.register("t", batch).unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap(),
+            executor::execute(&optimized, &catalog).unwrap());
+    }
+
+    #[test]
+    fn leaves_function_calls_and_intervening_projections_intact() {
+        let uncertain = Expr::Call {
+            name: "isnull".into(), args: vec![Expr::Column("n".into())]
+        };
+        let nested = Plan::scan("t").filter(uncertain.clone()).filter(uncertain);
+        assert_eq!(optimize(nested.clone()), nested);
     }
 }

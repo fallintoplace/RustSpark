@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { parseStrictJSON } from "./strict-json.mjs";
 
 export class RustSparkError extends Error {
   constructor(message) {
@@ -89,15 +90,7 @@ export class RustSpark {
     }
     let rows;
     try {
-      rows = JSON.parse(result.stdout, (_key, value) => {
-        if (typeof value === "number" && !Number.isFinite(value)) {
-          throw new RangeError("non-finite SQL JSON number");
-        }
-        if (typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)) {
-          throw new RangeError("SQL integer cannot be represented safely in JavaScript");
-        }
-        return value;
-      });
+      rows = parseStrictJSON(result.stdout);
     }
     catch { throw new RustSparkError("RustSpark returned invalid JSON"); }
     if (!Array.isArray(rows) || rows.some((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
