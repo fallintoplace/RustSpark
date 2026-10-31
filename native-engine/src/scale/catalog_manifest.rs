@@ -51,8 +51,11 @@ struct Column {
     nullable: bool,
 }
 
-fn encode_fields(schema: &Schema) -> Vec<Column> {
-    schema.fields().iter().map(|field| Column {
+fn encode_fields(schema: &Schema) -> Result<Vec<Column>> {
+    if schema.is_empty() || schema.len() > MAX_COLUMNS {
+        return Err(Error::Schema("catalog manifest has invalid column count".into()));
+    }
+    Ok(schema.fields().iter().map(|field| Column {
         name: field.name.clone(),
         kind: match field.data_type {
             DataType::Boolean => "boolean",
@@ -61,7 +64,7 @@ fn encode_fields(schema: &Schema) -> Vec<Column> {
             DataType::Text => "text",
         }.into(),
         nullable: field.nullable,
-    }).collect()
+    }).collect())
 }
 
 fn decode_fields(columns: Vec<Column>) -> Result<Schema> {
@@ -98,7 +101,7 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
             tables.push(Table::Parquet {
                 name: name.to_string(),
                 path: canonical_source(parquet.path())?,
-                fields: encode_fields(parquet.schema()),
+                fields: encode_fields(parquet.schema())?,
             });
         } else {
             let csv = catalog.get(name)?;
@@ -108,7 +111,7 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
             tables.push(Table::Csv {
                 name: name.to_string(),
                 path: canonical_source(csv.path())?,
-                fields: encode_fields(csv.schema()),
+                fields: encode_fields(csv.schema())?,
                 max_record_bytes: csv.max_record_bytes(),
             });
         }
@@ -233,5 +236,22 @@ mod tests {
         fs::write(&path, vec![b' '; MAX_MANIFEST_BYTES as usize + 1]).unwrap();
         assert!(load(&path).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod catalog_snapshot_column_count_tests {
+    use super::*;
+    #[test]
+    fn rejects_column_counts_that_the_reader_cannot_reload() {
+        for count in [0, MAX_COLUMNS + 1] {
+            let fields = (0..count).map(|i|
+                Field::new(format!("c{i}"), DataType::Integer, false)).collect();
+            let schema = Schema::new(fields).unwrap();
+            assert!(encode_fields(&schema).is_err());
+        }
+        let fields = (0..MAX_COLUMNS).map(|i|
+            Field::new(format!("c{i}"), DataType::Integer, false)).collect();
+        assert_eq!(encode_fields(&Schema::new(fields).unwrap()).unwrap().len(), MAX_COLUMNS);
     }
 }
