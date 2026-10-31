@@ -17,7 +17,11 @@ pub fn filter_owned(batch: Batch, predicate: &Expr) -> Result<Batch> {
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch);
     }
-    filter(&batch, predicate)
+    let indices = crate::vector_filter::select_indices(&batch, predicate)?;
+    if indices.len() == batch.num_rows() {
+        return Ok(batch);
+    }
+    batch.take_sorted_owned(&indices)
 }
 
 #[cfg(test)]
@@ -185,5 +189,54 @@ mod literal_false_filter_fast_path_tests {
             assert_eq!(empty.schema(), &schema);
             assert_eq!(empty.column(0).unwrap(), &[]);
         }
+    }
+}
+
+#[cfg(test)]
+mod move_owned_filter_payloads {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn filtered_text_cells_keep_their_allocations() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..100).map(|index| vec![
+            if index % 7 == 0 { Value::Null } else { Value::Integer(index) },
+            Value::Text(format!("{index}-{}", "é🙂".repeat(1000))),
+        ]).collect()).unwrap();
+        let ptr = match input.value(43, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let predicate = Expr::binary(Expr::Column("id".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(40)));
+        let expected = filter(&input, &predicate).unwrap();
+        let moved = filter_owned(input, &predicate).unwrap();
+        assert_eq!(moved, expected);
+        assert_eq!(match moved.value(2, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn empty_and_identity_selections_keep_schema_and_rows() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let none = filter_owned(input.clone(),
+            &Expr::Literal(Value::Boolean(false))).unwrap();
+        assert_eq!(none.num_rows(), 0);
+        assert_eq!(none.schema(), input.schema());
+        let keep = Expr::binary(Expr::Column("id".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(0)));
+        assert_eq!(filter_owned(input.clone(), &keep).unwrap(), input);
+        assert!(filter_owned(input, &Expr::Column("id".into())).is_err());
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
+        assert_eq!(filter_owned(zero, &Expr::Literal(Value::Boolean(true))).unwrap().num_rows(), 4);
     }
 }
