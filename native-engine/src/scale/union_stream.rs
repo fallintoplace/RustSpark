@@ -384,7 +384,7 @@ mod zero_column_stream_union_fast_path_tests {
         assert_eq!(output.iter().map(Batch::num_rows).sum::<usize>(), 1);
         let left = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
         let mut limited = UnionDistinctStream::new([Ok(left)].into_iter(),
-            std::iter::empty(), schema, QueryControl::default(), 0, 64).unwrap();
+            std::iter::empty(), schema, QueryControl::default(), 1, 63).unwrap();
         assert!(limited.next().unwrap().is_err());
         assert!(limited.next().is_none());
     }
