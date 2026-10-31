@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import signal
+import math
+import threading
 import re
 from pathlib import Path
 import subprocess
@@ -81,12 +83,18 @@ def iter_arrow_batches(
     csv_tables: dict[str, str | Path] | None = None,
     parquet_tables: dict[str, str | Path] | None = None,
     json_tables: dict[str, str | Path] | None = None,
+    process_timeout: float | None = None,
 ) -> Iterator[object]:
     """Yield pyarrow.RecordBatch values from Arrow IPC stdout.
 
     Keep the iterator open until all batches have been consumed. Closing the
     generator early terminates the RustSpark process.
     """
+    if process_timeout is not None and (
+        type(process_timeout) not in (float, int)
+        or not math.isfinite(process_timeout) or process_timeout <= 0
+    ):
+        raise ValueError("process_timeout must be finite and positive")
     import pyarrow as pa  # Optional dependency, not needed for RustSpark itself.
 
     command = build_command(
@@ -102,32 +110,59 @@ def iter_arrow_batches(
             start_new_session=(os.name == "posix"),
         )
         completed = False
+        stop_deadline = threading.Event()
+        expired = threading.Event()
+
+        def terminate_group() -> None:
+            # A child may have exited while one of its descendants still
+            # holds the Arrow stdout pipe open.
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                process.kill()
+
+        def enforce_deadline() -> None:
+            if not stop_deadline.wait(process_timeout):
+                expired.set()
+                terminate_group()
+
+        watchdog = None
+        if process_timeout is not None:
+            watchdog = threading.Thread(target=enforce_deadline, daemon=True)
+            watchdog.start()
         try:
             assert process.stdout is not None
             with pa.ipc.open_stream(process.stdout) as reader:
                 for batch in reader:
+                    if expired.is_set():
+                        raise TimeoutError("RustSpark Arrow stream exceeded process timeout")
                     yield batch
             status = process.wait()
+            if expired.is_set():
+                raise TimeoutError("RustSpark Arrow stream exceeded process timeout")
             completed = True
             if status:
                 error_log.seek(0, os.SEEK_END)
                 error_log.seek(max(0, error_log.tell() - 8192))
                 stderr = error_log.read().decode("utf-8", errors="replace").strip()
                 raise RuntimeError(stderr or f"RustSpark exited with status {status}")
+        except Exception as error:
+            if expired.is_set() and not isinstance(error, TimeoutError):
+                raise TimeoutError("RustSpark Arrow stream exceeded process timeout") from error
+            raise
         finally:
+            stop_deadline.set()
+            if watchdog is not None:
+                watchdog.join()
             if not completed:
-                # Stop descendants that inherited stdout if iteration ends early.
-                if os.name == "posix":
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                elif process.poll() is None:
-                    process.terminate()
+                terminate_group()
             if process.stdout:
                 process.stdout.close()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                process.kill()
+                terminate_group()
                 process.wait()
