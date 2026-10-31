@@ -75,10 +75,26 @@ class DataFrameCommandTests(unittest.TestCase):
             self.assertEqual(query_dataframe("SELECT 1", process_timeout=3), "frame")
             self.assertEqual(run.call_args.kwargs["timeout"], 3)
             self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
-            self.assertEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
+            self.assertNotEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
             run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
             with self.assertRaisesRegex(RuntimeError, "process timeout"):
                 query_dataframe("SELECT 1", process_timeout=3)
+
+
+class BoundedPandasErrorTests(unittest.TestCase):
+    def test_query_failure_reports_only_the_tail_of_spooled_diagnostics(self):
+        fake_pa = SimpleNamespace()
+        def backend_failure(command, *, stderr, **kwargs):
+            self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+            stderr.write(b"verbose log" * 16_000 + b"\\nFINAL SQL ERROR")
+            return subprocess.CompletedProcess(command, 1)
+
+        with patch.dict(sys.modules, {"pyarrow": fake_pa}), patch(
+            "query_dataframe.subprocess.run", side_effect=backend_failure
+        ):
+            with self.assertRaisesRegex(RuntimeError, "FINAL SQL ERROR") as raised:
+                query_dataframe("SELECT 1")
+        self.assertNotIn("verbose log" * 8_000, str(raised.exception))
 
 
 class NamedJsonPandasTests(unittest.TestCase):
