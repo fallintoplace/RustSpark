@@ -192,9 +192,9 @@ func oneRow(rows []map[string]any) (map[string]any, error) {
     return rows[0], nil
 }
 
-// QueryNDJSON streams newline-delimited JSON rows to output without storing
-// them in memory. The caller is responsible for JSON parsing and byte limits.
-// An output write failure stops the query subprocess.
+// QueryNDJSON streams newline-delimited JSON rows without buffering the result.
+// MaxOutputBytes optionally bounds bytes sent to the output writer; zero means
+// unlimited streaming. An output write failure stops the query subprocess.
 func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, output io.Writer) error {
     if output == nil { return errors.New("NDJSON output writer must not be nil") }
     args, err := c.arguments(sql, opts)
@@ -208,7 +208,11 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
     command := exec.CommandContext(ctx, binary, args...)
-    command.Stdout = output
+    if opts.MaxOutputBytes > 0 {
+        command.Stdout = &ndjsonByteLimit{output: output, remaining: opts.MaxOutputBytes}
+    } else {
+        command.Stdout = output
+    }
     stderr := boundedStderr()
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
