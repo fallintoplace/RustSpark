@@ -229,6 +229,17 @@ impl<R: Read> Iterator for FrameReader<R> {
     type Item = Result<Frame>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
+        // Probe for trailing bytes before decoding another unadmitted frame.
+        // An attacker must not force a payload allocation after max_frames.
+        if self.frames_seen >= self.max_frames {
+            self.finished = true;
+            let mut extra = [0u8; 1];
+            return match self.input.read(&mut extra) {
+                Ok(0) => None,
+                Ok(_) => Some(Err(Error::Execution("exchange stream frame count limit exceeded".into()))),
+                Err(error) => Some(Err(error.into())),
+            };
+        }
         let remaining = self.max_total_bytes.saturating_sub(self.bytes_seen);
         match read_frame(&mut self.input, self.max_frame_bytes.min(remaining)) {
             Ok(None) => { self.finished = true; None }
@@ -237,10 +248,6 @@ impl<R: Read> Iterator for FrameReader<R> {
                 Some(Err(error))
             }
             Ok(Some(frame)) => {
-                if self.frames_seen >= self.max_frames {
-                    self.finished = true;
-                    return Some(Err(Error::Execution("exchange stream frame count limit exceeded".into())));
-                }
                 let Some(total) = self.bytes_seen.checked_add(frame.payload.len())
                     .filter(|&bytes| bytes <= self.max_total_bytes) else {
                     self.finished = true;
@@ -272,12 +279,17 @@ pub fn read_frames_limited(
 ) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut total = 0_usize;
-    while let Some(frame) = read_frame(
-        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
-    )? {
+    loop {
         if frames.len() >= max_frames {
+            // EOF at the exact limit is valid; any next byte proves an extra
+            // frame without allocating its declared payload.
+            let mut extra = [0u8; 1];
+            if input.read(&mut extra)? == 0 { break; }
             return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
         }
+        let Some(frame) = read_frame(
+            input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
+        )? else { break; };
         total = total.checked_add(frame.payload.len())
             .filter(|used| *used <= max_total_bytes)
             .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
@@ -491,6 +503,47 @@ mod shuffle_header_integrity_tests {
         let mut legacy = encoded;
         legacy[..4].copy_from_slice(b"RSP1");
         assert!(read_frame(&mut legacy.as_slice(), 128).is_err());
+    }
+}
+
+#[cfg(test)]
+mod frame_count_preallocation_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn iterator_rejects_next_frame_after_only_one_extra_byte() {
+        let mut wire = Vec::new();
+        for task in 0..2 {
+            write_frame(&mut wire, &Frame {
+                stage: 3, task, attempt: 1, payload: vec![7; 128],
+            }, 256).unwrap();
+        }
+        let mut reader = FrameReader::new(Cursor::new(wire), 256, 256, 1);
+        assert!(reader.next().unwrap().is_ok());
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+        assert_eq!(reader.input.position(), (HEADER_BYTES + 128 + 1) as u64);
+    }
+
+    #[test]
+    fn eager_reader_does_not_read_over_limit_payload() {
+        let mut wire = Vec::new();
+        for task in 0..2 {
+            write_frame(&mut wire, &Frame {
+                stage: 5, task, attempt: 1, payload: vec![11; 128],
+            }, 256).unwrap();
+        }
+        let mut input = Cursor::new(wire);
+        assert!(read_frames_limited(&mut input, 256, 256, 1).is_err());
+        assert_eq!(input.position(), (HEADER_BYTES + 128 + 1) as u64);
+
+        let mut only_one = Vec::new();
+        write_frame(&mut only_one, &Frame {
+            stage: 5, task: 1, attempt: 1, payload: vec![11; 128],
+        }, 256).unwrap();
+        assert_eq!(read_frames_limited(&mut only_one.as_slice(), 256, 256, 1)
+            .unwrap().len(), 1);
     }
 }
 

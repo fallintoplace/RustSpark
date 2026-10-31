@@ -63,6 +63,7 @@ impl SetStream {
     ) -> Result<Self> {
         let output_schema = set_schema(&left_schema, &right_schema)?;
         let mut right_counts: HashMap<Vec<Value>, usize> = HashMap::new();
+        let track_multiplicity = matches!(mode, SetMode::IntersectAll | SetMode::ExceptAll);
         let mut retained_bytes = 0usize;
         // Bounded materialization of right-hand distinct keys, not its row count.
         for batch in right {
@@ -77,9 +78,13 @@ impl SetStream {
                 let at_limit = right_counts.len() >= max_keys;
                 match right_counts.entry(values) {
                     Entry::Occupied(mut entry) => {
-                        let next = entry.get().checked_add(1)
-                            .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
-                        *entry.get_mut() = next;
+                        // DISTINCT modes need membership only. Repeated right-side
+                        // keys do not require a counter update or overflow check.
+                        if track_multiplicity {
+                            let next = entry.get().checked_add(1)
+                                .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+                            *entry.get_mut() = next;
+                        }
                     }
                     Entry::Vacant(entry) => {
                         let bytes = super::row_footprint::footprint(entry.key().iter());
@@ -153,13 +158,20 @@ impl Iterator for SetStream {
                 if batch.schema() != &self.left_schema {
                     return Err(Error::Schema("stream set left schema changed".into()));
                 }
-                let mut output = Vec::new();
+                let mut output: Vec<Vec<Value>> = (0..self.output_schema.len())
+                    .map(|_| Vec::new()).collect();
+                let mut selected = 0usize;
                 for index in 0..batch.num_rows() {
                     if index % 1024 == 0 { self.control.check()?; }
                     let row = convert_row(&batch, index, &self.output_schema)?;
-                    if self.select_row(&row)? { output.push(row); }
+                    if self.select_row(&row)? {
+                        for (column, value) in output.iter_mut().zip(row) {
+                            column.push(value);
+                        }
+                        selected += 1;
+                    }
                 }
-                Batch::from_rows(self.output_schema.clone(), output)
+                Batch::new_with_row_count(self.output_schema.clone(), output, selected)
             })();
             match result {
                 Ok(batch) if batch.num_rows() == 0 => continue,
@@ -220,5 +232,76 @@ mod tests {
         assert_eq!(output.field(0).unwrap().data_type, DataType::Float);
         assert_eq!(set_schema(&integer, &Schema::new(vec![Field::new("v",
             DataType::Text, true)]).unwrap()).is_err(), true);
+    }
+}
+
+#[cfg(test)]
+mod distinct_right_membership_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_right_keys_use_membership_without_changing_sql_set_results() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            std::iter::repeat_n(vec![Value::Integer(1)], 10_000)
+                .chain(std::iter::once(vec![Value::Null])).collect()).unwrap();
+        let run = |mode| SetStream::new(
+            Box::new([Ok(left.clone())].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            schema.clone(), schema.clone(), mode,
+            QueryControl::default(), 10, 4096,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(run(SetMode::IntersectDistinct),
+            vec![vec![Value::Integer(1)], vec![Value::Null]]);
+        assert_eq!(run(SetMode::ExceptDistinct), vec![vec![Value::Integer(2)]]);
+        assert_eq!(run(SetMode::IntersectAll),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod columnar_streaming_set_perf_tests {
+    use super::*;
+
+    #[test]
+    fn all_semantics_preserve_multiplicity_through_many_batches() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let keys = (0..300_i64).map(|n| vec![
+            if n % 17 == 0 { Value::Null } else { Value::Integer(n % 41) },
+            if n % 5 == 0 { Value::Null } else { Value::Text(format!("v{}", n % 7)) },
+        ]).collect::<Vec<_>>();
+        let left = Batch::from_rows(schema.clone(), keys.clone()).unwrap();
+        let right = Batch::from_rows(schema.clone(), keys.clone()).unwrap();
+        let results = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema,
+            SetMode::IntersectAll, QueryControl::default(),
+            512, 1_000_000,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let actual = results.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual, keys);
+    }
+
+    #[test]
+    fn zero_column_rows_are_counted_without_materialized_row_vectors() {
+        let schema = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
+        let right = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        let results = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectAll, QueryControl::default(),
+            10, 10_000,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(results.iter().map(Batch::num_rows).sum::<usize>(), 2);
+        assert!(results.iter().all(|batch| batch.schema().is_empty()));
     }
 }
