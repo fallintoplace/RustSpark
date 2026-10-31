@@ -283,6 +283,9 @@ where I: IntoIterator<Item = Result<Batch>>
         let batch = aggregate_shard(
             shard, &schema, &keys, items, &output_schema,
             max_groups_per_partition, io_batch_rows, control)?;
+        // A sparse hash exchange can have thousands of empty shards.
+        // No grouped rows exist for them, so skip schema-only output files.
+        if batch.num_rows() == 0 { continue; }
         let id = GROUP_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-groups-{}-{id}.rspill", std::process::id()));
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
@@ -457,6 +460,48 @@ mod grouped_spill_window_output_tests {
         assert_eq!(rows.len(), 11);
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sparse_group_result_shards_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn writes_only_nonempty_group_results_for_sparse_partitions() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-groups-sparse-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("g", DataType::Integer, false),
+            Field::new("value", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(5), Value::Integer(7)],
+            vec![Value::Integer(5), Value::Integer(11)],
+        ]).unwrap();
+        let items = [AggregateItem::new(
+            AggregateOp::Sum(Expr::Column("value".into())), "total")];
+        let result = grouped_aggregate([Ok(batch)], schema.clone(),
+            &[("g".into(), "g".into())], &items,
+            &dir, 128, 10, 2, &QueryControl::default()).unwrap();
+        assert_eq!(result.paths().len(), 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let mut reader = SpillReader::new(BufReader::new(
+            File::open(&result.paths()[0]).unwrap()), 2).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(5), Value::Integer(18)]]);
+        assert!(reader.next_batch().unwrap().is_none());
+        drop(result);
+        let empty = grouped_aggregate(Vec::<Result<Batch>>::new(), schema,
+            &[("g".into(), "g".into())], &items, &dir, 128, 10, 2,
+            &QueryControl::default()).unwrap();
+        assert!(empty.paths().is_empty());
+        drop(empty);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir(dir).unwrap();
     }
 }
