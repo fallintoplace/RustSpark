@@ -72,8 +72,11 @@ def parse_query_rows(text: str) -> list[dict]:
             fields[key] = value
         return fields
 
-    rows = json.loads(text, object_pairs_hook=unique_fields,
-                      parse_constant=reject_nonfinite, parse_float=parse_finite_float)
+    try:
+        rows = json.loads(text, object_pairs_hook=unique_fields,
+                          parse_constant=reject_nonfinite, parse_float=parse_finite_float)
+    except RecursionError as error:
+        raise ValueError("SQL result exceeds JSON nesting limit") from error
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL template results must be an array of row objects")
     return rows
