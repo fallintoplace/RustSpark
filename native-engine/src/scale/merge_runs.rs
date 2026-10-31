@@ -14,6 +14,13 @@ use super::{cancel::QueryControl, spill::SpillReader};
 const MAX_FAN_IN: usize = 64;
 const MAX_OUTPUT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
+// Avoid reserving more Value slots than the output byte budget can hold.
+// Actual TEXT bytes are still enforced per row during append.
+fn output_buffer_capacity(requested: usize, columns: usize) -> usize {
+    let fixed_row_bytes = columns.max(1).saturating_mul(std::mem::size_of::<Value>());
+    requested.min(256).min((MAX_OUTPUT_BATCH_BYTES / fixed_row_bytes.max(1)).max(1))
+}
+
 enum AppendStatus { Added, Full, Exhausted }
 
 struct InputRun {
@@ -223,8 +230,17 @@ impl Iterator for RunMerger {
             self.stopped = true;
             return Some(Err(error));
         }
-        // Reserve common small batches without preallocating a full large output budget.
-        let capacity = self.output_batch_rows.min(256);
+        // An empty fan-in cannot produce rows. Preserve cancellation
+        // semantics without allocating unused buffers for wide schemas.
+        if self.runs.is_empty() {
+            self.stopped = true;
+            return match self.control.check() {
+                Ok(()) => None,
+                Err(error) => Some(Err(error)),
+            };
+        }
+        // Keep even the initial column capacity within the output byte budget.
+        let capacity = output_buffer_capacity(self.output_batch_rows, self.schema.len());
         let mut columns: Vec<Vec<Value>> =
             (0..self.schema.len()).map(|_| Vec::with_capacity(capacity)).collect();
         let mut rows = 0usize;
@@ -564,5 +580,37 @@ mod single_integer_key_merge_heap_regressions {
             drop(runs);
         }
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bounded_merge_output_reservation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn wide_schema_preallocation_respects_output_value_slot_budget() {
+        for width in [1, 32, 512, 4096] {
+            let rows = output_buffer_capacity(65_536, width);
+            assert!(rows >= 1 && rows <= 256);
+            let reserved = rows * width * std::mem::size_of::<Value>();
+            assert!(reserved <= MAX_OUTPUT_BATCH_BYTES);
+        }
+        assert_eq!(output_buffer_capacity(3, 256), 3);
+    }
+
+    #[test]
+    fn no_input_runs_finish_without_allocating_wide_output_columns() {
+        let schema = Schema::new((0..256)
+            .map(|index| Field::new(format!("key_{index}"), DataType::Integer, true))
+            .collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key_0".into()))];
+        let paths: [&Path; 0] = [];
+        let mut merge = RunMerger::new(
+            &paths, schema, &keys, 128, 65_536, QueryControl::default(),
+        ).unwrap();
+        assert!(merge.next().is_none());
+        assert!(merge.stopped);
+        assert!(merge.next().is_none());
     }
 }
