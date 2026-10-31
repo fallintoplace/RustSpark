@@ -244,6 +244,7 @@ mod distinct_on_feature_tests {
 #[cfg(test)]
 mod borrowed_multicolumn_distinct_tests {
     use super::*;
+    use crate::scalar::Value;
     use crate::schema::{DataType, Field, Schema};
 
     #[test]

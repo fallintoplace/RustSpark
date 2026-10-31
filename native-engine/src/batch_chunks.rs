@@ -68,8 +68,7 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         }
     }
-    // Every input was already schema-validated and matched exactly.
-    // The constructor still verifies column widths without rescanning values.
+    // Compatible input batches have already validated each scalar.
     Batch::from_validated_columns(schema, columns, total)
 }
 
@@ -106,6 +105,7 @@ mod tests {
 #[cfg(test)]
 mod zero_column_concat_consolidation_tests {
     use super::*;
+    use crate::schema::Schema;
     #[test]
     fn concatenation_preserves_zero_column_rows() {
         let schema = Schema::new(vec![]).unwrap();
@@ -152,6 +152,30 @@ mod batch_chunk_nth_skip_tests {
         assert!(iter.nth(usize::MAX).is_none());
         assert_eq!(iter.len(), 0);
         assert!(iter.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod trusted_concatenation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn retains_nullable_wide_text_and_zero_column_cardinality() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let long = Value::Text("🙂".repeat(8192));
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![long.clone()], vec![Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(schema, vec![vec![long.clone()]]).unwrap();
+        let combined = concatenate(&[first, second]).unwrap();
+        assert_eq!(combined.rows().unwrap(), vec![
+            vec![long.clone()], vec![Value::Null], vec![long],
+        ]);
+        let zero = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(zero.clone(), vec![], 3).unwrap();
+        let right = Batch::new_with_row_count(zero, vec![], 4).unwrap();
+        assert_eq!(concatenate(&[left, right]).unwrap().num_rows(), 7);
     }
 }
 

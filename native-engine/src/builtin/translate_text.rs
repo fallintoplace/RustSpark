@@ -47,6 +47,32 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(String::from_utf8(output)
             .expect("ASCII translations remain UTF-8")));
     }
+    if text.is_ascii() && from.is_ascii() {
+        // Keep ASCII lookup speed even when replacement scalars are Unicode.
+        // Some(None) denotes deletion; None means the source byte is unmapped.
+        let mut mapping: [Option<Option<char>>; 128] = [None; 128];
+        let mut replacements = to.chars();
+        for &byte in from.as_bytes() {
+            let replacement = replacements.next();
+            if mapping[usize::from(byte)].is_none() {
+                mapping[usize::from(byte)] = Some(replacement);
+            }
+        }
+        let mut output = String::with_capacity(text.len());
+        for &byte in text.as_bytes() {
+            let character = match mapping[usize::from(byte)] {
+                None => Some(char::from(byte)),
+                Some(mapped) => mapped,
+            };
+            if let Some(character) = character {
+                if character.len_utf8() > (16 * 1024 * 1024_usize).saturating_sub(output.len()) {
+                    return Err(Error::Execution("TRANSLATE output exceeds 16 MiB".into()));
+                }
+                output.push(character);
+            }
+        }
+        return Ok(Value::Text(output));
+    }
     let mut mapping: HashMap<char, Option<char>> = HashMap::new();
     let mut replacement = to.chars();
     for character in from.chars() {
@@ -160,5 +186,27 @@ mod translate_empty_text_tests {
             .map(|code| char::from_u32(code).unwrap()).collect::<String>();
         assert!(evaluate(&[Value::Text(String::new()), Value::Text(distinct),
             Value::Text("x".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ascii_lookup_unicode_translation_regressions {
+    use super::*;
+
+    #[test]
+    fn preserves_first_mapping_deletion_and_utf8_growth_limits() {
+        let run = |source: &str, from: &str, to: &str| evaluate(&[
+            Value::Text(source.into()), Value::Text(from.into()),
+            Value::Text(to.into()),
+        ]).unwrap();
+        assert_eq!(run("aba", "aab", "🙂éZ"), Value::Text("🙂Z🙂".into()));
+        assert_eq!(run("abcXYZ", "abc", "界"), Value::Text("界XYZ".into()));
+        assert_eq!(run("abba", "ab", "🙂"), Value::Text("🙂🙂".into()));
+        assert_eq!(run("abc", "", "🙂"), Value::Text("abc".into()));
+        assert_eq!(run("éabc", "a", "🙂"), Value::Text("é🙂bc".into()));
+        assert!(matches!(evaluate(&[
+            Value::Text("a".repeat(5 * 1024 * 1024)),
+            Value::Text("a".into()), Value::Text("🙂".into()),
+        ]), Err(Error::Execution(_))));
     }
 }
