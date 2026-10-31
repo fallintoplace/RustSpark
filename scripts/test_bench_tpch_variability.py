@@ -35,6 +35,17 @@ class VariabilityTests(unittest.TestCase):
         self.assertGreater(noisy["results"][0]["coefficient_of_variation"], 0.25)
         self.assertEqual(noisy["unstable_queries"], [1])
 
+    def test_even_count_large_finite_samples_keep_finite_median(self):
+        samples = [1e308] * 4
+        data = {"results": [{
+            "id": 1, "status": "ok",
+            "median_ms": 1e308, "samples_ms": samples,
+            "p95_ms": 1e308,
+        }]}
+        result = variation.inspect(data)
+        self.assertEqual(result["unstable_queries"], [])
+        self.assertEqual(result["results"][0]["median_absolute_deviation_ms"], 0)
+
     def test_noisy_samples_flagged(self):
         result = variation.inspect(report([10, 20, 10, 20]))
         self.assertEqual(result["unstable_queries"], [1])
