@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, btree_map::Entry}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, BTreeSet, btree_map::Entry}, time::{Duration, Instant}};
 
 use crate::{Error, Result};
 
@@ -38,6 +38,9 @@ impl Task {
 
 pub struct TaskScheduler {
     tasks: BTreeMap<u64, Task>,
+    // Both indexes are bounded by the admitted task count.
+    queued: BTreeSet<u64>,
+    leased_by_expiry: BTreeSet<(Instant, u64)>,
     max_attempts: u32,
 }
 
@@ -77,7 +80,8 @@ impl TaskScheduler {
                 }
             }
         }
-        Ok(Self { tasks: entries, max_attempts })
+        let queued = entries.keys().copied().collect();
+        Ok(Self { tasks: entries, queued, leased_by_expiry: BTreeSet::new(), max_attempts })
     }
 
     pub fn lease(&mut self, worker: u64, now: Instant, ttl: Duration) -> Result<Option<Lease>> {
@@ -86,26 +90,26 @@ impl TaskScheduler {
         }
         let until = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
-        let mut candidate = None;
-        for (&id, task) in &mut self.tasks {
-            task.expire_if_needed(now, self.max_attempts);
-            if candidate.is_none() && task.status == TaskStatus::Queued {
-                candidate = Some(id);
-            }
-        }
-        let Some(id) = candidate else { return Ok(None); };
+        self.expire_leases(now);
+        let Some(&id) = self.queued.iter().next() else { return Ok(None); };
+        self.queued.remove(&id);
         let task = self.tasks.get_mut(&id).expect("queued task exists");
         task.attempts += 1;
         task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
+        self.leased_by_expiry.insert((until, id));
         Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
     }
 
-    /// Reclaim expired leases independently of worker requests, so monitoring
-    /// and retry orchestration can observe current task states.
+    /// Reclaim only leases with elapsed deadlines. Runtime cost is proportional
+    /// to the number of expired leases rather than all admitted tasks.
     pub fn expire_leases(&mut self, now: Instant) -> usize {
         let mut expired = 0usize;
-        for task in self.tasks.values_mut() {
+        while let Some(&(until, id)) = self.leased_by_expiry.iter().next() {
+            if until > now { break; }
+            self.leased_by_expiry.remove(&(until, id));
+            let task = self.tasks.get_mut(&id).expect("indexed lease exists");
             if task.expire_if_needed(now, self.max_attempts) {
+                if task.status == TaskStatus::Queued { self.queued.insert(id); }
                 expired += 1;
             }
         }
@@ -123,7 +127,15 @@ impl TaskScheduler {
         match &task.status {
             TaskStatus::Leased { worker, attempt, until }
                 if *worker == lease.worker && *attempt == lease.attempt && *until > now => {
-                task.status = TaskStatus::Leased { worker: lease.worker, attempt: lease.attempt, until: deadline.max(*until) };
+                let old_until = *until;
+                let new_until = deadline.max(old_until);
+                task.status = TaskStatus::Leased {
+                    worker: lease.worker, attempt: lease.attempt, until: new_until
+                };
+                if new_until != old_until {
+                    self.leased_by_expiry.remove(&(old_until, lease.task));
+                    self.leased_by_expiry.insert((new_until, lease.task));
+                }
                 Ok(true)
             }
             _ => Ok(false),
@@ -143,12 +155,14 @@ impl TaskScheduler {
                 if *worker == lease.worker && *attempt == lease.attempt => *until,
             _ => return false,
         };
+        self.leased_by_expiry.remove(&(until, lease.task));
         if now >= until {
             task.status = if task.attempts >= self.max_attempts {
                 TaskStatus::Failed
             } else {
                 TaskStatus::Queued
             };
+            if task.status == TaskStatus::Queued { self.queued.insert(lease.task); }
             return false;
         }
         task.status = if success {
@@ -158,16 +172,21 @@ impl TaskScheduler {
         } else {
             TaskStatus::Queued
         };
+        if task.status == TaskStatus::Queued { self.queued.insert(lease.task); }
         true
     }
 
     pub fn cancel_task(&mut self, id: u64) -> bool {
         let Some(task) = self.tasks.get_mut(&id) else { return false; };
-        if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
-            task.status = TaskStatus::Failed;
-            return true;
+        match &task.status {
+            TaskStatus::Queued => { self.queued.remove(&id); }
+            TaskStatus::Leased { until, .. } => {
+                self.leased_by_expiry.remove(&(*until, id));
+            }
+            TaskStatus::Done | TaskStatus::Failed => return false,
         }
-        false
+        task.status = TaskStatus::Failed;
+        true
     }
 
     pub fn counts(&self) -> TaskCounts {
@@ -185,9 +204,7 @@ impl TaskScheduler {
 
     /// View a bounded, deterministic list of ready task IDs without leasing.
     pub fn queued_tasks(&self, limit: usize) -> Vec<u64> {
-        self.tasks.iter().filter_map(|(&id, task)|
-            (task.status == TaskStatus::Queued).then_some(id)
-        ).take(limit).collect()
+        self.queued.iter().take(limit).copied().collect()
     }
 
     pub fn status(&self, task: u64) -> Option<&TaskStatus> {
@@ -263,6 +280,8 @@ impl TaskScheduler {
                 cancelled += 1;
             }
         }
+        self.queued.clear();
+        self.leased_by_expiry.clear();
         cancelled
     }
 }
@@ -399,5 +418,42 @@ mod scheduler_duplicate_admission_diagnostics_tests {
         let full = TaskScheduler::with_task_limit([10, 11], 2, 1).err().unwrap();
         assert!(full.to_string().contains("admission limit"));
         assert_eq!(TaskScheduler::with_task_limit([10], 2, 1).unwrap().counts().queued, 1);
+    }
+}
+
+#[cfg(test)]
+mod indexed_scheduler_regressions {
+    use super::*;
+
+    #[test]
+    fn renewals_keep_expiration_index_bounded_and_ignore_old_deadlines() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([7], 3).unwrap();
+        let lease = scheduler.lease(11, now, Duration::from_secs(1)).unwrap().unwrap();
+        for seconds in 2..1_000 {
+            assert!(scheduler.renew(&lease, now, Duration::from_secs(seconds)).unwrap());
+            assert_eq!(scheduler.leased_by_expiry.len(), 1);
+        }
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(500)), 0);
+        assert_eq!(scheduler.status(7).unwrap(), &TaskStatus::Leased {
+            worker: 11, attempt: 1, until: now + Duration::from_secs(999),
+        });
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(1_000)), 1);
+        assert_eq!(scheduler.queued_tasks(10), [7]);
+    }
+
+    #[test]
+    fn completed_and_cancelled_tasks_leave_no_stale_lease_index_entries() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3], 2).unwrap();
+        let first = scheduler.lease(9, now, Duration::from_secs(5)).unwrap().unwrap();
+        let second = scheduler.lease(8, now, Duration::from_secs(1)).unwrap().unwrap();
+        assert!(scheduler.finish_at(&first, true, now));
+        assert!(scheduler.cancel_task(second.task));
+        assert_eq!(scheduler.leased_by_expiry.len(), 0);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(100)), 0);
+        assert_eq!(scheduler.queued_tasks(10), [3]);
+        assert_eq!(scheduler.counts().done, 1);
+        assert_eq!(scheduler.counts().failed, 1);
     }
 }
