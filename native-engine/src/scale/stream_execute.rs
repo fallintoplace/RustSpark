@@ -204,13 +204,7 @@ impl Iterator for DistinctOutput {
                     std::collections::hash_map::Entry::Occupied(_) => continue,
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         let key = entry.key();
-                        let footprint = key.iter().fold(
-                            64usize.saturating_add(key.len().saturating_mul(std::mem::size_of::<Value>())),
-                            |total, value| match value {
-                                Value::Text(text) => total.saturating_add(text.len()),
-                                _ => total,
-                            },
-                        );
+                        let footprint = super::row_footprint::footprint(key.iter());
                         let next_total = self.retained_bytes.checked_add(footprint);
                         if at_limit || next_total.is_none_or(|size| size > self.max_bytes) {
                             self.stopped = true;
