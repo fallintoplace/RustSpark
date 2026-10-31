@@ -181,7 +181,7 @@ impl BloomFilter {
         if self.bits != other.bits || self.hashes != other.hashes {
             return Err(Error::Execution("cannot intersect incompatible Bloom filters".into()));
         }
-        if !self.populated { return Ok(()); }
+        if !self.populated || other.occupied_bits == other.bits { return Ok(()); }
         if !other.populated {
             self.words.fill(0);
             self.occupied_bits = 0;
@@ -495,5 +495,28 @@ mod saturated_bloom_shortcut_regressions {
             assert!(filter.might_contain(&Value::Integer(123)));
             assert_eq!(filter.bits_set(), other.bits_set());
         }
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_intersection_regressions {
+    use super::*;
+
+    #[test]
+    fn intersecting_with_a_saturated_source_preserves_membership_and_counts() {
+        let mut partial = BloomFilter::new(64, 5).unwrap();
+        partial.insert(&Value::Integer(23));
+        let before = partial.clone();
+        let mut full = BloomFilter::new(64, 5).unwrap();
+        for n in 0..10_000 {
+            if full.bits_set() == 64 { break; }
+            full.insert(&Value::Integer(n));
+        }
+        assert_eq!(full.bits_set(), 64);
+        partial.intersect_with(&full).unwrap();
+        assert_eq!(partial.words, before.words);
+        assert_eq!(partial.bits_set(), before.bits_set());
+        assert!(partial.might_contain(&Value::Integer(23)));
+        assert!(partial.intersect_with(&BloomFilter::new(128, 5).unwrap()).is_err());
     }
 }
