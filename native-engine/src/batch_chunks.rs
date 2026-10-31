@@ -68,7 +68,9 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         }
     }
-    Batch::new_with_row_count(schema, columns, total)
+    // Every input was already schema-validated and matched exactly.
+    // The constructor still verifies column widths without rescanning values.
+    Batch::from_validated_columns(schema, columns, total)
 }
 
 #[cfg(test)]
@@ -150,5 +152,30 @@ mod batch_chunk_nth_skip_tests {
         assert!(iter.nth(usize::MAX).is_none());
         assert_eq!(iter.len(), 0);
         assert!(iter.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod already_validated_chunk_concatenation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn wide_chunks_preserve_nullable_text_and_zero_width_cardinality() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..25).map(|n| vec![
+            if n % 5 == 0 { Value::Null } else { Value::Text(format!("text-{n}-{}", "🙂".repeat(500))) },
+            Value::Integer(n),
+        ]).collect()).unwrap();
+        let chunks = chunks(&input, 4).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(concatenate(&chunks).unwrap(), input);
+        let zero = Schema::new(vec![]).unwrap();
+        let parts = (0..4).map(|_| Batch::new_with_row_count(zero.clone(), vec![], 3).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(concatenate(&parts).unwrap().num_rows(), 12);
+        assert!(concatenate(&[chunks[0].clone(), Batch::empty(zero)]).is_err());
     }
 }
