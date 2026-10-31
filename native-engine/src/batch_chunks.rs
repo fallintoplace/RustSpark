@@ -68,8 +68,7 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         }
     }
-    // Source batches are already type-checked and all schemas match.
-    // Validate shape, not every cloned scalar, on concatenation.
+    // Compatible input batches have already validated each scalar.
     Batch::from_validated_columns(schema, columns, total)
 }
 
@@ -106,6 +105,7 @@ mod tests {
 #[cfg(test)]
 mod zero_column_concat_consolidation_tests {
     use super::*;
+    use crate::schema::Schema;
     #[test]
     fn concatenation_preserves_zero_column_rows() {
         let schema = Schema::new(vec![]).unwrap();
@@ -161,20 +161,45 @@ mod trusted_concatenation_regressions {
     use crate::schema::{DataType, Field, Schema};
 
     #[test]
-    fn concatenation_matches_public_validation_for_nullable_wide_text() {
+    fn retains_nullable_wide_text_and_zero_column_cardinality() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let long = Value::Text("🙂".repeat(8192));
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![long.clone()], vec![Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(schema, vec![vec![long.clone()]]).unwrap();
+        let combined = concatenate(&[first, second]).unwrap();
+        assert_eq!(combined.rows().unwrap(), vec![
+            vec![long.clone()], vec![Value::Null], vec![long],
+        ]);
+        let zero = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(zero.clone(), vec![], 3).unwrap();
+        let right = Batch::new_with_row_count(zero, vec![], 4).unwrap();
+        assert_eq!(concatenate(&[left, right]).unwrap().num_rows(), 7);
+    }
+}
+
+#[cfg(test)]
+mod already_validated_chunk_concatenation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn wide_chunks_preserve_nullable_text_and_zero_width_cardinality() {
         let schema = Schema::new(vec![
-            Field::new("payload", DataType::Text, true),
+            Field::new("text", DataType::Text, true),
             Field::new("id", DataType::Integer, false),
         ]).unwrap();
-        let wide = Value::Text("界".repeat(2048));
-        let rows = vec![
-            vec![wide.clone(), Value::Integer(1)],
-            vec![Value::Null, Value::Integer(2)],
-            vec![wide, Value::Integer(3)],
-        ];
-        let inputs = rows.chunks(1).map(|chunk| Batch::from_rows(
-            schema.clone(), chunk.to_vec()
-        ).unwrap()).collect::<Vec<_>>();
-        assert_eq!(concatenate(&inputs).unwrap(), Batch::from_rows(schema, rows).unwrap());
+        let input = Batch::from_rows(schema, (0..25).map(|n| vec![
+            if n % 5 == 0 { Value::Null } else { Value::Text(format!("text-{n}-{}", "🙂".repeat(500))) },
+            Value::Integer(n),
+        ]).collect()).unwrap();
+        let chunks = chunks(&input, 4).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(concatenate(&chunks).unwrap(), input);
+        let zero = Schema::new(vec![]).unwrap();
+        let parts = (0..4).map(|_| Batch::new_with_row_count(zero.clone(), vec![], 3).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(concatenate(&parts).unwrap().num_rows(), 12);
+        assert!(concatenate(&[chunks[0].clone(), Batch::empty(zero)]).is_err());
     }
 }
