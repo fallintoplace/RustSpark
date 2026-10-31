@@ -136,7 +136,7 @@ impl BloomFilter {
         }
         // An unpopulated filter has no set bits. Avoid visiting large
         // bitsets for the common case of an empty build-side partition.
-        if !other.populated { return Ok(()); }
+        if !other.populated || self.occupied_bits == self.bits { return Ok(()); }
         if !self.populated {
             self.words.copy_from_slice(&other.words);
             self.occupied_bits = other.occupied_bits;
@@ -495,5 +495,28 @@ mod saturated_bloom_shortcut_regressions {
             assert!(filter.might_contain(&Value::Integer(123)));
             assert_eq!(filter.bits_set(), other.bits_set());
         }
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_union_regressions {
+    use super::*;
+
+    #[test]
+    fn saturated_union_is_identity_and_still_validates_layout() {
+        let mut full = BloomFilter::new(64, 5).unwrap();
+        for n in 0..10_000 {
+            if full.bits_set() == 64 { break; }
+            full.insert(&Value::Integer(n));
+        }
+        assert_eq!(full.bits_set(), 64);
+        let before = full.clone();
+        let mut other = BloomFilter::new(64, 5).unwrap();
+        other.insert(&Value::Text("different".into()));
+        full.union_with(&other).unwrap();
+        assert_eq!(full.words, before.words);
+        assert_eq!(full.bits_set(), 64);
+        assert!(full.might_contain(&Value::Integer(10_000_000)));
+        assert!(full.union_with(&BloomFilter::new(128, 5).unwrap()).is_err());
     }
 }
