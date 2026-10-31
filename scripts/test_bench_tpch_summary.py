@@ -51,6 +51,17 @@ class SuiteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "query ID"):
             suite.summarize(data)
 
+    def test_large_finite_summaries_preserve_valid_percentages(self):
+        data = report()
+        for row in data["results"]:
+            row["median_ms"] = 5e306
+        result = suite.summarize(data)
+        self.assertAlmostEqual(result["top_three_latency_percent"], round(3 / 22 * 100, 2))
+        for row in data["results"]:
+            row["median_ms"] = 1e308
+        with self.assertRaisesRegex(ValueError, "latency sum"):
+            suite.summarize(data)
+
     def test_hotspot_share_uses_sum_of_all_twenty_two_queries(self):
         data = suite.summarize(report())
         self.assertEqual(data["top_latency_queries"], [22, 21, 20])
