@@ -54,6 +54,48 @@ impl Ord for ColumnCandidate<'_> {
     }
 }
 
+// A common ORDER BY expression has only one computed key. It does not
+// need a Vec<Cow<Value>> and an Arc clone for every candidate row.
+#[derive(Debug)]
+struct ExpressionCandidate {
+    row: usize,
+    value: Value,
+    descending: bool,
+    nulls_first: bool,
+}
+impl PartialEq for ExpressionCandidate {
+    fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal }
+}
+impl Eq for ExpressionCandidate {}
+impl PartialOrd for ExpressionCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for ExpressionCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        crate::sort::compare_values(
+            &self.value, &other.value, self.descending, self.nulls_first,
+        ).then_with(|| self.row.cmp(&other.row))
+    }
+}
+
+fn top_k_expression(batch: &Batch, key: &SortKey, k: usize) -> Result<Batch> {
+    let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
+    for row in 0..batch.num_rows() {
+        let candidate = ExpressionCandidate {
+            row, value: key.expression.evaluate(batch, row)?,
+            descending: key.descending, nulls_first: key.nulls_first,
+        };
+        if heap.len() < k {
+            heap.push(candidate);
+        } else if let Some(mut worst) = heap.peek_mut() {
+            if candidate < *worst { *worst = candidate; }
+        }
+    }
+    let mut retained = heap.into_vec();
+    retained.sort_unstable();
+    batch.take(&retained.into_iter().map(|candidate| candidate.row).collect::<Vec<_>>())
+}
+
 fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     let columns = keys.iter().map(|key| match &key.expression {
         crate::expr::Expr::Column(name) => batch.column(batch.schema().column(name)?),
@@ -103,6 +145,9 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
         return top_k_columns(batch, keys, k);
+    }
+    if keys.len() == 1 {
+        return top_k_expression(batch, &keys[0], k);
     }
     let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
     let key_columns = keys.iter().map(|key| match &key.expression {
@@ -403,5 +448,36 @@ mod topk_borrowed_mixed_expression_keys {
                 BinaryOp::Add, Expr::Literal(Value::Integer(1)))),
         ];
         assert!(top_k(&batch, &keys, 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod computed_single_key_heap_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_key_heap_matches_stable_full_sort_for_nulls_and_ties() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("label", DataType::Text, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..200).map(|i| vec![
+            if i % 17 == 0 { Value::Null } else { Value::Integer((i % 11) as i64) },
+            Value::Text(format!("{i}-{}", "x".repeat(128))),
+        ]).collect()).unwrap();
+        let expression = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add, Expr::Literal(Value::Integer(2)),
+        );
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let keys = [SortKey { expression: expression.clone(), descending, nulls_first }];
+                let expected = crate::sort::sort(&input, &keys).unwrap();
+                for k in [1, 2, 17, 101, 199] {
+                    assert_eq!(top_k(&input, &keys, k).unwrap(),
+                        expected.slice_rows(0, k).unwrap());
+                }
+            }
+        }
     }
 }
