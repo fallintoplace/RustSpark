@@ -174,6 +174,39 @@ fn fast_integer_in_list<'a>(
     Ok(Some((batch.column(index)?, keys, *negated, has_null)))
 }
 
+fn float_hash_key(value: f64) -> u64 {
+    // Match Value's SQL equality: every NaN compares equal, and -0 == +0.
+    if value.is_nan() { f64::NAN.to_bits() }
+    else if value == 0.0 { 0.0f64.to_bits() }
+    else { value.to_bits() }
+}
+
+/// Hash floating-point IN-list literals once per batch instead of comparing
+/// every row with every literal. Mixed INT/FLOAT members keep scalar SQL
+/// comparison to preserve exact cross-type numeric semantics.
+fn fast_float_in_list<'a>(
+    batch: &'a Batch, predicate: &Expr,
+) -> Result<Option<(&'a [Value], std::collections::HashSet<u64>, bool, bool)>> {
+    let Expr::InList { needle, choices, negated } = predicate else {
+        return Ok(None);
+    };
+    let Expr::Column(name) = needle.as_ref() else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Float {
+        return Ok(None);
+    }
+    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut has_null = false;
+    for choice in choices {
+        match choice {
+            Expr::Literal(Value::Float(value)) => { keys.insert(float_hash_key(*value)); },
+            Expr::Literal(Value::Null) => has_null = true,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((batch.column(index)?, keys, *negated, has_null)))
+}
+
 /// Resolve constant TEXT IN lists once and compare borrowed column values.
 /// NULL choices make unmatched NOT IN rows UNKNOWN, not TRUE.
 fn fast_text_in_list<'a>(
@@ -223,6 +256,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if let Value::Integer(value) = value {
                 let matched = keys.contains(value);
+                if if negated { !has_null && !matched } else { matched } {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, keys, negated, has_null)) =
+        fast_float_in_list(batch, predicate)? {
+        if (negated && has_null) || (!negated && keys.is_empty()) {
+            return Ok(selected);
+        }
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(number) = value {
+                let matched = keys.contains(&float_hash_key(*number));
                 if if negated { !has_null && !matched } else { matched } {
                     selected.push(row);
                 }
@@ -817,5 +863,72 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hashed_float_in_list_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn hash_membership_matches_scalar_with_nan_signed_zero_and_null() {
+        let values = vec![
+            Value::Null, Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(f64::NAN), Value::Float(-f64::NAN),
+            Value::Float(f64::INFINITY), Value::Float(f64::NEG_INFINITY),
+            Value::Float(1.0), Value::Float(1.5), Value::Float(-7.25),
+        ];
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap(),
+            values.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        for null_choice in [false, true] {
+            for negated in [false, true] {
+                let mut choices = vec![
+                    Expr::Literal(Value::Float(f64::NAN)),
+                    Expr::Literal(Value::Float(-0.0)),
+                    Expr::Literal(Value::Float(f64::INFINITY)),
+                    Expr::Literal(Value::Float(-0.0)),
+                ];
+                if null_choice { choices.push(Expr::Literal(Value::Null)); }
+                let predicate = Expr::InList {
+                    needle: Box::new(Expr::Column("n".into())),
+                    choices, negated,
+                };
+                assert!(fast_float_in_list(&batch, &predicate).unwrap().is_some());
+                let expected = (0..batch.num_rows()).filter(|&row|
+                    predicate.evaluate(&batch, row).unwrap()
+                        .as_boolean().unwrap() == Some(true)).collect::<Vec<_>>();
+                assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+            }
+        }
+        assert_eq!(float_hash_key(-0.0), float_hash_key(0.0));
+        assert_eq!(float_hash_key(f64::NAN), float_hash_key(-f64::NAN));
+    }
+
+    #[test]
+    fn large_float_list_and_mixed_numeric_fallback_match_scalar() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Float, false)]).unwrap(),
+            (0..400).map(|n| vec![Value::Float(n as f64 / 2.0)]).collect(),
+        ).unwrap();
+        let choices = (0..150).map(|n|
+            Expr::Literal(Value::Float(n as f64))).collect::<Vec<_>>();
+        let predicate = Expr::InList {
+            needle: Box::new(Expr::Column("n".into())), choices, negated: false,
+        };
+        let expected = (0..batch.num_rows()).filter(|&row|
+            predicate.evaluate(&batch, row).unwrap()
+                .as_boolean().unwrap() == Some(true)).collect::<Vec<_>>();
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+        let mixed = Expr::InList {
+            needle: Box::new(Expr::Column("n".into())),
+            choices: vec![Expr::Literal(Value::Float(0.0)),
+                Expr::Literal(Value::Integer(1))],
+            negated: false,
+        };
+        assert!(fast_float_in_list(&batch, &mixed).unwrap().is_none());
+        assert_eq!(select_indices(&batch, &mixed).unwrap(), vec![0, 2]);
     }
 }
