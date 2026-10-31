@@ -100,7 +100,7 @@ impl CrossJoinStream {
                     }
                     let Some(next) = self.left.next() else {
                         if output_rows == 0 { return Ok(None); }
-                        return Ok(Some(Batch::new_with_row_count(
+                        return Ok(Some(Batch::from_validated_columns(
                             self.output_schema.clone(), output, output_rows,
                         )?));
                     };
@@ -136,7 +136,7 @@ impl CrossJoinStream {
                 self.left_row += 1;
             }
         }
-        Ok(Some(Batch::new_with_row_count(
+        Ok(Some(Batch::from_validated_columns(
             self.output_schema.clone(), output, output_rows,
         )?))
     }
@@ -293,5 +293,35 @@ mod borrowed_cross_join_left_rows_tests {
         let actual = stream.collect::<Result<Vec<_>>>().unwrap().into_iter()
             .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod trusted_cross_join_output_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn streamed_batches_match_materialized_cartesian_product() {
+        let left_schema = Schema::new(vec![
+            Field::new("l", DataType::Text, true),
+        ]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("r", DataType::Integer, true),
+        ]).unwrap();
+        let left = Batch::from_rows(left_schema.clone(), vec![
+            vec![Value::Text("界".repeat(1024))], vec![Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(right_schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null],
+        ]).unwrap();
+        let expected = join::cross_join(&left, &right).unwrap();
+        let parts = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            left_schema, right_schema, 1, QueryControl::default()
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().flat_map(|b| b.rows().unwrap())
+            .collect::<Vec<_>>(), expected.rows().unwrap());
+        assert!(parts.iter().all(|b| b.schema() == expected.schema()));
     }
 }
