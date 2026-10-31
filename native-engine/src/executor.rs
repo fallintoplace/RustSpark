@@ -110,7 +110,7 @@ fn execute_inner(
             if let Plan::Scan { table } = input.as_ref() {
                 project::project(catalog.get(table)?, selections)?
             } else {
-                project::project(&descend(input)?, selections)?
+                project::project_owned(descend(input)?, selections)?
             }
         },
         Plan::Aggregate { input, group_by, aggregates } => {
@@ -441,5 +441,43 @@ mod owned_intermediate_filter_execution_tests {
         ]);
         assert!(execute(&generated.filter(Expr::Column("missing".into())),
             &catalog).is_err());
+    }
+}
+
+#[cfg(test)]
+mod owned_intermediate_project_execution_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, project::Selection, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn projects_filtered_text_with_computation_and_duplicate_aliases() {
+        let mut catalog = Catalog::new();
+        let large = "東京🙂".repeat(2048);
+        catalog.register("t", Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text(large.clone())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("small".into())],
+        ]).unwrap()).unwrap();
+        let predicate = Expr::binary(Expr::Column("id".into()), BinaryOp::LessEqual,
+            Expr::Literal(Value::Integer(2)));
+        let source = Plan::scan("t").filter(predicate);
+        let selections = vec![
+            Selection::new(Expr::Column("note".into()), "copy"),
+            Selection::new(Expr::Column("note".into()), "moved"),
+            Selection::new(Expr::binary(Expr::Column("id".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(9))), "id_plus"),
+        ];
+        let input = execute(&source, &catalog).unwrap();
+        let expected = project::project(&input, &selections).unwrap();
+        let actual = execute(&Plan::Project {
+            input: Box::new(source), selections,
+        }, &catalog).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.rows().unwrap()[0][2], Value::Integer(10));
+        assert_eq!(actual.rows().unwrap()[1][0], Value::Null);
     }
 }
