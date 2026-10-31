@@ -151,7 +151,12 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
 
 // decodeUniqueValue reads a JSON value while rejecting duplicate object keys,
 // including duplicate names expressed using different JSON escape sequences.
-func decodeUniqueValue(decoder *json.Decoder) (any, error) {
+const maxJSONNestingDepth = 256
+
+func decodeUniqueValue(decoder *json.Decoder, depth int) (any, error) {
+    if depth > maxJSONNestingDepth {
+        return nil, errors.New("RustSpark JSON nesting limit exceeded")
+    }
     token, err := decoder.Token()
     if err != nil { return nil, err }
     if number, ok := token.(json.Number); ok && strings.ContainsAny(string(number), ".eE") {
@@ -172,7 +177,7 @@ func decodeUniqueValue(decoder *json.Decoder) (any, error) {
             if _, exists := object[name]; exists {
                 return nil, fmt.Errorf("duplicate RustSpark JSON key %q", name)
             }
-            value, err := decodeUniqueValue(decoder)
+            value, err := decodeUniqueValue(decoder, depth+1)
             if err != nil { return nil, err }
             object[name] = value
         }
@@ -181,7 +186,7 @@ func decodeUniqueValue(decoder *json.Decoder) (any, error) {
     case '[':
         array := make([]any, 0)
         for decoder.More() {
-            value, err := decodeUniqueValue(decoder)
+            value, err := decodeUniqueValue(decoder, depth+1)
             if err != nil { return nil, err }
             array = append(array, value)
         }
@@ -197,7 +202,7 @@ func decodeUniqueValue(decoder *json.Decoder) (any, error) {
 func decodeRows(output io.Reader) ([]map[string]any, error) {
     decoder := json.NewDecoder(output)
     decoder.UseNumber()
-    value, err := decodeUniqueValue(decoder)
+    value, err := decodeUniqueValue(decoder, 0)
     if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
     values, ok := value.([]any)
     if !ok { return nil, errors.New("RustSpark JSON result must be an array") }
