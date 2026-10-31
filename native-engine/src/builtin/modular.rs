@@ -75,6 +75,8 @@ mod gcd_extension_tests {
         assert_eq!(gcd(&[Value::Integer(0), Value::Integer(0)]).unwrap(), Value::Integer(0));
         assert_eq!(gcd(&[Value::Integer(i64::MIN), Value::Integer(3)]).unwrap(), Value::Integer(1));
         assert!(gcd(&[Value::Integer(i64::MIN), Value::Integer(0)]).is_err());
+        assert_eq!(gcd(&[Value::Integer(i64::MIN), Value::Integer(2)]).unwrap(), Value::Integer(2));
+        assert!(gcd_type(&[DataType::Text, DataType::Integer]).is_err());
         assert_eq!(gcd(&[Value::Null, Value::Integer(5)]).unwrap(), Value::Null);
     }
 }
