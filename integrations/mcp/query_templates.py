@@ -21,7 +21,7 @@ def list_templates(directory: Path) -> list[str]:
 
 
 def template_path(directory: Path, name: str) -> Path:
-    if not TEMPLATE_NAME.fullmatch(name):
+    if not isinstance(name, str) or not TEMPLATE_NAME.fullmatch(name):
         raise ValueError("Invalid template name")
     path = directory / f"{name}.sql"
     if not path.is_file() or path.is_symlink():
