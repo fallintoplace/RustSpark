@@ -13,7 +13,7 @@ class TemplatesTests(unittest.TestCase):
             (base / "bad.name.sql").write_text("SELECT 2", encoding="utf-8")
             self.assertEqual(list_templates(base), ["safe"])
             self.assertEqual(template_path(base, "safe").name, "safe.sql")
-            for name in ["../secret", "bad.name", "", ".hidden", "some/name"]:
+            for name in ["../secret", "bad.name", "", ".hidden", "some/name", None, 42]:
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     template_path(base, name)
 
