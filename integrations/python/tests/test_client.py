@@ -52,6 +52,13 @@ class RustSparkTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, '[{"v":1.25}]', "")
         self.assertEqual(RustSpark().query("SELECT 1"), [{"v": 1.25}])
 
+    @patch("rustspark_local.run_bounded")
+    def test_deeply_nested_json_returns_client_error(self, run):
+        deep_json = '[{"nested":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
+        run.return_value = subprocess.CompletedProcess([], 0, deep_json, "")
+        with self.assertRaisesRegex(RustSparkError, "invalid JSON"):
+            RustSpark().query("SELECT 1")
+
     def test_rejects_unsafe_or_conflicting_options_early(self):
         client = RustSpark()
         with self.assertRaises(ValueError):

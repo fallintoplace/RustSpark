@@ -154,7 +154,7 @@ class RustSpark:
                 completed.stdout, object_pairs_hook=_unique_json_keys,
                 parse_constant=_reject_nonfinite, parse_float=_finite_json_float,
             )
-        except (json.JSONDecodeError, ValueError) as exc:
+        except (json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise RustSparkError("RustSpark returned invalid JSON") from exc
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise RustSparkError("RustSpark returned an unexpected JSON result shape")
