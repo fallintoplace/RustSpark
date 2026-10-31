@@ -18,6 +18,7 @@ mod hyperbolic;
 mod inverse_hyperbolic;
 mod angles;
 mod modular;
+mod integral_div;
 mod bitwise;
 mod bitshift;
 mod bit_count;
@@ -123,6 +124,7 @@ const MODULES: &[&[Function]] = &[
     &inverse_hyperbolic::FUNCTIONS,
     &angles::FUNCTIONS,
     &modular::FUNCTIONS,
+    &integral_div::FUNCTIONS,
     &bitwise::FUNCTIONS,
     &bitshift::FUNCTIONS,
     &bit_count::FUNCTIONS,
