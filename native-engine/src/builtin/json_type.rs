@@ -1,5 +1,57 @@
 use super::{Function, json_path};
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
+use serde::{Deserialize, de::{IgnoredAny, MapAccess, SeqAccess, Visitor}};
+use std::fmt;
+
+// Root JSON_TYPE only needs the shape, not an allocated value tree.
+struct RootJsonType(&'static str);
+
+impl<'de> Deserialize<'de> for RootJsonType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct Classifier;
+
+        impl<'de> Visitor<'de> for Classifier {
+            type Value = RootJsonType;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NULL"))
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("BOOLEAN"))
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NUMBER"))
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NUMBER"))
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NUMBER"))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("STRING"))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RootJsonType("ARRAY"))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                while map.next_entry::<String, IgnoredAny>()?.is_some() {}
+                Ok(RootJsonType("OBJECT"))
+            }
+        }
+        deserializer.deserialize_any(Classifier)
+    }
+}
+
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
@@ -9,6 +61,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let Some(path) = super::string(&args[1])? else { return Ok(Value::Null); };
         path
     } else { "$" };
+    if path == "$" {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let RootJsonType(label) = RootJsonType::deserialize(&mut deserializer)
+            .and_then(|value| deserializer.end().map(|()| value))
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Text(label.into()));
+    }
     let document = json_path::parse(text)?;
     let Some(found) = json_path::lookup(Some(&document), path)? else { return Ok(Value::Null); };
     let label = match found {
@@ -130,5 +192,42 @@ mod json_depth_wide_object_tests {
                 Value::Integer(expected));
         }
         assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streaming_root_json_type_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_large_root_arrays_and_objects_without_materialization() {
+        let array = format!("[{}]", vec![r#"{"data":[1,2,"🙂"]}"#; 10_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(array)]).unwrap(),
+            Value::Text("ARRAY".into()));
+        let object = format!(r#"{{"items":[{}],"meta":{{"key":"é"}}}}"#,
+            vec!["null"; 20_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(object)]).unwrap(),
+            Value::Text("OBJECT".into()));
+        for (text, expected) in [
+            ("null", "NULL"), ("false", "BOOLEAN"), ("42", "NUMBER"),
+            ("-1.5e3", "NUMBER"), (r#""é🙂""#, "STRING"),
+            ("[]", "ARRAY"), ("{}", "OBJECT"),
+        ] {
+            assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(),
+                Value::Text(expected.into()));
+        }
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn rejects_invalid_json_and_keeps_nested_path_behavior() {
+        for invalid in ["[1,INVALID]", "{\"a\":1} trailing", "{bad}", ""] {
+            assert!(evaluate(&[Value::Text(invalid.into())]).is_err(),
+                "{invalid}");
+        }
+        assert_eq!(evaluate(&[Value::Text("[1,\"x\"]".into()),
+            Value::Text("$[1]".into())]).unwrap(), Value::Text("STRING".into()));
+        assert_eq!(evaluate(&[Value::Text("[1,\"x\"]".into()),
+            Value::Text("$[99]".into())]).unwrap(), Value::Null);
     }
 }
