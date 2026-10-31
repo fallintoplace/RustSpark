@@ -27,6 +27,13 @@ class BenchmarkSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one"):
             bench_stats.summarize_samples([])
 
+    def test_finite_large_samples_do_not_overflow_even_median(self):
+        summary = bench_stats.summarize_samples([1e308, 1e308])
+        self.assertEqual(summary["median_ms"], 1e308)
+        self.assertEqual(summary["p95_ms"], 1e308)
+        with self.assertRaisesRegex(ValueError, "Invalid benchmark duration"):
+            bench_stats.summarize_samples([10**500])
+
     def test_statistics_use_unrounded_samples(self):
         result = bench_stats.summarize_samples([0.0001, 0.0005])
         self.assertEqual(result["samples_ms"], [0.0, 0.001])

@@ -33,7 +33,8 @@ def checked_retry_ids(ids):
 
 def retry_command(binary, queries, parquet, ids, report, repeat=1, timeout=120):
     checked_retry_ids(ids)
-    if repeat < 1 or timeout < 1:
+    if (type(repeat) is not int or repeat < 1
+            or type(timeout) is not int or timeout < 1):
         raise ValueError("Invalid retry parameters")
     return [sys.executable, str(Path(__file__).with_name("tpch_run.py")),
             "--binary", binary, "--queries-dir", str(queries), "--parquet-dir", str(parquet),

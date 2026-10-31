@@ -37,13 +37,19 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
         Some((left, right)) => (left, Some(right)),
         None => (without_ref, None),
     };
-    let raw_path = match find_authority(without_query) {
-        Some(authority) => {
-            let after_scheme = without_query.split_once("://")
-                .map(|(_, rest)| rest).unwrap_or("");
-            after_scheme.strip_prefix(authority).unwrap_or("")
-        }
-        None => without_query,
+    // Opaque URIs have a scheme-specific part, not a hierarchical path.
+    // Keep relative paths intact, but do not report the entire URI as PATH.
+    let raw_path = if parsed.as_ref().is_some_and(Url::cannot_be_a_base) {
+        None
+    } else {
+        Some(match find_authority(without_query) {
+            Some(authority) => {
+                let after_scheme = without_query.split_once("://")
+                    .map(|(_, rest)| rest).unwrap_or("");
+                after_scheme.strip_prefix(authority).unwrap_or("")
+            }
+            None => without_query,
+        })
     };
     // Avoid allocating an uppercased component name for each input row.
     let result = if part.eq_ignore_ascii_case("PROTOCOL") {
@@ -56,7 +62,7 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
         find_authority(url)
             .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user.to_owned()))
     } else if part.eq_ignore_ascii_case("PATH") {
-        Some(raw_path.to_owned())
+        raw_path.map(str::to_owned)
     } else if part.eq_ignore_ascii_case("QUERY") {
         if let Some(key) = key {
             query.and_then(|query| query.split('&').find_map(|param| {
@@ -69,9 +75,9 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
     } else if part.eq_ignore_ascii_case("REF") {
         fragment.map(str::to_owned)
     } else if part.eq_ignore_ascii_case("FILE") {
-        Some(match query {
-            Some(query) => format!("{raw_path}?{query}"),
-            None => raw_path.to_owned(),
+        raw_path.map(|path| match query {
+            Some(query) => format!("{path}?{query}"),
+            None => path.to_owned(),
         })
     } else {
         return Err(Error::Type(format!(
@@ -188,5 +194,28 @@ mod case_insensitive_url_parts_tests {
         assert_eq!(extract(url, "query", Some("Q")).unwrap(), Value::Text("2".into()));
         assert_eq!(extract(url, "QUERY", Some("q")).unwrap(), Value::Text("1".into()));
         assert!(matches!(extract(url, "unsupported", None), Err(Error::Type(_))));
+    }
+}
+
+#[cfg(test)]
+mod opaque_uri_path_regressions {
+    use super::*;
+
+    #[test]
+    fn opaque_schemes_do_not_report_scheme_specific_data_as_paths() {
+        for uri in [
+            "mailto:dev@example.org",
+            "urn:isbn:9780131103627",
+            "data:text/plain,hello",
+        ] {
+            assert_eq!(extract(uri, "PATH", None).unwrap(), Value::Null);
+            assert_eq!(extract(uri, "FILE", None).unwrap(), Value::Null);
+        }
+        assert_eq!(extract("mailto:dev@example.org", "PROTOCOL", None).unwrap(),
+            Value::Text("mailto".into()));
+        assert_eq!(extract("relative/file.csv?q=1", "PATH", None).unwrap(),
+            Value::Text("relative/file.csv".into()));
+        assert_eq!(extract("relative/file.csv?q=1", "FILE", None).unwrap(),
+            Value::Text("relative/file.csv?q=1".into()));
     }
 }

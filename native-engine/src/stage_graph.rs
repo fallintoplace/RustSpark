@@ -175,6 +175,36 @@ impl StageGraph {
             }
             return tasks;
         }
+        if running.len() >= 512 {
+            // A worker window with most partitions already dispatched should
+            // not scan and hash-probe every occupied partition on every poll.
+            // Sort the exclusions once and issue whole free partition ranges.
+            let mut excluded: HashMap<u64, Vec<usize>> = HashMap::new();
+            for &(stage, partition) in running {
+                excluded.entry(stage).or_default().push(partition);
+            }
+            for partitions in excluded.values_mut() { partitions.sort_unstable(); }
+            for &index in &self.order_indices {
+                let stage = &self.stages[index];
+                if !Self::dependency_ready(stage, completed) { continue; }
+                let mut next = 0usize;
+                if let Some(partitions) = excluded.get(&stage.id) {
+                    for &blocked in partitions {
+                        if blocked >= stage.partitions { break; }
+                        if blocked > next {
+                            let take = (blocked - next).min(max_tasks - tasks.len());
+                            tasks.extend((next..next + take).map(|p| (stage.id, p)));
+                            if tasks.len() == max_tasks { return tasks; }
+                        }
+                        next = blocked + 1;
+                    }
+                }
+                let take = (stage.partitions - next).min(max_tasks - tasks.len());
+                tasks.extend((next..next + take).map(|p| (stage.id, p)));
+                if tasks.len() == max_tasks { return tasks; }
+            }
+            return tasks;
+        }
         for &index in &self.order_indices {
             let stage = &self.stages[index];
             if !Self::dependency_ready(stage, completed) {
@@ -501,5 +531,43 @@ mod empty_running_dispatch_tests {
         assert!(pending.iter().all(|(id, _)| *id != 8));
         let completed = HashSet::from([3]);
         assert_eq!(graph.ready_tasks(&completed, 100).len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod dense_running_partition_windows_regressions {
+    use super::*;
+
+    #[test]
+    fn skips_large_contiguous_claimed_ranges_and_ignores_unknown_tasks() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 11, dependencies: vec![], partitions: 1400 },
+            Stage { id: 22, dependencies: vec![], partitions: 1000 },
+        ]).unwrap();
+        let running: HashSet<_> = (0..1399).map(|p| (11, p))
+            .chain([(11, 99_999), (999, 0)]).collect();
+        let tasks = graph.ready_tasks_excluding(&HashSet::new(), &running, 4);
+        assert_eq!(tasks, [(11, 1399), (22, 0), (22, 1), (22, 2)]);
+        assert_eq!(graph.ready_tasks_excluding(&HashSet::from([11]), &running, 3),
+            [(22, 0), (22, 1), (22, 2)]);
+    }
+
+    #[test]
+    fn dense_exclusions_match_reference_scan_at_varied_window_sizes() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 2200 },
+            Stage { id: 2, dependencies: vec![], partitions: 1300 },
+        ]).unwrap();
+        let running = (0..2200).filter(|p| p % 5 != 0)
+            .map(|p| (1, p))
+            .chain((0..1300).filter(|p| p % 7 == 0).map(|p| (2, p)))
+            .collect::<HashSet<_>>();
+        for window in [1, 4, 13, 1024, 5000] {
+            let expected = [(1, 2200), (2, 1300)].into_iter()
+                .flat_map(|(stage, count)| (0..count).map(move |p| (stage, p)))
+                .filter(|task| !running.contains(task)).take(window).collect::<Vec<_>>();
+            assert_eq!(graph.ready_tasks_excluding(&HashSet::new(), &running, window),
+                expected);
+        }
     }
 }

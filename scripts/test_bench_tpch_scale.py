@@ -13,6 +13,13 @@ class ScaleTests(unittest.TestCase):
             with self.subTest(value=item), self.assertRaises(ValueError):
                 sweep.scales(item)
 
+    def test_unrepresentable_integer_duration_is_not_valid_evidence(self):
+        entry = {"status": "ok", "median_ms": 10**500, "result_rows": 1,
+                 "sql_sha256": "a" * 64, "result_sha256": "b" * 64}
+        self.assertFalse(sweep.valid_query_measurement(entry))
+        entry["median_ms"] = 1.25
+        self.assertTrue(sweep.valid_query_measurement(entry))
+
     def test_commands(self):
         fixture, report, prepare, run = sweep.commands(0.1, "rs", Path("/tmp/out"))
         self.assertEqual(fixture.name, "sf-0.1")

@@ -3,8 +3,10 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 from tpch_run import TABLES, reject_nonfinite, unique_keys
 
@@ -35,14 +37,27 @@ def count_command(binary, fixture, table):
             "--sql", f"SELECT COUNT(*) AS n FROM {table}", "--stdout-format", "json"]
 
 
+MAX_COUNT_OUTPUT_BYTES = 64 * 1024
+
+
 def execute_count(binary, fixture, table, timeout):
-    output = subprocess.run(
-        count_command(binary, fixture, table), capture_output=True,
-        text=True, timeout=timeout, check=False,
-    )
-    if output.returncode:
-        raise RuntimeError(f"COUNT({table}) exited {output.returncode}: {output.stderr[-400:]}")
-    return parse_count(output.stdout)
+    # A COUNT(*) should return one tiny JSON row. Avoid holding unbounded
+    # stdout and stderr in Python memory if the backend is noisy.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        result = subprocess.run(
+            count_command(binary, fixture, table),
+            stdout=stdout, stderr=stderr, timeout=timeout, check=False,
+        )
+        if result.returncode:
+            stderr.seek(0, os.SEEK_END)
+            stderr.seek(max(0, stderr.tell() - 400))
+            detail = stderr.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"COUNT({table}) exited {result.returncode}: {detail}")
+        stdout.seek(0, os.SEEK_END)
+        if stdout.tell() > MAX_COUNT_OUTPUT_BYTES:
+            raise ValueError("COUNT output exceeds 64 KiB budget")
+        stdout.seek(0)
+        return parse_count(stdout.read().decode("utf-8"))
 
 
 def compare_table_count(binary, fixture, timeout, table, expected_count):
@@ -53,8 +68,8 @@ def compare_table_count(binary, fixture, timeout, table, expected_count):
 
 
 def check(binary, fixture, timeout=120):
-    if timeout < 1:
-        raise ValueError("Timeout must be positive")
+    if type(timeout) is not int or timeout < 1:
+        raise ValueError("Timeout must be a positive integer")
     manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"),
                           object_pairs_hook=unique_keys)
     if not isinstance(manifest, dict):

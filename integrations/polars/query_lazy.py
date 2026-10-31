@@ -98,12 +98,18 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
             csv_tables=csv_tables, parquet_tables=parquet_tables,
             json_tables=json_tables,
         )
-        try:
-            completed = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.PIPE, text=True,
-                                       check=False, timeout=process_timeout)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
-        if completed.returncode:
-            raise RuntimeError(completed.stderr.strip() or "RustSpark query failed")
+        # A backend can emit arbitrarily many diagnostics. Keep these off
+        # the Python heap and surface only a bounded tail on failure.
+        with tempfile.TemporaryFile() as error_log:
+            try:
+                completed = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                           stderr=error_log, check=False,
+                                           timeout=process_timeout)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
+            if completed.returncode:
+                error_log.seek(0, os.SEEK_END)
+                error_log.seek(max(0, error_log.tell() - 65_536))
+                detail = error_log.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "RustSpark query failed")
         yield pl.scan_ipc(result)

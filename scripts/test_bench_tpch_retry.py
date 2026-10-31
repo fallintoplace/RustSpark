@@ -22,6 +22,13 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(args[start + 1:start + 3], ["2", "4"])
         self.assertIn("--json-out", args)
 
+    def test_retry_admits_only_positive_integer_budgets(self):
+        for option in ("repeat", "timeout"):
+            for invalid in (True, False, 0, -1, 1.5, float("nan"), float("inf"), "2"):
+                kwargs = {option: invalid}
+                with self.subTest(option=option, value=invalid), self.assertRaisesRegex(ValueError, "retry parameters"):
+                    retry.retry_command("rs", "queries", "data", [2], "out.json", **kwargs)
+
     def test_no_empty_rerun_command(self):
         with self.assertRaises(ValueError):
             retry.retry_command("rs", "queries", "data", [], "out.json")

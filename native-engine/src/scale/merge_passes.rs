@@ -1,6 +1,5 @@
 //! Multi-pass external merge to bound open file descriptors.
 use std::{
-    fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -47,6 +46,7 @@ pub fn merge_to_fan_in(
     };
     while result.current.len() > fan_in {
         control.check()?;
+        let previous_scratch_len = result.scratch.len();
         // Each fan-in group emits exactly one path in the next pass.
         let mut next_pass = Vec::with_capacity(result.current.len().div_ceil(fan_in));
         for group in result.current.chunks(fan_in) {
@@ -57,7 +57,7 @@ pub fn merge_to_fan_in(
             }
             let id = PASS_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("rustspark-merge-{}-{id}.rspill", std::process::id()));
-            let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+            let file = super::private_files::create_private(&path)?;
             result.scratch.push(path.clone());
             let merger = RunMerger::new(
                 group, schema.clone(), keys, io_batch_rows, io_batch_rows, control.clone()
@@ -67,9 +67,9 @@ pub fn merge_to_fan_in(
             writer.finish()?;
             next_pass.push(path);
         }
-        // Only the final short group can contain one input run; every
-        // other old run was consumed by a newly produced output. Preserve
-        // that single carried path without hashing all next-pass filenames.
+        // Inputs to this pass are no longer required once every output run
+        // is complete. Reclaim both original sorted runs and scratch runs;
+        // carried-through singleton runs remain live in the next pass.
         let has_singleton = result.current.len() % fan_in == 1;
         for (index, path) in result.current.iter().enumerate() {
             if has_singleton && index + 1 == result.current.len() {
@@ -77,8 +77,16 @@ pub fn merge_to_fan_in(
             }
             std::fs::remove_file(path)?;
         }
-        let carried = has_singleton.then(|| result.current.last().expect("nonempty pass"));
-        result.scratch.retain(|path| carried.is_some_and(|keep| keep == path));
+        // New output files were appended to scratch during this pass.
+        // Keep them, plus any old scratch run carried through unchanged.
+        let carried = has_singleton.then(|| result.current.last().expect("nonempty pass").clone());
+        let mut scratch_index = 0usize;
+        result.scratch.retain(|path| {
+            let keep = scratch_index >= previous_scratch_len
+                || carried.as_ref().is_some_and(|live| live.as_path() == path.as_path());
+            scratch_index += 1;
+            keep
+        });
         result.current = next_pass;
     }
     Ok(result)
