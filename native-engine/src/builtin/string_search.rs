@@ -26,8 +26,9 @@ fn split_part(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(result.to_owned()));
     }
     if index == -1 {
-        let result = text.rfind(delimiter).map_or(text, |position| &text[position + delimiter.len()..]);
-        return Ok(Value::Text(result.to_owned()));
+        // Reverse substring searches choose different matches for overlapping
+        // delimiters. SQL positions refer to the same forward split fields.
+        return Ok(Value::Text(text.split(delimiter).last().unwrap_or("").to_owned()));
     }
     // Nonoverlapping delimiters can produce at most one additional field
     // per delimiter-width span. Byte lengths give a safe UTF-8 upper bound.
@@ -39,8 +40,9 @@ fn split_part(args: &[Value]) -> Result<Value> {
         usize::try_from(index - 1).ok()
             .and_then(|offset| text.split(delimiter).nth(offset))
     } else {
-        usize::try_from(index.unsigned_abs() - 1).ok()
-            .and_then(|offset| text.rsplit(delimiter).nth(offset))
+        usize::try_from(index.unsigned_abs()).ok()
+            .and_then(|position| text.split(delimiter).count().checked_sub(position))
+            .and_then(|offset| text.split(delimiter).nth(offset))
     };
     Ok(Value::Text(result.unwrap_or("").to_string()))
 }
@@ -275,5 +277,28 @@ mod impossible_unicode_locate_tests {
         assert!(locate(&[
             Value::Text("é".into()), haystack, Value::Integer(0),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod overlapping_delimiter_split_part_tests {
+    use super::*;
+
+    #[test]
+    fn negative_positions_use_the_same_left_to_right_fields() {
+        for (text, delimiter, expected) in [
+            ("ababa", "aba", "ba"),
+            ("aaaaa", "aaa", "aa"),
+            ("ééé", "éé", "é"),
+        ] {
+            let args = |position| [
+                Value::Text(text.into()), Value::Text(delimiter.into()),
+                Value::Integer(position),
+            ];
+            assert_eq!(split_part(&args(2)).unwrap(), Value::Text(expected.into()));
+            assert_eq!(split_part(&args(-1)).unwrap(), Value::Text(expected.into()));
+            assert_eq!(split_part(&args(-2)).unwrap(), Value::Text(String::new()));
+            assert_eq!(split_part(&args(-3)).unwrap(), Value::Text(String::new()));
+        }
     }
 }

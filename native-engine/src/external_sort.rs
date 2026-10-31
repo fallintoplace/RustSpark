@@ -155,6 +155,13 @@ impl Iterator for ExternalSort {
             self.finished = true;
             return Some(Err(error));
         }
+        // Do not reserve output_rows slots for every column when no runs
+        // remain. A wide schema with a large output batch can otherwise
+        // allocate substantial memory just to return end-of-stream.
+        if self.winners.winner().is_none() {
+            self.finished = true;
+            return None;
+        }
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(self.output_rows)).collect::<Vec<_>>();
         let mut row_count = 0usize;
@@ -436,5 +443,24 @@ mod deferred_external_sort_error_tests {
         ]);
         assert!(merge.next().unwrap().is_err());
         assert!(merge.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod empty_external_merge_allocation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn empty_wide_schema_finishes_before_reserving_output_columns() {
+        let schema = Schema::new((0..64)
+            .map(|index| Field::new(format!("column_{index}"), DataType::Text, true))
+            .collect()).unwrap();
+        let mut sorted = external_sort(
+            Vec::<Batch>::new(), &schema, &[], std::env::temp_dir(), 64, 65_536,
+        ).unwrap();
+        assert!(sorted.next().is_none());
+        assert!(sorted.finished);
+        assert!(sorted.next().is_none());
     }
 }

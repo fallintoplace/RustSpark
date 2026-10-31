@@ -3,8 +3,13 @@ import unittest
 import tempfile
 import subprocess
 import sys
+import os
+import time
+import socket
+import threading
+from http.server import HTTPServer
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler
 
 
 class GatewayTests(unittest.TestCase):
@@ -54,6 +59,11 @@ class GatewayTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_result_rows(invalid)
 
+    def test_excessively_nested_request_is_invalid(self):
+        deep = b'{"params":' + b"[" * 20000 + b"0" + b"]" * 20000 + b"}"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            validate_params(deep)
+
     def test_only_safe_regular_templates_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
             queries = Path(directory)
@@ -66,6 +76,11 @@ class GatewayTests(unittest.TestCase):
 
 
 class InvalidBackendJSONTests(unittest.TestCase):
+    def test_excessively_nested_backend_rows_are_invalid(self):
+        deep = '[{"value":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            parse_result_rows(deep)
+
     def test_rejects_nonfinite_numbers_and_duplicate_result_keys(self):
         for payload in ('[{"n":NaN}]', '[{"n":Infinity}]', '[{"n":1e999}]',
                         '[{"id":1,"id":2}]', '[{"nested":{"x":1,"x":2}}]'):
@@ -76,6 +91,15 @@ class InvalidBackendJSONTests(unittest.TestCase):
 
 
 class BoundedBackendTests(unittest.TestCase):
+    def test_rejects_invalid_resource_limits_without_starting_backend(self):
+        command = [sys.executable, "-c", "print('ok')"]
+        for timeout in (float("nan"), float("inf"), float("-inf"), -1, 0, True, "10"):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded_backend(command, timeout=timeout, max_bytes=1024)
+        for size in (float("nan"), float("inf"), -1, 0, True, 1.5, "1024"):
+            with self.subTest(max_bytes=size), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded_backend(command, timeout=5, max_bytes=size)
+
     def test_backend_output_budget_and_timeout(self):
         valid = run_bounded_backend(
             [sys.executable, "-c", "print('ok')"], timeout=5, max_bytes=32
@@ -92,6 +116,60 @@ class BoundedBackendTests(unittest.TestCase):
                 [sys.executable, "-c", "import time; time.sleep(2)"],
                 timeout=0.1, max_bytes=32,
             )
+
+
+class BackendDescendantCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process-group signaling requires POSIX")
+    def test_timeout_closes_inherited_stdout_from_grandchildren(self):
+        script = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('started',flush=True);time.sleep(6)"
+        )
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded_backend([sys.executable, "-c", script],
+                                timeout=0.4, max_bytes=1024)
+        self.assertLess(time.monotonic() - started, 3.0)
+
+
+class RequestFramingTests(unittest.TestCase):
+    def test_ambiguous_content_length_and_chunked_encoding_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(
+                secret="test-secret" * 3, queries=directory, database=directory,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+            ))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                headers = (
+                    b"POST /v1/query/safe HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"Authorization: Bearer test-secrettest-secrettest-secret\r\n"
+                    b"Content-Type: application/json\r\n"
+                )
+                for framing in (
+                    b"Content-Length: 2\r\nContent-Length: 2\r\n",
+                    b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n",
+                    b"Transfer-Encoding: chunked\r\n",
+                    b"Content-Length: +2\r\n",
+                    b"Content-Length: 2, 2\r\n",
+                ):
+                    with self.subTest(framing=framing), socket.create_connection(
+                        server.server_address, timeout=2,
+                    ) as connection:
+                        connection.settimeout(2)
+                        connection.sendall(headers + framing + b"\r\n{}")
+                        response = connection.recv(4096).split(b"\r\n", 1)[0]
+                        self.assertIn(b"400", response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

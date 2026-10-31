@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 
@@ -20,11 +21,19 @@ def reject_constant(value):
     raise ValueError(f"Non-finite JSON value: {value}")
 
 
+def finite_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("Non-finite JSON number")
+    return value
+
+
 def load_report(path: Path) -> dict:
     report = json.loads(
         path.read_text(encoding="utf-8"),
         object_pairs_hook=reject_duplicate_keys,
         parse_constant=reject_constant,
+        parse_float=finite_json_float,
     )
     if not isinstance(report, dict):
         raise ValueError(f"{path}: expected a JSON report object")
