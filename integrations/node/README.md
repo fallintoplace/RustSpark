@@ -27,3 +27,16 @@ npm test
 ```
 
 Use `query("", { sqlFile: "queries/report.sql" })` for reviewed SQL files instead of inline SQL. `queryOne(sql, options)` uses a two-row limit and returns one object, `null` for no rows, or an error for multiple rows. Named file sources and typed parameters are sent in stable key order.
+
+## Exact 64-bit integer results
+
+By default, the Node client rejects JSON integers outside JavaScript's safe
+integer range instead of silently rounding them. On Node.js versions that
+support the JSON.parse source-context argument, pass
+`{ unsafeIntegers: "bigint" }` to `query` or `queryOne` to return
+out-of-range *integer tokens* as `bigint` values. Safe integers remain
+numbers. Exponent notation and fractional tokens are still validated as
+numbers and cannot be converted to BigInt. Without source-context support,
+the client raises an error instead of returning a rounded value.
+
+Note: BigInt values need a custom serializer before passing them to JSON.stringify.
