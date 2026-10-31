@@ -247,7 +247,15 @@ impl<R: Read> SpillReader<R> {
 
     fn read_batch(&mut self) -> Result<Option<Batch>> {
         let mut first = [0u8; 1];
-        if self.input.read(&mut first)? == 0 { return Ok(None); }
+        // Interrupted at a batch boundary is not EOF or a corrupt spill file.
+        loop {
+            match self.input.read(&mut first) {
+                Ok(0) => return Ok(None),
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
         let mut remaining = [0u8; 3];
         self.input.read_exact(&mut remaining)?;
         let rows = u32::from_le_bytes([first[0], remaining[0], remaining[1], remaining[2]]) as usize;
@@ -619,5 +627,51 @@ mod early_spill_tag_validation_regressions {
         let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
         assert!(reader.next_batch().unwrap_err().to_string().contains("schema"));
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod interrupted_spill_boundary_tests {
+    use super::*;
+    use std::io::{self, Cursor, Read};
+
+    struct InterruptAtFirstBatch {
+        inner: Cursor<Vec<u8>>,
+        remaining_before_interrupt: usize,
+        interrupted: bool,
+    }
+    impl Read for InterruptAtFirstBatch {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted && self.remaining_before_interrupt == 0 {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let limit = if self.interrupted { bytes.len() }
+                else { bytes.len().min(self.remaining_before_interrupt) };
+            let count = self.inner.read(&mut bytes[..limit])?;
+            if !self.interrupted { self.remaining_before_interrupt -= count; }
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn interruption_at_record_boundary_is_retried_without_losing_rows() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(7)], vec![Value::Integer(11)],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let bytes = writer.finish().unwrap();
+        // Signature, field count, length-prefixed field name, type and nullability.
+        let header_len = 8 + 4 + 4 + "id".len() + 2;
+        let input = InterruptAtFirstBatch {
+            inner: Cursor::new(bytes),
+            remaining_before_interrupt: header_len,
+            interrupted: false,
+        };
+        let mut reader = SpillReader::new(input, 16).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(batch));
+        assert_eq!(reader.next_batch().unwrap(), None);
     }
 }
