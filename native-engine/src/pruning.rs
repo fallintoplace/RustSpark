@@ -201,13 +201,17 @@ pub fn can_skip_columns(
             Expr::Binary { left, op: BinaryOp::And, right } => {
                 let negated_left = Expr::Not(left.clone());
                 let negated_right = Expr::Not(right.clone());
-                can_skip_columns(stats, &negated_left) ||
+                // NOT (A AND B) = NOT A OR NOT B: neither arm may
+                // produce a TRUE row before we can discard the partition.
+                can_skip_columns(stats, &negated_left) &&
                     can_skip_columns(stats, &negated_right)
             }
             Expr::Binary { left, op: BinaryOp::Or, right } => {
                 let negated_left = Expr::Not(left.clone());
                 let negated_right = Expr::Not(right.clone());
-                can_skip_columns(stats, &negated_left) &&
+                // NOT (A OR B) = NOT A AND NOT B: one impossible arm
+                // is enough to reject the entire conjunction.
+                can_skip_columns(stats, &negated_left) ||
                     can_skip_columns(stats, &negated_right)
             }
             _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
