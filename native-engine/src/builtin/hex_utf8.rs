@@ -20,12 +20,17 @@ fn hex(args: &[Value]) -> Result<Value> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::Execution("HEX input exceeds byte limit".into()));
     }
-    let mut output = String::with_capacity(input.len() * 2);
+    // Each input byte emits exactly two ASCII digits. Append both bytes
+    // together and validate the resulting UTF-8 buffer only once.
+    let mut output = Vec::with_capacity(input.len() * 2);
     for &byte in input {
-        output.push(char::from(DIGITS[(byte >> 4) as usize]));
-        output.push(char::from(DIGITS[(byte & 15) as usize]));
+        output.extend_from_slice(&[
+            DIGITS[(byte >> 4) as usize],
+            DIGITS[(byte & 15) as usize],
+        ]);
     }
-    Ok(Value::Text(output))
+    Ok(Value::Text(String::from_utf8(output)
+        .expect("HEX alphabet always contains valid ASCII")))
 }
 fn decode_hex_digit(byte: u8) -> Result<u8> {
     match byte {
@@ -137,5 +142,22 @@ mod hex_direct_string_tests {
             Value::Text("C3A9F09F9982".into()));
         assert_eq!(hex(&[Value::Text(String::new())]).unwrap(),
             Value::Text(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod bulk_hex_encoding_regressions {
+    use super::*;
+
+    #[test]
+    fn every_byte_and_long_unicode_strings_round_trip() {
+        let bytes = (0..=127u8).collect::<Vec<_>>();
+        let input = String::from_utf8(bytes).unwrap();
+        let encoded = hex(&[Value::Text(input.clone())]).unwrap();
+        assert_eq!(unhex_utf8(&[encoded]).unwrap(), Value::Text(input));
+        let wide = Value::Text("🙂é東京".repeat(10_000));
+        let encoded = hex(&[wide.clone()]).unwrap();
+        assert_eq!(unhex_utf8(&[encoded]).unwrap(), wide);
+        assert_eq!(hex(&[Value::Null]).unwrap(), Value::Null);
     }
 }
