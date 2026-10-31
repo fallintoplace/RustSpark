@@ -439,7 +439,7 @@ mod native_scheduler_admission_limit_tests {
     #[test]
     fn rejects_oversized_worklists_without_leasing() {
         assert!(TaskScheduler::with_task_limit([1, 2, 3], 2, 2).is_err());
-        assert!(TaskScheduler::with_task_limit([], 2, 0).is_err());
+        assert!(TaskScheduler::with_task_limit(std::iter::empty::<u64>(), 2, 0).is_err());
         let mut queue = TaskScheduler::with_task_limit([2, 1], 2, 2).unwrap();
         assert_eq!(queue.counts().queued, 2);
         assert_eq!(queue.lease(9, Instant::now(), Duration::from_secs(5))
