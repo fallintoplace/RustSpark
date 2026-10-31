@@ -114,18 +114,22 @@ mod merge_batch_size_diagnostics_tests {
     use crate::batch::Batch;
     #[test]
     fn separates_invalid_fan_in_from_invalid_io_batch_size() {
-        let schema = Schema::new(vec![]).unwrap();
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "key", crate::schema::DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(crate::expr::Expr::Column("key".into()))];
         let empty = || write_source(schema.clone());
-        let err = merge_to_fan_in(empty(), Path::new("."), schema.clone(), &[],
+        let err = merge_to_fan_in(empty(), Path::new("."), schema.clone(), &keys,
             4, 0, &QueryControl::default()).err().unwrap();
         assert!(err.to_string().contains("batch size"));
-        let err = merge_to_fan_in(empty(), Path::new("."), schema, &[],
+        let err = merge_to_fan_in(empty(), Path::new("."), schema, &keys,
             1, 4, &QueryControl::default()).err().unwrap();
         assert!(err.to_string().contains("fan-in"));
     }
     fn write_source(schema: Schema) -> RunSet {
         super::super::sorted_runs::write_sorted_runs(
-            std::iter::empty::<Result<Batch>>(), schema, &[], Path::new("."), 1, &QueryControl::default()
+            std::iter::empty::<Result<Batch>>(), schema,
+            &[SortKey::ascending(crate::expr::Expr::Column("key".into()))],
+            Path::new("."), 1, &QueryControl::default()
         ).unwrap()
     }
 }
