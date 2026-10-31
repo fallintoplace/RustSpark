@@ -112,10 +112,25 @@ impl<W: Write> SpillWriter<W> {
         if start > end || end > batch.num_rows() {
             return Err(Error::Execution("invalid spill batch row range".into()));
         }
+        self.write_selected_rows(batch, start..end)
+    }
+
+    /// Serialize selected rows directly without allocating a gathered Batch.
+    /// Repeated indices retain their multiplicity and caller order.
+    pub fn write_batch_indices(&mut self, batch: &Batch, indices: &[usize]) -> Result<()> {
+        if indices.iter().any(|&row| row >= batch.num_rows()) {
+            return Err(Error::Execution("invalid spill batch row index".into()));
+        }
+        self.write_selected_rows(batch, indices.iter().copied())
+    }
+
+    fn write_selected_rows<I>(&mut self, batch: &Batch, rows: I) -> Result<()>
+    where I: ExactSizeIterator<Item = usize> + Clone
+    {
         if batch.schema() != &self.schema {
             return Err(Error::Schema("spill batch schema mismatch".into()));
         }
-        let cells = (end - start).checked_mul(self.schema.len())
+        let cells = rows.len().checked_mul(self.schema.len())
             .filter(|&cells| cells <= MAX_CELLS)
             .ok_or_else(|| Error::Execution("spill batch exceeds cell limit".into()))?;
         // Include the 4-byte row count and one tag per cell. Validate all
@@ -123,9 +138,12 @@ impl<W: Write> SpillWriter<W> {
         let mut wire_bytes = 4usize.checked_add(cells)
             .filter(|&bytes| bytes <= MAX_BATCH_BYTES)
             .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
-        for column in 0..self.schema.len() {
-            for value in &batch.column(column)?[start..end] {
-                match value {
+        let columns = (0..self.schema.len())
+            .map(|index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
+        for column in &columns {
+            for row in rows.clone() {
+                match &column[row] {
                     Value::Integer(_) | Value::Float(_) =>
                         charge_batch_bytes(&mut wire_bytes, 8)?,
                     Value::Text(text) => {
@@ -138,15 +156,12 @@ impl<W: Write> SpillWriter<W> {
                 }
             }
         }
-        let columns = (0..self.schema.len())
-            .map(|index| batch.column(index))
-            .collect::<Result<Vec<_>>>()?;
-        write_u32(&mut self.output, end - start)?;
+        write_u32(&mut self.output, rows.len())?;
         // Buffer cells to avoid a virtual Write call per numeric value.
         // Text larger than the scratch buffer is streamed directly to
         // avoid duplicating multi-megabyte values in memory.
         let mut encoded = Vec::with_capacity(ENCODE_BUFFER_BYTES);
-        for row in start..end {
+        for row in rows {
             for column in &columns {
                 match &column[row] {
                     Value::Null => encoded.push(0),
@@ -709,5 +724,33 @@ mod single_pass_spill_decode_tests {
     fn trusted_constructor_still_rejects_mismatched_column_lengths() {
         let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
         assert!(Batch::from_validated_columns(schema, vec![vec![]], 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod selected_rows_spill_write_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn arbitrary_indices_and_ranges_roundtrip_without_gathering() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("é🙂".repeat(2048))],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("third".into())],
+            vec![Value::Integer(4), Value::Text("fourth".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        assert!(writer.write_batch_indices(&batch, &[0, 10]).is_err());
+        writer.write_batch_indices(&batch, &[3, 1, 3, 0]).unwrap();
+        writer.write_batch_range(&batch, 1, 3).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 4).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(batch.take(&[3, 1, 3, 0]).unwrap()));
+        assert_eq!(reader.next_batch().unwrap(), Some(batch.slice_rows(1, 3).unwrap()));
+        assert_eq!(reader.next_batch().unwrap(), None);
     }
 }
