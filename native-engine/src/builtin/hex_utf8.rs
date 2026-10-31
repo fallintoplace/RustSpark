@@ -177,3 +177,20 @@ mod hex_pair_lookup_tests {
         assert_eq!(hex(&[Value::Null]).unwrap(), Value::Null);
     }
 }
+
+#[cfg(test)]
+mod bulk_hex_encoding_regressions {
+    use super::*;
+
+    #[test]
+    fn every_byte_and_long_unicode_strings_round_trip() {
+        let bytes = (0..=127u8).collect::<Vec<_>>();
+        let input = String::from_utf8(bytes).unwrap();
+        let encoded = hex(&[Value::Text(input.clone())]).unwrap();
+        assert_eq!(unhex_utf8(&[encoded]).unwrap(), Value::Text(input));
+        let wide = Value::Text("🙂é東京".repeat(10_000));
+        let encoded = hex(&[wide.clone()]).unwrap();
+        assert_eq!(unhex_utf8(&[encoded]).unwrap(), wide);
+        assert_eq!(hex(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
