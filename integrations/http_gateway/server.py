@@ -166,12 +166,15 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 return
             # Never guess a request body boundary from ambiguous HTTP framing.
             lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get_all("Transfer-Encoding"):
+                self.close_connection = True
+                self.send_json(400, {"error": "Ambiguous request framing"})
+                return
             if not lengths:
                 self.close_connection = True
                 self.send_json(411, {"error": "Content-Length required"})
                 return
-            if (len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0])
-                    or self.headers.get_all("Transfer-Encoding")):
+            if len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
                 self.close_connection = True
                 self.send_json(400, {"error": "Ambiguous request framing"})
                 return
