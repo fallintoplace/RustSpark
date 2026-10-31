@@ -47,15 +47,24 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(String::from_utf8(output)
             .expect("ASCII translations remain UTF-8")));
     }
-    if text.is_ascii() && from.is_ascii() {
-        // Keep ASCII lookup speed even when replacement scalars are Unicode.
+    if text.is_ascii() {
+        // Mixed Unicode source maps still need their distinct-character
+        // limit, even though non-ASCII keys cannot match ASCII input.
+        if !from.is_ascii() &&
+            from.chars().collect::<std::collections::HashSet<_>>().len() > 4096 {
+            return Err(Error::Execution("TRANSLATE map exceeds 4096 characters".into()));
+        }
+        // Keep ASCII lookup speed even when source or replacement
+        // scalars are Unicode.
         // Some(None) denotes deletion; None means the source byte is unmapped.
         let mut mapping: [Option<Option<char>>; 128] = [None; 128];
         let mut replacements = to.chars();
-        for &byte in from.as_bytes() {
+        for character in from.chars() {
+            // Consume replacement positions for every source scalar,
+            // including ones that cannot occur in an ASCII input.
             let replacement = replacements.next();
-            if mapping[usize::from(byte)].is_none() {
-                mapping[usize::from(byte)] = Some(replacement);
+            if character.is_ascii() && mapping[character as usize].is_none() {
+                mapping[character as usize] = Some(replacement);
             }
         }
         let mut output = String::with_capacity(text.len());
@@ -208,5 +217,27 @@ mod ascii_lookup_unicode_translation_regressions {
             Value::Text("a".repeat(5 * 1024 * 1024)),
             Value::Text("a".into()), Value::Text("🙂".into()),
         ]), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod mixed_unicode_ascii_translation_regressions {
+    use super::*;
+
+    #[test]
+    fn preserves_unicode_mapping_positions_duplicates_and_deletions() {
+        let translate = |text: &str, from: &str, to: &str| {
+            evaluate(&[
+                Value::Text(text.into()),
+                Value::Text(from.into()),
+                Value::Text(to.into()),
+            ]).unwrap()
+        };
+        assert_eq!(translate("a1a", "🙂aé", "XYQ"), Value::Text("Y1Y".into()));
+        assert_eq!(translate("aba", "éab", "🙂Z"), Value::Text("Z".into()));
+        assert_eq!(translate("aba", "🙂aa", "XYZ"), Value::Text("YbY".into()));
+        assert_eq!(translate("ba", "éb", "🙂"), Value::Text("a".into()));
+        assert_eq!(translate("foo", "é🙂", "ab"), Value::Text("foo".into()));
+        assert_eq!(translate("", "", ""), Value::Text(String::new()));
     }
 }
