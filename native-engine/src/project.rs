@@ -26,6 +26,8 @@ fn expression_nullable(expression: &Expr, schema: &Schema) -> Result<bool> {
         Expr::Column(name) => Ok(schema.field(schema.column(name)?)?.nullable),
         Expr::Literal(value) => Ok(value.is_null()),
         Expr::IsNull(_) | Expr::IsDistinctFrom { .. } => Ok(false),
+        Expr::Not(inner) if matches!(inner.as_ref(),
+            Expr::IsNull(_) | Expr::IsDistinctFrom { .. }) => Ok(false),
         _ => Ok(true),
     }
 }
