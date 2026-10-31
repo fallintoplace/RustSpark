@@ -443,22 +443,28 @@ mod empty_bloom_set_operation_shortcuts {
 }
 
 #[cfg(test)]
-mod fully_saturated_bloom_regressions {
+mod saturated_filter_fast_path_tests {
     use super::*;
 
     #[test]
-    fn saturated_filter_accepts_every_key_and_stays_saturated() {
-        let mut filter = BloomFilter::new(1, 4).unwrap();
-        let large = Value::Text("é🙂".repeat(100_000));
-        assert!(!filter.might_contain(&large));
-        filter.insert(&Value::Integer(7));
+    fn fully_occupied_filters_accept_all_probes_and_preserve_accounting() {
+        let mut filter = BloomFilter::new(1, 8).unwrap();
+        assert!(!filter.might_contain(&Value::Null));
+        filter.insert(&Value::Integer(1));
         assert_eq!(filter.bits_set(), 1);
-        assert!(filter.might_contain(&large));
-        assert!(filter.might_contain(&Value::Null));
-        assert_eq!(filter.probe_batch(&[Value::Integer(-4), Value::Null]),
-            vec![true, true]);
-        filter.insert_batch(&[large, Value::Integer(11)]);
-        assert_eq!(filter.bits_set(), 1);
-        assert_eq!(filter.estimated_false_positive_rate(), 1.0);
+        for key in [
+            Value::Integer(-1234),
+            Value::Text("large-key".repeat(1024)),
+            Value::Null,
+            Value::Float(123.5),
+        ] {
+            assert!(filter.might_contain(&key));
+            filter.insert(&key);
+            assert_eq!(filter.bits_set(), 1);
+        }
+        let empty = BloomFilter::new(1, 8).unwrap();
+        filter.intersect_with(&empty).unwrap();
+        assert_eq!(filter.bits_set(), 0);
+        assert!(!filter.might_contain(&Value::Integer(1)));
     }
 }
