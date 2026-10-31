@@ -164,6 +164,32 @@ impl Batch {
         Ok(Self { schema: self.schema.clone(), columns, rows: indices.len() })
     }
 
+    /// Gather unique row indices in any order from an owned batch.
+    /// Validate all indices before moving cells, then transfer TEXT storage
+    /// without cloning it. Repeated indices require a borrowed gather instead.
+    pub fn take_unique_owned(mut self, indices: &[usize]) -> Result<Self> {
+        if indices.len() == self.rows {
+            return self.permute_rows_owned(indices);
+        }
+        let mut seen = std::collections::HashSet::with_capacity(indices.len());
+        for &row in indices {
+            if row >= self.rows || !seen.insert(row) {
+                return Err(Error::Execution(
+                    "owned batch gather requires unique, in-bounds indices".into(),
+                ));
+            }
+        }
+        let mut columns = Vec::with_capacity(self.columns.len());
+        for mut source in self.columns.drain(..) {
+            let mut selected = Vec::with_capacity(indices.len());
+            for &row in indices {
+                selected.push(std::mem::replace(&mut source[row], Value::Null));
+            }
+            columns.push(selected);
+        }
+        Ok(Self { schema: self.schema, columns, rows: indices.len() })
+    }
+
     /// Select rows from a columnar batch using a boolean mask.
     pub fn take_mask(&self, mask: &[bool]) -> Result<Self> {
         if mask.len() != self.rows {
@@ -665,5 +691,48 @@ mod owned_row_transfer_regressions {
         assert_eq!(input.value(0, 0).unwrap(), &Value::Null);
         assert_eq!(input.value(1, 0).unwrap(), &Value::Text("tail".into()));
         assert!(input.move_row_to_columns(2, &mut columns).is_err());
+    }
+}
+
+#[cfg(test)]
+mod arbitrary_owned_gather_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn moves_large_text_without_copying_across_nonmonotonic_row_indices() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("🍉".repeat(4096)), Value::Integer(0)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text("東京".repeat(4096)), Value::Integer(2)],
+            vec![Value::Text("tail".into()), Value::Integer(3)],
+        ]).unwrap();
+        let original_ptr = match input.value(2, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        };
+        let expected = input.take(&[2, 0, 1]).unwrap();
+        let actual = input.clone().take_unique_owned(&[2, 0, 1]).unwrap();
+        assert_eq!(actual, expected);
+        let moved = input.take_unique_owned(&[2, 0, 1]).unwrap();
+        assert_eq!(match moved.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, original_ptr);
+    }
+
+    #[test]
+    fn rejects_duplicates_and_preserves_zero_column_cardinality() {
+        let zero = Batch::new_with_row_count(
+            Schema::new(vec![]).unwrap(), vec![], 4,
+        ).unwrap();
+        assert_eq!(zero.clone().take_unique_owned(&[3, 1]).unwrap().num_rows(), 2);
+        assert_eq!(zero.clone().take_unique_owned(&[]).unwrap().num_rows(), 0);
+        assert!(zero.clone().take_unique_owned(&[2, 2]).is_err());
+        assert!(zero.clone().take_unique_owned(&[5]).is_err());
+        assert_eq!(zero.clone().take_unique_owned(&[3, 2, 1, 0]).unwrap().num_rows(), 4);
+        assert!(zero.take_unique_owned(&[0, 0, 1, 2]).is_err());
     }
 }
