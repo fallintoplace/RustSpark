@@ -279,3 +279,32 @@ mod borrowed_levenshtein_affix_regressions {
         ]).unwrap(), Value::Integer(1));
     }
 }
+
+#[cfg(test)]
+mod shared_unicode_edge_streaming_tests {
+    use super::*;
+
+    #[test]
+    fn long_shared_unicode_edges_do_not_expand_dp_work() {
+        let edge = "é🙂界".repeat(60_000);
+        let left = Value::Text(format!("{edge}x{edge}"));
+        let right = Value::Text(format!("{edge}y{edge}"));
+        assert_eq!(evaluate(&[left.clone(), right.clone()]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[left, right, Value::Integer(1)]).unwrap(), Value::Integer(1));
+    }
+
+    #[test]
+    fn shared_edges_are_trimmed_on_unicode_scalar_boundaries() {
+        for (left, right, expected) in [
+            ("🧡a🚀", "🧡b🚀", 1),
+            ("ééhello🌙", "ééhell🌙", 1),
+            ("🙂a🙂", "🙂abc🙂", 2),
+            ("abc", "abc🌟", 1),
+            ("🌟abc", "abc", 1),
+        ] {
+            assert_eq!(evaluate(&[
+                Value::Text(left.into()), Value::Text(right.into())
+            ]).unwrap(), Value::Integer(expected));
+        }
+    }
+}
