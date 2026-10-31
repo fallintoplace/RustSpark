@@ -216,6 +216,46 @@ mod tests {
 impl ColumnStatistics {
     /// Build mergeable min/max statistics for a sequence of compatible batches.
     pub fn from_batches(batches: &[Batch], name: &str) -> Result<Self> {
+        // Borrow TEXT extrema across all source batches. Computing each batch's
+        // temporary statistics copies two potentially very large strings.
+        if let Some(first) = batches.first() {
+            let index = first.schema().column(name)?;
+            if first.schema().field(index)?.data_type == DataType::Text {
+                let mut rows = 0u64;
+                let mut nulls = 0u64;
+                let mut min: Option<&str> = None;
+                let mut max: Option<&str> = None;
+                for batch in batches {
+                    let column = batch.schema().column(name)?;
+                    if batch.schema().field(column)?.data_type != DataType::Text {
+                        return Err(Error::Type("statistics batches disagree on column type".into()));
+                    }
+                    rows = rows.checked_add(u64::try_from(batch.num_rows())
+                        .map_err(|_| Error::Execution("statistics row count overflow".into()))?)
+                        .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
+                    for value in batch.column(column)? {
+                        match value {
+                            Value::Null => {
+                                nulls = nulls.checked_add(1).ok_or_else(||
+                                    Error::Execution("statistics NULL count overflow".into()))?;
+                            }
+                            Value::Text(text) => {
+                                let text = text.as_str();
+                                if min.is_none_or(|old| text < old) { min = Some(text); }
+                                if max.is_none_or(|old| text > old) { max = Some(text); }
+                            }
+                            _ => unreachable!("native batch schema was validated"),
+                        }
+                    }
+                }
+                return Ok(Self {
+                    rows,
+                    nulls,
+                    min: min.map(|text| Value::Text(text.to_owned())),
+                    max: max.map(|text| Value::Text(text.to_owned())),
+                });
+            }
+        }
         let mut combined = Self::default();
         let mut expected_type = None;
         for batch in batches {
@@ -489,5 +529,38 @@ mod borrowed_text_statistics_tests {
             for value in &input { reference.observe(value).unwrap(); }
             assert_eq!(ColumnStatistics::from_batch(&batch, "label").unwrap(), reference);
         }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_multibatch_text_extrema_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn matches_batchwise_merges_for_wide_nullable_unicode_text() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let batches = vec![
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Text("z".repeat(32768))], vec![Value::Null],
+                vec![Value::Text("é".repeat(32768))],
+            ]).unwrap(),
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Text("a".repeat(32768))], vec![Value::Text("z".repeat(32768))],
+            ]).unwrap(),
+            Batch::empty(schema.clone()),
+            Batch::from_rows(schema, vec![vec![Value::Null]]).unwrap(),
+        ];
+        let mut reference = ColumnStatistics::default();
+        for batch in &batches {
+            reference.merge(&ColumnStatistics::from_batch(batch, "key").unwrap()).unwrap();
+        }
+        assert_eq!(ColumnStatistics::from_batches(&batches, "key").unwrap(), reference);
+        assert_eq!(ColumnStatistics::from_batches(&[], "key").unwrap(), ColumnStatistics::default());
+        let mixed = Batch::from_rows(
+            Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)]],
+        ).unwrap();
+        assert!(ColumnStatistics::from_batches(&[batches[0].clone(), mixed], "key").is_err());
     }
 }
