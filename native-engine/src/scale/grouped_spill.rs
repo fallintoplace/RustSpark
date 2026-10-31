@@ -1,7 +1,7 @@
 //! Hash-partitioned grouped aggregation with bounded per-shard states.
 use std::{
     collections::{HashMap, HashSet},
-    fs::{File, OpenOptions},
+    fs::File,
     io::{BufReader, BufWriter},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -356,7 +356,7 @@ where I: IntoIterator<Item = Result<Batch>>
         if batch.num_rows() == 0 { continue; }
         let id = GROUP_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-groups-{}-{id}.rspill", std::process::id()));
-        let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+        let file = super::private_files::create_private(&path)?;
         result.paths.push(path);
         let mut output_writer = SpillWriter::new(BufWriter::new(file), output_schema.clone())?;
         let mut start = 0;

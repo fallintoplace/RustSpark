@@ -1,6 +1,6 @@
 //! Disk-partitioned equijoins. The build side is bounded per partition.
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -143,7 +143,7 @@ where L: IntoIterator<Item = Result<Batch>>,
         }
         let id = JOIN_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-join-{}-{id}.rspill", std::process::id()));
-        let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+        let file = super::private_files::create_private(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
         // LEFT, FULL and ANTI must still visit the probe side even when

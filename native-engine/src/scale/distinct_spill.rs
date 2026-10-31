@@ -2,7 +2,7 @@
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
-    fs::{File, OpenOptions},
+    fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -102,7 +102,7 @@ where I: IntoIterator<Item = Result<Batch>>
         if unique_rows == 0 { continue; }
         let id = DISTINCT_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-distinct-{}-{id}.rspill", std::process::id()));
-        let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+        let file = super::private_files::create_private(&path)?;
         result.paths.push(path);
         let mut output = SpillWriter::new(BufWriter::new(file), schema.clone())?;
         // Every retained row was decoded from a validated spill batch.

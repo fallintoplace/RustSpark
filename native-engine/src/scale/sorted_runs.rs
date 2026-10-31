@@ -1,6 +1,5 @@
 //! Generate independently sorted spill runs with deterministic scratch cleanup.
 use std::{
-    fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -63,7 +62,7 @@ fn flush_pending_run(
     let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
     let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());
     let path = directory.join(filename);
-    let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    let file = super::private_files::create_private(&path)?;
     runs.files.push(path);
     let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
     writer.write_batch(&sorted)?;
