@@ -23,6 +23,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_BACKEND_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = MAX_BACKEND_OUTPUT_BYTES
 
 
 def _reject_duplicate_json_fields(pairs):
@@ -52,6 +53,18 @@ def parse_result_rows(text: str) -> list[dict]:
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL result must be a list of objects")
     return rows
+
+
+def encode_response_bounded(payload, max_bytes: int = MAX_RESPONSE_BYTES) -> bytes:
+    """Build JSON without retaining a response larger than the wire budget."""
+    output = bytearray()
+    encoder = json.JSONEncoder(separators=(",", ":"))
+    for piece in encoder.iterencode(payload):
+        data = piece.encode("utf-8")
+        if len(data) > max_bytes - len(output):
+            raise ValueError("JSON response exceeds gateway output budget")
+        output.extend(data)
+    return bytes(output)
 
 
 def validate_params(body: bytes) -> dict[str, str]:
@@ -200,7 +213,13 @@ def make_handler(*, secret: str, queries: Path, database: Path,
             super().setup()
 
         def send_json(self, status, payload):
-            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            try:
+                data = encode_response_bounded(payload)
+            except ValueError:
+                # Never send a partial success body or allocate an expanded
+                # JSON response beyond the gateway's byte budget.
+                status = 502
+                data = b'{"error":"JSON response exceeds output budget"}'
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -243,6 +262,12 @@ def make_handler(*, secret: str, queries: Path, database: Path,
             if len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
                 self.close_connection = True
                 self.send_json(400, {"error": "Ambiguous request framing"})
+                return
+            # int() itself rejects extremely long decimal strings on modern
+            # Python. Reject oversized framing deterministically first.
+            if len(lengths[0]) > len(str(MAX_REQUEST_BYTES)):
+                self.close_connection = True
+                self.send_json(413, {"error": "Request too large"})
                 return
             length = int(lengths[0])
             if not 0 <= length <= MAX_REQUEST_BYTES:

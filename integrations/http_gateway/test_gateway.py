@@ -134,6 +134,48 @@ class BackendDescendantCleanupTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3.0)
 
 
+class BoundedGatewayResponsesTests(unittest.TestCase):
+    def test_json_encoder_rejects_escaped_output_expansion(self):
+        from server import encode_response_bounded
+        self.assertEqual(encode_response_bounded({"rows": [{"value": "ok"}]}, 100),
+                         b'{"rows":[{"value":"ok"}]}')
+        with self.assertRaisesRegex(ValueError, "output budget"):
+            encode_response_bounded({"rows": [{"text": "\\u0000" * 100}]}, 200)
+
+    def test_gateway_rejects_oversized_escaped_success_responses(self):
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(
+                secret="token-" * 5, queries=root, database=root,
+                binary="rustspark", max_rows=10, timeout=1,
+            ))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                body = b'{"params":{}}'
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/query/safe",
+                    data=body,
+                    headers={"Authorization": "Bearer " + "token-" * 5,
+                             "Content-Type": "application/json"},
+                )
+                with patch("server.run_bounded_backend",
+                           return_value=subprocess.CompletedProcess(
+                               [], 0, '[{"text":"' + "é" * 2_000_000 + '"}]', "",
+                           )):
+                    with self.assertRaises(HTTPError) as raised:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(raised.exception.code, 502)
+                    self.assertIn("output budget", raised.exception.read().decode())
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+
 class RequestFramingTests(unittest.TestCase):
     def test_ambiguous_content_length_and_chunked_encoding_are_rejected(self):
         with tempfile.TemporaryDirectory() as root:
@@ -158,6 +200,7 @@ class RequestFramingTests(unittest.TestCase):
                     b"Transfer-Encoding: chunked\r\n",
                     b"Content-Length: +2\r\n",
                     b"Content-Length: 2, 2\r\n",
+                    b"Content-Length: " + b"9" * 5000 + b"\r\n",
                 ):
                     with self.subTest(framing=framing), socket.create_connection(
                         server.server_address, timeout=2,
@@ -165,7 +208,7 @@ class RequestFramingTests(unittest.TestCase):
                         connection.settimeout(2)
                         connection.sendall(headers + framing + b"\r\n{}")
                         response = connection.recv(4096).split(b"\r\n", 1)[0]
-                        self.assertIn(b"400", response)
+                        self.assertTrue(b"400" in response or b"413" in response)
             finally:
                 server.shutdown()
                 server.server_close()
