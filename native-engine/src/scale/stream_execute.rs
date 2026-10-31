@@ -246,12 +246,12 @@ impl Iterator for DistinctOutput {
                         .all(|(value, column)| value == &column[row]))) {
                     continue;
                 }
-                let footprint = super::row_footprint::footprint(
+                let minimum = super::row_footprint::minimum_cloned_footprint(
                     columns.iter().map(|column| &column[row])
                 );
-                let next_total = self.retained_bytes.checked_add(footprint);
                 if self.unique_keys >= self.max_keys ||
-                    next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.retained_bytes.checked_add(minimum)
+                        .is_none_or(|size| size > self.max_bytes) {
                     self.pending_error = Some(Error::Execution(
                         "stream DISTINCT memory budget exceeded".into()));
                     break;
@@ -263,6 +263,13 @@ impl Iterator for DistinctOutput {
                         break;
                     }
                 };
+                let actual_footprint = super::row_footprint::footprint(key.iter());
+                let next_total = self.retained_bytes.checked_add(actual_footprint);
+                if next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.pending_error = Some(Error::Execution(
+                        "stream DISTINCT memory budget exceeded".into()));
+                    break;
+                }
                 self.retained_bytes = next_total.expect("validated DISTINCT memory");
                 self.unique_keys += 1;
                 self.seen.entry(fingerprint).or_default().push(key);
@@ -1301,5 +1308,27 @@ mod stream_distinct_deferred_budget_tests {
         ]);
         assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod compact_retained_stream_key_accounting {
+    use super::*;
+
+    #[test]
+    fn stream_distinct_admits_small_clones_from_large_capacity_input() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, false)]).unwrap();
+        let mut source = String::with_capacity(16 * 1024);
+        source.push_str("key");
+        let batch = Batch::from_rows(schema,
+            vec![vec![Value::Text(source)]]).unwrap();
+        let mut distinct = DistinctOutput::new(
+            Box::new(std::iter::once(Ok(batch))), QueryControl::default(), 1, 128,
+        );
+        assert_eq!(distinct.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("key".into())]]);
+        assert_eq!(distinct.retained_bytes, 64 + std::mem::size_of::<Value>() + 3);
+        assert!(distinct.next().is_none());
     }
 }
