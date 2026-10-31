@@ -599,9 +599,6 @@ fn lower(
                 child(left)?, child(right)?, schema, control.clone()
             )))
         }
-        _ => Err(Error::Unsupported(
-            "operator has no streaming physical implementation yet".into()
-        )),
     }
 }
 

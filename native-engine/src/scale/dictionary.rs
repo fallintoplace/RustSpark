@@ -164,7 +164,7 @@ impl DictionaryColumn {
         let mut bytes = left.encoded_string_bytes;
         let mut mapping = Vec::with_capacity(right.dictionary.len());
         for text in right.dictionary.iter() {
-            let code = if let Some(&existing) = seen.get(text) {
+            let code = if let Some(&existing) = seen.get(text.as_str()) {
                 existing
             } else {
                 if dictionary.len() >= max_distinct {
