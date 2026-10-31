@@ -11,6 +11,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Boolean(true)); }
+    // Plain ASCII identifiers have no regex metacharacters.
+    if pattern.len() <= 4096 && pattern.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || byte == b'_') {
+        return Ok(Value::Boolean(text.contains(pattern)));
+    }
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
 }
 
@@ -77,5 +82,21 @@ mod empty_regex_like_perf_tests {
                 .unwrap(), Value::Boolean(true));
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text("".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod literal_regex_like_tests {
+    use super::*;
+
+    #[test]
+    fn literal_fast_path_matches_regex_on_unicode_and_missing_values() {
+        for text in ["foo_bar", "éfoo_bar", "bar", ""] {
+            for pattern in ["foo", "_", "FOO", ""] {
+                let values = [Value::Text(text.into()), Value::Text(pattern.into())];
+                assert_eq!(evaluate(&values).unwrap(),
+                    Value::Boolean(regex_support::compile(pattern).unwrap().is_match(text)));
+            }
+        }
     }
 }
