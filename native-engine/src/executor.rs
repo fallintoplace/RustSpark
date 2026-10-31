@@ -103,7 +103,7 @@ fn execute_inner(
                 // Avoid cloning the full source table before selecting rows.
                 filter::filter(catalog.get(table)?, predicate)?
             } else {
-                filter::filter(&descend(input)?, predicate)?
+                filter::filter_owned(descend(input)?, predicate)?
             }
         },
         Plan::Project { input, selections } => {
@@ -402,5 +402,44 @@ mod catalog_distinct_borrow_tests {
                 ..ExecutionOptions::default() }).unwrap();
         assert_eq!(result.rows().unwrap(),
             vec![vec![Value::Null], vec![Value::Integer(7)]]);
+    }
+}
+
+#[cfg(test)]
+mod owned_intermediate_filter_execution_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, project::Selection, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn filters_computed_intermediate_batches_and_nullable_payloads() {
+        let mut catalog = Catalog::new();
+        let large = "é🙂".repeat(4096);
+        catalog.register("t", Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text(large.clone())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("ok".into())],
+        ]).unwrap()).unwrap();
+        let generated = Plan::Project {
+            input: Box::new(Plan::scan("t")),
+            selections: vec![
+                Selection::new(Expr::Column("id".into()), "id"),
+                Selection::new(Expr::Column("payload".into()), "payload"),
+            ],
+        };
+        let predicate = Expr::binary(Expr::Column("id".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(1)));
+        let actual = execute(&generated.clone().filter(predicate.clone()), &catalog).unwrap();
+        let child = execute(&generated, &catalog).unwrap();
+        assert_eq!(actual, filter::filter(&child, &predicate).unwrap());
+        assert_eq!(actual.rows().unwrap(), vec![
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("ok".into())],
+        ]);
+        assert!(execute(&generated.filter(Expr::Column("missing".into())),
+            &catalog).is_err());
     }
 }
