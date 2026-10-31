@@ -55,6 +55,12 @@ fn reverse(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("REVERSE input exceeds 16 MiB".into()));
     }
+    if text.is_ascii() {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.reverse();
+        return Ok(Value::Text(String::from_utf8(bytes)
+            .expect("reversing ASCII bytes preserves UTF-8")));
+    }
     let mut result = String::with_capacity(text.len());
     for character in text.chars().rev() {
         result.push(character);
@@ -71,10 +77,13 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(left.to_owned()));
     }
     let mut end = 0;
-    for ((offset, first), (_, second)) in left.char_indices().zip(right.char_indices()) {
+    for (&first, &second) in left.as_bytes().iter().zip(right.as_bytes()) {
         if first != second { break; }
-        end = offset + first.len_utf8();
+        end += 1;
     }
+    // Different Unicode scalars may share leading UTF-8 bytes. Exclude any
+    // partial scalar from the returned prefix.
+    while !left.is_char_boundary(end) { end -= 1; }
     Ok(Value::Text(left[..end].to_string()))
 }
 
@@ -184,5 +193,50 @@ mod equal_common_prefix_fast_path_tests {
         assert_eq!(common_prefix(&[Value::Text("".into()),
             Value::Text("".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod byte_oriented_text_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn common_prefix_never_returns_partial_unicode_characters() {
+        for (left, right) in [
+            ("éclair", "êclair"),
+            ("🙂one", "🙃two"),
+            ("é🙂alpha", "é🙂beta"),
+            ("abc", "abcdef"),
+            ("café-one", "café-two"),
+            ("", "x"),
+        ] {
+            let expected = left.chars().zip(right.chars())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect::<String>();
+            assert_eq!(
+                common_prefix(&[Value::Text(left.into()), Value::Text(right.into())]).unwrap(),
+                Value::Text(expected)
+            );
+        }
+        let shared = "x".repeat(100_000);
+        assert_eq!(
+            common_prefix(&[
+                Value::Text(format!("{shared}é")),
+                Value::Text(format!("{shared}ê")),
+            ]).unwrap(),
+            Value::Text(shared)
+        );
+    }
+
+    #[test]
+    fn ascii_reversal_keeps_unicode_fallback() {
+        let ascii = "abc123XYZ".repeat(20_000);
+        let expected = ascii.chars().rev().collect::<String>();
+        assert_eq!(reverse(&[Value::Text(ascii)]).unwrap(),
+            Value::Text(expected));
+        assert_eq!(reverse(&[Value::Text("a🙂é".into())]).unwrap(),
+            Value::Text("é🙂a".into()));
+        assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
     }
 }
