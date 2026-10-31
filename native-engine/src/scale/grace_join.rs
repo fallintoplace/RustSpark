@@ -159,7 +159,10 @@ where L: IntoIterator<Item = Result<Batch>>,
             let mut rows = 0usize;
             for right_row in 0..build.num_rows() {
                 control.check()?;
-                if !matched_right.as_ref().expect("outer-build bitmap")[right_row] {
+                let matched = matched_right.as_ref()
+                    .and_then(|bits| bits.get(right_row))
+                    .ok_or_else(|| Error::Execution("missing outer-join match state".into()))?;
+                if !*matched {
                     for output in &mut columns[..left_schema.len()] {
                         output.push(Value::Null);
                     }
