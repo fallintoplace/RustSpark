@@ -3,33 +3,42 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 const MAX_BYTES: usize = 1_000_000;
 const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
-fn push_digit(output: &mut String, digit: u8) {
-    output.push(char::from(DIGITS[usize::from(digit)]));
-}
-
 fn base64(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let bytes = text.as_bytes();
-    if bytes.len() > MAX_BYTES { return Err(Error::Execution("BASE64 input exceeds byte limit".into())); }
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut chunks = bytes.chunks_exact(3);
-    for chunk in &mut chunks {
+    if bytes.len() > MAX_BYTES {
+        return Err(Error::Execution("BASE64 input exceeds byte limit".into()));
+    }
+    // Emit each quartet as four ASCII bytes in one bulk append, then
+    // validate UTF-8 once. Avoid four UTF-8 character pushes per 3-byte block.
+    let mut output = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut triples = bytes.chunks_exact(3);
+    for chunk in &mut triples {
         let (a, b, c) = (chunk[0], chunk[1], chunk[2]);
-        push_digit(&mut output, (a >> 2));
-        push_digit(&mut output, (((a & 3) << 4) | (b >> 4)));
-        push_digit(&mut output, (((b & 15) << 2) | (c >> 6)));
-        push_digit(&mut output, (c & 63));
+        output.extend_from_slice(&[
+            DIGITS[(a >> 2) as usize],
+            DIGITS[(((a & 3) << 4) | (b >> 4)) as usize],
+            DIGITS[(((b & 15) << 2) | (c >> 6)) as usize],
+            DIGITS[(c & 63) as usize],
+        ]);
     }
-    let tail = chunks.remainder();
-    if !tail.is_empty() {
-        let a = tail[0];
-        let b = if tail.len() == 2 { tail[1] } else { 0 };
-        push_digit(&mut output, (a >> 2));
-        push_digit(&mut output, (((a & 3) << 4) | (b >> 4)));
-        output.push(if tail.len() == 2 { DIGITS[((b & 15) << 2) as usize] as char } else { '=' });
-        output.push('=');
+    match triples.remainder() {
+        [] => {}
+        [a] => output.extend_from_slice(&[
+            DIGITS[(a >> 2) as usize],
+            DIGITS[((a & 3) << 4) as usize],
+            b'=', b'=',
+        ]),
+        [a, b] => output.extend_from_slice(&[
+            DIGITS[(a >> 2) as usize],
+            DIGITS[(((a & 3) << 4) | (b >> 4)) as usize],
+            DIGITS[((b & 15) << 2) as usize],
+            b'=',
+        ]),
+        _ => unreachable!("chunks_exact leaves at most two bytes"),
     }
-    Ok(Value::Text(output))
+    Ok(Value::Text(String::from_utf8(output)
+        .expect("BASE64 alphabet always contains valid ASCII")))
 }
 const REVERSE_DIGITS: [u8; 256] = {
     let mut table = [u8::MAX; 256];
@@ -138,5 +147,38 @@ mod decoded_output_budget_tests {
         let largest = "a".repeat(MAX_BYTES);
         let encoded = base64(&[Value::Text(largest.clone())]).unwrap();
         assert_eq!(unbase64_utf8(&[encoded]).unwrap(), Value::Text(largest));
+    }
+}
+
+#[cfg(test)]
+mod bulk_quartet_base64_regressions {
+    use super::*;
+
+    #[test]
+    fn binary_boundaries_and_long_utf8_round_trip() {
+        for len in 0..=256 {
+            let text = "é🙂a".repeat(len);
+            let original = Value::Text(text.clone());
+            let encoded = base64(&[original.clone()]).unwrap();
+            assert_eq!(unbase64_utf8(&[encoded.clone()]).unwrap(), original);
+            let Value::Text(encoded) = encoded else { unreachable!() };
+            assert_eq!(encoded.len(), text.len().div_ceil(3) * 4);
+        }
+        let largest = Value::Text("z".repeat(MAX_BYTES));
+        assert_eq!(unbase64_utf8(&[base64(&[largest.clone()]).unwrap()]).unwrap(), largest);
+        assert!(base64(&[Value::Text("z".repeat(MAX_BYTES + 1))]).is_err());
+    }
+
+    #[test]
+    fn produces_canonical_padding_for_every_tail_size() {
+        for (plain, encoded) in [
+            ("", ""), ("a", "YQ=="), ("ab", "YWI="), ("abc", "YWJj"),
+            ("abcd", "YWJjZA=="), ("abcde", "YWJjZGU="),
+            ("abcdef", "YWJjZGVm"),
+        ] {
+            assert_eq!(base64(&[Value::Text(plain.into())]).unwrap(),
+                Value::Text(encoded.into()));
+        }
+        assert_eq!(base64(&[Value::Null]).unwrap(), Value::Null);
     }
 }
