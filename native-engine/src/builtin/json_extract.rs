@@ -17,6 +17,45 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 
+// Keep only the selected root array element. Other elements still undergo
+// full syntax validation, but do not allocate serde_json::Value subtrees.
+struct RootArrayItem(Option<usize>);
+
+impl<'de> serde::de::DeserializeSeed<'de> for RootArrayItem {
+    type Value = Option<serde_json::Value>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D)
+        -> std::result::Result<Self::Value, D::Error>
+    {
+        struct ItemVisitor(Option<usize>);
+        impl<'de> serde::de::Visitor<'de> for ItemVisitor {
+            type Value = Option<serde_json::Value>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON array")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                let mut selected = None;
+                let mut index = 0usize;
+                loop {
+                    if self.0 == Some(index) {
+                        let Some(value) = seq.next_element::<serde_json::Value>()? else { break; };
+                        selected = Some(value);
+                    } else if seq.next_element::<serde::de::IgnoredAny>()?.is_none() {
+                        break;
+                    }
+                    index += 1;
+                }
+                Ok(selected)
+            }
+        }
+        deserializer.deserialize_seq(ItemVisitor(self.0))
+    }
+}
+
 fn json_array_at_type(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Text && types[1] == DataType::Integer {
         Ok(DataType::Text)
@@ -27,6 +66,23 @@ fn json_array_at_type(types: &[DataType]) -> Result<DataType> {
 fn json_array_at(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(index) = super::integer(&args[1])? else { return Ok(Value::Null); };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(crate::Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    if text.trim_start().starts_with('[') {
+        use serde::de::DeserializeSeed;
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let value = RootArrayItem(usize::try_from(index).ok())
+            .deserialize(&mut deserializer)
+            .and_then(|value| deserializer.end().map(|()| value))
+            .map_err(|error| crate::Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        return match value {
+            Some(value) => Ok(Value::Text(json_path::serialize_bounded(&value, 16 * 1024 * 1024)?)),
+            None => Ok(Value::Null),
+        };
+    }
     let doc = json_path::parse(text)?;
     match doc {
         serde_json::Value::Array(items) => match usize::try_from(index).ok()
@@ -70,5 +126,42 @@ mod json_array_at_extension_tests {
         assert_eq!(json_array_at(&[arr.clone(), Value::Integer(-1)]).unwrap(), Value::Null);
         assert_eq!(json_array_at(&[arr, Value::Integer(7)]).unwrap(), Value::Null);
         assert_eq!(json_array_at(&[Value::Null, Value::Integer(0)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod root_array_item_streaming_tests {
+    use super::*;
+
+    #[test]
+    fn selects_one_element_from_a_wide_array() {
+        let ignored = vec![r#"{"nested":[1,2,{"x":"🙂"}]}"#; 12_000].join(",");
+        let input = format!("[{ignored},{{\"target\":[null,true]}}]");
+        assert_eq!(json_array_at(&[
+            Value::Text(input), Value::Integer(12_000),
+        ]).unwrap(), Value::Text(r#"{"target":[null,true]}"#.into()));
+    }
+
+    #[test]
+    fn matches_materialized_reference_and_validates_all_elements() {
+        let json = r#"[null,1.0,{"x":[1,2]},"é🙂"]"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let values = parsed.as_array().unwrap();
+        for index in [-1, 0, 1, 2, 3, 4, i64::MAX] {
+            let expected = usize::try_from(index).ok().and_then(|n| values.get(n))
+                .map(|value| Value::Text(serde_json::to_string(value).unwrap()))
+                .unwrap_or(Value::Null);
+            assert_eq!(json_array_at(&[
+                Value::Text(json.into()), Value::Integer(index),
+            ]).unwrap(), expected, "index={index}");
+        }
+        for input in ["[1,2] true", "[1,2,", "[1,,2]"] {
+            assert!(matches!(json_array_at(&[
+                Value::Text(input.into()), Value::Integer(0),
+            ]), Err(crate::Error::Execution(_))));
+        }
+        assert!(matches!(json_array_at(&[
+            Value::Text("{}".into()), Value::Integer(0),
+        ]), Err(crate::Error::Type(_))));
     }
 }
