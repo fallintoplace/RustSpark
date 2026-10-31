@@ -70,7 +70,7 @@ impl TaskScheduler {
         if max_tasks == 0 {
             return Err(Error::Execution("task admission limit must be positive".into()));
         }
-        let mut tasks = tasks.into_iter();
+        let tasks = tasks.into_iter();
         let initial_capacity = tasks.size_hint().0.min(max_tasks).min(4096);
         let mut entries = HashMap::with_capacity(initial_capacity);
         for id in tasks {
