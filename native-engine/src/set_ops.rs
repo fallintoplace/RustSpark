@@ -165,7 +165,7 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 fn right_counts<'a>(
     columns: &'a [&'a [Value]], rows: usize, max_distinct_keys: usize,
 ) -> Result<HashMap<BorrowedSetRow<'a>, usize>> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::<BorrowedSetRow<'a>, usize>::new();
     for row in 0..rows {
         let key = BorrowedSetRow { columns, row };
         let at_limit = counts.len() >= max_distinct_keys;
@@ -305,8 +305,9 @@ mod bounded_right_set_key_regression {
             vec![Value::Integer(1)], vec![Value::Integer(1)],
             vec![Value::Integer(2)],
         ]).unwrap();
-        assert!(bounded_right_keys(&right, 1).is_err());
-        assert_eq!(bounded_right_keys(&right, 2).unwrap().len(), 2);
+        let columns = borrowed_columns(&right).unwrap();
+        assert!(bounded_right_keys(&columns, right.num_rows(), 1).is_err());
+        assert_eq!(bounded_right_keys(&columns, right.num_rows(), 2).unwrap().len(), 2);
         let left = Batch::from_rows(schema, vec![vec![Value::Integer(2)]]).unwrap();
         assert_eq!(intersect_distinct(&left, &right).unwrap().row(0).unwrap(),
             vec![Value::Integer(2)]);
@@ -365,10 +366,12 @@ mod bounded_multiset_state_tests {
             vec![Value::Null], vec![Value::Null],
             vec![Value::Integer(2)],
         ]).unwrap();
-        assert!(right_counts(&right, 2).is_err());
-        let counts = right_counts(&right, 3).unwrap();
+        let columns = borrowed_columns(&right).unwrap();
+        assert!(right_counts(&columns, right.num_rows(), 2).is_err());
+        let counts = right_counts(&columns, right.num_rows(), 3).unwrap();
         assert_eq!(counts.len(), 3);
-        assert_eq!(counts[&vec![Value::Null]], 2);
+        let null_key = BorrowedSetRow { columns: &columns, row: 2 };
+        assert_eq!(counts[&null_key], 2);
         let left = Batch::from_rows(schema, vec![
             vec![Value::Null], vec![Value::Integer(1)], vec![Value::Integer(1)],
         ]).unwrap();

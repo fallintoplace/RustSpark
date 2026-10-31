@@ -1,4 +1,4 @@
-use crate::{batch::Batch, Error, Result};
+use crate::{batch::Batch, scalar::Value, Error, Result};
 #[cfg(test)]
 use crate::schema::Schema;
 

@@ -10,7 +10,6 @@ use std::{
 use crate::{
     aggregate::{AggregateItem, AggregateOp},
     batch::Batch,
-    expr::Expr,
     scalar::Value,
     schema::{DataType, Field, Schema},
     Error, Result,
@@ -19,6 +18,9 @@ use super::{
     cancel::QueryControl, partition_spill::PartitionWriter,
     spill::{SpillReader, SpillWriter},
 };
+
+#[cfg(test)]
+use crate::expr::Expr;
 
 static GROUP_ID: AtomicU64 = AtomicU64::new(1);
 
