@@ -20,7 +20,8 @@ fn sign(args: &[Value]) -> Result<Value> {
         Value::Null => Ok(Value::Null),
         Value::Float(value) => {
             if !value.is_finite() { return Err(Error::Execution("SIGN received nonfinite value".into())); }
-            super::finite(if *value == 0.0 { 0.0 } else { value.signum() })
+            // Signum preserves the sign bit of IEEE-754 negative zero.
+            super::finite(if *value == 0.0 { *value } else { value.signum() })
         }
         _ => Err(Error::Type("SIGN expects numeric value".into())),
     }
@@ -79,5 +80,23 @@ mod is_even_extension_tests {
         assert_eq!(is_even(&[Value::Integer(i64::MIN)]).unwrap(), Value::Boolean(true));
         assert_eq!(is_even(&[Value::Integer(0)]).unwrap(), Value::Boolean(true));
         assert_eq!(is_even(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod signed_zero_signum_tests {
+    use super::*;
+    #[test]
+    fn float_sign_preserves_negative_zero() {
+        let Value::Float(negative) = sign(&[Value::Float(-0.0)]).unwrap() else {
+            panic!("expected float");
+        };
+        assert_eq!(negative.to_bits(), (-0.0_f64).to_bits());
+        let Value::Float(positive) = sign(&[Value::Float(0.0)]).unwrap() else {
+            panic!("expected float");
+        };
+        assert_eq!(positive.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(sign(&[Value::Float(-3.0)]).unwrap(), Value::Float(-1.0));
+        assert_eq!(sign(&[Value::Null]).unwrap(), Value::Null);
     }
 }
