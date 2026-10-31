@@ -21,6 +21,7 @@ pub struct CrossJoinStream {
     right_row: usize,
     batch_rows: usize,
     control: QueryControl,
+    pending_error: Option<Error>,
     stopped: bool,
 }
 
@@ -62,8 +63,18 @@ impl CrossJoinStream {
             left, left_schema, output_schema, right_rows, right_bytes,
             left_batch: None, left_row: 0, left_ready: false,
             current_left_bytes: 0, right_row: 0,
-            batch_rows, control, stopped: false,
+            batch_rows, control, pending_error: None, stopped: false,
         })
+    }
+
+    // Emit an already-computed prefix before reporting a later terminal failure.
+    fn defer_error(
+        &mut self, error: Error, output: Vec<Vec<Value>>, rows: usize,
+    ) -> Result<Option<Batch>> {
+        if rows == 0 { return Err(error); }
+        let batch = Batch::new_with_row_count(self.output_schema.clone(), output, rows)?;
+        self.pending_error = Some(error);
+        Ok(Some(batch))
     }
 
     fn produce(&mut self) -> Result<Option<Batch>> {
@@ -79,7 +90,11 @@ impl CrossJoinStream {
         let mut output_rows = 0usize;
         let mut output_bytes = 0usize;
         while output_rows < self.batch_rows {
-            if output_rows % 256 == 0 { self.control.check()?; }
+            if output_rows % 256 == 0 {
+                if let Err(error) = self.control.check() {
+                    return self.defer_error(error, output, output_rows);
+                }
+            }
             if !self.left_ready {
                 loop {
                     if let Some(batch) = &self.left_batch {
@@ -104,9 +119,15 @@ impl CrossJoinStream {
                             self.output_schema.clone(), output, output_rows,
                         )?));
                     };
-                    let batch = next?;
+                    let batch = match next {
+                        Ok(batch) => batch,
+                        Err(error) => return self.defer_error(error, output, output_rows),
+                    };
                     if batch.schema() != &self.left_schema {
-                        return Err(Error::Schema("stream cross join left schema changed".into()));
+                        return self.defer_error(
+                            Error::Schema("stream cross join left schema changed".into()),
+                            output, output_rows,
+                        );
                     }
                     self.left_row = 0;
                     self.left_batch = Some(batch);
@@ -116,7 +137,10 @@ impl CrossJoinStream {
             let next_bytes = self.current_left_bytes
                 .saturating_add(self.right_bytes[self.right_row]);
             if next_bytes > MAX_OUTPUT_BATCH_BYTES {
-                return Err(Error::Execution("stream cross join output row byte budget exceeded".into()));
+                return self.defer_error(
+                    Error::Execution("stream cross join output row byte budget exceeded".into()),
+                    output, output_rows,
+                );
             }
             if output_rows != 0 && output_bytes.saturating_add(next_bytes) > MAX_OUTPUT_BATCH_BYTES {
                 break;
@@ -146,6 +170,10 @@ impl Iterator for CrossJoinStream {
     type Item = Result<Batch>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         match self.produce() {
             Ok(Some(batch)) => Some(Ok(batch)),
             Ok(None) => { self.stopped = true; None },
@@ -293,6 +321,53 @@ mod borrowed_cross_join_left_rows_tests {
         let actual = stream.collect::<Result<Vec<_>>>().unwrap().into_iter()
             .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_terminal_prefix_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn forwards_valid_product_before_later_left_failure() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(10)], vec![Value::Integer(20)],
+        ]).unwrap();
+        let mut stream = CrossJoinStream::new(
+            Box::new([Ok(first), Err(Error::Execution("late failure".into()))].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, 16, QueryControl::default(),
+        ).unwrap();
+        let prefix = stream.next().unwrap().unwrap();
+        assert_eq!(prefix.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(1), Value::Integer(20)],
+            vec![Value::Integer(2), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(20)],
+        ]);
+        assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn forwards_valid_product_before_later_schema_failure() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let good = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)]]).unwrap();
+        let wrong = Batch::empty(Schema::new(vec![]).unwrap());
+        let right = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(3)]]).unwrap();
+        let mut stream = CrossJoinStream::new(
+            Box::new([Ok(good), Ok(wrong)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, 8, QueryControl::default(),
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(matches!(stream.next(), Some(Err(Error::Schema(_)))));
+        assert!(stream.next().is_none());
     }
 }
 
