@@ -6,7 +6,7 @@ const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
     row.iter().fold(base, |used, value| {
         used.saturating_add(match value {
-            Value::Text(text) => text.len(),
+            Value::Text(text) => text.capacity(),
             _ => 0,
         })
     })
@@ -457,5 +457,43 @@ mod precomputed_row_batch_limits_tests {
         assert!(RowBatcher::with_byte_budget(
             std::iter::empty(), schema, 10, width - 1,
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod retained_capacity_admission_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn large_retained_text_capacity_fails_after_valid_rows() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let mut oversized = String::with_capacity(4096);
+        oversized.push('x');
+        let rows = vec![
+            Ok(vec![Value::Text("ok".into())]),
+            Ok(vec![Value::Text(oversized)]),
+            Ok(vec![Value::Text("unreachable".into())]),
+        ];
+        let mut batches = RowBatcher::with_byte_budget(rows.into_iter(), schema, 8, 128).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("ok".into())]]);
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
+    }
+
+    #[test]
+    fn capacity_equal_to_budget_is_accepted() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let mut text = String::with_capacity(64);
+        text.push('x');
+        let minimum = std::mem::size_of::<Value>();
+        let capacity = text.capacity();
+        let batches = RowBatcher::with_byte_budget(
+            [Ok(vec![Value::Text(text)])].into_iter(), schema, 4,
+            minimum + capacity,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
     }
 }
