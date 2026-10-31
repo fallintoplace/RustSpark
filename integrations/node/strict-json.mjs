@@ -8,12 +8,12 @@ export function parseStrictJSON(source) {
   const whitespace = () => {
     while (position < source.length && /[\x20\t\n\r]/.test(source[position])) position++;
   };
-  const stringToken = () => {
+  const stringToken = (decode = true) => {
     const start = position++;
     while (position < source.length) {
       const char = source[position++];
       if (char === '"') {
-        return JSON.parse(source.slice(start, position));
+        return decode ? JSON.parse(source.slice(start, position)) : undefined;
       }
       if (char === "\\") position++;
     }
@@ -24,7 +24,9 @@ export function parseStrictJSON(source) {
     whitespace();
     const first = source[position];
     if (first === '"') {
-      stringToken();
+      // JSON.parse validates the full document later. Avoid materializing
+      // large value strings during the duplicate-key pre-scan.
+      stringToken(false);
     } else if (first === "{") {
       position++;
       const names = new Set();
