@@ -11,6 +11,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 || from.len() > 16_384 || to.len() > 16_384 {
         return Err(Error::Execution("TRANSLATE input exceeds memory budget".into()));
     }
+    if text.is_empty() { return Ok(Value::Text(String::new())); }
     if from.is_empty() { return Ok(Value::Text(text.to_owned())); }
     // Identical source and replacement positions cannot change output.
     // Preserve the Unicode mapping cardinality budget for oversized patterns.
@@ -131,5 +132,21 @@ mod identity_translate_fast_path_tests {
             Value::Text("aa".into())]).unwrap(), Value::Text("aaa".into()));
         assert_eq!(evaluate(&[Value::Null, Value::Text("x".into()),
             Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod translate_empty_text_tests {
+    use super::*;
+
+    #[test]
+    fn empty_input_avoids_building_a_large_translation_map() {
+        let from = Value::Text("αβγδεζηθικλμνξοπρστυφχψω".repeat(100));
+        assert_eq!(evaluate(&[Value::Text(String::new()), from.clone(),
+            Value::Text("!".into())]).unwrap(), Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Text(String::new()), from,
+            Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate(&[Value::Text(String::new()),
+            Value::Text("x".repeat(16_385)), Value::Text(String::new())]).is_err());
     }
 }
