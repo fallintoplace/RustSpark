@@ -126,9 +126,15 @@ fn execute_inner(
             let Plan::Sort { input: source, keys } = input.as_ref() else {
                 unreachable!("checked sort plan");
             };
-            let source = execute_inner(source, catalog, options, depth + 2, guard)?;
-            guard.check()?;
-            crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            // Sorting a catalog scan must not clone or reject its entire input
+            // against the final-result budget before Top-K has reduced it.
+            if let Plan::Scan { table } = source.as_ref() {
+                crate::topk::top_k_offset(catalog.get(table)?, keys, *offset, *count)?
+            } else {
+                let source = execute_inner(source, catalog, options, depth + 2, guard)?;
+                guard.check()?;
+                crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            }
         },
         Plan::Limit { input, offset, count } => {
             // A LIMIT over a scan must not materialize and budget the whole input.
@@ -512,5 +518,37 @@ mod owned_intermediate_limit_execution_tests {
                 expected);
         }
         assert!(execute(&filtered.limit(usize::MAX, Some(1)), &catalog).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod direct_sorted_catalog_limit_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value,
+        schema::{DataType, Field, Schema}, sort::SortKey};
+
+    #[test]
+    fn large_scans_can_return_small_sorted_windows_under_result_budget() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("score", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..100).rev()
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        catalog.register("large", input).unwrap();
+        let order = Plan::Sort {
+            input: Box::new(Plan::scan("large")),
+            keys: vec![SortKey::ascending(Expr::Column("score".into()))],
+        };
+        let options = ExecutionOptions { max_output_rows: 3, ..ExecutionOptions::default() };
+        let result = execute_with_options(&order.clone().limit(5, Some(3)),
+            &catalog, options).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(5)], vec![Value::Integer(6)], vec![Value::Integer(7)],
+        ]);
+        assert!(execute_with_options(&order, &catalog, options).is_err());
+        assert!(execute_with_options(
+            &Plan::Sort { input: Box::new(Plan::scan("large")),
+                keys: vec![SortKey::ascending(Expr::Column("missing".into()))],
+            }.limit(0, Some(1)), &catalog, options).is_err());
     }
 }
