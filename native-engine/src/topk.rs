@@ -563,3 +563,38 @@ mod topk_computed_singleton_and_owned_offset_regressions {
         }
     }
 }
+
+
+#[cfg(test)]
+mod owned_topk_window_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value,
+        schema::{DataType, Field, Schema}, sort::SortKey};
+
+    #[test]
+    fn offset_window_matches_stable_sort_for_large_nullable_text() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..240).map(|index| vec![
+            if index % 7 == 0 { Value::Null } else { Value::Integer((index * 17 % 29) as i64) },
+            if index % 11 == 0 { Value::Null }
+            else { Value::Text(format!("{index}-{}", "🙂".repeat(300))) },
+        ]).collect()).unwrap();
+        for (descending, nulls_first) in [
+            (false, false), (false, true), (true, false), (true, true),
+        ] {
+            let keys = [SortKey {
+                expression: Expr::Column("score".into()), descending, nulls_first,
+            }];
+            let sorted = crate::sort::sort(&input, &keys).unwrap();
+            for (offset, count) in [(0, 1), (1, 5), (80, 12), (250, 10)] {
+                let start = offset.min(sorted.num_rows());
+                let end = start.saturating_add(count).min(sorted.num_rows());
+                assert_eq!(top_k_offset(&input, &keys, offset, count).unwrap(),
+                    sorted.slice_rows(start, end).unwrap());
+            }
+        }
+    }
+}
