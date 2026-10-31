@@ -143,6 +143,7 @@ pub struct UnionDistinctStream<L, R> {
     retained_bytes: usize,
     max_keys: usize,
     max_bytes: usize,
+    pending_error: Option<Error>,
     stopped: bool,
 }
 
@@ -157,7 +158,8 @@ impl<L, R> UnionDistinctStream<L, R> {
         Ok(Self {
             inner: UnionAllStream::new(left, right, schema, control),
             seen: std::collections::HashMap::new(),
-            unique_keys: 0, retained_bytes: 0, max_keys, max_bytes, stopped: false,
+            unique_keys: 0, retained_bytes: 0, max_keys, max_bytes,
+            pending_error: None, stopped: false,
         })
     }
 }
@@ -169,6 +171,10 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         loop {
             let batch = match self.inner.next()? {
                 Ok(batch) => batch,
@@ -212,28 +218,36 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     continue;
                 }
                 if self.unique_keys >= self.max_keys {
-                    self.stopped = true;
-                    return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
+                    self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
+                    break;
                 }
                 let footprint = super::row_footprint::footprint(
                     columns.iter().map(|column| &column[row])
                 );
                 let Some(next_total) = self.retained_bytes.checked_add(footprint)
                     .filter(|&bytes| bytes <= self.max_bytes) else {
-                    self.stopped = true;
-                    return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
+                    self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
+                    break;
                 };
                 let key = match batch.row(row) {
                     Ok(key) => key,
                     Err(error) => {
-                        self.stopped = true;
-                        return Some(Err(error));
+                        self.pending_error = Some(error);
+                        break;
                     }
                 };
                 self.retained_bytes = next_total;
                 self.unique_keys += 1;
                 self.seen.entry(fingerprint).or_default().push(key);
                 selected.push(row);
+            }
+            // Preserve successful rows when a later key exceeds admission.
+            // Report the terminal error on the next poll without reading more input.
+            if selected.is_empty() {
+                if let Some(error) = self.pending_error.take() {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
             }
             if !selected.is_empty() {
                 if selected.len() == batch.num_rows() {
@@ -280,6 +294,25 @@ mod union_distinct_stream_feature_tests {
             [Ok(batch)].into_iter(), std::iter::empty(), schema,
             QueryControl::default(), 1, 4096
         ).unwrap();
+        assert_eq!(union.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1)]]);
+        assert!(union.next().unwrap().is_err());
+        assert!(union.next().is_none());
+    }
+
+    #[test]
+    fn preserves_two_admitted_rows_before_the_third_is_rejected() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(4)], vec![Value::Integer(5)],
+            vec![Value::Integer(6)],
+        ]).unwrap();
+        let mut union = UnionDistinctStream::new(
+            [Ok(batch)].into_iter(), std::iter::empty(), schema,
+            QueryControl::default(), 2, 4096,
+        ).unwrap();
+        assert_eq!(union.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(4)], vec![Value::Integer(5)]]);
         assert!(union.next().unwrap().is_err());
         assert!(union.next().is_none());
     }
