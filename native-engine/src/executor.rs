@@ -121,6 +121,24 @@ fn execute_inner(
             }
         }
         Plan::Sort { input, keys } => sort::sort_owned(descend(input)?, keys)?,
+        Plan::Limit { input, offset, count }
+            if matches!(input.as_ref(), Plan::Project { input: source, .. }
+                if matches!(source.as_ref(), Plan::Scan { .. })) => {
+            let Plan::Project { input: source, selections } = input.as_ref() else {
+                unreachable!("checked direct projection plan");
+            };
+            let Plan::Scan { table } = source.as_ref() else {
+                unreachable!("checked direct scan plan");
+            };
+            match project::project_columns_window(
+                catalog.get(table)?, selections, *offset, *count,
+            )? {
+                Some(result) => result,
+                // Computed projections can error even on rows beyond LIMIT.
+                None => limit::limit_owned(descend(input)?, *offset, *count)?,
+            }
+        },
+
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
             && matches!(input.as_ref(), Plan::Sort { .. }) => {
             let Plan::Sort { input: source, keys } = input.as_ref() else {
@@ -134,17 +152,6 @@ fn execute_inner(
             // A LIMIT over a scan must not materialize and budget the whole input.
             if let Plan::Scan { table } = input.as_ref() {
                 limit::limit(catalog.get(table)?, *offset, *count)?
-            } else if let Plan::Project { input: source, selections } = input.as_ref() {
-                if let Plan::Scan { table } = source.as_ref() {
-                    match project::project_columns_window(
-                        catalog.get(table)?, selections, *offset, *count,
-                    )? {
-                        Some(output) => output,
-                        None => limit::limit_owned(descend(input)?, *offset, *count)?,
-                    }
-                } else {
-                    limit::limit_owned(descend(input)?, *offset, *count)?
-                }
             } else {
                 limit::limit_owned(descend(input)?, *offset, *count)?
             }
@@ -525,7 +532,6 @@ mod owned_intermediate_limit_execution_tests {
         assert!(execute(&filtered.limit(usize::MAX, Some(1)), &catalog).is_err());
     }
 }
-
 
 #[cfg(test)]
 mod projected_scan_limit_budget_tests {
