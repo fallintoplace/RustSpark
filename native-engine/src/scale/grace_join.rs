@@ -574,7 +574,7 @@ mod owned_first_grace_build_batch_tests {
         let second = Batch::from_rows(schema.clone(), vec![
             vec![Value::Text("tail".into())],
         ]).unwrap();
-        let file = OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
         let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
         writer.write_batch(&Batch::empty(schema.clone())).unwrap();
         writer.write_batch(&first).unwrap();
