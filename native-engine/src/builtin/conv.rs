@@ -39,8 +39,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if !(2..=36).contains(&from_base) || !(2..=36).contains(&unsigned_base) {
         return Ok(Value::Null);
     }
+    if source.len() > 128 { return Err(Error::Execution("CONV input exceeds 128-byte budget".into())); }
     let raw = source.trim();
-    if raw.len() > 128 { return Err(Error::Execution("CONV input exceeds 128-byte budget".into())); }
     let (negative, raw) = match raw.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, raw.strip_prefix('+').unwrap_or(raw)),
@@ -70,6 +70,11 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("18446744073709551615".into()), Value::Integer(10), Value::Integer(2)]).unwrap(),
             Value::Text("1".repeat(64)));
         assert!(evaluate(&[Value::Text("9".into()), Value::Integer(2), Value::Integer(10)]).is_err());
+        // Leading whitespace must not bypass the source byte budget.
+        assert!(evaluate(&[Value::Text(format!("{}FF", " ".repeat(129))),
+            Value::Integer(16), Value::Integer(10)]).is_err());
+        assert_eq!(evaluate(&[Value::Text(" FF ".into()), Value::Integer(16),
+            Value::Integer(10)]).unwrap(), Value::Text("255".into()));
         assert_eq!(evaluate(&[Value::Null, Value::Integer(10), Value::Integer(2)]).unwrap(), Value::Null);
     }
 }
