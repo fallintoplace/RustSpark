@@ -27,7 +27,11 @@ pub fn limit_owned(batch: Batch, offset: usize, count: Option<usize>) -> Result<
     if offset == 0 && count.is_none_or(|count| count >= batch.num_rows()) {
         return Ok(batch);
     }
-    limit(&batch, offset, count)
+    let start = offset.min(batch.num_rows());
+    let end = count.map_or(batch.num_rows(), |count| {
+        start.saturating_add(count).min(batch.num_rows())
+    });
+    batch.slice_rows_owned(start, end)
 }
 
 #[cfg(test)]
@@ -97,5 +101,31 @@ mod native_owned_limit_tests {
                 limit(&batch, window.0, window.1).unwrap());
         }
         assert!(limit_owned(batch, usize::MAX, Some(1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod move_owned_limit_payload_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn selecting_partial_window_moves_original_text_payload() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Null],
+            vec![Value::Text("payload".repeat(2048))],
+            vec![Value::Text("tail".into())],
+        ]).unwrap();
+        let ptr = match input.value(1, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let limited = limit_owned(input, 1, Some(1)).unwrap();
+        assert_eq!(limited.num_rows(), 1);
+        assert_eq!(match limited.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
     }
 }

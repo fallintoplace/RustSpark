@@ -253,6 +253,60 @@ impl Batch {
     }
 }
 
+
+impl Batch {
+    /// Slice an owned batch while moving values instead of cloning TEXT cells.
+    /// The full-range case returns the original column vectors unchanged.
+    pub fn slice_rows_owned(self, start: usize, end: usize) -> Result<Self> {
+        if start > end || end > self.rows {
+            return Err(Error::Execution("invalid batch row slice".into()));
+        }
+        if start == 0 && end == self.rows {
+            return Ok(self);
+        }
+        let columns = self.columns.into_iter().map(|source| {
+            source.into_iter().skip(start).take(end - start).collect()
+        }).collect();
+        Ok(Self { schema: self.schema, columns, rows: end - start })
+    }
+}
+
+#[cfg(test)]
+mod owned_batch_slices {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn partial_slice_moves_text_allocations_and_keeps_nulls() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Null],
+            vec![Value::Text("hello🙂".repeat(1024))],
+            vec![Value::Text("last".into())],
+        ]).unwrap();
+        let ptr = match input.value(1, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let expected = input.slice_rows(1, 2).unwrap();
+        let owned = input.slice_rows_owned(1, 2).unwrap();
+        assert_eq!(owned, expected);
+        assert_eq!(match owned.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn validates_ranges_and_keeps_zero_width_cardinality() {
+        let input = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
+        assert_eq!(input.clone().slice_rows_owned(2, 4).unwrap().num_rows(), 2);
+        assert_eq!(input.clone().slice_rows_owned(0, 5).unwrap(), input);
+        assert!(input.clone().slice_rows_owned(4, 2).is_err());
+        assert!(input.slice_rows_owned(4, 6).is_err());
+    }
+}
+
 #[cfg(test)]
 mod batch_slicing_feature_tests {
     use super::*;

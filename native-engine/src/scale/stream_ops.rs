@@ -141,7 +141,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
             if skipped == 0 && count == batch.num_rows() {
                 return Some(Ok(batch));
             }
-            return Some(batch.slice_rows(skipped, skipped + count));
+            return Some(batch.slice_rows_owned(skipped, skipped + count));
         }
     }
 }
