@@ -11,6 +11,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Boolean(true)); }
+    if pattern == "." {
+        // A non-newline UTF-8 byte implies a non-newline Unicode scalar.
+        return Ok(Value::Boolean(text.bytes().any(|byte| byte != b'\n')));
+    }
     // Plain ASCII identifiers have no regex metacharacters.
     if pattern.len() <= 4096 && pattern.bytes().all(|byte|
         byte.is_ascii_alphanumeric() || byte == b'_') {
@@ -98,5 +102,23 @@ mod literal_regex_like_tests {
                     Value::Boolean(regex_support::compile(pattern).unwrap().is_match(text)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dot_pattern_like_tests {
+    use super::*;
+
+    #[test]
+    fn single_dot_matches_non_newline_scalars_like_regex() {
+        for text in ["", "\n", "\n\n", "🙂", "\né", "\r\n", "a\nb"] {
+            let expected = regex_support::compile(".").unwrap().is_match(text);
+            assert_eq!(
+                evaluate(&[Value::Text(text.into()), Value::Text(".".into())]).unwrap(),
+                Value::Boolean(expected)
+            );
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
+            Value::Null);
     }
 }
