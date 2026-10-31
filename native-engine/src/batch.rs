@@ -100,6 +100,12 @@ impl Batch {
         Ok(Self { schema, ..self })
     }
 
+    /// Consume validated column vectors without cloning their scalar payloads.
+    /// Used by owned streaming operators that have already checked schemas.
+    pub(crate) fn into_columns(self) -> Vec<Vec<Value>> {
+        self.columns
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
