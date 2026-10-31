@@ -52,14 +52,17 @@ fn digit(c: u8) -> Result<u8> {
 fn unbase64_utf8(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let input = text.as_bytes();
-    if input.len() % 4 != 0 || input.len() > MAX_BYTES.div_ceil(3) * 4 {
-        return Err(Error::Parse("invalid or oversized BASE64 length".into()));
+    if input.len() > MAX_BYTES.div_ceil(3) * 4 {
+        return Err(Error::Execution("UNBASE64_UTF8 input exceeds byte budget".into()));
+    }
+    if input.len() % 4 != 0 {
+        return Err(Error::Parse("invalid BASE64 length".into()));
     }
     let padding = usize::from(input.last() == Some(&b'='))
         + usize::from(input.get(input.len().saturating_sub(2)) == Some(&b'='));
     let decoded_len = input.len() / 4 * 3 - padding;
     if decoded_len > MAX_BYTES {
-        return Err(Error::Parse("decoded BASE64 exceeds byte limit".into()));
+        return Err(Error::Execution("decoded BASE64 exceeds byte budget".into()));
     }
     let mut bytes = Vec::with_capacity(decoded_len);
     let chunks = input.len() / 4;
@@ -127,7 +130,11 @@ mod decoded_output_budget_tests {
     #[test]
     fn checks_decoded_size_instead_of_only_encoded_size() {
         let too_large = "AAAA".repeat(MAX_BYTES.div_ceil(3));
-        assert!(unbase64_utf8(&[Value::Text(too_large)]).is_err());
+        assert!(matches!(unbase64_utf8(&[Value::Text(too_large)]), Err(Error::Execution(_))));
+        assert!(matches!(
+            unbase64_utf8(&[Value::Text("AAAA".repeat(MAX_BYTES.div_ceil(3) + 1))]),
+            Err(Error::Execution(_)),
+        ));
         let largest = "a".repeat(MAX_BYTES);
         let encoded = base64(&[Value::Text(largest.clone())]).unwrap();
         assert_eq!(unbase64_utf8(&[encoded]).unwrap(), Value::Text(largest));
