@@ -23,6 +23,20 @@ impl Hasher for PartitionHasher {
             self.0 = self.0.wrapping_mul(0x100000001b3);
         }
     }
+
+    // Hash::hash invokes typed Hasher methods for numeric keys. The default
+    // methods use native-endian bytes, which can send the same SQL key to
+    // different shuffle buckets on mixed-endian worker architectures.
+    fn write_u16(&mut self, value: u16) { self.write(&value.to_le_bytes()); }
+    fn write_u32(&mut self, value: u32) { self.write(&value.to_le_bytes()); }
+    fn write_u64(&mut self, value: u64) { self.write(&value.to_le_bytes()); }
+    fn write_u128(&mut self, value: u128) { self.write(&value.to_le_bytes()); }
+    fn write_usize(&mut self, value: usize) { self.write(&(value as u64).to_le_bytes()); }
+    fn write_i16(&mut self, value: i16) { self.write(&value.to_le_bytes()); }
+    fn write_i32(&mut self, value: i32) { self.write(&value.to_le_bytes()); }
+    fn write_i64(&mut self, value: i64) { self.write(&value.to_le_bytes()); }
+    fn write_i128(&mut self, value: i128) { self.write(&value.to_le_bytes()); }
+    fn write_isize(&mut self, value: isize) { self.write(&(value as i64).to_le_bytes()); }
 }
 
 pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
@@ -449,5 +463,39 @@ mod partition_hasher_state_regressions {
         fragments.write(&[]);
         fragments.write(&value[15..]);
         assert_eq!(fragments.finish(), whole.finish());
+    }
+}
+
+#[cfg(test)]
+mod portable_typed_partition_hash_tests {
+    use super::*;
+
+    #[test]
+    fn integer_hash_matches_canonical_little_endian_bytes() {
+        let value = 0x0123_4567_89ab_cdef_u64;
+        let mut typed = PartitionHasher::default();
+        value.hash(&mut typed);
+        let mut bytes = PartitionHasher::default();
+        bytes.write(&value.to_le_bytes());
+        assert_eq!(typed.finish(), bytes.finish());
+
+        let mut typed = PartitionHasher::default();
+        (-0x123456_i64).hash(&mut typed);
+        let mut bytes = PartitionHasher::default();
+        bytes.write(&(-0x123456_i64).to_le_bytes());
+        assert_eq!(typed.finish(), bytes.finish());
+    }
+
+    #[test]
+    fn hash_is_stable_across_numeric_write_widths_and_repeated_calls() {
+        let mut typed = PartitionHasher::default();
+        typed.write_u16(0x0102);
+        typed.write_i32(-3);
+        typed.write_usize(17);
+        let mut bytes = PartitionHasher::default();
+        bytes.write(&0x0102_u16.to_le_bytes());
+        bytes.write(&(-3_i32).to_le_bytes());
+        bytes.write(&(17_u64).to_le_bytes());
+        assert_eq!(typed.finish(), bytes.finish());
     }
 }
