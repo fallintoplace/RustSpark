@@ -39,12 +39,28 @@ fn hex(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(String::from_utf8(output)
         .expect("HEX pairs contain only ASCII bytes")))
 }
+const UNHEX_DIGITS: [u8; 256] = {
+    let mut table = [u8::MAX; 256];
+    let mut digit = 0_u8;
+    while digit < 10 {
+        table[(b'0' + digit) as usize] = digit;
+        digit += 1;
+    }
+    let mut digit = 0_u8;
+    while digit < 6 {
+        table[(b'A' + digit) as usize] = digit + 10;
+        table[(b'a' + digit) as usize] = digit + 10;
+        digit += 1;
+    }
+    table
+};
+
 fn decode_hex_digit(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::Parse("invalid hexadecimal digit".into())),
+    let digit = UNHEX_DIGITS[usize::from(byte)];
+    if digit == u8::MAX {
+        Err(Error::Parse("invalid hexadecimal digit".into()))
+    } else {
+        Ok(digit)
     }
 }
 
@@ -192,5 +208,29 @@ mod bulk_hex_encoding_regressions {
         let encoded = hex(&[wide.clone()]).unwrap();
         assert_eq!(unhex_utf8(&[encoded]).unwrap(), wide);
         assert_eq!(hex(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod unhex_nibble_table_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_every_ascii_byte_and_mixed_case_hex() {
+        for byte in 0_u8..=127 {
+            let encoded = format!("{byte:02X}");
+            assert_eq!(
+                unhex_utf8(&[Value::Text(encoded)]).unwrap(),
+                Value::Text(char::from(byte).to_string())
+            );
+        }
+        assert_eq!(
+            unhex_utf8(&[Value::Text("c3A9F09f9982".into())]).unwrap(),
+            Value::Text("é🙂".into())
+        );
+        for invalid in ["0g", "G0", "_0", "é0", "0🙂"] {
+            assert!(unhex_utf8(&[Value::Text(invalid.into())]).is_err());
+        }
+        assert_eq!(unhex_utf8(&[Value::Null]).unwrap(), Value::Null);
     }
 }
