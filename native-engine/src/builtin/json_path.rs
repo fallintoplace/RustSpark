@@ -9,6 +9,29 @@ pub(super) fn parse(input: &str) -> Result<serde_json::Value> {
         .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))
 }
 
+struct JsonOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for JsonOutput {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("native JSON output exceeds byte budget"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+pub(super) fn serialize_bounded(value: &serde_json::Value, limit: usize) -> Result<String> {
+    let mut writer = JsonOutput { bytes: Vec::new(), limit };
+    serde_json::to_writer(&mut writer, value)
+        .map_err(|error| Error::Execution(format!("native JSON serialization failed: {error}")))?;
+    Ok(String::from_utf8(writer.bytes).expect("serde_json writes UTF-8"))
+}
+
 /// Support explicit, bounded $.field[0].nested JSON paths.
 pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
     -> Result<Option<&'a serde_json::Value>>
@@ -132,5 +155,17 @@ mod borrowed_json_quoted_key_tests {
         assert_eq!(lookup(Some(&doc), r#"$.root["é🙂"]"#).unwrap(), Some(&serde_json::json!(2)));
         assert_eq!(lookup(Some(&doc), "$.root['missing']").unwrap(), None);
         assert_eq!(lookup(Some(&doc), r#"$.root['x\'k']"#).unwrap(), Some(&serde_json::json!(3)));
+    }
+}
+
+#[cfg(test)]
+mod json_output_budget_tests {
+    use super::*;
+    #[test]
+    fn serializes_exact_json_without_exceeding_byte_budget() {
+        let value = serde_json::json!({"hello": [1, 2]});
+        let expected = value.to_string();
+        assert_eq!(serialize_bounded(&value, expected.len()).unwrap(), expected);
+        assert!(matches!(serialize_bounded(&value, expected.len() - 1), Err(Error::Execution(_))));
     }
 }

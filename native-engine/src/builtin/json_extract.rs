@@ -10,8 +10,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         path
     } else { "$" };
     let doc = json_path::parse(text)?;
-    Ok(json_path::lookup(Some(&doc), path)?
-        .map_or(Value::Null, |value| Value::Text(value.to_string())))
+    match json_path::lookup(Some(&doc), path)? {
+        Some(value) => Ok(Value::Text(json_path::serialize_bounded(value, 16 * 1024 * 1024)?)),
+        None => Ok(Value::Null),
+    }
 }
 
 
@@ -27,9 +29,11 @@ fn json_array_at(args: &[Value]) -> Result<Value> {
     let Some(index) = super::integer(&args[1])? else { return Ok(Value::Null); };
     let doc = json_path::parse(text)?;
     match doc {
-        serde_json::Value::Array(items) => Ok(usize::try_from(index).ok()
-            .and_then(|offset| items.get(offset))
-            .map_or(Value::Null, |item| Value::Text(item.to_string()))),
+        serde_json::Value::Array(items) => match usize::try_from(index).ok()
+            .and_then(|offset| items.get(offset)) {
+            Some(item) => Ok(Value::Text(json_path::serialize_bounded(item, 16 * 1024 * 1024)?)),
+            None => Ok(Value::Null),
+        },
         _ => Err(crate::Error::Type("JSON_ARRAY_AT requires an array".into())),
     }
 }
