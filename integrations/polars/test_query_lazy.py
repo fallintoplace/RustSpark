@@ -1,4 +1,6 @@
 import subprocess
+import os
+import signal
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -64,17 +66,24 @@ class PolarsCommandTests(unittest.TestCase):
                     pass
         fake_pl = SimpleNamespace(scan_ipc=lambda path: "lazy frame")
         with patch.dict(sys.modules, {"polars": fake_pl}), \
-             patch("query_lazy.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+             patch("query_lazy.subprocess.Popen") as spawn:
+            proc = spawn.return_value
+            proc.wait.return_value = 0
+            proc.poll.return_value = 0
             with rustspark_lazy_frame("SELECT 1", process_timeout=3) as frame:
                 self.assertEqual(frame, "lazy frame")
-            self.assertEqual(run.call_args.kwargs["timeout"], 3)
-            self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
-            self.assertNotEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
-            run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
-            with self.assertRaisesRegex(RuntimeError, "process timeout"):
-                with rustspark_lazy_frame("SELECT 1", process_timeout=3):
-                    pass
+            self.assertEqual(proc.wait.call_args.kwargs["timeout"], 3)
+            self.assertEqual(spawn.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertNotEqual(spawn.call_args.kwargs["stderr"], subprocess.PIPE)
+            self.assertEqual(spawn.call_args.kwargs["start_new_session"], os.name == "posix")
+            proc.wait.side_effect = [subprocess.TimeoutExpired("rustspark", 3), -9]
+            proc.poll.return_value = None
+            with patch("query_lazy.os.killpg") as kill_group:
+                with self.assertRaisesRegex(RuntimeError, "process timeout"):
+                    with rustspark_lazy_frame("SELECT 1", process_timeout=3):
+                        pass
+                if os.name == "posix":
+                    kill_group.assert_called_once_with(proc.pid, signal.SIGKILL)
 
     def test_named_json_tables_are_forwarded_and_mixed_sources_rejected(self):
         command = build_command("SELECT * FROM events", Path("out.arrow"),
@@ -93,16 +102,26 @@ class BoundedPolarsErrorTests(unittest.TestCase):
         def backend_failure(command, *, stderr, **kwargs):
             self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
             stderr.write(b"noisy log" * 20_000 + b"\\nFINAL QUERY ERROR")
-            return subprocess.CompletedProcess(command, 1)
+            return SimpleNamespace(wait=lambda timeout=None: 1)
 
         with patch.dict(sys.modules, {"polars": SimpleNamespace()}), patch(
-            "query_lazy.subprocess.run", side_effect=backend_failure
+            "query_lazy.subprocess.Popen", side_effect=backend_failure
         ):
             with self.assertRaisesRegex(RuntimeError, "FINAL QUERY ERROR") as raised:
                 with rustspark_lazy_frame("SELECT 1"):
                     pass
         self.assertNotIn("noisy log" * 8_000, str(raised.exception))
 
+
+
+class FailedPolarsExportStartupTests(unittest.TestCase):
+    def test_missing_binary_is_a_readable_runtime_error(self):
+        with patch.dict(sys.modules, {"polars": SimpleNamespace()}), patch(
+            "query_lazy.subprocess.Popen", side_effect=FileNotFoundError("no executable")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Unable to start"):
+                with rustspark_lazy_frame("SELECT 1"):
+                    pass
 
 if __name__ == "__main__":
     unittest.main()
