@@ -26,11 +26,36 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
     } else { 0 };
     let suffix = &text[start..];
-    // Literal ASCII regexes need no compilation or captures. A dollar
-    // in the replacement must still use the regex capture-expansion path.
+
+    // Literal ASCII patterns do not need regex compilation or captures.
+    // A dollar in replacement requires the regex capture-expansion path.
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
-        !replacement.contains('
+        !replacement.contains('$') {
+        let matches = suffix.match_indices(pattern).count();
+        let removed = matches.checked_mul(pattern.len())
+            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
+        let output_bytes = start.checked_add(suffix.len() - removed)
+            .and_then(|base| matches.checked_mul(replacement.len())
+                .and_then(|inserted| base.checked_add(inserted)))
+            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
+        if output_bytes > 16 * 1024 * 1024 {
+            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+        }
+        let mut result = String::with_capacity(output_bytes);
+        result.push_str(&text[..start]);
+        let mut consumed = 0usize;
+        for (index, _) in suffix.match_indices(pattern) {
+            result.push_str(&suffix[consumed..index]);
+            result.push_str(replacement);
+            consumed = index + pattern.len();
+        }
+        result.push_str(&suffix[consumed..]);
+        return Ok(Value::Text(result));
+    }
+
+    let compiled = regex_support::compile(pattern)?;
+    let mut result = String::with_capacity(text.len());
     result.push_str(&text[..start]);
     let mut consumed = 0;
     let mut expanded = String::new();
