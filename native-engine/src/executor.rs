@@ -161,7 +161,7 @@ fn execute_inner(
         Plan::CrossJoin { left, right } => join::cross_join_with_max_rows(
             &descend(left)?, &descend(right)?, options.max_output_rows
         )?,
-        Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
+        Plan::UnionAll { left, right } => union::union_all_owned(descend(left)?, descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
         Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
         Plan::ExceptAll { left, right } => set_ops::except_all(&descend(left)?, &descend(right)?)?,
