@@ -46,7 +46,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             return Err(Error::Execution("query plan exceeds maximum depth".into()));
         }
         match node {
-            Plan::OneRow | Plan::Scan { .. } => {}
+            Plan::OneRow | Plan::Scan { .. } | Plan::Values { .. } => {}
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
@@ -95,6 +95,7 @@ fn execute_inner(
     guard.check()?;
     let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
+        Plan::Values { batch } => batch.clone(),
         Plan::OneRow => Batch::new_with_row_count(Schema::new(vec![])?, vec![], 1)?,
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => {

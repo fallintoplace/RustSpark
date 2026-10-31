@@ -1,12 +1,13 @@
 use crate::{
     aggregate::{AggregateItem, AggregateOp},
+    batch::Batch,
     expr::{BinaryOp, Expr},
     join::JoinKind,
     lexer::{Token, tokenize},
     plan::Plan,
     project::Selection,
     scalar::Value,
-    schema::DataType,
+    schema::{DataType, Field, Schema},
     sort::SortKey,
     Error,
     Result,
@@ -784,6 +785,78 @@ impl Parser {
 
 
 
+
+    fn values_relation(&mut self) -> Result<Plan> {
+        self.expect_word("VALUES")?;
+        const MAX_ROWS: usize = 4096;
+        const MAX_COLUMNS: usize = 256;
+        let empty = Schema::new(vec![])?;
+        let singleton = Batch::new_with_row_count(empty.clone(), vec![], 1)?;
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        loop {
+            if rows.len() >= MAX_ROWS {
+                return Err(Error::Parse("VALUES row limit exceeded".into()));
+            }
+            self.expect_symbol('(')?;
+            let mut row = Vec::new();
+            loop {
+                if row.len() >= MAX_COLUMNS {
+                    return Err(Error::Parse("VALUES column limit exceeded".into()));
+                }
+                let expression = self.expression(0)?;
+                // Validate with no columns: inline expressions cannot reference a table.
+                expression.output_type(&empty)?;
+                row.push(expression.evaluate(&singleton, 0)?);
+                if !self.take_symbol(',') { break; }
+            }
+            self.expect_symbol(')')?;
+            if let Some(first) = rows.first() {
+                if row.len() != first.len() {
+                    return Err(Error::Schema("VALUES row column counts differ".into()));
+                }
+            }
+            rows.push(row);
+            if !self.take_symbol(',') { break; }
+        }
+        let columns = rows[0].len();
+        let mut kinds = Vec::with_capacity(columns);
+        let mut nullable = Vec::with_capacity(columns);
+        for column in 0..columns {
+            let mut kind: Option<DataType> = None;
+            let mut nulls = false;
+            for row in &rows {
+                let next = match &row[column] {
+                    Value::Null => { nulls = true; continue; },
+                    Value::Boolean(_) => DataType::Boolean,
+                    Value::Integer(_) => DataType::Integer,
+                    Value::Float(_) => DataType::Float,
+                    Value::Text(_) => DataType::Text,
+                };
+                kind = match kind {
+                    None => Some(next),
+                    Some(previous) if previous == next => Some(previous),
+                    Some(DataType::Integer) if next == DataType::Float => Some(DataType::Float),
+                    Some(DataType::Float) if next == DataType::Integer => Some(DataType::Float),
+                    _ => return Err(Error::Type("VALUES column has incompatible types".into())),
+                };
+            }
+            kinds.push(kind.unwrap_or(DataType::Text));
+            nullable.push(nulls);
+        }
+        let fields = kinds.iter().enumerate().map(|(index, &kind)| {
+            Field::new(format!("col{}", index + 1), kind, nullable[index])
+        }).collect();
+        let schema = Schema::new(fields)?;
+        for row in &mut rows {
+            for (value, &kind) in row.iter_mut().zip(kinds.iter()) {
+                if !kind.accepts(value) {
+                    *value = value.cast_to(kind)?;
+                }
+            }
+        }
+        Ok(Plan::Values { batch: Batch::from_rows(schema, rows)? })
+    }
+
     fn from_relation(&mut self) -> Result<Plan> {
         let mut plan = if self.take_symbol('(') {
             if self.subquery_depth >= 32 {
@@ -795,6 +868,8 @@ impl Parser {
             self.expect_symbol(')')?;
             self.subquery_depth -= 1;
             query
+        } else if self.peek_word("VALUES") {
+            self.values_relation()?
         } else {
             let source = self.identifier()?;
             self.scan_or_cte(source)?
@@ -814,6 +889,8 @@ impl Parser {
                 let source_names = match &plan {
                     Plan::Project { selections, .. } =>
                         selections.iter().map(|selection| selection.alias.clone()).collect::<Vec<_>>(),
+                    Plan::Values { batch } => batch.schema().fields().iter()
+                        .map(|field| field.name.clone()).collect::<Vec<_>>(),
                     _ => return Err(Error::Unsupported(
                         "derived table column aliases require explicit projection".into())),
                 };
@@ -888,7 +965,9 @@ impl Parser {
     }
 
     fn select_with_intersections(&mut self) -> Result<Plan> {
-        let mut plan = self.select_body()?;
+        let mut plan = if self.peek_word("VALUES") {
+            self.values_relation()?
+        } else { self.select_body()? };
         while self.take_word("INTERSECT") {
             let all = self.take_word("ALL");
             if !all { self.take_word("DISTINCT"); }
@@ -1670,5 +1749,48 @@ mod spark_bitwise_operator_sql_tests {
         catalog.register("t", Batch::empty(schema)).unwrap();
         assert!(executor::execute(&parse_sql("SELECT 'x' & 1 FROM t").unwrap(), &catalog).is_err());
         assert!(crate::lexer::tokenize("SELECT 1 || 2, 3 | 4, 5 >>> 2 FROM t").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod spark_inline_values_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    #[test]
+    fn inline_values_are_typed_and_renamed_in_from_and_cte() {
+        let cat = Catalog::new();
+        let run = |query: &str| executor::execute(&parse_sql(query).unwrap(), &cat)
+            .unwrap().rows().unwrap();
+        assert_eq!(run("SELECT id, tag FROM VALUES (1, 'a'), (2, 'b') AS v(id, tag)"),
+            vec![vec![Value::Integer(1), Value::Text("a".into())],
+                 vec![Value::Integer(2), Value::Text("b".into())]]);
+        assert_eq!(run("SELECT col1 FROM VALUES (7), (8)"),
+            vec![vec![Value::Integer(7)], vec![Value::Integer(8)]]);
+        assert_eq!(run("SELECT n FROM (VALUES (3), (4)) AS v(n)"),
+            vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
+        assert_eq!(run("VALUES (1), (2)"), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn values_widen_numeric_columns_and_check_bad_rows() {
+        let cat = Catalog::new();
+        let result = executor::execute(&parse_sql(
+            "SELECT col1, col2 FROM VALUES (1, NULL), (2.5, 'ok')"
+        ).unwrap(), &cat).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Float(1.0), Value::Null],
+            vec![Value::Float(2.5), Value::Text("ok".into())]]);
+        for query in [
+            "VALUES (1, 2), (3)",
+            "VALUES (1), ('x')",
+            "VALUES (unbound)",
+            "SELECT x FROM VALUES (1,2) AS v(x)",
+            "VALUES (1, 2), (3, 4, 5)",
+        ] {
+            let result = parse_sql(query).and_then(|plan| executor::execute(&plan, &cat));
+            assert!(result.is_err(), "{query}");
+        }
     }
 }

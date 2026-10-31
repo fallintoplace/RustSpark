@@ -1,4 +1,5 @@
 use crate::{
+    batch::Batch,
     aggregate::AggregateItem,
     expr::Expr,
     join::JoinKind,
@@ -9,6 +10,8 @@ use crate::{
 /// An owned, DataFusion-independent logical query tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plan {
+    /// A bounded inline relation, with validated native schema and values.
+    Values { batch: Batch },
     /// Spark's one-row, zero-column relation for SELECT without FROM.
     OneRow,
     Scan {
@@ -75,7 +78,7 @@ pub enum Plan {
 impl Plan {
     fn push_children<'a>(&'a self, pending: &mut Vec<&'a Self>) {
         match self {
-            Self::OneRow | Self::Scan { .. } => {}
+            Self::OneRow | Self::Scan { .. } | Self::Values { .. } => {}
             Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::Aggregate { input, .. }
