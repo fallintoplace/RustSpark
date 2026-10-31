@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crate::{
     batch::Batch,
@@ -272,12 +272,27 @@ impl Expr {
                 }
             },
             Self::Binary { left, op, right } => {
-                let left = left.evaluate(batch, row)?;
+                // Comparisons and boolean predicates only inspect their
+                // operands. Borrow direct columns and constants instead of
+                // cloning wide TEXT values for every evaluated row.
+                let left: Cow<'_, Value> = match left.as_ref() {
+                    Expr::Column(name) => Cow::Borrowed(
+                        batch.value(row, batch.schema().column(name)?)?
+                    ),
+                    Expr::Literal(value) => Cow::Borrowed(value),
+                    expr => Cow::Owned(expr.evaluate(batch, row)?),
+                };
                 if (*op == BinaryOp::And && left.as_boolean()? == Some(false))
                     || (*op == BinaryOp::Or && left.as_boolean()? == Some(true)) {
-                    return Ok(left);
+                    return Ok(left.into_owned());
                 }
-                let right = right.evaluate(batch, row)?;
+                let right: Cow<'_, Value> = match right.as_ref() {
+                    Expr::Column(name) => Cow::Borrowed(
+                        batch.value(row, batch.schema().column(name)?)?
+                    ),
+                    Expr::Literal(value) => Cow::Borrowed(value),
+                    expr => Cow::Owned(expr.evaluate(batch, row)?),
+                };
                 evaluate_binary(&left, *op, &right)
             }
         }
@@ -862,5 +877,48 @@ mod streaming_like_matcher_tests {
             .to_string().contains("work budget"));
         assert!(sql_like(&huge, "a%").unwrap());
         assert!(sql_like(&"é🙂".repeat(5_000), "é%🙂").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_binary_operands_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn wide_text_comparisons_keep_null_and_numeric_semantics() {
+        let very_large = "🙂".repeat(70_000);
+        let schema = Schema::new(vec![
+            Field::new("left", DataType::Text, true),
+            Field::new("right", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(very_large.clone()), Value::Text(very_large.clone()), Value::Integer(4)],
+            vec![Value::Text("ab".into()), Value::Text("bc".into()), Value::Integer(0)],
+            vec![Value::Null, Value::Text("bc".into()), Value::Integer(2)],
+        ]).unwrap();
+        let equals = Expr::binary(
+            Expr::Column("left".into()), BinaryOp::Equal,
+            Expr::Column("right".into()),
+        );
+        assert_eq!(equals.evaluate(&batch, 0).unwrap(), Value::Boolean(true));
+        assert_eq!(equals.evaluate(&batch, 1).unwrap(), Value::Boolean(false));
+        assert_eq!(equals.evaluate(&batch, 2).unwrap(), Value::Null);
+        let less = Expr::binary(
+            Expr::Column("left".into()), BinaryOp::Less,
+            Expr::Column("right".into()),
+        );
+        assert_eq!(less.evaluate(&batch, 1).unwrap(), Value::Boolean(true));
+        let sum = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(3)),
+        );
+        assert_eq!(sum.evaluate(&batch, 0).unwrap(), Value::Integer(7));
+        let short_circuit = Expr::binary(
+            Expr::Literal(Value::Boolean(false)), BinaryOp::And,
+            Expr::binary(Expr::Literal(Value::Integer(1)), BinaryOp::Divide,
+                Expr::Literal(Value::Integer(0))),
+        );
+        assert_eq!(short_circuit.evaluate(&batch, 0).unwrap(), Value::Boolean(false));
     }
 }
