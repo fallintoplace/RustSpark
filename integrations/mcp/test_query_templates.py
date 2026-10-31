@@ -52,6 +52,11 @@ class TemplatesTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_query_rows(text)
 
+    def test_deeply_nested_json_result_has_a_bounded_failure(self):
+        deep = '[{"v":' + "[" * 2000 + "0" + "]" * 2000 + "}]"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            parse_query_rows(deep)
+
     def test_mixed_type_parameter_keys_are_rejected_before_sorting(self):
         for invalid in (None, 3):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "parameter name"):
