@@ -32,25 +32,27 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
         !replacement.contains('$') {
-        let matches = suffix.match_indices(pattern).count();
-        let removed = matches.checked_mul(pattern.len())
-            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
-        let output_bytes = start.checked_add(suffix.len() - removed)
-            .and_then(|base| matches.checked_mul(replacement.len())
-                .and_then(|inserted| base.checked_add(inserted)))
-            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
-        if output_bytes > 16 * 1024 * 1024 {
-            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-        }
-        let mut result = String::with_capacity(output_bytes);
+        const LIMIT: usize = 16 * 1024 * 1024;
+        let mut result = String::with_capacity(text.len());
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
         for (index, _) in suffix.match_indices(pattern) {
-            result.push_str(&suffix[consumed..index]);
+            let unchanged = &suffix[consumed..index];
+            if result.len().checked_add(unchanged.len())
+                .and_then(|len| len.checked_add(replacement.len()))
+                .is_none_or(|len| len > LIMIT) {
+                return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+            }
+            result.push_str(unchanged);
             result.push_str(replacement);
             consumed = index + pattern.len();
         }
-        result.push_str(&suffix[consumed..]);
+        let remaining = &suffix[consumed..];
+        if result.len().checked_add(remaining.len())
+            .is_none_or(|len| len > LIMIT) {
+            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+        }
+        result.push_str(remaining);
         return Ok(Value::Text(result));
     }
 
@@ -210,5 +212,38 @@ mod literal_regexp_replace_fast_path_tests {
             Value::Text("z".repeat(17)),
         ];
         assert!(matches!(evaluate(&args), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod single_pass_literal_replace_regressions {
+    use super::*;
+
+    #[test]
+    fn literal_path_matches_regex_for_overlapping_and_unicode_inputs() {
+        for (source, pattern, replacement) in [
+            ("aaaaa", "aa", "X"),
+            ("é🙂ab-éab", "ab", "界"),
+            ("no matches", "xyz", "🙂"),
+            ("hello_hello", "hello", ""),
+        ] {
+            let expected = regex_support::compile(pattern).unwrap()
+                .replace_all(source, replacement).to_string();
+            assert_eq!(evaluate(&[Value::Text(source.into()),
+                Value::Text(pattern.into()), Value::Text(replacement.into())]).unwrap(),
+                Value::Text(expected));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("éab🙂ab".into()), Value::Text("ab".into()),
+            Value::Text("x".into()), Value::Integer(4),
+        ]).unwrap(), Value::Text("éab🙂x".into()));
+    }
+
+    #[test]
+    fn incremental_growth_still_rejects_oversized_output() {
+        assert!(matches!(evaluate(&[
+            Value::Text("a".repeat(1_000_000)), Value::Text("a".into()),
+            Value::Text("z".repeat(17)),
+        ]), Err(Error::Execution(_))));
     }
 }
