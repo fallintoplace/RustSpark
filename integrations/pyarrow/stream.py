@@ -18,6 +18,8 @@ def add_named_inputs(command, flag, tables):
         if not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None:
             raise ValueError(f"Invalid SQL table name: {name!r}")
     for name, path in sorted(tables.items()):
+        if not isinstance(path, (str, os.PathLike)):
+            raise ValueError("Named input paths must be text paths")
         file_path = os.fspath(path)
         if not isinstance(file_path, str) or not file_path:
             raise ValueError("Named input paths must be nonempty text paths")
