@@ -1,7 +1,7 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
-use serde::{Deserialize, de::{IgnoredAny, SeqAccess, Visitor}};
-use std::fmt;
+use serde::{Deserialize, de::{IgnoredAny, MapAccess, SeqAccess, Visitor}};
+use std::{collections::HashSet, fmt};
 
 struct RootArrayLength(usize);
 
@@ -27,6 +27,37 @@ impl<'de> Deserialize<'de> for RootArrayLength {
             }
         }
         deserializer.deserialize_seq(Counter)
+    }
+}
+
+// Count unique root object keys, matching serde_json::Map's overwrite
+// behavior for duplicate keys, without retaining nested JSON value trees.
+struct RootObjectSize(usize);
+
+impl<'de> Deserialize<'de> for RootObjectSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct Counter;
+        impl<'de> Visitor<'de> for Counter {
+            type Value = RootObjectSize;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                let mut names = HashSet::new();
+                while let Some(name) = map.next_key::<String>()? {
+                    names.insert(name);
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(RootObjectSize(names.len()))
+            }
+        }
+        deserializer.deserialize_map(Counter)
     }
 }
 
@@ -75,6 +106,27 @@ fn json_size_type(types: &[DataType]) -> Result<DataType> {
 }
 fn json_size(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    if text.trim_start().starts_with('[') {
+        // JSON_SIZE of a root array needs its element count, not a full
+        // serde_json::Value tree. Validate the entire document as we count.
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let count = RootArrayLength::deserialize(&mut deserializer)
+            .and_then(|result| deserializer.end().map(|()| result.0))
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Integer(i64::try_from(count)
+            .map_err(|_| Error::Execution("JSON_SIZE overflow".into()))?));
+    }
+    if text.trim_start().starts_with('{') {
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let count = RootObjectSize::deserialize(&mut deserializer)
+            .and_then(|size| deserializer.end().map(|()| size.0))
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Integer(i64::try_from(count)
+            .map_err(|_| Error::Execution("JSON_SIZE overflow".into()))?));
+    }
     let doc = json_path::parse(text)?;
     let count = match doc {
         serde_json::Value::Array(items) => items.len(),
@@ -154,5 +206,72 @@ mod root_array_streaming_length_tests {
         assert_eq!(length(r#"{"nested":[1,2,3]}"#, Some("$.nested")).unwrap(),
             Value::Integer(3));
         assert_eq!(length("null", None).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streaming_root_json_size_tests {
+    use super::*;
+
+    #[test]
+    fn large_root_arrays_match_nested_and_scalar_size_rules() {
+        let items = (0..10_000).map(|index| format!(
+            r#"{{"id":{index},"value":[null,true,"é🙂"]}}"#
+        )).collect::<Vec<_>>().join(",");
+        let document = format!("  \n[{items}] \t");
+        assert_eq!(json_size(&[Value::Text(document)]).unwrap(),
+            Value::Integer(10_000));
+        for (document, expected) in [
+            ("[]", 0), ("[{},[],null,42]", 4),
+            (r#"{"a":[1,2],"b":false}"#, 2), ("null", 0),
+            ("false", 1), ("42", 1),
+        ] {
+            assert_eq!(json_size(&[Value::Text(document.into())]).unwrap(),
+                Value::Integer(expected));
+        }
+        assert_eq!(json_size(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn malformed_suffix_and_oversized_input_still_fail() {
+        for invalid in ["[1,2", "[1,,2]", "[1] trailing", "[1] [2]"] {
+            assert!(json_size(&[Value::Text(invalid.into())]).is_err(),
+                "{invalid}");
+        }
+        assert!(matches!(
+            json_size(&[Value::Text(format!("[{}]", " ".repeat(16 * 1024 * 1024)))]),
+            Err(Error::Execution(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod streaming_json_size_tests {
+    use super::*;
+
+    #[test]
+    fn counts_wide_roots_without_materializing_nested_values() {
+        let rows = vec![r#"{"nested":[1,2,{"x":"🙂"}]}"#; 10_000].join(",");
+        assert_eq!(json_size(&[Value::Text(format!("[{rows}]"))]).unwrap(),
+            Value::Integer(10_000));
+        let fields = (0..5_000).map(|n|
+            format!(r#""col{n}":{{"nested":[1,true,null]}}"#)
+        ).collect::<Vec<_>>().join(",");
+        assert_eq!(json_size(&[Value::Text(format!("{{{fields}}}"))]).unwrap(),
+            Value::Integer(5_000));
+    }
+
+    #[test]
+    fn duplicates_and_malformed_tails_keep_serde_semantics() {
+        assert_eq!(json_size(&[Value::Text(r#"{"a":1,"a":2,"b":3}"#.into())])
+            .unwrap(), Value::Integer(2));
+        for invalid in ["[1,2] 3", r#"{"a":1,"broken":[}"#, "[1,,2]"] {
+            assert!(matches!(json_size(&[Value::Text(invalid.into())]),
+                Err(Error::Execution(_))));
+        }
+        for (text, count) in [("null", 0), ("true", 1), ("17", 1), (r#""é""#, 1)] {
+            assert_eq!(json_size(&[Value::Text(text.into())]).unwrap(),
+                Value::Integer(count));
+        }
     }
 }
