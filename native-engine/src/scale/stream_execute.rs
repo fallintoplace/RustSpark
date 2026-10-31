@@ -159,6 +159,7 @@ struct DistinctOutput {
     retained_bytes: usize,
     max_keys: usize,
     max_bytes: usize,
+    pending_error: Option<Error>,
     stopped: bool,
 }
 
@@ -167,7 +168,7 @@ impl DistinctOutput {
         Self {
             source, control, seen: HashMap::new(), schema: None,
             unique_keys: 0, retained_bytes: 0,
-            max_keys, max_bytes, stopped: false,
+            max_keys, max_bytes, pending_error: None, stopped: false,
         }
     }
 }
@@ -177,6 +178,10 @@ impl Iterator for DistinctOutput {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         loop {
             if let Err(error) = self.control.check() {
                 self.stopped = true;
@@ -247,14 +252,15 @@ impl Iterator for DistinctOutput {
                 let next_total = self.retained_bytes.checked_add(footprint);
                 if self.unique_keys >= self.max_keys ||
                     next_total.is_none_or(|size| size > self.max_bytes) {
-                    self.stopped = true;
-                    return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
+                    self.pending_error = Some(Error::Execution(
+                        "stream DISTINCT memory budget exceeded".into()));
+                    break;
                 }
                 let key = match batch.row(row) {
                     Ok(key) => key,
                     Err(error) => {
-                        self.stopped = true;
-                        return Some(Err(error));
+                        self.pending_error = Some(error);
+                        break;
                     }
                 };
                 self.retained_bytes = next_total.expect("validated DISTINCT memory");
@@ -270,6 +276,10 @@ impl Iterator for DistinctOutput {
                 // Since the input batch is owned, move retained TEXT buffers
                 // into the output rather than cloning every selected cell.
                 return Some(batch.take_sorted_owned(&selected));
+            }
+            if let Some(error) = self.pending_error.take() {
+                self.stopped = true;
+                return Some(Err(error));
             }
         }
     }
@@ -1266,5 +1276,30 @@ mod distinct_schema_drift_tests {
         ).collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(actual.into_iter().flat_map(|b| b.rows().unwrap())
             .collect::<Vec<_>>(), vec![vec![Value::Integer(7)], vec![Value::Integer(8)]]);
+    }
+}
+
+#[cfg(test)]
+mod stream_distinct_deferred_budget_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn valid_prefix_is_returned_before_a_later_key_budget_error() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let source: BatchStream = Box::new(std::iter::once(Ok(batch)));
+        let mut stream = DistinctOutput::new(
+            source, QueryControl::default(), 2, 1024 * 1024);
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }
