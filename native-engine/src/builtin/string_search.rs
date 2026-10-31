@@ -29,6 +29,11 @@ fn split_part(args: &[Value]) -> Result<Value> {
         let result = text.rfind(delimiter).map_or(text, |position| &text[position + delimiter.len()..]);
         return Ok(Value::Text(result.to_owned()));
     }
+    // There cannot be more nonempty-delimiter fields than text bytes + 1.
+    // Skip a linear scan for impossible large positions.
+    if index.unsigned_abs() > u64::try_from(text.len()).unwrap_or(u64::MAX).saturating_add(1) {
+        return Ok(Value::Text(String::new()));
+    }
     let result = if index > 0 {
         usize::try_from(index - 1).ok()
             .and_then(|offset| text.split(delimiter).nth(offset))
@@ -111,6 +116,8 @@ mod tests {
         assert!(split_part(&[Value::Text("x".into()), Value::Text(",".into()), Value::Integer(0)]).is_err());
         assert_eq!(split_part(&[Value::Text("a,b,c".into()), Value::Text(",".into()), Value::Integer(-2)]).unwrap(), Value::Text("b".into()));
         assert_eq!(split_part(&[Value::Text("a,b".into()), Value::Text(",".into()), Value::Integer(i64::MIN)]).unwrap(), Value::Text("".into()));
+        assert_eq!(split_part(&[Value::Text("a,b".into()), Value::Text(",".into()), Value::Integer(i64::MAX)]).unwrap(), Value::Text("".into()));
+        assert_eq!(split_part(&[Value::Text("a,b".into()), Value::Text(",".into()), Value::Integer(3)]).unwrap(), Value::Text("".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(1)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(-1)]).unwrap(), Value::Text("abc".into()));
         assert_eq!(split_part(&[Value::Text("abc".into()), Value::Text("".into()), Value::Integer(2)]).unwrap(), Value::Text("".into()));
