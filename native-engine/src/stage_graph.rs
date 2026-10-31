@@ -147,15 +147,28 @@ impl StageGraph {
     /// Enumerate runnable partition tasks in topological order without exceeding
     /// the caller's scheduling window. Completed stages are not rescheduled.
     pub fn ready_tasks(&self, completed: &HashSet<u64>, max_tasks: usize) -> Vec<(u64, usize)> {
-        let mut tasks = Vec::new();
+        self.ready_tasks_excluding(completed, &HashSet::new(), max_tasks)
+    }
+
+    /// Issue a new scheduling window without resending partitions already
+    /// dispatched to workers. A stage stays blocked until all upstream stages
+    /// appear in completed, including tasks still running upstream.
+    pub fn ready_tasks_excluding(
+        &self, completed: &HashSet<u64>,
+        running: &HashSet<(u64, usize)>, max_tasks: usize,
+    ) -> Vec<(u64, usize)> {
+        let mut tasks = Vec::with_capacity(max_tasks.min(1024));
+        if max_tasks == 0 { return tasks; }
         for &index in &self.order_indices {
             let stage = &self.stages[index];
             if !Self::dependency_ready(stage, completed) {
                 continue;
             }
             for partition in 0..stage.partitions {
+                let task = (stage.id, partition);
+                if running.contains(&task) { continue; }
+                tasks.push(task);
                 if tasks.len() == max_tasks { return tasks; }
-                tasks.push((stage.id, partition));
             }
         }
         tasks
@@ -393,5 +406,35 @@ mod cached_critical_path_priorities_tests {
             assert_eq!(graph.ready_by_critical_path(&HashSet::from([1, 2])), [3, 6]);
             assert_eq!(graph.ready_by_critical_path(&HashSet::from([1, 2, 3])), [5, 6]);
         }
+    }
+}
+
+#[cfg(test)]
+mod inflight_stage_partition_scheduling_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_windows_exclude_dispatched_tasks_but_not_new_partitions() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 3, dependencies: vec![1, 2], partitions: 2 },
+            Stage { id: 1, dependencies: vec![], partitions: 3 },
+            Stage { id: 2, dependencies: vec![], partitions: 3 },
+        ]).unwrap();
+        let mut completed = HashSet::new();
+        let first = graph.ready_tasks(&completed, 4);
+        assert_eq!(first.len(), 4);
+        let running: HashSet<(u64, usize)> = first.iter().copied().collect();
+        let next = graph.ready_tasks_excluding(&completed, &running, 10);
+        assert_eq!(next.len(), 2);
+        assert!(next.iter().all(|task| !running.contains(task)));
+        assert!(next.iter().all(|(stage, _)| *stage != 3));
+        assert!(graph.ready_tasks_excluding(&completed, &running, 0).is_empty());
+
+        completed.insert(1);
+        assert!(graph.ready_tasks_excluding(&completed, &running, 10)
+            .iter().all(|(stage, _)| *stage == 2));
+        completed.insert(2);
+        assert_eq!(graph.ready_tasks_excluding(&completed, &HashSet::new(), 10),
+            vec![(3, 0), (3, 1)]);
     }
 }
