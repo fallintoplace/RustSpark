@@ -97,6 +97,12 @@ impl<W: Write> SpillWriter<W> {
         Ok(Self { output, schema })
     }
 
+    // Continue a file whose schema header was already written and finalized.
+    // Only internal scratch-file owners may reopen an existing stream.
+    pub(crate) fn resume(output: W, schema: Schema) -> Self {
+        Self { output, schema }
+    }
+
     pub fn write_batch(&mut self, batch: &Batch) -> Result<()> {
         self.write_batch_range(batch, 0, batch.num_rows())
     }
