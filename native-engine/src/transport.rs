@@ -14,8 +14,8 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0; 256];
+const CRC32_TABLES: [[u32; 256]; 8] = {
+    let mut tables = [[0u32; 256]; 8];
     let mut index = 0;
     while index < 256 {
         let mut crc = index as u32;
@@ -24,19 +24,44 @@ const CRC32_TABLE: [u32; 256] = {
             crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb88320 } else { 0 };
             bit += 1;
         }
-        table[index] = crc;
+        tables[0][index] = crc;
         index += 1;
     }
-    table
+    let mut slice = 1;
+    while slice < 8 {
+        let mut index = 0;
+        while index < 256 {
+            let crc = tables[slice - 1][index];
+            tables[slice][index] = (crc >> 8) ^ tables[0][(crc & 0xff) as usize];
+            index += 1;
+        }
+        slice += 1;
+    }
+    tables
 };
 
-fn checksum_parts(header: &[u8], payload: &[u8]) -> u32 {
-    let mut value = !0u32;
-    for &byte in header.iter().chain(payload) {
-        let index = ((value ^ u32::from(byte)) & 0xff) as usize;
-        value = (value >> 8) ^ CRC32_TABLE[index];
+fn crc32_update(mut value: u32, mut bytes: &[u8]) -> u32 {
+    while bytes.len() >= 8 {
+        let low = u32::from_le_bytes(bytes[..4].try_into().expect("eight bytes")) ^ value;
+        value = CRC32_TABLES[7][(low & 0xff) as usize]
+            ^ CRC32_TABLES[6][((low >> 8) & 0xff) as usize]
+            ^ CRC32_TABLES[5][((low >> 16) & 0xff) as usize]
+            ^ CRC32_TABLES[4][(low >> 24) as usize]
+            ^ CRC32_TABLES[3][bytes[4] as usize]
+            ^ CRC32_TABLES[2][bytes[5] as usize]
+            ^ CRC32_TABLES[1][bytes[6] as usize]
+            ^ CRC32_TABLES[0][bytes[7] as usize];
+        bytes = &bytes[8..];
     }
-    !value
+    for &byte in bytes {
+        let index = ((value ^ u32::from(byte)) & 0xff) as usize;
+        value = (value >> 8) ^ CRC32_TABLES[0][index];
+    }
+    value
+}
+
+fn checksum_parts(header: &[u8], payload: &[u8]) -> u32 {
+    !crc32_update(crc32_update(!0u32, header), payload)
 }
 
 #[cfg(test)]
@@ -466,5 +491,35 @@ mod shuffle_header_integrity_tests {
         let mut legacy = encoded;
         legacy[..4].copy_from_slice(b"RSP1");
         assert!(read_frame(&mut legacy.as_slice(), 128).is_err());
+    }
+}
+
+#[cfg(test)]
+mod slicing_by_eight_crc_regressions {
+    use super::*;
+
+    fn reference(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            let mut entry = (crc ^ u32::from(byte)) & 0xff;
+            for _ in 0..8 {
+                entry = (entry >> 1) ^ if entry & 1 != 0 { 0xedb88320 } else { 0 };
+            }
+            crc = (crc >> 8) ^ entry;
+        }
+        !crc
+    }
+
+    #[test]
+    fn matches_bitwise_crc_for_misaligned_exchange_headers_and_payloads() {
+        assert_eq!(checksum(b"123456789"), 0xcbf43926);
+        for len in [0, 1, 2, 7, 8, 9, 15, 16, 23, 31, 32, 63, 64, 65, 4097] {
+            let header = [0x41u8; 28];
+            let payload = (0..len).map(|index| (index * 37 % 251) as u8).collect::<Vec<_>>();
+            let mut full = header.to_vec();
+            full.extend_from_slice(&payload);
+            assert_eq!(checksum_parts(&header, &payload), reference(&full), "payload length {len}");
+            assert_eq!(checksum(&payload), reference(&payload));
+        }
     }
 }
