@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import statistics
 
 
 def finite_median(values):
