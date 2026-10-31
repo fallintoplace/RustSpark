@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import signal
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -65,6 +66,26 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     return command
 
 
+def _run_export(command: list[str], *, stderr, timeout: float | None) -> int:
+    """Bound the entire export process group, including spawned children."""
+    with subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=stderr,
+        start_new_session=(os.name == "posix"),
+    ) as process:
+        try:
+            return process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            process.wait()
+            raise
+
+
 @contextmanager
 def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                          csv: str | Path | None = None,
@@ -102,12 +123,11 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
         # the Python heap and surface only a bounded tail on failure.
         with tempfile.TemporaryFile() as error_log:
             try:
-                completed = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                           stderr=error_log, check=False,
-                                           timeout=process_timeout)
+                returncode = _run_export(command, stderr=error_log,
+                                         timeout=process_timeout)
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
-            if completed.returncode:
+            if returncode:
                 error_log.seek(0, os.SEEK_END)
                 error_log.seek(max(0, error_log.tell() - 65_536))
                 detail = error_log.read().decode("utf-8", errors="replace").strip()
