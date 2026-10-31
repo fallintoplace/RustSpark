@@ -135,7 +135,8 @@ where I: Iterator<Item = Result<Vec<Value>>>
             }
         }
         if row_count == 0 { return None; }
-        let batch = Batch::new_with_row_count(self.schema.clone(), columns, row_count);
+        // Every incoming cell was checked against this schema before admission.
+        let batch = Batch::from_validated_columns(self.schema.clone(), columns, row_count);
         if batch.is_err() { self.finished = true; }
         Some(batch)
     }
@@ -400,5 +401,32 @@ mod late_row_type_error_regressions {
         ).unwrap();
         assert!(first.next().unwrap().is_err());
         assert!(first.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod trusted_stream_finalize_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn retains_nullable_wide_text_and_reports_late_invalid_cells() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let text = "🙂界".repeat(2048);
+        let rows = vec![
+            Ok(vec![Value::Integer(1), Value::Text(text.clone())]),
+            Ok(vec![Value::Integer(2), Value::Null]),
+            Ok(vec![Value::Integer(3), Value::Integer(9)]),
+        ];
+        let mut stream = RowBatcher::new(rows.into_iter(), schema, 16).unwrap();
+        let batch = stream.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.value(0, 1).unwrap(), &Value::Text(text));
+        assert_eq!(batch.value(1, 1).unwrap(), &Value::Null);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }
