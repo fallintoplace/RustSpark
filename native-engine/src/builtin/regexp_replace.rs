@@ -256,3 +256,36 @@ mod literal_regex_single_pass_tests {
         ]).unwrap(), Value::Text("abc!abc!".into()));
     }
 }
+
+#[cfg(test)]
+mod single_pass_literal_replace_regressions {
+    use super::*;
+
+    #[test]
+    fn literal_path_matches_regex_for_overlapping_and_unicode_inputs() {
+        for (source, pattern, replacement) in [
+            ("aaaaa", "aa", "X"),
+            ("é🙂ab-éab", "ab", "界"),
+            ("no matches", "xyz", "🙂"),
+            ("hello_hello", "hello", ""),
+        ] {
+            let expected = regex_support::compile(pattern).unwrap()
+                .replace_all(source, replacement).to_string();
+            assert_eq!(evaluate(&[Value::Text(source.into()),
+                Value::Text(pattern.into()), Value::Text(replacement.into())]).unwrap(),
+                Value::Text(expected));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("éab🙂ab".into()), Value::Text("ab".into()),
+            Value::Text("x".into()), Value::Integer(4),
+        ]).unwrap(), Value::Text("éab🙂x".into()));
+    }
+
+    #[test]
+    fn incremental_growth_still_rejects_oversized_output() {
+        assert!(matches!(evaluate(&[
+            Value::Text("a".repeat(1_000_000)), Value::Text("a".into()),
+            Value::Text("z".repeat(17)),
+        ]), Err(Error::Execution(_))));
+    }
+}
