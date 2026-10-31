@@ -116,13 +116,22 @@ impl SetStream {
                     else { *remaining -= 1; false }
                 } else { true }
             }
-            SetMode::IntersectDistinct | SetMode::ExceptDistinct => {
-                let belongs = self.right_counts.contains_key(row);
-                let wanted = if self.mode == SetMode::IntersectDistinct {
-                    belongs
-                } else { !belongs };
-                if !wanted || self.emitted.contains(row) { false }
-                else {
+            SetMode::IntersectDistinct => {
+                // Right-hand membership already holds every qualifying key.
+                // Remove a match on first use instead of keeping a second
+                // key copy in the emitted set and charging the budget twice.
+                if self.right_counts.remove(row).is_some() {
+                    let bytes = super::row_footprint::footprint(row.iter());
+                    self.retained_bytes -= bytes;
+                    true
+                } else {
+                    false
+                }
+            }
+            SetMode::ExceptDistinct => {
+                if self.right_counts.contains_key(row) || self.emitted.contains(row) {
+                    false
+                } else {
                     let bytes = super::row_footprint::footprint(row.iter());
                     let next = self.retained_bytes.checked_add(bytes)
                         .filter(|total| *total <= self.max_bytes);
@@ -303,5 +312,51 @@ mod columnar_streaming_set_perf_tests {
         ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(results.iter().map(Batch::num_rows).sum::<usize>(), 2);
         assert!(results.iter().all(|batch| batch.schema().is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod intersect_distinct_right_key_reuse_regressions {
+    use super::*;
+
+    #[test]
+    fn matching_right_keys_need_no_second_memory_admission() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2)], vec![Value::Integer(2)],
+            vec![Value::Integer(1)], vec![Value::Integer(3)],
+            vec![Value::Integer(1)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        // Both right-hand keys exactly fill the admission budget.
+        // INTERSECT DISTINCT must not require another key for its output.
+        let result = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 2, 1024,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Value::Integer(2)], vec![Value::Integer(1)]]);
+    }
+
+    #[test]
+    fn matches_can_cross_batches_without_being_emitted_twice() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
+        let mk = |values: Vec<Value>| Batch::from_rows(schema.clone(),
+            values.into_iter().map(|v| vec![v]).collect()).unwrap();
+        let result = SetStream::new(
+            Box::new([
+                Ok(mk(vec![Value::Null, Value::Integer(1)])),
+                Ok(mk(vec![Value::Integer(1), Value::Null, Value::Integer(2)])),
+            ].into_iter()),
+            Box::new([Ok(mk(vec![Value::Integer(1), Value::Null]))].into_iter()),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 2, 1024,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.into_iter().flat_map(|b| b.rows().unwrap())
+            .collect::<Vec<_>>(), vec![vec![Value::Null], vec![Value::Integer(1)]]);
     }
 }
