@@ -55,15 +55,6 @@ const UNHEX_DIGITS: [u8; 256] = {
     table
 };
 
-fn decode_hex_digit(byte: u8) -> Result<u8> {
-    let digit = UNHEX_DIGITS[usize::from(byte)];
-    if digit == u8::MAX {
-        Err(Error::Parse("invalid hexadecimal digit".into()))
-    } else {
-        Ok(digit)
-    }
-}
-
 fn unhex_utf8(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     if text.len() > MAX_INPUT_BYTES * 2 {
@@ -74,8 +65,11 @@ fn unhex_utf8(args: &[Value]) -> Result<Value> {
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);
     for pair in text.as_bytes().chunks_exact(2) {
-        let upper = decode_hex_digit(pair[0])?;
-        let lower = decode_hex_digit(pair[1])?;
+        let upper = UNHEX_DIGITS[usize::from(pair[0])];
+        let lower = UNHEX_DIGITS[usize::from(pair[1])];
+        if upper == u8::MAX || lower == u8::MAX {
+            return Err(Error::Parse("invalid hexadecimal digit".into()));
+        }
         bytes.push((upper << 4) | lower);
     }
     let decoded = String::from_utf8(bytes)
@@ -232,5 +226,23 @@ mod unhex_nibble_table_tests {
             assert!(unhex_utf8(&[Value::Text(invalid.into())]).is_err());
         }
         assert_eq!(unhex_utf8(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod combined_hex_nibble_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_long_utf8_and_rejects_either_invalid_nibble() {
+        for repeat in 0..80 {
+            let original = Value::Text(format!("{}🙂", "aé".repeat(repeat)));
+            let encoded = hex(&[original.clone()]).unwrap();
+            assert_eq!(unhex_utf8(&[encoded]).unwrap(), original);
+        }
+        for text in ["0g", "g0", "0Z", "Z0", "ab0!", "!0ab"] {
+            assert!(unhex_utf8(&[Value::Text(text.into())]).is_err(), "{text}");
+            assert_eq!(try_unhex_utf8(&[Value::Text(text.into())]).unwrap(), Value::Null);
+        }
     }
 }
