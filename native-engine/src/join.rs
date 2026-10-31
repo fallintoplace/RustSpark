@@ -766,7 +766,7 @@ mod columnar_outer_hash_join_regressions {
         ]);
         let full = hash_join(&left, &right, "id", "id", JoinKind::Full).unwrap();
         assert_eq!(full.num_rows(), 8);
-        assert_eq!(full.row(4).unwrap(), vec![
+        assert_eq!(full.row(2).unwrap(), vec![
             Value::Null, Value::Text("null-left".into()), Value::Null, Value::Null,
         ]);
         assert_eq!(full.row(5).unwrap(), vec![
