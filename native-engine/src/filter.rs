@@ -126,7 +126,8 @@ pub fn filter_first_owned(batch: Batch, predicate: &Expr, max_rows: usize) -> Re
         return Ok(Batch::empty(batch.schema().clone()));
     }
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
-        return batch.slice_rows_owned(0, max_rows.min(batch.num_rows()));
+        let end = max_rows.min(batch.num_rows());
+        return batch.slice_rows_owned(0, end);
     }
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     let direct = match predicate {
