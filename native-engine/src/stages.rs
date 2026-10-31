@@ -36,6 +36,8 @@ pub struct Stage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageGraph {
     stages: Vec<Stage>,
+    order: Vec<usize>,
+    root: Option<usize>,
 }
 
 impl StageGraph {
@@ -72,30 +74,34 @@ impl StageGraph {
                 return Err(Error::Schema("invalid physical stage input count".into()));
             }
         }
-        let graph = Self { stages };
-        graph.execution_order()?;
-        Ok(graph)
+        let order = Self::calculate_execution_order(&stages)?;
+        let mut referenced = vec![false; stages.len()];
+        for stage in &stages {
+            for &input in &stage.inputs { referenced[input] = true; }
+        }
+        let mut roots = stages.iter().filter(|stage| !referenced[stage.id]);
+        let root = match (roots.next(), roots.next()) {
+            (Some(root), None) => Some(root.id),
+            _ => None,
+        };
+        Ok(Self { stages, order, root })
     }
 
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
     pub fn root(&self) -> Option<usize> {
-        let mut referenced = vec![false; self.stages.len()];
-        for stage in &self.stages {
-            for &input in &stage.inputs { referenced[input] = true; }
-        }
-        let mut roots = self.stages.iter().filter(|stage| !referenced[stage.id]);
-        match (roots.next(), roots.next()) {
-            (Some(root), None) => Some(root.id),
-            _ => None,
-        }
+        self.root
     }
 
-    /// Deterministic topological order. Rejects cycles before any task starts.
+    /// Deterministic topological order, validated at graph construction.
     pub fn execution_order(&self) -> Result<Vec<usize>> {
-        let mut degrees = vec![0_usize; self.stages.len()];
-        let mut children = vec![Vec::new(); self.stages.len()];
-        for stage in &self.stages {
+        Ok(self.order.clone())
+    }
+
+    fn calculate_execution_order(stages: &[Stage]) -> Result<Vec<usize>> {
+        let mut degrees = vec![0_usize; stages.len()];
+        let mut children = vec![Vec::new(); stages.len()];
+        for stage in &stages {
             for &input in &stage.inputs {
                 degrees[stage.id] += 1;
                 children[input].push(stage.id);
@@ -105,7 +111,7 @@ impl StageGraph {
         for (id, degree) in degrees.iter().enumerate() {
             if *degree == 0 { ready.push(Reverse(id)); }
         }
-        let mut ordered = Vec::with_capacity(self.stages.len());
+        let mut ordered = Vec::with_capacity(stages.len());
         while let Some(Reverse(id)) = ready.pop() {
             ordered.push(id);
             for &child in &children[id] {
@@ -113,7 +119,7 @@ impl StageGraph {
                 if degrees[child] == 0 { ready.push(Reverse(child)); }
             }
         }
-        if ordered.len() != self.stages.len() {
+        if ordered.len() != stages.len() {
             return Err(Error::Execution("native execution stage graph contains a cycle".into()));
         }
         Ok(ordered)
@@ -353,5 +359,33 @@ mod cross_join_stage_kind_tests {
         assert_eq!(root.kind, StageKind::CrossJoin);
         assert_eq!(root.inputs.len(), 2);
         assert!(root.kind.is_blocking());
+    }
+}
+
+#[cfg(test)]
+mod cached_physical_dag_perf_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_order_reads_do_not_change_order_or_root() {
+        let stages = (0..4096).map(|id| Stage {
+            id, kind: StageKind::Scan, inputs: vec![],
+        }).collect();
+        let graph = StageGraph::new(stages).unwrap();
+        assert_eq!(graph.root(), None);
+        for _ in 0..16 {
+            let order = graph.execution_order().unwrap();
+            assert_eq!(order.len(), 4096);
+            assert_eq!(order.first(), Some(&0));
+            assert_eq!(order.last(), Some(&4095));
+        }
+        let ordered = StageGraph::new(vec![
+            Stage { id: 2, kind: StageKind::HashJoin, inputs: vec![0, 1] },
+            Stage { id: 1, kind: StageKind::Scan, inputs: vec![] },
+            Stage { id: 0, kind: StageKind::Scan, inputs: vec![] },
+        ]).unwrap();
+        assert_eq!(ordered.root(), Some(2));
+        assert_eq!(ordered.execution_order().unwrap(), [0, 1, 2]);
+        assert_eq!(ordered.execution_order().unwrap(), [0, 1, 2]);
     }
 }
