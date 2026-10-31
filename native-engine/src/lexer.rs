@@ -315,9 +315,9 @@ mod spark_backtick_identifier_tests {
         assert_eq!(tokens[1], Token::Word("order date".into()));
         assert_eq!(tokens[3], Token::Word("a`b".into()));
         assert_eq!(tokens[5], Token::Word("é🙂".into()));
-        assert_eq!(tokens[7], Token::Word("FROM".into()));
-        assert_eq!(tokens[8], Token::Word("some table".into()));
-        for invalid in ["SELECT `unterminated", "SELECT `` FROM t", "SELECT `a```b"] {
+        assert_eq!(tokens[6], Token::Word("FROM".into()));
+        assert_eq!(tokens[7], Token::Word("some table".into()));
+        for invalid in ["SELECT `unterminated", "SELECT `` FROM t", "SELECT `a`` FROM t"] {
             assert!(tokenize(invalid).is_err(), "{invalid}");
         }
     }
