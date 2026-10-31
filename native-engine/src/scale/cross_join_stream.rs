@@ -17,6 +17,7 @@ pub struct CrossJoinStream {
     left_batch: Option<Batch>,
     left_row: usize,
     current_left: Option<Vec<Value>>,
+    current_left_bytes: usize,
     right_row: usize,
     batch_rows: usize,
     control: QueryControl,
@@ -59,7 +60,8 @@ impl CrossJoinStream {
         }
         Ok(Self {
             left, left_schema, output_schema, right_rows, right_bytes,
-            left_batch: None, left_row: 0, current_left: None, right_row: 0,
+            left_batch: None, left_row: 0, current_left: None,
+            current_left_bytes: 0, right_row: 0,
             batch_rows, control, stopped: false,
         })
     }
@@ -74,7 +76,9 @@ impl CrossJoinStream {
                 loop {
                     if let Some(batch) = &self.left_batch {
                         if self.left_row < batch.num_rows() {
-                            self.current_left = Some(batch.row(self.left_row)?);
+                            let row = batch.row(self.left_row)?;
+                            self.current_left_bytes = super::row_footprint::footprint(row.iter());
+                            self.current_left = Some(row);
                             self.right_row = 0;
                             break;
                         }
@@ -92,7 +96,7 @@ impl CrossJoinStream {
                 }
             }
             let left = self.current_left.as_ref().expect("initialized left row");
-            let next_bytes = super::row_footprint::footprint(left.iter())
+            let next_bytes = self.current_left_bytes
                 .saturating_add(self.right_bytes[self.right_row]);
             if next_bytes > MAX_OUTPUT_BATCH_BYTES {
                 return Err(Error::Execution("stream cross join output row byte budget exceeded".into()));
@@ -163,5 +167,30 @@ mod tests {
             2, QueryControl::default(),
         ).unwrap();
         assert_eq!(stream.collect::<Result<Vec<_>>>().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_cached_left_footprint_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn repeats_large_unicode_rows_without_losing_memory_accounting() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(2048))],
+            vec![Value::Text("é".repeat(1024))],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+        ]).unwrap();
+        let expected = join::cross_join(&left, &right).unwrap().rows().unwrap();
+        let actual = CrossJoinStream::new(Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()), schema.clone(), schema,
+            3, QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), expected);
     }
 }
