@@ -48,6 +48,16 @@ class AbbaTests(unittest.TestCase):
         self.assertEqual(report["paired_median_speedup"], 1.5)
         self.assertEqual(report["baseline_over_candidate"], 1.2)
 
+    def test_small_positive_speedup_is_never_rounded_to_zero(self):
+        commands = {"baseline": ["old"], "candidate": ["new"]}
+        def timed(cmd, timeout, ordered):
+            return (0.000001 if cmd[0] == "old" else 1.0, "same", 1)
+        with mock.patch.object(abba, "timed_command", side_effect=timed):
+            report = abba.compare_query(commands, False, repeat=1, warmup=0, timeout=120)
+        self.assertEqual(report["baseline_over_candidate"], 0.000001)
+        self.assertEqual(report["paired_speedups"], [0.000001])
+        self.assertEqual(report["paired_median_speedup"], 0.000001)
+
     def test_invalid_injected_timings_do_not_produce_speedup(self):
         commands = {"baseline": ["old"], "candidate": ["new"]}
         with mock.patch.object(abba, "timed_command", return_value=(float("nan"), "x", 1)):
