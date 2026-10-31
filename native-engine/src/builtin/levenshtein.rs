@@ -60,11 +60,36 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let first = &first[..first_end];
     let second = &second[..second_end];
     if first.is_ascii() && second.is_ascii() {
+        if threshold == Some(1) {
+            return Ok(Value::Integer(single_ascii_edit(first.as_bytes(), second.as_bytes())));
+        }
         return distance_units(first.as_bytes(), second.as_bytes(), threshold);
     }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     distance_units(&a, &b, threshold)
+}
+
+// A threshold of one permits at most one insertion, deletion, or
+// substitution. Compare ASCII slices directly instead of allocating DP rows.
+fn single_ascii_edit(a: &[u8], b: &[u8]) -> i64 {
+    let (longer, shorter) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    if longer.len() - shorter.len() > 1 { return -1; }
+    let same_length = longer.len() == shorter.len();
+    let (mut i, mut j, mut edits) = (0usize, 0usize, 0usize);
+    while i < longer.len() && j < shorter.len() {
+        if longer[i] == shorter[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        if edits != 0 { return -1; }
+        edits += 1;
+        i += 1;
+        if same_length { j += 1; }
+    }
+    edits += (longer.len() - i) + (shorter.len() - j);
+    if edits <= 1 { edits as i64 } else { -1 }
 }
 
 fn distance_units<T: Eq + Copy>(
@@ -445,5 +470,54 @@ mod narrow_banded_levenshtein_tests {
             Value::Integer(2));
         assert_eq!(evaluate(&[left, right, Value::Integer(1)]).unwrap(),
             Value::Integer(-1));
+    }
+}
+
+#[cfg(test)]
+mod ascii_single_edit_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn one_edit_threshold_matches_dynamic_programming() {
+        let cases = [
+            ("", ""), ("a", ""), ("", "z"), ("a", "a"),
+            ("a", "b"), ("ab", "ba"), ("ab", "abc"),
+            ("abc", "ac"), ("abc", "axc"), ("abc", "xbc"),
+            ("abc", "abxc"), ("aaaa", "aaab"), ("aaaa", "baaa"),
+            ("aaaa", "aabb"), ("abcd", "ab"),
+        ];
+        for (left, right) in cases {
+            let expected = distance_units(left.as_bytes(), right.as_bytes(), Some(1)).unwrap();
+            let actual = evaluate(&[
+                Value::Text(left.into()),
+                Value::Text(right.into()),
+                Value::Integer(1),
+            ]).unwrap();
+            assert_eq!(actual, expected, "{left:?} -> {right:?}");
+            let swapped = evaluate(&[
+                Value::Text(right.into()),
+                Value::Text(left.into()),
+                Value::Integer(1),
+            ]).unwrap();
+            assert_eq!(swapped, expected, "{right:?} -> {left:?}");
+        }
+    }
+
+    #[test]
+    fn large_ascii_inputs_avoid_quadratic_work() {
+        let prefix = "a".repeat(100_000);
+        assert_eq!(evaluate(&[
+            Value::Text(format!("{prefix}x")),
+            Value::Text(format!("{prefix}z")),
+            Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[
+            Value::Text(format!("{prefix}xy")),
+            Value::Text(format!("{prefix}zz")),
+            Value::Integer(1),
+        ]).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[
+            Value::Text("é".into()), Value::Text("e".into()), Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
     }
 }
