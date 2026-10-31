@@ -137,8 +137,10 @@ impl SetStream {
                 // Right-hand membership already holds every qualifying key.
                 // Remove a match on first use instead of keeping a second
                 // key copy in the emitted set and charging the budget twice.
-                if self.right_counts.remove(row).is_some() {
-                    let bytes = super::row_footprint::footprint(row.iter());
+                if let Some((stored_key, _)) = self.right_counts.remove_entry(row) {
+                    // Charge and release the same stored allocation. An equal
+                    // incoming TEXT value can have a very different capacity.
+                    let bytes = super::row_footprint::footprint(stored_key.iter());
                     self.retained_bytes -= bytes;
                     true
                 } else {
@@ -521,6 +523,62 @@ mod trusted_set_output_regressions {
                 vec![Value::Float(2.0)], vec![Value::Null],
             ]);
         assert_eq!(output[0].schema().fields()[0].data_type, DataType::Float);
+    }
+}
+
+#[cfg(test)]
+mod intersect_distinct_retained_allocation_tests {
+    use super::*;
+
+    #[test]
+    fn releasing_right_key_uses_owned_capacity_not_matching_left_capacity() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let mut large_left = String::with_capacity(16_384);
+        large_left.push_str("same key");
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("same key".into())],
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(large_left)],
+            vec![Value::Text("same key".into())],
+        ]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 1, 256,
+        ).unwrap();
+        assert!(stream.retained_bytes > 0);
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("same key".into())]]);
+        assert_eq!(stream.retained_bytes, 0);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn reclaiming_mixed_nullable_keys_tracks_remaining_right_bytes_exactly() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("other", DataType::Integer, false),
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        let mut wide = String::with_capacity(4096);
+        wide.push('x');
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(wide), Value::Integer(1)],
+        ]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 2, 1024,
+        ).unwrap();
+        let remaining = super::super::row_footprint::footprint(
+            [Value::Null, Value::Integer(2)].iter(),
+        );
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert_eq!(stream.retained_bytes, remaining);
     }
 }
 
