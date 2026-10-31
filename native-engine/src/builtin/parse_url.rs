@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 use url::{ParseError, Url};
@@ -45,7 +46,14 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
         }
         None => without_query,
     };
-    let result = match part.to_ascii_uppercase().as_str() {
+    // Most SQL calls pass an uppercase component. Borrow its name rather
+    // than allocate an uppercase String on every row.
+    let normalized: Cow<'_, str> = if part.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        Cow::Owned(part.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(part)
+    };
+    let result = match normalized.as_ref() {
         "PROTOCOL" => parsed.as_ref().map(|parsed| parsed.scheme().to_owned()),
         "HOST" => parsed.as_ref().and_then(|parsed|
             parsed.host_str().map(str::to_owned)),
@@ -158,5 +166,31 @@ mod tests {
             vec![Value::Text("spark.apache.org".into()), Value::Text("1".into())],
             vec![Value::Null, Value::Null],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_component_name_tests {
+    use super::*;
+
+    #[test]
+    fn uppercase_mixed_case_and_invalid_names_remain_equivalent() {
+        let url = "https://user@spark.apache.org/path?q=1#tag";
+        for name in ["HOST", "host", "HoSt"] {
+            assert_eq!(extract(url, name, None).unwrap(),
+                Value::Text("spark.apache.org".into()));
+        }
+        assert_eq!(extract(url, "QUERY", Some("q")).unwrap(),
+            Value::Text("1".into()));
+        assert_eq!(extract(url, "query", Some("q")).unwrap(),
+            Value::Text("1".into()));
+        assert_eq!(extract(url, "pAtH", None).unwrap(),
+            Value::Text("/path".into()));
+        assert_eq!(extract(url, "ReF", None).unwrap(),
+            Value::Text("tag".into()));
+        assert!(extract(url, "UnKnOwN", None).unwrap_err()
+            .to_string().contains("UNKNOWN"));
+        assert_eq!(try_parse_url(&[Value::Text(url.into()),
+            Value::Text("UnKnOwN".into())]).unwrap(), Value::Null);
     }
 }
