@@ -199,6 +199,13 @@ fn can_skip_columns_verified(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
     predicate: &Expr,
 ) -> bool {
+    // The constant-false/unknown shortcut must also apply inside
+    // AND/OR trees when no usable column statistics are available.
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) ||
+        matches!(predicate, Expr::Not(inner)
+            if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
+        return true;
+    }
     match predicate {
         Expr::Binary { left, op: BinaryOp::And, right } =>
             can_skip_columns_verified(stats, left) || can_skip_columns_verified(stats, right),
@@ -464,6 +471,21 @@ mod nested_partition_pruning_preflight_tests {
         assert!(!can_skip_columns(&corrupt, &gt("a", 30)));
         assert!(can_skip_columns(&HashMap::new(),
             &Expr::Literal(Value::Boolean(false))));
+    }
+
+    #[test]
+    fn impossible_constant_branch_prunes_even_without_statistics() {
+        let stats = HashMap::new();
+        let predicate = Expr::binary(
+            Expr::Literal(Value::Boolean(true)), BinaryOp::And,
+            Expr::Literal(Value::Boolean(false)),
+        );
+        assert!(can_skip_columns(&stats, &predicate));
+        let predicate = Expr::binary(
+            Expr::Literal(Value::Boolean(false)), BinaryOp::Or,
+            Expr::Literal(Value::Boolean(true)),
+        );
+        assert!(!can_skip_columns(&stats, &predicate));
     }
 
     #[test]
