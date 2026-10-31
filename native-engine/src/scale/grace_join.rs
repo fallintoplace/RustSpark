@@ -184,24 +184,29 @@ where L: IntoIterator<Item = Result<Batch>>,
             }
         }
         if outer_build {
+            // No more probe rows need the hash table. Consume the owned
+            // build columns so unmatched right-side payloads are moved.
+            drop(prepared);
+            let mut build_columns = build.into_columns().into_iter()
+                .map(Vec::into_iter).collect::<Vec<_>>();
+            let matches = matched_right.as_ref()
+                .ok_or_else(|| Error::Execution("missing outer-join match state".into()))?;
             let mut columns: Vec<Vec<Value>> =
                 (0..result_schema.len()).map(|_| Vec::new()).collect();
-            let build_columns = (0..right_schema.len())
-                .map(|index| build.column(index)).collect::<Result<Vec<_>>>()?;
             let mut rows = 0usize;
-            for right_row in 0..build.num_rows() {
+            for &matched in matches {
                 control.check()?;
-                let matched = matched_right.as_ref()
-                    .and_then(|bits| bits.get(right_row))
-                    .ok_or_else(|| Error::Execution("missing outer-join match state".into()))?;
-                if !*matched {
+                if !matched {
                     for output in &mut columns[..left_schema.len()] {
                         output.push(Value::Null);
                     }
-                    for (input, output) in build_columns.iter()
-                        .zip(columns[left_schema.len()..].iter_mut()) {
-                        output.push(input[right_row].clone());
-                    }
+                }
+                for (input, output) in build_columns.iter_mut()
+                    .zip(columns[left_schema.len()..].iter_mut()) {
+                    let value = input.next().expect("build column matches row count");
+                    if !matched { output.push(value); }
+                }
+                if !matched {
                     rows += 1;
                     if rows >= io_batch_rows {
                         let batch = Batch::from_validated_columns(
@@ -544,5 +549,53 @@ mod owned_grace_build_admission_tests {
         assert!(load_build_bounded(&path, &schema, 3, 2, 5_000,
             &QueryControl::default()).is_err());
         fs::remove_file(path).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod owned_unmatched_outer_rows_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn full_join_moves_unmatched_wide_text_and_preserves_matched_rows() {
+        let dir = std::env::temp_dir().join(format!("native-outer-move-{}-{}",
+            std::process::id(), JOIN_ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let wide = "ü".repeat(4096);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("left".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("matched".into())],
+            vec![Value::Integer(2), Value::Text(wide.clone())],
+        ]).unwrap();
+        let files = grace_join([Ok(left)], [Ok(right)],
+            schema.clone(), schema, "id", "id", JoinKind::Full,
+            &dir, 2, 100, 1, &QueryControl::default()).unwrap();
+        let mut rows = Vec::new();
+        for path in files.paths() {
+            let mut reader = SpillReader::new(
+                BufReader::new(File::open(path).unwrap()), 1).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                rows.extend(batch.rows().unwrap());
+            }
+        }
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&vec![
+            Value::Integer(1), Value::Text("left".into()),
+            Value::Integer(1), Value::Text("matched".into()),
+        ]));
+        assert!(rows.contains(&vec![
+            Value::Null, Value::Null, Value::Integer(2), Value::Text(wide),
+        ]));
+        drop(files);
+        fs::remove_dir(&dir).unwrap();
     }
 }
