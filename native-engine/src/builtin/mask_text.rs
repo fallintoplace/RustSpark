@@ -28,23 +28,23 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let lowercase = replacement(args, 2, Some('x'))?;
     let digits = replacement(args, 3, Some('n'))?;
     let others = replacement(args, 4, None)?;
-    // ASCII replacements preserve the exact output length. Rewrite one
-    // buffer without checking UTF-8 growth on every character.
-    if input.is_ascii() && [uppercase, lowercase, digits, others].into_iter()
-        .flatten().all(|replacement| replacement.is_ascii()) {
-        let mut output = input.as_bytes().to_vec();
-        for byte in &mut output {
-            let original = char::from(*byte);
+    // Default MASK replacements are ASCII. Transform a byte copy in place
+    // instead of encoding each output scalar through String::push.
+    if input.is_ascii() &&
+        [uppercase, lowercase, digits, others].into_iter().flatten()
+            .all(|character| character.is_ascii()) {
+        let mut bytes = input.as_bytes().to_vec();
+        for byte in &mut bytes {
             let selected = match *byte {
-                b'A'..=b'Z' => uppercase.unwrap_or(original),
-                b'a'..=b'z' => lowercase.unwrap_or(original),
-                b'0'..=b'9' => digits.unwrap_or(original),
-                _ => others.unwrap_or(original),
+                b'A'..=b'Z' => uppercase,
+                b'a'..=b'z' => lowercase,
+                b'0'..=b'9' => digits,
+                _ => others,
             };
-            *byte = selected as u8;
+            if let Some(character) = selected { *byte = character as u8; }
         }
-        return Ok(Value::Text(String::from_utf8(output)
-            .expect("ASCII replacements preserve UTF-8")));
+        return Ok(Value::Text(String::from_utf8(bytes)
+            .expect("ASCII MASK replacements preserve ASCII")));
     }
     let mut result = String::with_capacity(input.len());
     if input.is_ascii() {
@@ -156,30 +156,23 @@ mod ascii_mask_classifier_regressions {
 }
 
 #[cfg(test)]
-mod ascii_in_place_mask_regression_tests {
+mod ascii_mask_byte_buffer_regressions {
     use super::*;
 
     #[test]
-    fn ascii_replacements_preserve_size_and_classification() {
-        let source = "Aa9-*? ".repeat(2000);
-        let expected = "Xxn-*? ".repeat(2000);
-        assert_eq!(evaluate(&[Value::Text(source)]).unwrap(), Value::Text(expected));
+    fn masks_ascii_classes_and_preserves_multibyte_fallback() {
+        assert_eq!(evaluate(&[Value::Text("Aa19?!".into())]).unwrap(),
+            Value::Text("Xxnn?!".into()));
         assert_eq!(evaluate(&[
-            Value::Text("Az9-_".into()),
-            Value::Text("Q".into()), Value::Text("k".into()),
-            Value::Text("7".into()), Value::Text("?".into()),
-        ]).unwrap(), Value::Text("Qk7??".into()));
+            Value::Text("Aa19?!".into()),
+            Value::Null, Value::Text("q".into()),
+            Value::Text("4".into()), Value::Text("_".into()),
+        ]).unwrap(), Value::Text("Aq44__".into()));
         assert_eq!(evaluate(&[
-            Value::Text("Az9".into()), Value::Null, Value::Null, Value::Null,
-        ]).unwrap(), Value::Text("Az9".into()));
-    }
-
-    #[test]
-    fn unicode_replacements_use_the_bounded_fallback() {
-        assert_eq!(evaluate(&[
-            Value::Text("Aa1!".into()),
-            Value::Text("🙂".into()), Value::Text("é".into()),
-            Value::Text("界".into()), Value::Null,
-        ]).unwrap(), Value::Text("🙂é界!".into()));
+            Value::Text("Ab".into()), Value::Text("é".into()),
+        ]).unwrap(), Value::Text("éx".into()));
+        assert_eq!(evaluate(&[Value::Text("Ab🙂3".into())]).unwrap(),
+            Value::Text("Xx🙂n".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
