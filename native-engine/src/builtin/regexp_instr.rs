@@ -9,6 +9,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
+    // Both patterns match at the first Unicode character boundary.
+    if pattern.is_empty() || pattern == ".*" {
+        return Ok(Value::Integer(1));
+    }
     // A start-anchored identifier literal matches only at SQL position 1.
     if let Some(prefix) = pattern.strip_prefix('^') {
         if prefix.len() <= 4095 && prefix.bytes().all(|byte|
@@ -131,5 +135,25 @@ mod anchored_literal_instr_fast_path_tests {
                     "pattern={pattern:?} text={text:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod zero_width_regexp_instr_regressions {
+    use super::*;
+
+    #[test]
+    fn empty_and_dot_star_patterns_match_first_unicode_boundary() {
+        for text in ["", "\n", "é🙂", "\nabc", "東京\n🙂"] {
+            for pattern in ["", ".*"] {
+                let regex = regex_support::compile(pattern).unwrap();
+                let expected = regex.find(text).map_or(0,
+                    |matched| text[..matched.start()].chars().count() + 1);
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), Value::Integer(expected as i64));
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".*".into())]).unwrap(), Value::Null);
     }
 }
