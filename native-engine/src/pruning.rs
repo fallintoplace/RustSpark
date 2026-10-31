@@ -195,6 +195,23 @@ pub fn can_skip_columns(
             can_skip_columns(stats, left) || can_skip_columns(stats, right),
         Expr::Binary { left, op: BinaryOp::Or, right } =>
             can_skip_columns(stats, left) && can_skip_columns(stats, right),
+        // De Morgan's laws hold in SQL's three-valued boolean logic.
+        // Retain the existing conservative behavior for missing statistics.
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::Binary { left, op: BinaryOp::And, right } => {
+                let negated_left = Expr::Not(left.clone());
+                let negated_right = Expr::Not(right.clone());
+                can_skip_columns(stats, &negated_left) ||
+                    can_skip_columns(stats, &negated_right)
+            }
+            Expr::Binary { left, op: BinaryOp::Or, right } => {
+                let negated_left = Expr::Not(left.clone());
+                let negated_right = Expr::Not(right.clone());
+                can_skip_columns(stats, &negated_left) &&
+                    can_skip_columns(stats, &negated_right)
+            }
+            _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
+        },
         _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
     }
 }
@@ -349,5 +366,51 @@ mod corrupt_column_bounds_pruning_tests {
         assert!(can_skip_columns(&std::collections::HashMap::from([
             ("x".into(), trusted),
         ]), &equal));
+    }
+}
+
+#[cfg(test)]
+mod compound_negation_pruning_regressions {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn compare(name: &str, op: BinaryOp, value: i64) -> Expr {
+        Expr::binary(Expr::Column(name.into()), op, Expr::Literal(Value::Integer(value)))
+    }
+    fn stats() -> HashMap<String, ColumnStatistics> {
+        HashMap::from([
+            ("x".into(), ColumnStatistics { rows: 10, nulls: 0,
+                min: Some(Value::Integer(10)), max: Some(Value::Integer(20)) }),
+            ("y".into(), ColumnStatistics { rows: 10, nulls: 0,
+                min: Some(Value::Integer(1)), max: Some(Value::Integer(5)) }),
+        ])
+    }
+
+    #[test]
+    fn not_and_can_be_skipped_only_when_every_branch_is_unavoidable() {
+        let predicate = Expr::Not(Box::new(Expr::binary(
+            compare("x", BinaryOp::GreaterEqual, 10), BinaryOp::And,
+            compare("y", BinaryOp::LessEqual, 5),
+        )));
+        assert!(can_skip_columns(&stats(), &predicate));
+        let with_unknown_y = Expr::Not(Box::new(Expr::binary(
+            compare("x", BinaryOp::GreaterEqual, 10), BinaryOp::And,
+            compare("missing", BinaryOp::LessEqual, 5),
+        )));
+        assert!(!can_skip_columns(&stats(), &with_unknown_y));
+    }
+
+    #[test]
+    fn not_or_prunes_if_one_disjunct_is_provably_true() {
+        let impossible = Expr::Not(Box::new(Expr::binary(
+            compare("x", BinaryOp::GreaterEqual, 10), BinaryOp::Or,
+            compare("y", BinaryOp::Greater, 5),
+        )));
+        assert!(can_skip_columns(&stats(), &impossible));
+        let possible = Expr::Not(Box::new(Expr::binary(
+            compare("x", BinaryOp::Less, 0), BinaryOp::Or,
+            compare("y", BinaryOp::Greater, 5),
+        )));
+        assert!(!can_skip_columns(&stats(), &possible));
     }
 }
