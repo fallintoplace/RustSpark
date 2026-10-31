@@ -126,7 +126,8 @@ impl FileCatalog {
         if let Some(table) = self.tables.remove(source.as_ref()) {
             self.tables.insert(destination.into_owned(), table);
         } else {
-            let table = self.parquet.remove(source.as_ref()).expect("Parquet source was checked");
+            let table = self.parquet.remove(source.as_ref())
+                .ok_or_else(|| Error::Schema(format!("unknown native file table: {from}")))?;
             self.parquet.insert(destination.into_owned(), table);
         }
         Ok(())
