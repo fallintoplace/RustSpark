@@ -123,10 +123,8 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         let candidate = Candidate { row, values, options: Arc::clone(&options) };
         if heap.len() < k {
             heap.push(candidate);
-        } else if let Some(worst) = heap.peek() {
-            if candidate < *worst {
-                *heap.peek_mut().expect("nonempty top-K heap") = candidate;
-            }
+        } else if let Some(mut worst) = heap.peek_mut() {
+            if candidate < *worst { *worst = candidate; }
         }
     }
     let mut retained = heap.into_vec();
