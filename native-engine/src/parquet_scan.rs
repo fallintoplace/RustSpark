@@ -94,6 +94,41 @@ pub struct ParquetScanOptions<'a> {
     pub limit: Option<usize>,
 }
 
+/// Resolve requested Parquet root fields once for wide projections. Keep
+/// linear lookups for narrow schemas to avoid unnecessary hash allocations.
+fn projection_indices(
+    fields: &[arrow_schema::FieldRef], columns: &[&str],
+) -> Result<Vec<usize>> {
+    if columns.is_empty() {
+        return Err(Error::Schema("Parquet projection must have at least one column".into()));
+    }
+    let indexed = if columns.len().saturating_mul(fields.len()) >= 2048 {
+        let mut indices = std::collections::HashMap::with_capacity(fields.len());
+        for (position, field) in fields.iter().enumerate() {
+            // The previous linear lookup returned the first case-insensitive
+            // match when the schema contained names differing only in case.
+            indices.entry(field.name().to_ascii_lowercase()).or_insert(position);
+        }
+        Some(indices)
+    } else {
+        None
+    };
+    let mut selected = Vec::with_capacity(columns.len());
+    let mut seen = std::collections::HashSet::with_capacity(columns.len());
+    for &name in columns {
+        let position = if let Some(indices) = &indexed {
+            indices.get(&name.to_ascii_lowercase()).copied()
+        } else {
+            fields.iter().position(|field| field.name().eq_ignore_ascii_case(name))
+        }.ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
+        if !seen.insert(position) {
+            return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
+        }
+        selected.push(position);
+    }
+    Ok(selected)
+}
+
 pub fn scan_with_options(
     path: impl AsRef<Path>, batch_size: usize, options: ParquetScanOptions<'_>,
 ) -> Result<ParquetScan> {
@@ -108,27 +143,7 @@ pub fn scan_with_options(
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
     if let Some(columns) = options.columns {
-        if columns.is_empty() {
-            return Err(Error::Schema("Parquet projection must have at least one column".into()));
-        }
-        let fields = builder.schema().fields();
-        // Resolve every file field once instead of rescanning the full schema
-        // for each requested column. Keep the first case-insensitive match,
-        // matching the previous behavior for unusual duplicate file names.
-        let mut positions = std::collections::HashMap::with_capacity(fields.len());
-        for (index, field) in fields.iter().enumerate() {
-            positions.entry(field.name().to_ascii_lowercase()).or_insert(index);
-        }
-        let mut selected = Vec::with_capacity(columns.len());
-        let mut seen = std::collections::HashSet::with_capacity(columns.len());
-        for &name in columns {
-            let index = *positions.get(&name.to_ascii_lowercase())
-                .ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
-            if !seen.insert(index) {
-                return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
-            }
-            selected.push(index);
-        }
+        let selected = projection_indices(builder.schema().fields(), columns)?;
         let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
         builder = builder.with_projection(mask);
     }
@@ -687,5 +702,44 @@ mod wide_parquet_projection_lookup_regressions {
         assert!(scan_columns(&path, 4, &["col_001", "COL_001"]).is_err());
         assert!(scan_columns(&path, 4, &["unknown"]).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_projection_index_regressions {
+    use super::*;
+    use std::sync::Arc;
+
+    fn fields(count: usize) -> Vec<arrow_schema::FieldRef> {
+        (0..count).map(|n| Arc::new(arrow_schema::Field::new(
+            format!("Column_{n}"), arrow_schema::DataType::Int64, true,
+        ))).collect()
+    }
+
+    #[test]
+    fn wide_projection_matches_linear_lookup_with_reverse_and_case_insensitive_names() {
+        let fields = fields(256);
+        let names = (0..256).rev().map(|n| format!("cOlUmN_{n}")).collect::<Vec<_>>();
+        let wanted = names.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(projection_indices(&fields, &wanted).unwrap(),
+            (0..256).rev().collect::<Vec<_>>());
+        assert!(projection_indices(&fields, &["Column_17", "column_17"]).is_err());
+        assert!(projection_indices(&fields, &["missing"]).is_err());
+        assert!(projection_indices(&fields, &[]).is_err());
+    }
+
+    #[test]
+    fn sparse_and_case_colliding_schemas_preserve_first_match_rule() {
+        let mut fields = fields(128);
+        fields.insert(3, Arc::new(arrow_schema::Field::new(
+            "COLUMN_0", arrow_schema::DataType::Int64, true,
+        )));
+        let names = (0..128).map(|n| format!("column_{n}")).collect::<Vec<_>>();
+        let wanted = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let expected = wanted.iter().map(|name| fields.iter()
+            .position(|field| field.name().eq_ignore_ascii_case(name)).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(projection_indices(&fields, &wanted).unwrap(), expected);
+        assert_eq!(projection_indices(&fields, &["column_0"]).unwrap(), vec![0]);
     }
 }
