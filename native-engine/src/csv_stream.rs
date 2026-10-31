@@ -168,7 +168,9 @@ impl<R: BufRead> Iterator for CsvStream<R> {
             self.exhausted = true;
             return Some(Err(error));
         }
-        let mut rows = Vec::with_capacity(self.batch_rows.min(65_536));
+        // Avoid a large allocation when a short stream requests huge batches.
+        // Let row storage grow when a batch actually contains many records.
+        let mut rows = Vec::with_capacity(self.batch_rows.min(1_024));
         for _ in 0..self.batch_rows.min(65_536) {
             match self.records.record() {
                 Ok(Some(fields)) => {
@@ -370,5 +372,28 @@ mod bounded_csv_stream_batch_tests {
         let batches = CsvStream::new(Cursor::new(input), usize::MAX, 32)
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [65_536, 1]);
+    }
+}
+
+#[cfg(test)]
+mod modest_initial_csv_batch_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn short_and_large_batches_preserve_all_csv_rows() {
+        let mut short = CsvStream::new(
+            std::io::Cursor::new(b"id\na\nb\n"),
+            usize::MAX, 64,
+        ).unwrap();
+        let batch = short.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert!(short.next().is_none());
+
+        let mut csv = String::from("id\n");
+        for n in 0..1_025 { csv.push_str(&format!("{n}\n")); }
+        let batches = CsvStream::new(
+            std::io::Cursor::new(csv.into_bytes()), usize::MAX, 64,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 1_025);
     }
 }
