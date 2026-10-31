@@ -90,6 +90,7 @@ fn hamming_distance(args: &[Value]) -> Result<Value> {
     if left.len() > 1_000_000 || right.len() > 1_000_000 {
         return Err(Error::Execution("HAMMING_DISTANCE input exceeds 1 MiB budget".into()));
     }
+    if left == right { return Ok(Value::Integer(0)); }
     if left.is_ascii() && right.is_ascii() {
         if left.len() != right.len() {
             return Err(Error::Type("HAMMING_DISTANCE requires equal-length strings".into()));
@@ -183,5 +184,21 @@ mod distance_fast_path_tests {
         assert_eq!(evaluate(&[Value::Text("same".into()), Value::Text("sane".into()), Value::Integer(0)]).unwrap(), Value::Integer(-1));
         assert_eq!(hamming_distance(&[Value::Text("AABB".into()), Value::Text("ABBA".into())]).unwrap(), Value::Integer(2));
         assert!(hamming_distance(&[Value::Text("A".into()), Value::Text("AB".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hamming_equal_unicode_fast_path_tests {
+    use super::*;
+    #[test]
+    fn identical_text_avoids_per_character_distance_counting() {
+        let long = Value::Text("🙂é東京".repeat(10_000));
+        assert_eq!(hamming_distance(&[long.clone(), long]).unwrap(), Value::Integer(0));
+        assert_eq!(hamming_distance(&[Value::Text("éa".into()),
+            Value::Text("éb".into())]).unwrap(), Value::Integer(1));
+        assert!(hamming_distance(&[Value::Text("🙂".into()),
+            Value::Text("éé".into())]).is_err());
+        assert!(hamming_distance(&[Value::Text("x".repeat(1_000_001)),
+            Value::Text("x".repeat(1_000_001))]).is_err());
     }
 }
