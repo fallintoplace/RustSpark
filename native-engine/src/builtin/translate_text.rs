@@ -26,26 +26,28 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if from == to && (from.is_ascii() || from.chars().count() <= 4096) {
         return Ok(Value::Text(text.to_owned()));
     }
-    if text.is_ascii() && from.is_ascii() && to.is_ascii() {
-        const UNMAPPED: i16 = -1;
-        const REMOVE: i16 = -2;
-        let mut mapping = [UNMAPPED; 128];
-        for (index, &byte) in from.as_bytes().iter().enumerate() {
-            if mapping[usize::from(byte)] == UNMAPPED {
-                mapping[usize::from(byte)] = to.as_bytes().get(index)
-                    .map_or(REMOVE, |replacement| i16::from(*replacement));
-            }
+    if text.is_ascii() && from.is_ascii() {
+        // ASCII source columns can use a small direct lookup even when
+        // replacement scalars are multi-byte Unicode characters.
+        // The outer Option distinguishes an unmapped byte from deletion.
+        let mut mapping: [Option<Option<char>>; 128] = [None; 128];
+        let mut replacements = to.chars();
+        for byte in from.bytes() {
+            let replacement = replacements.next();
+            mapping[usize::from(byte)].get_or_insert(replacement);
         }
-        let mut output = Vec::with_capacity(text.len());
-        for &byte in text.as_bytes() {
+        let mut output = String::with_capacity(text.len());
+        for byte in text.bytes() {
             match mapping[usize::from(byte)] {
-                UNMAPPED => output.push(byte),
-                REMOVE => {},
-                replacement => output.push(replacement as u8),
+                Some(Some(replacement)) => output.push(replacement),
+                Some(None) => {}
+                None => output.push(char::from(byte)),
+            }
+            if output.len() > 16 * 1024 * 1024 {
+                return Err(Error::Execution("TRANSLATE output exceeds 16 MiB".into()));
             }
         }
-        return Ok(Value::Text(String::from_utf8(output)
-            .expect("ASCII translations remain UTF-8")));
+        return Ok(Value::Text(output));
     }
     let mut mapping: HashMap<char, Option<char>> = HashMap::new();
     let mut replacement = to.chars();
@@ -160,5 +162,39 @@ mod translate_empty_text_tests {
             .map(|code| char::from_u32(code).unwrap()).collect::<String>();
         assert!(evaluate(&[Value::Text(String::new()), Value::Text(distinct),
             Value::Text("x".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_lookup_unicode_tests {
+    use super::*;
+
+    fn translate(text: &str, from: &str, to: &str) -> Result<Value> {
+        evaluate(&[
+            Value::Text(text.into()),
+            Value::Text(from.into()),
+            Value::Text(to.into()),
+        ])
+    }
+
+    #[test]
+    fn ascii_source_maps_to_multibyte_unicode_without_losing_duplicate_rules() {
+        assert_eq!(translate("ababa", "ab", "🙂é").unwrap(),
+            Value::Text("🙂é🙂é🙂".into()));
+        assert_eq!(translate("aabb", "aab", "X🙂Q").unwrap(),
+            Value::Text("XXQQ".into()));
+        assert_eq!(translate("abba", "ab", "é").unwrap(),
+            Value::Text("éé".into()));
+        assert_eq!(translate("abba", "ab", "").unwrap(),
+            Value::Text("".into()));
+        assert_eq!(translate("café", "a", "🙂").unwrap(),
+            Value::Text("c🙂fé".into()));
+    }
+
+    #[test]
+    fn expanded_ascii_input_still_respects_output_budget() {
+        let input = "a".repeat(5 * 1024 * 1024);
+        assert!(translate(&input, "a", "🙂").unwrap_err()
+            .to_string().contains("16 MiB"));
     }
 }
