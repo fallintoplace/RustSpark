@@ -1,5 +1,6 @@
 //! Hash-partitioned grouped aggregation with bounded per-shard states.
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter},
@@ -19,7 +20,6 @@ use super::{
     spill::{SpillReader, SpillWriter},
 };
 
-#[cfg(test)]
 use crate::expr::Expr;
 
 static GROUP_ID: AtomicU64 = AtomicU64::new(1);
@@ -145,12 +145,20 @@ fn add_to_state(
     state: &mut State, op: &AggregateOp, batch: &Batch, row: usize,
     retained_bytes: &mut usize, max_retained_bytes: usize,
 ) -> Result<()> {
-    let value = match op {
-        AggregateOp::CountAll => Value::Integer(1),
+    // A column reference already has its typed value in the decoded batch.
+    // Only computed expressions need an owned scalar, which is important for
+    // MIN/MAX on wide strings when most candidates never replace the extreme.
+    let value: Cow<'_, Value> = match op {
+        AggregateOp::CountAll => Cow::Owned(Value::Integer(1)),
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) | AggregateOp::SumDistinct(expr) |
-        AggregateOp::AvgDistinct(expr) => expr.evaluate(batch, row)?,
+        AggregateOp::AvgDistinct(expr) => match expr {
+            Expr::Column(name) => Cow::Borrowed(
+                batch.value(row, batch.schema().column(name)?)?
+            ),
+            _ => Cow::Owned(expr.evaluate(batch, row)?),
+        },
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -180,9 +188,9 @@ fn add_to_state(
                 let order = value.sql_compare(existing)?
                     .ok_or_else(|| Error::Type("non-comparable MIN/MAX input".into()))?;
                 if (is_min && order.is_lt()) || (!is_min && order.is_gt()) {
-                    *existing = value;
+                    *existing = value.into_owned();
                 }
-            } else { *current = Some(value); }
+            } else { *current = Some(value.into_owned()); }
         }
     }
     Ok(())
@@ -849,5 +857,53 @@ mod borrowed_group_key_equality_regressions {
             matches_group_row(&keys[position], &borrowed, 0)
         });
         assert_eq!(matched, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_group_aggregate_regressions {
+    use super::*;
+
+    #[test]
+    fn wide_text_min_max_and_distinct_match_owned_evaluation() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let big = "🙂".repeat(100_000);
+        let batches = Batch::from_rows(schema, vec![
+            vec![Value::Text(format!("b{big}"))],
+            vec![Value::Text(format!("z{big}"))],
+            vec![Value::Text(format!("a{big}"))],
+            vec![Value::Text(format!("z{big}"))],
+            vec![Value::Null],
+        ]).unwrap();
+        let expression = Expr::Column("payload".into());
+        let mut minimum = new_state(&AggregateOp::Min(expression.clone())).unwrap();
+        let mut maximum = new_state(&AggregateOp::Max(expression.clone())).unwrap();
+        let mut distinct = new_state(&AggregateOp::CountDistinct(expression.clone())).unwrap();
+        let mut bytes = 0usize;
+        for row in 0..batches.num_rows() {
+            add_to_state(&mut minimum, &AggregateOp::Min(expression.clone()), &batches, row,
+                &mut bytes, 32 * 1024 * 1024).unwrap();
+            add_to_state(&mut maximum, &AggregateOp::Max(expression.clone()), &batches, row,
+                &mut bytes, 32 * 1024 * 1024).unwrap();
+            add_to_state(&mut distinct, &AggregateOp::CountDistinct(expression.clone()), &batches, row,
+                &mut bytes, 32 * 1024 * 1024).unwrap();
+        }
+        assert!(matches!(minimum, State::Min(Some(Value::Text(ref text))) if text.starts_with('a')));
+        assert!(matches!(maximum, State::Max(Some(Value::Text(ref text))) if text.starts_with('z')));
+        assert!(matches!(distinct, State::CountDistinct { ref keys, .. } if keys.len() == 3));
+    }
+
+    #[test]
+    fn invalid_column_still_reports_an_error() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)]],
+        ).unwrap();
+        let op = AggregateOp::Min(Expr::Column("missing".into()));
+        let mut state = new_state(&op).unwrap();
+        let mut bytes = 0;
+        assert!(add_to_state(&mut state, &op, &batch, 0, &mut bytes, 1024).is_err());
     }
 }
