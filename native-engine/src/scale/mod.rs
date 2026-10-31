@@ -15,6 +15,7 @@ pub mod union_stream;
 pub mod cross_join_stream;
 pub mod set_stream;
 mod row_footprint;
+pub(crate) mod private_files;
 pub mod dictionary;
 pub mod hll;
 pub mod file_catalog;
