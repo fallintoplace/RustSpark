@@ -217,10 +217,13 @@ mod already_validated_chunk_concatenation_tests {
 #[cfg(test)]
 mod chunk_iterator_terminal_tests {
     use super::*;
+    use crate::schema::{DataType, Field, Schema};
 
     #[test]
     fn count_and_last_match_materialized_chunks() {
-        let input = super::tests::make_batch();
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..23)
+            .map(|id| vec![Value::Integer(id)]).collect()).unwrap();
         for chunk_size in [1, 2, 3, 17, 1024] {
             let mut materialized = chunks(&input, chunk_size).unwrap()
                 .collect::<Result<Vec<_>>>().unwrap();
