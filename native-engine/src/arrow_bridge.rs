@@ -225,6 +225,18 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             _ => None,
         };
         if let Some(values) = common {
+            // The Arrow array's physical type guarantees each decoded scalar
+            // type. Dictionary value slots can still contain NULL even when
+            // the dictionary key itself is present, so check that special
+            // case before trusting decoded column values.
+            if !field.is_nullable() &&
+                (array.null_count() != 0 ||
+                    matches!(field.data_type(), ArrowType::Dictionary(_, _)) &&
+                    values.iter().any(Value::is_null)) {
+                return Err(Error::Type(format!(
+                    "NULL in required column {}", field.name()
+                )));
+            }
             columns.push(values);
             continue;
         }
@@ -265,7 +277,9 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
         }
         columns.push(values);
     }
-    Batch::new_with_row_count(Schema::new(fields)?, columns, input.num_rows())
+    // Every decoded scalar was matched against its Arrow field type and
+    // requiredness. Skip rechecking each cell in a second full column scan.
+    Batch::from_validated_columns(Schema::new(fields)?, columns, input.num_rows())
 }
 
 #[cfg(test)]
@@ -465,5 +479,42 @@ mod arrow_unsigned_64_columnar_fast_path_tests {
         ])) as ArrayRef;
         let record = RecordBatch::try_from_iter(vec![("n", input)]).unwrap();
         assert!(matches!(from_arrow(&record), Err(Error::Type(_))));
+    }
+}
+
+#[cfg(test)]
+mod arrow_decoded_column_validation_tests {
+    use super::*;
+
+    #[test]
+    fn nonnullable_dictionary_rejects_null_dictionary_value_slots() {
+        let values = StringArray::from(vec![Some("known"), None]);
+        let keys = Int32Array::from(vec![Some(0), Some(1)]);
+        let array = DictionaryArray::<Int32Type>::try_new(keys, Arc::new(values)).unwrap();
+        let field = ArrowField::new(
+            "city",
+            ArrowType::Dictionary(Box::new(ArrowType::Int32), Box::new(ArrowType::Utf8)),
+            false,
+        );
+        let record = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![field])),
+            vec![Arc::new(array)],
+        ).unwrap();
+        assert!(from_arrow(&record).unwrap_err().to_string()
+            .contains("NULL in required column city"));
+    }
+
+    #[test]
+    fn trusted_decode_preserves_mixed_nullable_columns() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("amount", DataType::Float, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(7), Value::Float(1.25), Value::Text("界🙂".into())],
+            vec![Value::Integer(8), Value::Null, Value::Null],
+        ]).unwrap();
+        assert_eq!(from_arrow(&to_arrow(&batch).unwrap()).unwrap(), batch);
     }
 }
