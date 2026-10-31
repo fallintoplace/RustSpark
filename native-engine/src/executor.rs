@@ -103,7 +103,7 @@ fn execute_inner(
                 // Avoid cloning the full source table before selecting rows.
                 filter::filter(catalog.get(table)?, predicate)?
             } else {
-                filter::filter(&descend(input)?, predicate)?
+                filter::filter_owned(descend(input)?, predicate)?
             }
         },
         Plan::Project { input, selections } => {
@@ -120,7 +120,7 @@ fn execute_inner(
                 aggregate::aggregate(&descend(input)?, group_by, aggregates)?
             }
         }
-        Plan::Sort { input, keys } => sort::sort(&descend(input)?, keys)?,
+        Plan::Sort { input, keys } => sort::sort_owned(descend(input)?, keys)?,
         Plan::Limit { input, offset, count: Some(count) } if *count > 0
             && matches!(input.as_ref(), Plan::Sort { .. }) => {
             let Plan::Sort { input: source, keys } = input.as_ref() else {
@@ -142,7 +142,7 @@ fn execute_inner(
             if let Plan::Scan { table } = input.as_ref() {
                 distinct::distinct(catalog.get(table)?)?
             } else {
-                distinct::distinct(&descend(input)?)?
+                distinct::distinct_owned(descend(input)?)?
             }
         },
         Plan::Join {
@@ -161,7 +161,7 @@ fn execute_inner(
         Plan::CrossJoin { left, right } => join::cross_join_with_max_rows(
             &descend(left)?, &descend(right)?, options.max_output_rows
         )?,
-        Plan::UnionAll { left, right } => union::union_all(&descend(left)?, &descend(right)?)?,
+        Plan::UnionAll { left, right } => union::union_all_owned(descend(left)?, descend(right)?)?,
         Plan::Intersect { left, right } => set_ops::intersect_distinct(&descend(left)?, &descend(right)?)?,
         Plan::IntersectAll { left, right } => set_ops::intersect_all(&descend(left)?, &descend(right)?)?,
         Plan::ExceptAll { left, right } => set_ops::except_all(&descend(left)?, &descend(right)?)?,
@@ -402,6 +402,45 @@ mod catalog_distinct_borrow_tests {
                 ..ExecutionOptions::default() }).unwrap();
         assert_eq!(result.rows().unwrap(),
             vec![vec![Value::Null], vec![Value::Integer(7)]]);
+    }
+}
+
+#[cfg(test)]
+mod owned_intermediate_filter_execution_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, project::Selection, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn filters_computed_intermediate_batches_and_nullable_payloads() {
+        let mut catalog = Catalog::new();
+        let large = "é🙂".repeat(4096);
+        catalog.register("t", Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text(large.clone())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("ok".into())],
+        ]).unwrap()).unwrap();
+        let generated = Plan::Project {
+            input: Box::new(Plan::scan("t")),
+            selections: vec![
+                Selection::new(Expr::Column("id".into()), "id"),
+                Selection::new(Expr::Column("payload".into()), "payload"),
+            ],
+        };
+        let predicate = Expr::binary(Expr::Column("id".into()),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(1)));
+        let actual = execute(&generated.clone().filter(predicate.clone()), &catalog).unwrap();
+        let child = execute(&generated, &catalog).unwrap();
+        assert_eq!(actual, filter::filter(&child, &predicate).unwrap());
+        assert_eq!(actual.rows().unwrap(), vec![
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("ok".into())],
+        ]);
+        assert!(execute(&generated.filter(Expr::Column("missing".into())),
+            &catalog).is_err());
     }
 }
 

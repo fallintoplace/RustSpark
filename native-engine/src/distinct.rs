@@ -40,16 +40,34 @@ pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
 
 /// Deduplicate with independent key-cardinality and estimated byte budgets.
 pub fn distinct_with_budget(batch: &Batch, max_keys: usize, max_bytes: usize) -> Result<Batch> {
+    batch.take(&distinct_indices(batch, max_keys, max_bytes)?)
+}
+
+/// Deduplicate an owned input while moving retained TEXT values.
+pub fn distinct_owned(batch: Batch) -> Result<Batch> {
+    distinct_owned_with_budget(batch, 1_000_000, usize::MAX)
+}
+
+/// The same key/byte admission rules apply to borrowed and owned DISTINCT.
+pub fn distinct_owned_with_budget(
+    batch: Batch, max_keys: usize, max_bytes: usize,
+) -> Result<Batch> {
+    let selected = distinct_indices(&batch, max_keys, max_bytes)?;
+    if selected.len() == batch.num_rows() { return Ok(batch); }
+    batch.take_sorted_owned(&selected)
+}
+
+fn distinct_indices(batch: &Batch, max_keys: usize, max_bytes: usize) -> Result<Vec<usize>> {
     if batch.schema().is_empty() {
-        if batch.num_rows() == 0 { return Ok(Batch::empty(batch.schema().clone())); }
+        if batch.num_rows() == 0 { return Ok(Vec::new()); }
         if max_keys == 0 {
             return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
         }
         if max_bytes < 64 {
             return Err(crate::Error::Execution("DISTINCT byte budget exceeded".into()));
         }
-        // Every row is the same empty key. Do not hash all input row indices.
-        return Batch::new_with_row_count(batch.schema().clone(), vec![], 1);
+        // Every row has the same empty key. Record only its first offset.
+        return Ok(vec![0]);
     }
     let columns = (0..batch.schema().len())
         .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
@@ -82,7 +100,7 @@ pub fn distinct_with_budget(batch: &Batch, max_keys: usize, max_bytes: usize) ->
             }
         }
     }
-    batch.take(&indices)
+    Ok(indices)
 }
 
 #[cfg(test)]
@@ -378,5 +396,54 @@ mod bounded_borrowed_distinct_on_regressions {
         assert!(distinct_on_with_budget(&data, &["key", "KEY"], 5, usize::MAX).is_err());
         assert_eq!(distinct_on_with_budget(&Batch::empty(data.schema().clone()),
             &["key"], 0, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_distinct_gather_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn moves_only_first_unique_wide_text_rows_without_new_allocations() {
+        let large = "東京🙂".repeat(4096);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("id", DataType::Float, true),
+        ]).unwrap(), vec![
+            vec![Value::Text(large.clone()), Value::Float(-0.0)],
+            vec![Value::Text(large.clone()), Value::Float(0.0)],
+            vec![Value::Null, Value::Float(f64::NAN)],
+            vec![Value::Null, Value::Float(f64::NAN)],
+            vec![Value::Text("different".into()), Value::Null],
+        ]).unwrap();
+        let ptr = match batch.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        };
+        let expected = distinct(&batch).unwrap();
+        let actual = distinct_owned(batch).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.num_rows(), 3);
+        assert_eq!(match actual.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn owned_limits_match_borrowed_and_empty_schema_semantics() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]).unwrap();
+        assert_eq!(distinct_owned_with_budget(batch.clone(), 2, usize::MAX).unwrap(),
+            distinct_with_budget(&batch, 2, usize::MAX).unwrap());
+        assert!(distinct_owned_with_budget(batch.clone(), 1, usize::MAX).is_err());
+        assert!(distinct_owned_with_budget(batch, 2, 0).is_err());
+        let empty = Schema::new(vec![]).unwrap();
+        let repeated = Batch::new_with_row_count(empty, vec![], 100).unwrap();
+        assert_eq!(distinct_owned(repeated.clone()).unwrap(),
+            distinct(&repeated).unwrap());
+        assert!(distinct_owned_with_budget(repeated, 0, 64).is_err());
     }
 }

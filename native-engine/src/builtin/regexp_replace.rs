@@ -26,133 +26,34 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
     } else { 0 };
     let suffix = &text[start..];
-    // Literal ASCII regexes need no compilation or captures. A dollar
-    // in the replacement must still use the regex capture-expansion path.
+
+    // Literal ASCII patterns do not need regex compilation or captures.
+    // A dollar in replacement requires the regex capture-expansion path.
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
-        !replacement.contains('
-    result.push_str(&text[..start]);
-    let mut consumed = 0;
-    let mut expanded = String::new();
-    for captures in compiled.captures_iter(suffix) {
-        let matched = captures.get(0).expect("regex captures always contain the whole match");
-        let unchanged = &suffix[consumed..matched.start()];
-        expanded.clear();
-        captures.expand(replacement, &mut expanded);
-        if result.len().checked_add(unchanged.len())
-            .and_then(|len| len.checked_add(expanded.len()))
-            .is_none_or(|len| len > 16 * 1024 * 1024) {
-            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-        }
-        result.push_str(unchanged);
-        result.push_str(&expanded);
-        consumed = matched.end();
-    }
-    let remaining = &suffix[consumed..];
-    if result.len().checked_add(remaining.len())
-        .is_none_or(|len| len > 16 * 1024 * 1024) {
-        return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-    }
-    result.push_str(remaining);
-    Ok(Value::Text(result))
-}
-
-pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "regexp_replace", min_args: 3, max_args: 4,
-    result_type: output, call: evaluate,
-}];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn replaces_multiple_matches_and_capture_groups() {
-        assert_eq!(evaluate(&[
-            Value::Text("id:12 id:34".into()),
-            Value::Text("id:([0-9]+)".into()),
-            Value::Text("ref-$1".into()),
-        ]).unwrap(), Value::Text("ref-12 ref-34".into()));
-        assert!(evaluate(&[
-            Value::Text("x".into()), Value::Text("(".into()), Value::Text("y".into())
-        ]).is_err());
-    }
-}
-
-#[cfg(test)]
-mod spark_position_regressions {
-    use super::*;
-
-    #[test]
-    fn position_preserves_prefix_and_replaces_only_suffix() {
-        let args = |position| [
-            Value::Text("ab12cd34".into()), Value::Text("[0-9]+".into()),
-            Value::Text("x".into()), Value::Integer(position),
-        ];
-        assert_eq!(evaluate(&args(5)).unwrap(), Value::Text("ab12cdx".into()));
-        assert_eq!(evaluate(&args(1)).unwrap(), Value::Text("abxcdx".into()));
-        assert_eq!(evaluate(&args(99)).unwrap(), Value::Text("ab12cd34".into()));
-        assert!(evaluate(&args(0)).is_err());
-        assert!(output(&[DataType::Text, DataType::Text, DataType::Text, DataType::Text]).is_err());
-    }
-
-    #[test]
-    fn position_counts_unicode_characters() {
-        assert_eq!(evaluate(&[
-            Value::Text("éé11".into()), Value::Text("1".into()),
-            Value::Text("x".into()), Value::Integer(3),
-        ]).unwrap(), Value::Text("ééxx".into()));
-    }
-}
-
-#[cfg(test)]
-mod bounded_incremental_regex_replace_tests {
-    use super::*;
-    #[test]
-    fn rejects_expanding_outputs_before_allocating_them_all() {
-        let input = Value::Text("a".repeat(1_000));
-        let replacement = Value::Text("x".repeat(100_000));
-        assert!(evaluate(&[input, Value::Text("a".into()), replacement]).is_err());
-    }
-    #[test]
-    fn preserves_captures_zero_width_matches_and_positions() {
-        assert_eq!(evaluate(&[Value::Text("ab12".into()), Value::Text("([a-z]+)([0-9]+)".into()),
-            Value::Text("$2/$1".into())]).unwrap(), Value::Text("12/ab".into()));
-        assert_eq!(evaluate(&[Value::Text("ab".into()), Value::Text("".into()),
-            Value::Text("-".into())]).unwrap(), Value::Text("-a-b-".into()));
-        assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Text("z".into()),
-            Value::Text("x".into())]).unwrap(), Value::Text("abc".into()));
-    }
-}
-
-#[cfg(test)]
-mod expansion_buffer_reuse_tests {
-    use super::*;
-
-    #[test]
-    fn multiple_captures_expand_independently() {
-        let args = [
-            Value::Text("a1 b2 c3".into()),
-            Value::Text(r"([a-z])([0-9])".into()),
-            Value::Text("$2$1".into()),
-        ];
-        assert_eq!(evaluate(&args).unwrap(), Value::Text("1a 2b 3c".into()));
-    }
-}
-) {
+        !replacement.contains('$') {
         let matches = suffix.match_indices(pattern).count();
-        let bytes_without_matches = suffix.len() - matches * pattern.len();
-        let output_bytes = matches.checked_mul(replacement.len())
-            .and_then(|extra| start.checked_add(bytes_without_matches)
-                .and_then(|base| base.checked_add(extra)))
+        let removed = matches.checked_mul(pattern.len())
+            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
+        let output_bytes = start.checked_add(suffix.len() - removed)
+            .and_then(|base| matches.checked_mul(replacement.len())
+                .and_then(|inserted| base.checked_add(inserted)))
             .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
         if output_bytes > 16 * 1024 * 1024 {
             return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
         }
         let mut result = String::with_capacity(output_bytes);
         result.push_str(&text[..start]);
-        result.push_str(&suffix.replace(pattern, replacement));
+        let mut consumed = 0usize;
+        for (index, _) in suffix.match_indices(pattern) {
+            result.push_str(&suffix[consumed..index]);
+            result.push_str(replacement);
+            consumed = index + pattern.len();
+        }
+        result.push_str(&suffix[consumed..]);
         return Ok(Value::Text(result));
     }
+
     let compiled = regex_support::compile(pattern)?;
     let mut result = String::with_capacity(text.len());
     result.push_str(&text[..start]);
