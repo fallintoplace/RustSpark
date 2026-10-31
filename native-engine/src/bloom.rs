@@ -82,7 +82,13 @@ impl BloomFilter {
 
     /// Admit a native column's keys without materializing row tuples.
     pub fn insert_batch(&mut self, keys: &[Value]) {
-        for key in keys { self.insert(key); }
+        // A saturated bitset can never change after more insertions.
+        // Stop visiting the rest of a large build-side batch once full.
+        if self.occupied_bits == self.bits { return; }
+        for key in keys {
+            self.insert(key);
+            if self.occupied_bits == self.bits { break; }
+        }
     }
 
     /// Return one membership bit per input key in the original row order.
@@ -495,5 +501,28 @@ mod saturated_bloom_shortcut_regressions {
             assert!(filter.might_contain(&Value::Integer(123)));
             assert_eq!(filter.bits_set(), other.bits_set());
         }
+    }
+}
+
+#[cfg(test)]
+mod saturated_batch_short_circuit_tests {
+    use super::*;
+
+    #[test]
+    fn fully_occupied_bitset_keeps_all_memberships_and_metrics() {
+        let mut filter = BloomFilter::new(1, 3).unwrap();
+        filter.insert_batch(&[Value::Integer(123)]);
+        assert_eq!(filter.bits_set(), 1);
+        let existing = filter.clone();
+        let large = (0..20_000).map(|n| Value::Text(n.to_string())).collect::<Vec<_>>();
+        filter.insert_batch(&large);
+        assert_eq!(filter.bits_set(), existing.bits_set());
+        assert!(large.iter().all(|value| filter.might_contain(value)));
+        assert_eq!(filter.probe_batch(&large), vec![true; large.len()]);
+
+        let mut partial = BloomFilter::new(1024, 3).unwrap();
+        let keys = (0..100).map(Value::Integer).collect::<Vec<_>>();
+        partial.insert_batch(&keys);
+        assert!(keys.iter().all(|key| partial.might_contain(key)));
     }
 }
