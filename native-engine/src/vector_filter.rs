@@ -42,6 +42,19 @@ fn fast_boolean_column<'a>(batch: &'a Batch, predicate: &Expr) -> Result<Option<
     }
 }
 
+// Directly evaluate two Boolean input columns in one pass. For WHERE,
+// a row is selected only when the Boolean expression is TRUE; NULL
+// contributes UNKNOWN and is excluded unless the other OR operand is TRUE.
+fn fast_boolean_pair<'a>(
+    batch: &'a Batch, predicate: &Expr, boolean_op: BinaryOp,
+) -> Result<Option<(&'a [Value], &'a [Value])>> {
+    let Expr::Binary { left, op, right } = predicate else { return Ok(None); };
+    if *op != boolean_op { return Ok(None); }
+    let Some(first) = fast_boolean_column(batch, left)? else { return Ok(None) };
+    let Some(second) = fast_boolean_column(batch, right)? else { return Ok(None) };
+    Ok(Some((first, second)))
+}
+
 fn fast_float_predicate<'a>(
     batch: &'a Batch,
     predicate: &'a Expr,
@@ -289,6 +302,22 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                     _ => false,
                 };
                 if keep { selected.push(row); }
+            }
+        }
+    } else if let Some((first, second)) =
+        fast_boolean_pair(batch, predicate, BinaryOp::And)? {
+        for (row, (left, right)) in first.iter().zip(second).enumerate() {
+            if matches!(left, Value::Boolean(true))
+                && matches!(right, Value::Boolean(true)) {
+                selected.push(row);
+            }
+        }
+    } else if let Some((first, second)) =
+        fast_boolean_pair(batch, predicate, BinaryOp::Or)? {
+        for (row, (left, right)) in first.iter().zip(second).enumerate() {
+            if matches!(left, Value::Boolean(true))
+                || matches!(right, Value::Boolean(true)) {
+                selected.push(row);
             }
         }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
@@ -817,5 +846,56 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fused_boolean_columns_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn boolean_pair_matches_scalar_three_valued_logic() {
+        let choices = [Value::Boolean(false), Value::Boolean(true), Value::Null];
+        let rows = choices.iter().flat_map(|first| choices.iter().map(move |second|
+            vec![first.clone(), second.clone()])).collect::<Vec<_>>();
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Boolean, true),
+            Field::new("b", DataType::Boolean, true),
+        ]).unwrap(), rows).unwrap();
+        for op in [BinaryOp::And, BinaryOp::Or] {
+            let predicate = Expr::binary(
+                Expr::Column("a".into()), op, Expr::Column("b".into()));
+            assert!(fast_boolean_pair(&batch, &predicate, op).unwrap().is_some());
+            let expected = (0..batch.num_rows())
+                .filter(|&row| predicate.evaluate(&batch, row).unwrap()
+                    .as_boolean().unwrap() == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+        }
+        let same = Expr::binary(
+            Expr::Column("a".into()), BinaryOp::Or, Expr::Column("a".into()));
+        assert_eq!(select_indices(&batch, &same).unwrap(), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn computed_boolean_expressions_keep_scalar_fallback() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Boolean, true),
+            Field::new("b", DataType::Boolean, true),
+        ]).unwrap(), vec![
+            vec![Value::Boolean(true), Value::Boolean(false)],
+            vec![Value::Boolean(false), Value::Boolean(true)],
+            vec![Value::Null, Value::Boolean(true)],
+        ]).unwrap();
+        let predicate = Expr::binary(
+            Expr::Not(Box::new(Expr::Column("a".into()))),
+            BinaryOp::Or, Expr::Column("b".into()));
+        assert!(fast_boolean_pair(&batch, &predicate, BinaryOp::Or).unwrap().is_none());
+        let expected = (0..batch.num_rows())
+            .filter(|&row| predicate.evaluate(&batch, row).unwrap()
+                .as_boolean().unwrap() == Some(true))
+            .collect::<Vec<_>>();
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
     }
 }
