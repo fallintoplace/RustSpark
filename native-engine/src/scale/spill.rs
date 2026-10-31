@@ -261,11 +261,28 @@ impl<R: Read> SpillReader<R> {
         let mut bytes_seen = 4usize.checked_add(cells)
             .filter(|&bytes| bytes <= MAX_BATCH_BYTES)
             .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+        let field_types = self.schema.fields().iter()
+            .map(|field| (field.data_type, field.nullable))
+            .collect::<Vec<_>>();
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(rows)).collect::<Vec<_>>();
         for _ in 0..rows {
-            for column in &mut columns {
-                let value = match read_byte(&mut self.input)? {
+            for (column, &(data_type, nullable)) in columns.iter_mut().zip(&field_types) {
+                // Validate the cell against the declared schema before reading
+                // its variable-length payload or allocating a decoded String.
+                let tag = read_byte(&mut self.input)?;
+                let valid = match tag {
+                    0 => nullable,
+                    1 | 2 => data_type == DataType::Boolean,
+                    3 => data_type == DataType::Integer,
+                    4 => data_type == DataType::Float,
+                    5 => data_type == DataType::Text,
+                    _ => false,
+                };
+                if !valid {
+                    return Err(Error::Parse("spill value does not match schema".into()));
+                }
+                let value = match tag {
                     0 => Value::Null,
                     1 => Value::Boolean(false),
                     2 => Value::Boolean(true),
@@ -566,5 +583,41 @@ mod buffered_spill_values_perf_tests {
         let encoded = writer.finish().unwrap();
         let mut reader = SpillReader::new(encoded.bytes.as_slice(), 2).unwrap();
         assert_eq!(reader.next_batch().unwrap().unwrap(), source);
+    }
+}
+
+#[cfg(test)]
+mod early_spill_tag_validation_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    fn valid_integer_spill() -> Vec<u8> {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish().unwrap()
+    }
+
+    #[test]
+    fn rejects_text_tag_on_integer_column_before_reading_text_length() {
+        let mut bytes = valid_integer_spill();
+        let tag = 8 + 4 + 4 + 1 + 2 + 4;
+        assert_eq!(bytes[tag], 3);
+        bytes[tag] = 5;
+        // The next four integer bytes are not a valid string prefix.
+        // Reject by declared field type instead of attempting to allocate it.
+        let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
+        assert!(reader.next_batch().unwrap_err().to_string().contains("schema"));
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_null_tag_in_required_column_before_materialization() {
+        let mut bytes = valid_integer_spill();
+        bytes[8 + 4 + 4 + 1 + 2 + 4] = 0;
+        let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
+        assert!(reader.next_batch().unwrap_err().to_string().contains("schema"));
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }
