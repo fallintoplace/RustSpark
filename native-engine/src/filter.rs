@@ -69,6 +69,27 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
     if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
         return batch.slice_rows(0, 0);
     }
+    if max_rows == 0 { return batch.slice_rows(0, 0); }
+    let direct_column = match predicate {
+        Expr::Column(name) => Some((name.as_str(), true)),
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::Column(name) => Some((name.as_str(), false)),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some((name, wanted)) = direct_column {
+        let index = batch.schema().column(name)?;
+        let column = batch.column(index)?;
+        let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
+        for (row, value) in column.iter().enumerate() {
+            if matches!(value, Value::Boolean(actual) if *actual == wanted) {
+                keep.push(row);
+                if keep.len() == max_rows { break; }
+            }
+        }
+        return batch.take(&keep);
+    }
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     for row in 0..batch.num_rows() {
         if keep.len() == max_rows { break; }
@@ -238,5 +259,36 @@ mod move_owned_filter_payloads {
         assert!(filter_owned(input, &Expr::Column("id".into())).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
         assert_eq!(filter_owned(zero, &Expr::Literal(Value::Boolean(true))).unwrap().num_rows(), 4);
+    }
+}
+
+#[cfg(test)]
+mod bounded_boolean_column_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn direct_and_negated_boolean_columns_preserve_nulls_and_stop_at_limit() {
+        let schema = Schema::new(vec![
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Null, Value::Text("a".into())],
+            vec![Value::Boolean(false), Value::Text("b".into())],
+            vec![Value::Boolean(true), Value::Text("c".repeat(512))],
+            vec![Value::Boolean(false), Value::Null],
+            vec![Value::Boolean(true), Value::Text("e".into())],
+        ]).unwrap();
+        let flag = Expr::Column("flag".into());
+        assert_eq!(filter_first(&batch, &flag, 1).unwrap(),
+            batch.take(&[2]).unwrap());
+        assert_eq!(filter_first(&batch, &flag, 9).unwrap(),
+            batch.take(&[2, 4]).unwrap());
+        assert_eq!(filter_first(&batch, &Expr::Not(Box::new(flag)), 2).unwrap(),
+            batch.take(&[1, 3]).unwrap());
+        assert_eq!(filter_first(&batch, &Expr::Column("flag".into()), 0)
+            .unwrap().num_rows(), 0);
+        assert!(filter_first(&batch, &Expr::Column("text".into()), 0).is_err());
     }
 }
