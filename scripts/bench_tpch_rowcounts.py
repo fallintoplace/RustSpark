@@ -68,8 +68,8 @@ def compare_table_count(binary, fixture, timeout, table, expected_count):
 
 
 def check(binary, fixture, timeout=120):
-    if timeout < 1:
-        raise ValueError("Timeout must be positive")
+    if type(timeout) is not int or timeout < 1:
+        raise ValueError("Timeout must be a positive integer")
     manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"),
                           object_pairs_hook=unique_keys)
     if not isinstance(manifest, dict):
