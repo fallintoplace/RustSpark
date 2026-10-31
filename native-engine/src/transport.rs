@@ -14,8 +14,8 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0; 256];
+const CRC32_TABLES: [[u32; 256]; 8] = {
+    let mut tables = [[0u32; 256]; 8];
     let mut index = 0;
     while index < 256 {
         let mut crc = index as u32;
@@ -24,19 +24,44 @@ const CRC32_TABLE: [u32; 256] = {
             crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb88320 } else { 0 };
             bit += 1;
         }
-        table[index] = crc;
+        tables[0][index] = crc;
         index += 1;
     }
-    table
+    let mut slice = 1;
+    while slice < 8 {
+        let mut index = 0;
+        while index < 256 {
+            let crc = tables[slice - 1][index];
+            tables[slice][index] = (crc >> 8) ^ tables[0][(crc & 0xff) as usize];
+            index += 1;
+        }
+        slice += 1;
+    }
+    tables
 };
 
-fn checksum_parts(header: &[u8], payload: &[u8]) -> u32 {
-    let mut value = !0u32;
-    for &byte in header.iter().chain(payload) {
-        let index = ((value ^ u32::from(byte)) & 0xff) as usize;
-        value = (value >> 8) ^ CRC32_TABLE[index];
+fn crc32_update(mut value: u32, mut bytes: &[u8]) -> u32 {
+    while bytes.len() >= 8 {
+        let low = u32::from_le_bytes(bytes[..4].try_into().expect("eight bytes")) ^ value;
+        value = CRC32_TABLES[7][(low & 0xff) as usize]
+            ^ CRC32_TABLES[6][((low >> 8) & 0xff) as usize]
+            ^ CRC32_TABLES[5][((low >> 16) & 0xff) as usize]
+            ^ CRC32_TABLES[4][(low >> 24) as usize]
+            ^ CRC32_TABLES[3][bytes[4] as usize]
+            ^ CRC32_TABLES[2][bytes[5] as usize]
+            ^ CRC32_TABLES[1][bytes[6] as usize]
+            ^ CRC32_TABLES[0][bytes[7] as usize];
+        bytes = &bytes[8..];
     }
-    !value
+    for &byte in bytes {
+        let index = ((value ^ u32::from(byte)) & 0xff) as usize;
+        value = (value >> 8) ^ CRC32_TABLES[0][index];
+    }
+    value
+}
+
+fn checksum_parts(header: &[u8], payload: &[u8]) -> u32 {
+    !crc32_update(crc32_update(!0u32, header), payload)
 }
 
 #[cfg(test)]
@@ -204,16 +229,14 @@ impl<R: Read> Iterator for FrameReader<R> {
     type Item = Result<Frame>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
-        // The count limit must be checked before reading an extra payload.
-        // Probe one byte to distinguish clean EOF from another frame.
+        // Probe for trailing bytes before decoding another unadmitted frame.
+        // An attacker must not force a payload allocation after max_frames.
         if self.frames_seen >= self.max_frames {
             self.finished = true;
-            let mut first = [0u8; 1];
-            return match self.input.read(&mut first) {
+            let mut extra = [0u8; 1];
+            return match self.input.read(&mut extra) {
                 Ok(0) => None,
-                Ok(_) => Some(Err(Error::Execution(
-                    "exchange stream frame count limit exceeded".into()
-                ))),
+                Ok(_) => Some(Err(Error::Execution("exchange stream frame count limit exceeded".into()))),
                 Err(error) => Some(Err(error.into())),
             };
         }
@@ -225,10 +248,6 @@ impl<R: Read> Iterator for FrameReader<R> {
                 Some(Err(error))
             }
             Ok(Some(frame)) => {
-                if self.frames_seen >= self.max_frames {
-                    self.finished = true;
-                    return Some(Err(Error::Execution("exchange stream frame count limit exceeded".into())));
-                }
                 let Some(total) = self.bytes_seen.checked_add(frame.payload.len())
                     .filter(|&bytes| bytes <= self.max_total_bytes) else {
                     self.finished = true;
@@ -258,8 +277,6 @@ pub fn read_frames_limited(
     max_total_bytes: usize,
     max_frames: usize,
 ) -> Result<Vec<Frame>> {
-    // Share the incremental reader's preflight checks. In particular,
-    // a frame over the count limit must not allocate its payload.
     FrameReader::new(input, max_frame_bytes, max_total_bytes, max_frames).collect()
 }
 
@@ -472,33 +489,110 @@ mod shuffle_header_integrity_tests {
 }
 
 #[cfg(test)]
-mod frame_count_preflight_regressions {
+mod frame_count_preallocation_tests {
     use super::*;
     use std::io::Cursor;
 
     #[test]
-    fn excess_frames_fail_without_reading_their_payloads() {
+    fn iterator_rejects_next_frame_after_only_one_extra_byte() {
         let mut wire = Vec::new();
         for task in 0..2 {
             write_frame(&mut wire, &Frame {
-                stage: 1, task, attempt: 0, payload: vec![7; 4096],
-            }, 4096).unwrap();
+                stage: 3, task, attempt: 1, payload: vec![7; 128],
+            }, 256).unwrap();
         }
-        // The first byte proves there is an additional frame, but no
-        // header or payload from it is needed to enforce the count.
-        let mut cursor = Cursor::new(&wire);
-        assert!(read_frames_limited(&mut cursor, 4096, 8192, 0).is_err());
-        assert_eq!(cursor.position(), 1);
+        let mut reader = FrameReader::new(Cursor::new(wire), 256, 256, 1);
+        assert!(reader.next().unwrap().is_ok());
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+        assert_eq!(reader.input.position(), (HEADER_BYTES + 128 + 1) as u64);
+    }
 
-        let mut cursor = Cursor::new(&wire);
-        let mut frames = FrameReader::new(&mut cursor, 4096, 8192, 1);
-        assert!(frames.next().unwrap().is_ok());
-        assert!(frames.next().unwrap().is_err());
-        assert!(frames.next().is_none());
-        drop(frames);
-        assert_eq!(cursor.position(), (HEADER_BYTES + 4096 + 1) as u64);
+    #[test]
+    fn eager_reader_does_not_read_over_limit_payload() {
+        let mut wire = Vec::new();
+        for task in 0..2 {
+            write_frame(&mut wire, &Frame {
+                stage: 5, task, attempt: 1, payload: vec![11; 128],
+            }, 256).unwrap();
+        }
+        let mut input = Cursor::new(wire);
+        assert!(read_frames_limited(&mut input, 256, 256, 1).is_err());
+        assert_eq!(input.position(), (HEADER_BYTES + 128 + 1) as u64);
 
-        let mut empty = Cursor::new(Vec::<u8>::new());
-        assert!(read_frames_limited(&mut empty, 4096, 8192, 0).unwrap().is_empty());
+        let mut only_one = Vec::new();
+        write_frame(&mut only_one, &Frame {
+            stage: 5, task: 1, attempt: 1, payload: vec![11; 128],
+        }, 256).unwrap();
+        assert_eq!(read_frames_limited(&mut only_one.as_slice(), 256, 256, 1)
+            .unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod slicing_by_eight_crc_regressions {
+    use super::*;
+
+    fn reference(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            let mut entry = (crc ^ u32::from(byte)) & 0xff;
+            for _ in 0..8 {
+                entry = (entry >> 1) ^ if entry & 1 != 0 { 0xedb88320 } else { 0 };
+            }
+            crc = (crc >> 8) ^ entry;
+        }
+        !crc
+    }
+
+    #[test]
+    fn matches_bitwise_crc_for_misaligned_exchange_headers_and_payloads() {
+        assert_eq!(checksum(b"123456789"), 0xcbf43926);
+        for len in [0, 1, 2, 7, 8, 9, 15, 16, 23, 31, 32, 63, 64, 65, 4097] {
+            let header = [0x41u8; 28];
+            let payload = (0..len).map(|index| (index * 37 % 251) as u8).collect::<Vec<_>>();
+            let mut full = header.to_vec();
+            full.extend_from_slice(&payload);
+            assert_eq!(checksum_parts(&header, &payload), reference(&full), "payload length {len}");
+            assert_eq!(checksum(&payload), reference(&payload));
+        }
+    }
+}
+
+#[cfg(test)]
+mod early_frame_count_rejection_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn extra_frame_is_rejected_without_decoding_its_payload() {
+        let mut wire = Vec::new();
+        let first = Frame { stage: 1, task: 1, attempt: 1, payload: vec![3; 12] };
+        let extra = Frame { stage: 1, task: 2, attempt: 1, payload: vec![9; 32 * 1024] };
+        write_frame(&mut wire, &first, 32 * 1024).unwrap();
+        write_frame(&mut wire, &extra, 32 * 1024).unwrap();
+        let first_bytes = HEADER_BYTES + first.payload.len();
+        let mut reader = FrameReader::new(Cursor::new(wire.as_slice()),
+            32 * 1024, 64 * 1024, 1);
+        assert_eq!(reader.next().unwrap().unwrap(), first);
+        assert!(reader.next().unwrap().unwrap_err().to_string().contains("frame count"));
+        assert_eq!(reader.input.position(), (first_bytes + 1) as u64);
+        assert!(reader.next().is_none());
+        let mut cursor = Cursor::new(wire.as_slice());
+        assert!(read_frames_limited(&mut cursor, 32 * 1024, 64 * 1024, 1).is_err());
+        assert_eq!(cursor.position(), (first_bytes + 1) as u64);
+    }
+
+    #[test]
+    fn exactly_at_frame_limit_preserves_clean_eof() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &Frame { stage: 1, task: 5, attempt: 1,
+            payload: vec![7; 2] }, 2).unwrap();
+        assert_eq!(read_frames_limited(&mut wire.as_slice(), 2, 2, 1)
+            .unwrap().len(), 1);
+        assert!(read_frames_limited(&mut [].as_slice(), 2, 2, 0)
+            .unwrap().is_empty());
+        assert!(read_frames_limited(&mut wire.as_slice(), 2, 2, 0)
+            .unwrap_err().to_string().contains("frame count"));
     }
 }

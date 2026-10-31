@@ -126,6 +126,9 @@ impl BloomFilter {
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
             *destination |= *source;
         }
+        // An empty destination must become queryable after unioning a
+        // populated filter. Otherwise might_contain returns false for all keys.
+        self.populated |= other.populated;
         Ok(())
     }
 }
@@ -159,6 +162,7 @@ impl BloomFilter {
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
             *destination &= *source;
         }
+        self.populated &= other.populated;
         Ok(())
     }
 }
@@ -263,5 +267,35 @@ mod empty_bloom_probe_fast_path_tests {
         assert!(filter.might_contain(&key));
         assert!(filter.bits_set() > 0);
         assert!(filter.clone().might_contain(&key));
+    }
+}
+
+#[cfg(test)]
+mod bloom_empty_merge_regressions {
+    use super::*;
+
+    #[test]
+    fn union_into_fresh_filter_preserves_all_inserted_keys() {
+        let mut empty = BloomFilter::new(8192, 5).unwrap();
+        let mut populated = BloomFilter::new(8192, 5).unwrap();
+        let values = [Value::Integer(7), Value::Float(-0.0), Value::Null];
+        populated.insert_batch(&values);
+        empty.union_with(&populated).unwrap();
+        assert!(values.iter().all(|value| empty.might_contain(value)));
+        assert!(empty.might_contain(&Value::Float(0.0)));
+        let before = empty.bits_set();
+        empty.union_with(&BloomFilter::new(8192, 5).unwrap()).unwrap();
+        assert_eq!(empty.bits_set(), before);
+    }
+
+    #[test]
+    fn intersecting_with_empty_filter_clears_membership() {
+        let mut populated = BloomFilter::new(8192, 5).unwrap();
+        populated.insert(&Value::Integer(7));
+        populated.intersect_with(&BloomFilter::new(8192, 5).unwrap()).unwrap();
+        assert_eq!(populated.bits_set(), 0);
+        assert!(!populated.might_contain(&Value::Integer(7)));
+        populated.insert(&Value::Integer(9));
+        assert!(populated.might_contain(&Value::Integer(9)));
     }
 }
