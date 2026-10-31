@@ -101,7 +101,7 @@ impl StageGraph {
     fn calculate_execution_order(stages: &[Stage]) -> Result<Vec<usize>> {
         let mut degrees = vec![0_usize; stages.len()];
         let mut children = vec![Vec::new(); stages.len()];
-        for stage in &stages {
+        for stage in stages {
             for &input in &stage.inputs {
                 degrees[stage.id] += 1;
                 children[input].push(stage.id);
