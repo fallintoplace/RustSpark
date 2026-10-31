@@ -82,6 +82,36 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     Batch::from_validated_columns(schema, columns, total)
 }
 
+/// Concatenate already-owned batches without cloning heap-backed TEXT cells.
+///
+/// Validate all input schemas and row counts before consuming any columns,
+/// then transfer each source vector into exactly one destination vector.
+pub fn concatenate_owned(mut batches: Vec<Batch>) -> Result<Batch> {
+    let first = batches.first().ok_or_else(||
+        Error::Schema("cannot concatenate without a schema".into()))?;
+    if batches.len() == 1 {
+        return Ok(batches.pop().expect("one batch"));
+    }
+    let schema = first.schema().clone();
+    let mut total = 0usize;
+    for batch in &batches {
+        if batch.schema() != &schema {
+            return Err(Error::Schema("batch schemas must match exactly".into()));
+        }
+        total = total.checked_add(batch.num_rows())
+            .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
+    }
+    let mut columns: Vec<Vec<Value>> = (0..schema.len())
+        .map(|_| Vec::with_capacity(total))
+        .collect();
+    for batch in batches {
+        for (target, source) in columns.iter_mut().zip(batch.into_columns()) {
+            target.extend(source);
+        }
+    }
+    Batch::from_validated_columns(schema, columns, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +265,61 @@ mod chunk_iterator_terminal_tests {
         let empty = Batch::empty(input.schema().clone());
         assert_eq!(chunks(&empty, 3).unwrap().count(), 0);
         assert!(chunks(&empty, 3).unwrap().last().is_none());
+    }
+}
+
+#[cfg(test)]
+mod owned_concatenation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn moves_large_text_cells_without_reallocating_their_payloads() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(8192)), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text("é".repeat(4096)), Value::Integer(3)],
+        ]).unwrap();
+        let left_pointer = match left.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let right_pointer = match right.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let expected = concatenate(&[left.clone(), right.clone()]).unwrap();
+        let merged = concatenate_owned(vec![left, right]).unwrap();
+        assert_eq!(merged, expected);
+        assert_eq!(match merged.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, left_pointer);
+        assert_eq!(match merged.value(2, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, right_pointer);
+    }
+
+    #[test]
+    fn preserves_zero_width_counts_and_checks_schema_compatibility() {
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(empty_schema.clone(), vec![], 7).unwrap();
+        let b = Batch::new_with_row_count(empty_schema, vec![], 11).unwrap();
+        assert_eq!(concatenate_owned(vec![a, b]).unwrap().num_rows(), 18);
+        let text_schema = Schema::new(vec![Field::new("value", DataType::Text, true)]).unwrap();
+        let text = Batch::from_rows(text_schema.clone(), vec![
+            vec![Value::Text("owned".into())],
+        ]).unwrap();
+        assert_eq!(concatenate_owned(vec![text.clone()]).unwrap(), text);
+        assert!(concatenate_owned(Vec::new()).is_err());
+        let integers = Batch::empty(Schema::new(vec![
+            Field::new("value", DataType::Integer, true),
+        ]).unwrap());
+        assert!(concatenate_owned(vec![text, integers]).is_err());
     }
 }
