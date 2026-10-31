@@ -46,30 +46,16 @@ pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<
     if partitions == 0 || partitions > 4096 || keys.is_empty() {
         return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
     }
-    let indices = keys.iter().map(|key| batch.schema().column(key))
-        .collect::<Result<Vec<_>>>()?;
+    for key in keys { batch.schema().column(key)?; }
     if partitions == 1 {
         // Every row hashes to partition zero. Keep the validated input batch
         // directly instead of allocating key groups and hashing all rows.
         return Ok(vec![batch.clone()]);
     }
-    let columns = indices.iter().map(|&index| batch.column(index))
-        .collect::<Result<Vec<_>>>()?;
-    let mut groups = vec![Vec::new(); partitions];
-    let mask = partitions.is_power_of_two().then_some(partitions - 1);
-    for row in 0..batch.num_rows() {
-        let mut hasher = PartitionHasher::default();
-        for column in &columns {
-            column[row].hash(&mut hasher);
-        }
-        let hash = hasher.finish();
-        let bucket = match mask {
-            Some(mask) => (hash as usize) & mask,
-            None => (hash % partitions as u64) as usize,
-        };
-        groups[bucket].push(row);
-    }
-    groups.into_iter().map(|rows| batch.take(&rows)).collect()
+    // The multi-batch borrowed writer already appends rows directly to
+    // destination columns. Avoid storing one index per input row and
+    // gathering the payloads in a second pass for the single-batch case.
+    partition_batches(std::slice::from_ref(batch), keys, partitions)
 }
 
 #[cfg(test)]
@@ -673,5 +659,32 @@ mod trusted_partition_bucket_construction_tests {
         let different_schema = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
         assert!(partition_batches_owned(vec![input[0].clone(), Batch::empty(different_schema)],
             &["key"], 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_borrowed_partition_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn single_batch_direct_buckets_match_multi_batch_reference() {
+        let schema = Schema::new(vec![
+            Field::new("group", DataType::Text, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let rows = (0..129).map(|i| vec![
+            if i % 7 == 0 { Value::Null }
+            else { Value::Text(format!("group-{}", i % 13)) },
+            Value::Text(format!("{}-{i}", "λ".repeat(256))),
+        ]).collect();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        for count in [1, 2, 7, 64, 127] {
+            let actual = partition(&batch, &["group"], count).unwrap();
+            let reference = partition_batches(&[batch.clone()], &["group"], count).unwrap();
+            assert_eq!(actual, reference);
+            assert_eq!(actual.iter().map(Batch::num_rows).sum::<usize>(), 129);
+        }
+        assert!(partition(&batch, &["missing"], 1).is_err());
     }
 }
