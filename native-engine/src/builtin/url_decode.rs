@@ -18,11 +18,22 @@ pub(super) fn decode(text: &str) -> Result<String> {
     }
     let bytes = text.as_bytes();
     if !bytes.contains(&b'%') {
-        return Ok(text.replace('+', " "));
+        return Ok(if bytes.contains(&b'+') {
+            text.replace('+', " ")
+        } else {
+            text.to_owned()
+        });
     }
     let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
+    let mut index = 0usize;
+    let mut start = 0usize;
     while index < bytes.len() {
+        if bytes[index] != b'%' && bytes[index] != b'+' {
+            index += 1;
+            continue;
+        }
+        // Retain unchanged UTF-8 byte spans without pushing one byte at a time.
+        decoded.extend_from_slice(&bytes[start..index]);
         if bytes[index] == b'%' {
             let high = bytes.get(index + 1).copied().and_then(hex);
             let low = bytes.get(index + 2).copied().and_then(hex);
@@ -32,10 +43,12 @@ pub(super) fn decode(text: &str) -> Result<String> {
             decoded.push(high << 4 | low);
             index += 3;
         } else {
-            decoded.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
+            decoded.push(b' ');
             index += 1;
         }
+        start = index;
     }
+    decoded.extend_from_slice(&bytes[start..]);
     String::from_utf8(decoded)
         .map_err(|_| Error::Type("URL_DECODE produced invalid UTF-8".into()))
 }
@@ -70,5 +83,30 @@ mod url_plus_only_decode_tests {
         assert_eq!(decode("café東京").unwrap(), "café東京");
         assert_eq!(decode("a%2Bb+c").unwrap(), "a+b c");
         assert!(decode("a%GG+b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod url_decode_untouched_run_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_long_unicode_runs_while_decoding_sparse_escapes() {
+        let run = "é🙂界".repeat(12_000);
+        let encoded = format!("{run}%20{run}%2B{run}");
+        let expected = format!("{run} {run}+{run}");
+        assert_eq!(decode(&encoded).unwrap(), expected);
+        assert_eq!(decode("a%252Bb").unwrap(), "a%2Bb");
+    }
+
+    #[test]
+    fn preserves_form_spaces_and_rejects_invalid_utf8_and_escapes() {
+        assert_eq!(decode("+a+b+").unwrap(), " a b ");
+        assert_eq!(decode("a%2Bb+%C3%A9").unwrap(), "a+b é");
+        for invalid in ["%", "%A", "%GG", "%FF", "%E2%28%A1"] {
+            assert!(decode(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(decode("").unwrap(), "");
+        assert_eq!(decode("safeASCII").unwrap(), "safeASCII");
     }
 }

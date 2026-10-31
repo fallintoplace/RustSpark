@@ -144,13 +144,30 @@ fn execute_inner(
             let Plan::Sort { input: source, keys } = input.as_ref() else {
                 unreachable!("checked sort plan");
             };
-            let source = execute_inner(source, catalog, options, depth + 2, guard)?;
-            guard.check()?;
-            crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            // Sorting a catalog scan must not clone or reject its entire input
+            // against the final-result budget before Top-K has reduced it.
+            if let Plan::Scan { table } = source.as_ref() {
+                crate::topk::top_k_offset(catalog.get(table)?, keys, *offset, *count)?
+            } else {
+                let source = execute_inner(source, catalog, options, depth + 2, guard)?;
+                guard.check()?;
+                crate::topk::top_k_offset(&source, keys, *offset, *count)?
+            }
         },
         Plan::Limit { input, offset, count } => {
-            // A LIMIT over a scan must not materialize and budget the whole input.
-            if let Plan::Scan { table } = input.as_ref() {
+            // A bounded filter over a scan needs only OFFSET + LIMIT matches.
+            // Do not allocate all matching rows or reject a large intermediate
+            // result against the budget for the small final window.
+            if let Plan::Filter { input: source, predicate } = input.as_ref() {
+                if let (Plan::Scan { table }, Some(count)) = (source.as_ref(), count) {
+                    let needed = offset.checked_add(*count)
+                        .ok_or_else(|| Error::Execution("LIMIT + OFFSET overflow".into()))?;
+                    let filtered = filter::filter_first(catalog.get(table)?, predicate, needed)?;
+                    limit::limit_owned(filtered, *offset, Some(*count))?
+                } else {
+                    limit::limit_owned(descend(input)?, *offset, *count)?
+                }
+            } else if let Plan::Scan { table } = input.as_ref() {
                 limit::limit(catalog.get(table)?, *offset, *count)?
             } else {
                 limit::limit_owned(descend(input)?, *offset, *count)?
@@ -575,5 +592,76 @@ mod projected_scan_limit_budget_tests {
                     Expr::Column("n".into())), "quotient")],
         }.limit(0, Some(1));
         assert!(execute(&plan, &catalog).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod bounded_filter_scan_limit_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn limit_pushdown_keeps_filtered_offset_under_final_row_budget() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        catalog.register("data", Batch::from_rows(schema, (0..100)
+            .map(|n| vec![if n % 11 == 0 { Value::Null } else { Value::Integer(n) }])
+            .collect()).unwrap()).unwrap();
+        let predicate = Expr::binary(Expr::Column("n".into()),
+            BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(10)));
+        let plan = Plan::scan("data").filter(predicate).limit(3, Some(2));
+        let options = ExecutionOptions { max_output_rows: 2, ..ExecutionOptions::default() };
+        let output = execute_with_options(&plan, &catalog, options).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Integer(14)], vec![Value::Integer(15)]
+        ]);
+        assert!(execute_with_options(&Plan::scan("data"), &catalog, options).is_err());
+    }
+
+    #[test]
+    fn zero_limit_still_validates_predicate_and_overflow() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("data", Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)]
+        ]).unwrap()).unwrap();
+        assert!(execute(&Plan::scan("data").filter(
+            Expr::Column("n".into())).limit(0, Some(0)), &catalog).is_err());
+        assert!(execute(&Plan::scan("data").filter(
+            Expr::Literal(Value::Boolean(true))).limit(usize::MAX, Some(1)), &catalog).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod direct_sorted_catalog_limit_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value,
+        schema::{DataType, Field, Schema}, sort::SortKey};
+
+    #[test]
+    fn large_scans_can_return_small_sorted_windows_under_result_budget() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("score", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..100).rev()
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        catalog.register("large", input).unwrap();
+        let order = Plan::Sort {
+            input: Box::new(Plan::scan("large")),
+            keys: vec![SortKey::ascending(Expr::Column("score".into()))],
+        };
+        let options = ExecutionOptions { max_output_rows: 3, ..ExecutionOptions::default() };
+        let result = execute_with_options(&order.clone().limit(5, Some(3)),
+            &catalog, options).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(5)], vec![Value::Integer(6)], vec![Value::Integer(7)],
+        ]);
+        assert!(execute_with_options(&order, &catalog, options).is_err());
+        assert!(execute_with_options(
+            &Plan::Sort { input: Box::new(Plan::scan("large")),
+                keys: vec![SortKey::ascending(Expr::Column("missing".into()))],
+            }.limit(0, Some(1)), &catalog, options).is_err());
     }
 }

@@ -12,9 +12,12 @@ autobins = false
 # The old DataFusion integration suite targets a retired public API.
 # Native CLI regression coverage is explicitly listed below.
 autotests = false
+# Retired DataFusion examples are not valid native-engine targets.
+autoexamples = false
 
 [dependencies]
 rustspark-native = { path = "native-engine" }
+serde_json = "1"
 
 [lib]
 path = "src/lib.rs"

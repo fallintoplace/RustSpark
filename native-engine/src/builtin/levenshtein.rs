@@ -31,29 +31,33 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()));
     }
     if let Some(limit) = threshold {
-        // Every edit changes the length by at most one Unicode scalar.
-        // Reject impossible thresholds before allocating two character arrays
-        // (potentially many MiB for long input strings).
+        // An edit changes Unicode scalar length by at most one.
+        // Reject impossible thresholds without allocating character arrays.
         let first_len = if first.is_ascii() { first.len() } else { first.chars().count() };
         let second_len = if second.is_ascii() { second.len() } else { second.chars().count() };
         if first_len.abs_diff(second_len) > limit {
             return Ok(Value::Integer(-1));
         }
     }
-    let a = first.chars().collect::<Vec<_>>();
-    let b = second.chars().collect::<Vec<_>>();
-    // Removing identical edges does not change the edit distance.
-    let mut prefix = 0;
-    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
-        prefix += 1;
+    // Decode identical affixes from borrowed UTF-8 slices. Wide, mostly
+    // identical strings now allocate DP state only for the differing middle.
+    let mut prefix_bytes = 0usize;
+    for (left, right) in first.chars().zip(second.chars()) {
+        if left != right { break; }
+        prefix_bytes += left.len_utf8();
     }
-    let (mut a_end, mut b_end) = (a.len(), b.len());
-    while a_end > prefix && b_end > prefix && a[a_end - 1] == b[b_end - 1] {
-        a_end -= 1;
-        b_end -= 1;
+    let first = &first[prefix_bytes..];
+    let second = &second[prefix_bytes..];
+    let (mut first_end, mut second_end) = (first.len(), second.len());
+    while first_end > 0 && second_end > 0 {
+        let left = first[..first_end].chars().next_back().expect("nonempty UTF-8");
+        let right = second[..second_end].chars().next_back().expect("nonempty UTF-8");
+        if left != right { break; }
+        first_end -= left.len_utf8();
+        second_end -= right.len_utf8();
     }
-    let a = &a[prefix..a_end];
-    let b = &b[prefix..b_end];
+    let a = first[..first_end].chars().collect::<Vec<_>>();
+    let b = second[..second_end].chars().collect::<Vec<_>>();
     if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
@@ -250,6 +254,27 @@ mod levenshtein_threshold_preflight_tests {
         assert_eq!(evaluate(&[
             Value::Text("abc".into()),
             Value::Text("ab".into()),
+            Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_levenshtein_affix_regressions {
+    use super::*;
+
+    #[test]
+    fn long_shared_unicode_affixes_do_not_change_distances() {
+        let common = "🙂é東京".repeat(30_000);
+        let left = Value::Text(format!("{common}X{common}"));
+        let right = Value::Text(format!("{common}Y{common}"));
+        assert_eq!(evaluate(&[left.clone(), right.clone()]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[left.clone(), right, Value::Integer(1)]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[left, Value::Text(format!("{common}XYZ{common}")),
+            Value::Integer(1)]).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[
+            Value::Text(format!("{common}ab{common}")),
+            Value::Text(format!("{common}a{common}")),
             Value::Integer(1),
         ]).unwrap(), Value::Integer(1));
     }
