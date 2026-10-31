@@ -86,6 +86,20 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
             _ => unreachable!("all sort keys are columns"),
         }).collect::<Result<Vec<_>>>()?;
         let mut indices: Vec<usize> = (start..end).collect();
+        if columns.len() == 1 {
+            let column = columns[0];
+            let key = &keys[0];
+            indices.sort_by(|&left, &right| {
+                match (&column[left], &column[right]) {
+                    (Value::Integer(a), Value::Integer(b)) => {
+                        let ordering = a.cmp(b);
+                        if key.descending { ordering.reverse() } else { ordering }
+                    }
+                    (a, b) => compare_values(a, b, key.descending, key.nulls_first),
+                }
+            });
+            return Ok(indices);
+        }
         indices.sort_by(|&left, &right| {
             for (column, key) in columns.iter().zip(keys) {
                 let cmp = compare_values(&column[left], &column[right],
@@ -360,5 +374,40 @@ mod owned_sort_permutation_regressions {
         assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), sort(&batch, &keys).unwrap());
         assert!(sort_owned(Batch::empty(schema),
             &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod single_integer_key_sort_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn preserves_stable_ties_null_positions_and_descending_order() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("position", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(2), Value::Integer(0)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(2), Value::Integer(3)],
+            vec![Value::Null, Value::Integer(4)],
+            vec![Value::Integer(-2), Value::Integer(5)],
+        ]).unwrap();
+        for (descending, nulls_first) in [
+            (false, true), (true, true), (false, false), (true, false),
+        ] {
+            let keys = [SortKey {
+                expression: Expr::Column("key".into()), descending, nulls_first,
+            }];
+            let mut expected = batch.rows().unwrap();
+            expected.sort_by(|a, b| {
+                compare_values(&a[0], &b[0], descending, nulls_first)
+            });
+            let result = sort(&batch, &keys).unwrap();
+            assert_eq!(result.rows().unwrap(), expected);
+            assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), result);
+        }
     }
 }
