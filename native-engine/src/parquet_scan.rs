@@ -112,6 +112,11 @@ fn projection_indices(
     if columns.is_empty() {
         return Err(Error::Schema("Parquet projection must have at least one column".into()));
     }
+    // More requests than available physical fields must contain an unknown
+    // or duplicate name. Reject before allocating selection hash tables.
+    if columns.len() > fields.len() {
+        return Err(Error::Schema("Parquet projection exceeds available columns".into()));
+    }
     let indexed = if columns.len().saturating_mul(fields.len()) >= 2048 {
         let mut indices = std::collections::HashMap::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
@@ -139,6 +144,21 @@ fn projection_indices(
     Ok(selected)
 }
 
+fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
+    // Unique selected groups cannot outnumber file groups. This preflight
+    // also prevents a huge untrusted list from preallocating a huge HashSet.
+    if indices.len() > available {
+        return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(indices.len());
+    for &index in indices {
+        if index >= available || !seen.insert(index) {
+            return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+        }
+    }
+    Ok(())
+}
+
 pub fn scan_with_options(
     path: impl AsRef<Path>, batch_size: usize, options: ParquetScanOptions<'_>,
 ) -> Result<ParquetScan> {
@@ -158,13 +178,7 @@ pub fn scan_with_options(
         builder = builder.with_projection(mask);
     }
     if let Some(row_groups) = options.row_groups {
-        let count = builder.metadata().num_row_groups();
-        let mut seen = std::collections::HashSet::with_capacity(row_groups.len());
-        for &index in row_groups {
-            if index >= count || !seen.insert(index) {
-                return Err(Error::Execution("invalid or repeated Parquet row group".into()));
-            }
-        }
+        validate_row_groups(row_groups, builder.metadata().num_row_groups())?;
         builder = builder.with_row_groups(row_groups.to_vec());
     }
     builder = builder.with_offset(options.offset);
@@ -753,6 +767,35 @@ mod parquet_projection_index_regressions {
             .collect::<Vec<_>>();
         assert_eq!(projection_indices(&fields, &wanted).unwrap(), expected);
         assert_eq!(projection_indices(&fields, &["column_0"]).unwrap(), vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod parquet_selection_preflight_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn rejects_impossible_projection_width_before_building_lookup_tables() {
+        let fields: Vec<arrow_schema::FieldRef> = vec![
+            Arc::new(arrow_schema::Field::new(
+                "ID", arrow_schema::DataType::Int64, false)),
+            Arc::new(arrow_schema::Field::new(
+                "payload", arrow_schema::DataType::Utf8, true)),
+        ];
+        assert_eq!(projection_indices(&fields, &["id", "PAYLOAD"]).unwrap(), [0, 1]);
+        assert!(projection_indices(&fields, &["id", "ID", "payload"]).is_err());
+        assert!(projection_indices(&fields, &["id", "id"]).is_err());
+        assert!(projection_indices(&fields, &["missing"]).is_err());
+    }
+
+    #[test]
+    fn validates_oversized_row_group_windows_without_allocating_hash_tables() {
+        assert!(validate_row_groups(&[], 0).is_ok());
+        assert!(validate_row_groups(&[0, 2], 3).is_ok());
+        assert!(validate_row_groups(&[0, 0], 3).is_err());
+        assert!(validate_row_groups(&[3], 3).is_err());
+        assert!(validate_row_groups(&[0, 1, 2, 3, 4], 2).is_err());
     }
 }
 
