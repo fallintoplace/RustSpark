@@ -148,6 +148,7 @@ impl Batch {
             return Err(Error::Execution("selection mask length does not match batch".into()));
         }
         let selected = mask.iter().filter(|&&keep| keep).count();
+        if selected == 0 { return Ok(Self::empty(self.schema.clone())); }
         let columns = self.columns.iter().map(|source| {
             let mut output = Vec::with_capacity(selected);
             output.extend(source.iter().zip(mask).filter_map(|(value, &keep)|
@@ -378,5 +379,29 @@ mod boolean_selection_mask_tests {
         let result = zero.take_mask(&[true, false, true]).unwrap();
         assert_eq!(result.num_rows(), 2);
         assert_eq!(result.rows().unwrap(), vec![vec![], vec![]]);
+    }
+}
+
+#[cfg(test)]
+mod batch_take_mask_no_match_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn empty_selection_preserves_schema_and_zero_width_cardinality() {
+        let schema = Schema::new(vec![
+            Field::new("value", DataType::Text, true)
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(100_000))], vec![Value::Null]
+        ]).unwrap();
+        let empty = batch.take_mask(&[false, false]).unwrap();
+        assert_eq!(empty.num_rows(), 0);
+        assert_eq!(empty.schema(), &schema);
+        assert_eq!(empty.column(0).unwrap(), &[]);
+        assert!(batch.take_mask(&[]).is_err());
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let no_columns = Batch::new_with_row_count(empty_schema.clone(), vec![], 4).unwrap();
+        assert_eq!(no_columns.take_mask(&[false; 4]).unwrap().num_rows(), 0);
+        assert_eq!(no_columns.take_mask(&[true; 4]).unwrap().num_rows(), 4);
     }
 }
