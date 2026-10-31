@@ -1,15 +1,15 @@
 //! Top-K selection using O(k) candidate memory instead of a full sort.
-use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
+use std::{borrow::Cow, cmp::Ordering, collections::BinaryHeap, sync::Arc};
 use crate::{batch::Batch, expr::Expr, scalar::Value, sort::SortKey, Result};
 
 #[derive(Clone, Debug)]
-struct Candidate {
+struct Candidate<'a> {
     row: usize,
-    values: Vec<Value>,
+    values: Vec<Cow<'a, Value>>,
     options: Arc<Vec<(bool, bool)>>,
 }
 
-fn compare(left: &Candidate, right: &Candidate) -> Ordering {
+fn compare(left: &Candidate<'_>, right: &Candidate<'_>) -> Ordering {
     for ((a, b), (descending, nulls_first)) in left.values.iter()
         .zip(&right.values).zip(left.options.iter()) {
         let order = crate::sort::compare_values(a, b, *descending, *nulls_first);
@@ -18,14 +18,14 @@ fn compare(left: &Candidate, right: &Candidate) -> Ordering {
     left.row.cmp(&right.row)
 }
 
-impl PartialEq for Candidate {
+impl PartialEq for Candidate<'_> {
     fn eq(&self, other: &Self) -> bool { compare(self, other) == Ordering::Equal }
 }
-impl Eq for Candidate {}
-impl PartialOrd for Candidate {
+impl Eq for Candidate<'_> {}
+impl PartialOrd for Candidate<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
-impl Ord for Candidate {
+impl Ord for Candidate<'_> {
     fn cmp(&self, other: &Self) -> Ordering { compare(self, other) }
 }
 
@@ -116,8 +116,10 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for row in 0..batch.num_rows() {
         let values = keys.iter().zip(&key_columns).map(|(key, column)| {
             match column {
-                Some(values) => Ok(values[row].clone()),
-                None => key.expression.evaluate(batch, row),
+                // Column keys can borrow their input values for the entire heap
+                // lifetime. Only computed expressions need owned scalars.
+                Some(values) => Ok(Cow::Borrowed(&values[row])),
+                None => Ok(Cow::Owned(key.expression.evaluate(batch, row)?)),
             }
         }).collect::<Result<Vec<_>>>()?;
         let candidate = Candidate { row, values, options: Arc::clone(&options) };
@@ -352,5 +354,54 @@ mod topk_out_of_range_offset_shortcut_tests {
         let invalid = SortKey::ascending(Expr::Column("missing".into()));
         assert!(top_k_offset(&batch, &[invalid], 128, 1).is_err());
         assert!(top_k_offset(&batch, &[key], usize::MAX, 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod topk_borrowed_mixed_expression_keys {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_and_borrowed_keys_match_stable_sort_for_large_payloads() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, true),
+            Field::new("number", DataType::Integer, false),
+        ]).unwrap();
+        let rows = (0..330).map(|index| vec![
+            if index % 19 == 0 { Value::Null }
+            else { Value::Text(format!("{}-{:-03}", "long-key".repeat(100), index % 23)) },
+            Value::Integer((index * 31 % 47) as i64),
+        ]).collect();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let keys = [
+            SortKey { expression: Expr::Column("label".into()),
+                descending: true, nulls_first: false },
+            SortKey::ascending(Expr::binary(Expr::Column("number".into()),
+                BinaryOp::Add, Expr::Literal(Value::Integer(1)))),
+        ];
+        let sorted = crate::sort::sort(&batch, &keys).unwrap();
+        for size in [0, 1, 3, 29, 127, 329, 330, 400] {
+            assert_eq!(top_k(&batch, &keys, size).unwrap(),
+                sorted.slice_rows(0, size.min(sorted.num_rows())).unwrap());
+        }
+    }
+
+    #[test]
+    fn mixed_keys_still_evaluate_computed_expressions_on_discarded_rows() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("b".into()), Value::Integer(1)],
+            vec![Value::Text("z".into()), Value::Integer(i64::MAX)],
+        ]).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::Column("label".into())),
+            SortKey::ascending(Expr::binary(Expr::Column("n".into()),
+                BinaryOp::Add, Expr::Literal(Value::Integer(1)))),
+        ];
+        assert!(top_k(&batch, &keys, 1).is_err());
     }
 }
