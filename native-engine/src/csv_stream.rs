@@ -520,13 +520,13 @@ mod column_direct_csv_batch_tests {
 
     #[test]
     fn large_nullable_quoted_rows_match_across_batch_boundaries() {
-        let mut csv = String::from("id,payload,flag\\n");
+        let mut csv = String::from("id,payload,flag\n");
         let mut expected = Vec::new();
         for n in 0..257 {
             let text = if n % 11 == 0 { String::new() } else {
                 format!("payload-{n}-{}", "é".repeat(32))
             };
-            csv.push_str(&format!("{n},\\\"{text}\\\",{}\\n", n % 2 == 0));
+            csv.push_str(&format!("{n},\"{text}\",{}\n", n % 2 == 0));
             expected.push(vec![
                 Value::Integer(n),
                 if text.is_empty() { Value::Null } else { Value::Text(text) },
