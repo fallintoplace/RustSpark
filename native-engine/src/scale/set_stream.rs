@@ -63,6 +63,7 @@ impl SetStream {
     ) -> Result<Self> {
         let output_schema = set_schema(&left_schema, &right_schema)?;
         let mut right_counts: HashMap<Vec<Value>, usize> = HashMap::new();
+        let track_multiplicity = matches!(mode, SetMode::IntersectAll | SetMode::ExceptAll);
         let mut retained_bytes = 0usize;
         // Bounded materialization of right-hand distinct keys, not its row count.
         for batch in right {
@@ -77,9 +78,9 @@ impl SetStream {
                 let at_limit = right_counts.len() >= max_keys;
                 match right_counts.entry(values) {
                     Entry::Occupied(mut entry) => {
-                        // DISTINCT only needs membership. Counting repeated
-                        // right rows adds work without changing its result.
-                        if matches!(mode, SetMode::IntersectAll | SetMode::ExceptAll) {
+                        // DISTINCT modes need membership only. Repeated right-side
+                        // keys do not require a counter update or overflow check.
+                        if track_multiplicity {
                             let next = entry.get().checked_add(1)
                                 .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
                             *entry.get_mut() = next;
@@ -228,43 +229,30 @@ mod tests {
 }
 
 #[cfg(test)]
-mod duplicate_heavy_distinct_set_tests {
+mod distinct_right_membership_tests {
     use super::*;
 
     #[test]
-    fn distinct_modes_keep_membership_without_counting_duplicates() {
-        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+    fn repeated_right_keys_use_membership_without_changing_sql_set_results() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Null],
+        ]).unwrap();
         let right = Batch::from_rows(schema.clone(),
-            std::iter::repeat_n(vec![Value::Integer(7)], 4096).collect()).unwrap();
-        for mode in [SetMode::IntersectDistinct, SetMode::ExceptDistinct] {
-            let left = Batch::from_rows(schema.clone(), vec![
-                vec![Value::Integer(7)],
-                vec![Value::Integer(9)],
-                vec![Value::Integer(7)],
-            ]).unwrap();
-            let stream = SetStream::new(
-                Box::new([Ok(left)].into_iter()),
-                Box::new([Ok(right.clone())].into_iter()),
-                schema.clone(), schema.clone(), mode,
-                QueryControl::default(), 2, 4096,
-            ).unwrap();
-            assert_eq!(stream.right_counts.get(&vec![Value::Integer(7)]), Some(&1));
-            let actual = stream.collect::<Result<Vec<_>>>().unwrap().iter()
-                .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
-            let expected = if mode == SetMode::IntersectDistinct {
-                vec![vec![Value::Integer(7)]]
-            } else {
-                vec![vec![Value::Integer(9)]]
-            };
-            assert_eq!(actual, expected);
-        }
-        let left = Batch::empty(schema.clone());
-        let all = SetStream::new(
-            Box::new([Ok(left)].into_iter()),
-            Box::new([Ok(right)].into_iter()),
-            schema.clone(), schema, SetMode::IntersectAll,
-            QueryControl::default(), 2, 4096,
-        ).unwrap();
-        assert_eq!(all.right_counts.get(&vec![Value::Integer(7)]), Some(&4096));
+            std::iter::repeat_n(vec![Value::Integer(1)], 10_000)
+                .chain(std::iter::once(vec![Value::Null])).collect()).unwrap();
+        let run = |mode| SetStream::new(
+            Box::new([Ok(left.clone())].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            schema.clone(), schema.clone(), mode,
+            QueryControl::default(), 10, 4096,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(run(SetMode::IntersectDistinct),
+            vec![vec![Value::Integer(1)], vec![Value::Null]]);
+        assert_eq!(run(SetMode::ExceptDistinct), vec![vec![Value::Integer(2)]]);
+        assert_eq!(run(SetMode::IntersectAll),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null]]);
     }
 }
