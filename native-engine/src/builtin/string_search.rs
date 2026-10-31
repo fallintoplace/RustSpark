@@ -55,6 +55,10 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
     let ascii = text.is_ascii();
+    // A UTF-8 non-ASCII needle cannot occur in an ASCII-only source.
+    if ascii && !needle.is_ascii() {
+        return Ok(Value::Integer(0));
+    }
     let start = if ascii {
         if offset > text.len() { return Ok(Value::Integer(0)); }
         offset
@@ -246,5 +250,30 @@ mod delimiter_width_split_part_regressions {
             assert_eq!(run(text, delimiter, i64::MIN), Value::Text(String::new()));
         }
         assert_eq!(run("a|b", "", 1), Value::Text("a|b".into()));
+    }
+}
+
+#[cfg(test)]
+mod impossible_unicode_locate_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_needles_never_match_ascii_sources() {
+        let haystack = Value::Text("plain-ASCII".repeat(30_000));
+        for needle in ["é", "🙂", "aé", "́"] {
+            assert_eq!(locate(&[Value::Text(needle.into()), haystack.clone()]).unwrap(),
+                Value::Integer(0));
+            assert_eq!(instr(&[haystack.clone(), Value::Text(needle.into())]).unwrap(),
+                Value::Integer(0));
+            assert_eq!(locate(&[
+                Value::Text(needle.into()), haystack.clone(), Value::Integer(50_000),
+            ]).unwrap(), Value::Integer(0));
+        }
+        assert_eq!(locate(&[
+            Value::Text("ASCII".into()), Value::Text("plain-ASCII".into()),
+        ]).unwrap(), Value::Integer(7));
+        assert!(locate(&[
+            Value::Text("é".into()), haystack, Value::Integer(0),
+        ]).is_err());
     }
 }
