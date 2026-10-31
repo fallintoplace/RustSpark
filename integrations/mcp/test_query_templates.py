@@ -25,6 +25,12 @@ class TemplatesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_command("rustspark", Path("/db"), Path("q.sql"),
                          {"bad-name": "int64:3"})
+        with self.assertRaises(ValueError):
+            make_command("rustspark", Path("/db"), Path("q.sql"),
+                         {"value": "utf8:" + "é" * 2047})
+        accepted = make_command("rustspark", Path("/db"), Path("q.sql"),
+                                {"value": "utf8:" + "é" * 2045})
+        self.assertIn("value=" + "utf8:" + "é" * 2045, accepted)
 
     def test_configurable_execution_bounds_are_strict(self):
         command = make_command("rustspark", Path("/db"), Path("q.sql"), {},
