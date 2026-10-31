@@ -26,6 +26,9 @@ fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
     let factor = 10_f64.powi(scale.unsigned_abs() as i32);
     let round = |value: f64| if round_up { value.ceil() } else { value.floor() };
     let result = if scale >= 0 {
+        // Very large finite numbers have no fractional digits at this scale.
+        // Multiplying them would overflow to infinity before rounding.
+        if number.abs() > f64::MAX / factor { return super::finite(number); }
         round(number * factor) / factor
     } else {
         round(number / factor) * factor
@@ -76,5 +79,21 @@ mod tests {
         assert_eq!(ceil(&[Value::Integer(i64::MIN)]).unwrap(), Value::Integer(i64::MIN));
         assert_eq!(ceil(&[Value::Integer(9_007_199_254_740_993)]).unwrap(),
             Value::Integer(9_007_199_254_740_993));
+    }
+}
+
+#[cfg(test)]
+mod large_finite_scaled_ceil_floor_tests {
+    use super::*;
+
+    #[test]
+    fn large_finite_numbers_do_not_overflow_decimal_scaling() {
+        assert_eq!(floor(&[Value::Float(f64::MAX), Value::Integer(15)]).unwrap(),
+            Value::Float(f64::MAX));
+        assert_eq!(ceil(&[Value::Float(-f64::MAX), Value::Integer(2)]).unwrap(),
+            Value::Float(-f64::MAX));
+        assert_eq!(ceil(&[Value::Float(3.1411), Value::Integer(3)]).unwrap(),
+            Value::Float(3.142));
+        assert!(ceil(&[Value::Float(f64::INFINITY), Value::Integer(1)]).is_err());
     }
 }
