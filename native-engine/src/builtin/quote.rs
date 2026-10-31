@@ -26,6 +26,26 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 
+const JSON_QUOTE_LIMIT: usize = 16 * 1024 * 1024;
+
+struct BoundedJsonQuoteWriter {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl std::io::Write for BoundedJsonQuoteWriter {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if chunk.len() > JSON_QUOTE_LIMIT.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("JSON_QUOTE output exceeds 16 MiB"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 fn json_quote_type(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)
 }
@@ -34,12 +54,18 @@ fn json_quote(args: &[Value]) -> Result<Value> {
     if input.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("JSON_QUOTE input exceeds 16 MiB".into()));
     }
-    let encoded = serde_json::to_string(input)
-        .map_err(|error| Error::Execution(format!("JSON_QUOTE failed: {error}")))?;
-    if encoded.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("JSON_QUOTE output exceeds 16 MiB".into()));
+    let mut writer = BoundedJsonQuoteWriter {
+        bytes: Vec::with_capacity(input.len().saturating_add(2).min(JSON_QUOTE_LIMIT)),
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, input) {
+        if writer.exceeded {
+            return Err(Error::Execution("JSON_QUOTE output exceeds 16 MiB".into()));
+        }
+        return Err(Error::Execution(format!("JSON_QUOTE failed: {error}")));
     }
-    Ok(Value::Text(encoded))
+    Ok(Value::Text(String::from_utf8(writer.bytes)
+        .expect("serde_json only writes valid UTF-8")))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -107,5 +133,31 @@ mod quote_backslash_tests {
             Value::Text("'a\\\\\\'b'".into()));
         assert_eq!(evaluate(&[Value::Text("🙂\\z".into())]).unwrap(),
             Value::Text("'🙂\\\\z'".into()));
+    }
+}
+
+#[cfg(test)]
+mod json_quote_bounded_writer_tests {
+    use super::*;
+
+    #[test]
+    fn writer_preserves_json_string_escaping() {
+        for input in ["", "plain", "a\"b\\c", "é🙂", "\u{0000}\n\t\u{001f}"] {
+            assert_eq!(
+                json_quote(&[Value::Text(input.into())]).unwrap(),
+                Value::Text(serde_json::to_string(input).unwrap())
+            );
+        }
+        assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn rejects_expansion_without_allocating_beyond_output_budget() {
+        let text = "\0".repeat(2_800_000);
+        let mut writer = BoundedJsonQuoteWriter { bytes: Vec::new(), exceeded: false };
+        assert!(serde_json::to_writer(&mut writer, &text).is_err());
+        assert!(writer.exceeded);
+        assert!(writer.bytes.len() <= JSON_QUOTE_LIMIT);
+        assert!(matches!(json_quote(&[Value::Text(text)]), Err(Error::Execution(_))));
     }
 }
