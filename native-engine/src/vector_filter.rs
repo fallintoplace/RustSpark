@@ -32,6 +32,38 @@ fn fast_text_equality<'a>(
     Ok(None)
 }
 
+// Borrow SQL text keys and compare UTF-8 lexical order directly. Avoid
+// allocating a Value::Text for every row in range predicates.
+fn fast_text_ordering<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], BinaryOp, &'a str)>> {
+    let Expr::Binary { left, op, right } = predicate else { return Ok(None); };
+    if !matches!(op, BinaryOp::Less | BinaryOp::LessEqual |
+        BinaryOp::Greater | BinaryOp::GreaterEqual) {
+        return Ok(None);
+    }
+    let (name, operation, literal) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(name), Expr::Literal(Value::Text(value))) =>
+            (name, *op, value.as_str()),
+        (Expr::Literal(Value::Text(value)), Expr::Column(name)) => {
+            let reversed = match op {
+                BinaryOp::Less => BinaryOp::Greater,
+                BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                BinaryOp::Greater => BinaryOp::Less,
+                BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                _ => unreachable!("validated text ordering operator"),
+            };
+            (name, reversed, value.as_str())
+        }
+        _ => return Ok(None),
+    };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Text {
+        return Ok(None);
+    }
+    Ok(Some((batch.column(index)?, operation, literal)))
+}
+
 fn fast_boolean_column<'a>(batch: &'a Batch, predicate: &Expr) -> Result<Option<&'a [Value]>> {
     let Expr::Column(name) = predicate else { return Ok(None); };
     let index = batch.schema().column(name)?;
@@ -315,6 +347,20 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
+        }
+    } else if let Some((column, op, rhs)) = fast_text_ordering(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Text(lhs) = value {
+                let order = lhs.as_str().cmp(rhs);
+                let matches = match op {
+                    BinaryOp::Less => order.is_lt(),
+                    BinaryOp::LessEqual => !order.is_gt(),
+                    BinaryOp::Greater => order.is_gt(),
+                    BinaryOp::GreaterEqual => !order.is_lt(),
+                    _ => unreachable!("validated text ordering operator"),
+                };
+                if matches { selected.push(row); }
+            }
         }
     } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -817,5 +863,55 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod text_ordering_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn unicode_ordering_and_reversed_literals_match_scalar_sql() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("city", DataType::Text, true)]).unwrap(),
+            [None, Some(""), Some("a"), Some("a\0b"), Some("abc"),
+                Some("ä"), Some("é"), Some("東京"), Some("🙂")]
+                .into_iter().map(|value|
+                    vec![value.map_or(Value::Null, |value| Value::Text(value.into()))])
+                .collect(),
+        ).unwrap();
+        for literal in ["", "abc", "é", "🙂"] {
+            for op in [BinaryOp::Less, BinaryOp::LessEqual,
+                BinaryOp::Greater, BinaryOp::GreaterEqual] {
+                for reversed in [false, true] {
+                    let col = Expr::Column("city".into());
+                    let lit = Expr::Literal(Value::Text(literal.into()));
+                    let expression = if reversed {
+                        Expr::binary(lit, op, col)
+                    } else {
+                        Expr::binary(col, op, lit)
+                    };
+                    assert!(fast_text_ordering(&input, &expression).unwrap().is_some());
+                    let expected = (0..input.num_rows()).filter(|&row|
+                        expression.evaluate(&input, row).unwrap()
+                            .as_boolean().unwrap() == Some(true)).collect::<Vec<_>>();
+                    assert_eq!(select_indices(&input, &expression).unwrap(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_columns_do_not_fast_path_equality_expressions() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("name", DataType::Text, false)]).unwrap(),
+            vec![vec![Value::Text("a".into())]],
+        ).unwrap();
+        let expression = Expr::binary(
+            Expr::Column("name".into()), BinaryOp::Equal,
+            Expr::Literal(Value::Text("a".into())),
+        );
+        assert!(fast_text_ordering(&input, &expression).unwrap().is_none());
     }
 }
