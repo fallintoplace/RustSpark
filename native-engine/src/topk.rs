@@ -158,6 +158,40 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
         }
         return batch.take(&[best_row]);
     }
+    if k == 1 && keys.len() > 1 {
+        // No heap is needed to retain a single best row. Reuse the candidate
+        // buffers and borrow direct keys while evaluating every computed key.
+        let bound = keys.iter().map(|key| match &key.expression {
+            Expr::Column(name) => Ok(Some(batch.column(batch.schema().column(name)?)?)),
+            _ => Ok(None),
+        }).collect::<Result<Vec<_>>>()?;
+        let mut best_values: Vec<Cow<'_, Value>> = Vec::with_capacity(keys.len());
+        let mut current_values: Vec<Cow<'_, Value>> = Vec::with_capacity(keys.len());
+        let mut best_row = 0usize;
+        for row in 0..batch.num_rows() {
+            current_values.clear();
+            for (key, column) in keys.iter().zip(&bound) {
+                current_values.push(match column {
+                    Some(values) => Cow::Borrowed(&values[row]),
+                    None => Cow::Owned(key.expression.evaluate(batch, row)?),
+                });
+            }
+            let mut order = Ordering::Equal;
+            if row != 0 {
+                for ((current, best), key) in current_values.iter()
+                    .zip(&best_values).zip(keys) {
+                    order = crate::sort::compare_values(
+                        current, best, key.descending, key.nulls_first);
+                    if order != Ordering::Equal { break; }
+                }
+            }
+            if row == 0 || order == Ordering::Less {
+                std::mem::swap(&mut best_values, &mut current_values);
+                best_row = row;
+            }
+        }
+        return batch.take(&[best_row]);
+    }
     if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
         return top_k_columns(batch, keys, k);
     }
@@ -596,5 +630,55 @@ mod owned_topk_window_tests {
                     sorted.slice_rows(start, end).unwrap());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod multikey_single_topk_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn mixed_keys_top_one_agrees_with_full_sort_and_stable_ties() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(2), Value::Text("z".repeat(4096))],
+            vec![Value::Integer(1), Value::Text("gamma".into())],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(1), Value::Text("alpha".into())],
+            vec![Value::Integer(1), Value::Null],
+        ]).unwrap();
+        let keys = vec![
+            SortKey::ascending(Expr::binary(
+                Expr::Column("score".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(0)))),
+            SortKey::ascending(Expr::Column("label".into())),
+        ];
+        assert_eq!(top_k(&input, &keys, 1).unwrap(),
+            crate::sort::sort(&input, &keys).unwrap().slice_rows(0, 1).unwrap());
+        assert_eq!(top_k(&input, &keys, 1).unwrap().row(0).unwrap(),
+            vec![Value::Integer(1), Value::Null]);
+    }
+
+    #[test]
+    fn later_computed_key_errors_are_not_hidden_by_an_earlier_key() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, false),
+            Field::new("divisor", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(0), Value::Integer(1)],
+            vec![Value::Integer(3), Value::Integer(0)],
+        ]).unwrap();
+        let keys = vec![
+            SortKey::ascending(Expr::Column("score".into())),
+            SortKey::ascending(Expr::binary(
+                Expr::Literal(Value::Integer(10)), BinaryOp::Divide,
+                Expr::Column("divisor".into()))),
+        ];
+        assert!(top_k(&input, &keys, 1).is_err());
     }
 }
