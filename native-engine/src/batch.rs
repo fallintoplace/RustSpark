@@ -271,6 +271,35 @@ impl Batch {
 
 
 impl Batch {
+    /// Apply a full row permutation in place. Record the old-to-new mapping
+    /// once and replay its swap cycles over every column. No TEXT cell is cloned.
+    pub(crate) fn permute_rows_owned(mut self, indices: &[usize]) -> Result<Self> {
+        if indices.len() != self.rows {
+            return Err(Error::Execution("row permutation has incorrect length".into()));
+        }
+        let mut destinations = vec![usize::MAX; self.rows];
+        for (position, &source) in indices.iter().enumerate() {
+            if source >= self.rows || destinations[source] != usize::MAX {
+                return Err(Error::Execution("row permutation has duplicate or invalid indices".into()));
+            }
+            destinations[source] = position;
+        }
+        let mut swaps = Vec::new();
+        for position in 0..self.rows {
+            while destinations[position] != position {
+                let target = destinations[position];
+                destinations.swap(position, target);
+                swaps.push((position, target));
+            }
+        }
+        for column in &mut self.columns {
+            for &(left, right) in &swaps {
+                column.swap(left, right);
+            }
+        }
+        Ok(self)
+    }
+
     /// Slice an owned batch while moving values instead of cloning TEXT cells.
     /// The full-range case returns the original column vectors unchanged.
     pub fn slice_rows_owned(self, start: usize, end: usize) -> Result<Self> {
@@ -503,5 +532,49 @@ mod batch_take_mask_no_match_tests {
         let no_columns = Batch::new_with_row_count(empty_schema.clone(), vec![], 4).unwrap();
         assert_eq!(no_columns.take_mask(&[false; 4]).unwrap().num_rows(), 0);
         assert_eq!(no_columns.take_mask(&[true; 4]).unwrap().num_rows(), 4);
+    }
+}
+
+#[cfg(test)]
+mod owned_row_permutation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn permutes_columns_without_cloning_text_or_changing_nullable_rows() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let large = "東京🙂".repeat(4096);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(large), Value::Integer(0)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text("last".into()), Value::Integer(2)],
+        ]).unwrap();
+        let ptr = match batch.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        };
+        let expected = batch.take(&[2, 0, 1]).unwrap();
+        let permuted = batch.clone().permute_rows_owned(&[2, 0, 1]).unwrap();
+        assert_eq!(permuted, expected);
+        let owned = batch.permute_rows_owned(&[2, 0, 1]).unwrap();
+        assert_eq!(match owned.value(1, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn rejects_invalid_mappings_and_handles_empty_schema() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        for indices in [&[0usize][..], &[0, 0][..], &[1, 2][..]] {
+            assert!(batch.clone().permute_rows_owned(indices).is_err());
+        }
+        assert_eq!(batch.clone().permute_rows_owned(&[0, 1]).unwrap(), batch);
+        let width0 = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        assert_eq!(width0.permute_rows_owned(&[2, 0, 1]).unwrap().num_rows(), 3);
     }
 }

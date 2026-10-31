@@ -37,14 +37,17 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
     if input.len() as u64 > MAX_CSV_BYTES {
         return Err(Error::Execution("CSV input exceeds 64 MiB limit".into()));
     }
-    // The common streaming case is a single unquoted record. Avoid the
-    // character-by-character CSV state machine when no quoting is possible.
+    // Unquoted LF files can be split a record at a time without per-character
+    // parser state. Empty physical lines are ignored by the general scanner.
     if !input.as_bytes().contains(&b'"') && !input.as_bytes().contains(&b'\r') {
-        let body = input.strip_suffix('\n').unwrap_or(input);
-        if !body.contains('\n') {
-            if body.is_empty() { return Ok(Vec::new()); }
-            return Ok(vec![body.split(',').map(str::to_owned).collect()]);
+        let mut records = Vec::new();
+        for line in input.split('\n').filter(|line| !line.is_empty()) {
+            records.push(line.split(',').map(str::to_owned).collect());
+            if records.len() > max_records {
+                return Err(Error::Execution("CSV row count limit exceeded".into()));
+            }
         }
+        return Ok(records);
     }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
@@ -405,5 +408,32 @@ mod direct_columnar_csv_decode_regressions {
         assert!(from_csv_str_typed("id,tag\n,missing\n", schema.clone()).is_err());
         assert!(from_csv_str_typed("id,tag\n1\n", schema.clone()).is_err());
         assert!(from_csv_str_typed("id,tag\n1,extra,third\n", schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fast_multiline_csv_regressions {
+    use super::*;
+
+    #[test]
+    fn matches_general_scanner_for_unquoted_multiline_data() {
+        for input in [
+            "", "\n", "a,b\n", "a,b\n1,2\n3,4\n",
+            ",,\n\n,\n", "café,東京\n🙂,\n",
+            "a,b\n\n\n1,2", "a,b,\n,,\n",
+        ] {
+            let slow = input.replace('\n', "\r\n");
+            assert_eq!(parse_records(input).unwrap(), parse_records(&slow).unwrap(),
+                "unquoted LF and CRLF scanner differ for {input:?}");
+        }
+    }
+
+    #[test]
+    fn enforces_record_budget_without_quotes_or_carriage_returns() {
+        assert!(parse_records_with_limit("a,b\n1,2\n", 2).is_ok());
+        assert!(parse_records_with_limit("a,b\n1,2\n3,4\n", 2).is_err());
+        assert!(parse_records_with_limit("a,b", 0).is_err());
+        assert!(parse_records_with_limit("\n\n", 0).unwrap().is_empty());
+        assert!(parse_records_with_limit("a,b\r\n1,2\r\n3,4\r\n", 2).is_err());
     }
 }

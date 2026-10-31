@@ -53,20 +53,32 @@ pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     sort_range(batch, keys, 0, batch.num_rows())
 }
 
+/// Sort a temporary owned batch by rearranging its columns in place.
+/// Only row indices and a swap plan are allocated; wide TEXT buffers are moved.
+pub fn sort_owned(batch: Batch, keys: &[SortKey]) -> Result<Batch> {
+    if keys.is_empty() { return Ok(batch); }
+    let indices = sort_indices(&batch, keys, 0, batch.num_rows())?;
+    batch.permute_rows_owned(&indices)
+}
+
 /// Sort a bounded row window without copying the input batch first.
 pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Result<Batch> {
     if start > end || end > batch.num_rows() {
         return Err(crate::Error::Execution("invalid sort row window".into()));
     }
     if keys.is_empty() { return batch.slice_rows(start, end); }
+    batch.take(&sort_indices(batch, keys, start, end)?)
+}
+
+/// Produce the stable order once for borrowed and owned consumers. Computed
+/// expressions are still evaluated on every row before sorting.
+fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Result<Vec<usize>> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
     }
-    // Column references have no row-dependent evaluation errors. A window
-    // with zero or one rows is already sorted, so avoid key binding and index
-    // sorting after the schema checks.
-    if end - start <= 1 && keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
-        return batch.slice_rows(start, end);
+    if end - start <= 1 &&
+        keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        return Ok((start..end).collect());
     }
     if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         let columns = keys.iter().map(|key| match &key.expression {
@@ -76,12 +88,13 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
         let mut indices: Vec<usize> = (start..end).collect();
         indices.sort_by(|&left, &right| {
             for (column, key) in columns.iter().zip(keys) {
-                let cmp = compare_values(&column[left], &column[right], key.descending, key.nulls_first);
+                let cmp = compare_values(&column[left], &column[right],
+                    key.descending, key.nulls_first);
                 if cmp != Ordering::Equal { return cmp; }
             }
             Ordering::Equal
         });
-        return batch.take(&indices);
+        return Ok(indices);
     }
     let mut key_columns = Vec::with_capacity(keys.len());
     for key in keys {
@@ -102,7 +115,7 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
         Ordering::Equal
     });
     for index in &mut indices { *index += start; }
-    batch.take(&indices)
+    Ok(indices)
 }
 
 #[cfg(test)]
@@ -291,5 +304,61 @@ mod singleton_column_sort_tests {
         assert!(sort_range(&batch,
             &[SortKey::ascending(Expr::Column("unknown".into()))], 1, 1).is_err());
         assert_eq!(sort_range(&Batch::empty(schema), &keys, 0, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_sort_permutation_regressions {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn matches_stable_nullable_computed_order_and_moves_large_strings() {
+        let large = "é🙂東京".repeat(2048);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(2), Value::Text(large.clone())],
+            vec![Value::Null, Value::Text("first null".into())],
+            vec![Value::Integer(1), Value::Text("small".into())],
+            vec![Value::Integer(2), Value::Text("last tie".into())],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let ptr = match batch.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        };
+        let cases = [
+            vec![SortKey::ascending(Expr::Column("score".into()))],
+            vec![SortKey { expression: Expr::Column("score".into()),
+                descending: true, nulls_first: false }],
+            vec![SortKey::ascending(Expr::binary(Expr::Column("score".into()),
+                BinaryOp::Add, Expr::Literal(Value::Integer(1))))],
+        ];
+        for keys in &cases {
+            let expected = sort(&batch, keys).unwrap();
+            let actual = sort_owned(batch.clone(), keys).unwrap();
+            assert_eq!(actual, expected);
+        }
+        let keys = [SortKey::ascending(Expr::Column("score".into()))];
+        let owned = sort_owned(batch, &keys).unwrap();
+        assert_eq!(match owned.value(3, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn owned_sort_validates_even_empty_inputs_and_respects_nan_ties() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(f64::NAN)],
+            vec![Value::Float(-0.0)],
+            vec![Value::Float(0.0)],
+            vec![Value::Null],
+        ]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), sort(&batch, &keys).unwrap());
+        assert!(sort_owned(Batch::empty(schema),
+            &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
     }
 }
