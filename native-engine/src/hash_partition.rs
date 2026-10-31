@@ -170,6 +170,150 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     }).collect()
 }
 
+
+/** Hash partition owned input batches while moving rather than cloning rows.
+ *
+ * Compute destination counts before moving input columns, so each bucket
+ * allocates exactly the number of retained cells. The placement vector is
+ * bounded by input row count and is reused across all source columns.
+ */
+pub fn partition_batches_owned(
+    input: Vec<Batch>, keys: &[&str], partitions: usize,
+) -> Result<Vec<Batch>> {
+    if partitions == 0 || partitions > 4096 || keys.is_empty() {
+        return Err(Error::Execution(
+            "hash partitions must be in 1..=4096 with nonempty keys".into(),
+        ));
+    }
+    let first = input.first()
+        .ok_or_else(|| Error::Schema("partition input needs a schema".into()))?;
+    let schema = first.schema().clone();
+    let key_columns = keys.iter().map(|key| schema.column(key))
+        .collect::<Result<Vec<_>>>()?;
+    if input.iter().any(|batch| batch.schema() != &schema) {
+        return Err(Error::Schema("partition input schemas differ".into()));
+    }
+    let total = input.iter().try_fold(0usize, |sum, batch| {
+        sum.checked_add(batch.num_rows())
+            .ok_or_else(|| Error::Execution("partition row count overflow".into()))
+    })?;
+    if partitions == 1 {
+        if input.len() == 1 {
+            return Ok(input);
+        }
+        let mut combined = (0..schema.len())
+            .map(|_| Vec::with_capacity(total)).collect::<Vec<_>>();
+        for batch in input {
+            for (destination, source) in combined.iter_mut().zip(batch.into_columns()) {
+                destination.extend(source);
+            }
+        }
+        return Ok(vec![Batch::new_with_row_count(schema, combined, total)?]);
+    }
+
+    let mut counts = vec![0usize; partitions];
+    let mut placements = Vec::with_capacity(input.len());
+    let mask = partitions.is_power_of_two().then_some(partitions - 1);
+    for batch in &input {
+        let columns = key_columns.iter().map(|&index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
+        let mut destinations = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let mut hasher = PartitionHasher::default();
+            for column in &columns { column[row].hash(&mut hasher); }
+            let hash = hasher.finish();
+            let bucket = match mask {
+                Some(mask) => (hash as usize) & mask,
+                None => (hash % partitions as u64) as usize,
+            };
+            counts[bucket] = counts[bucket].checked_add(1)
+                .ok_or_else(|| Error::Execution("partition row count overflow".into()))?;
+            destinations.push(bucket);
+        }
+        placements.push(destinations);
+    }
+
+    let width = schema.len();
+    let mut output = counts.iter().map(|&count| {
+        (count != 0).then(|| (0..width)
+            .map(|_| Vec::with_capacity(count)).collect::<Vec<_>>())
+    }).collect::<Vec<_>>();
+    for (batch, destinations) in input.into_iter().zip(placements) {
+        for (column, source) in batch.into_columns().into_iter().enumerate() {
+            for (bucket, value) in destinations.iter().copied().zip(source) {
+                output[bucket].as_mut().expect("destination has nonzero rows")[column]
+                    .push(value);
+            }
+        }
+    }
+    output.into_iter().zip(counts).map(|(columns, rows)| {
+        Batch::new_with_row_count(schema.clone(),
+            columns.unwrap_or_else(|| vec![Vec::new(); width]), rows)
+    }).collect()
+}
+
+/// Consume a single input batch without duplicating heap-backed payloads.
+pub fn partition_owned(
+    batch: Batch, keys: &[&str], partitions: usize,
+) -> Result<Vec<Batch>> {
+    partition_batches_owned(vec![batch], keys, partitions)
+}
+
+#[cfg(test)]
+mod owned_hash_partition_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn all_fanouts_match_borrowed_partitioning_and_move_text() {
+        let rows = (0..320).map(|row| vec![
+            if row % 23 == 0 { Value::Null } else { Value::Integer(row % 53) },
+            if row == 119 { Value::Text("é🙂".repeat(4096)) }
+            else if row % 17 == 0 { Value::Null }
+            else { Value::Text(format!("item-{row}")) },
+        ]).collect::<Vec<_>>();
+        let input = Batch::from_rows(schema(), rows).unwrap();
+        let ptr = match input.value(119, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        for count in [1, 2, 7, 16, 257] {
+            let expected = partition(&input, &["key"], count).unwrap();
+            let output = partition_owned(input.clone(), &["key"], count).unwrap();
+            assert_eq!(output, expected, "fanout {count}");
+        }
+        let actual = partition_owned(input, &["key"], 7).unwrap();
+        let moved = actual.iter().flat_map(|batch| batch.column(1).unwrap())
+            .find(|cell| matches!(cell, Value::Text(text) if text.len() > 4096))
+            .unwrap();
+        assert_eq!(match moved { Value::Text(text) => text.as_ptr(), _ => unreachable!() }, ptr);
+    }
+
+    #[test]
+    fn across_batches_moving_matches_borrowed_and_preserves_errors() {
+        let batches = (0..5).map(|part| Batch::from_rows(schema(),
+            (0..37).map(|row| vec![
+                Value::Integer((row % 13) as i64),
+                Value::Text(format!("{part}:{row}")),
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        for count in [1, 3, 8, 64] {
+            let expected = partition_batches(&batches, &["key"], count).unwrap();
+            assert_eq!(partition_batches_owned(batches.clone(), &["key"], count).unwrap(), expected);
+        }
+        assert!(partition_batches_owned(vec![], &["key"], 4).is_err());
+        assert!(partition_batches_owned(batches.clone(), &[], 4).is_err());
+        assert!(partition_batches_owned(batches.clone(), &["unknown"], 4).is_err());
+        assert!(partition_batches_owned(batches, &["key"], 4097).is_err());
+    }
+}
+
 #[cfg(test)]
 mod partition_batches_feature_tests {
     use super::*;

@@ -45,6 +45,22 @@ impl Batch {
         Ok(Self { schema, columns, rows })
     }
 
+    /// Build a batch from columns whose values were already checked against
+    /// the schema while decoding. Only trusted internal callers may use this:
+    /// it validates the shape but deliberately skips a second cell scan.
+    pub(crate) fn from_validated_columns(
+        schema: Schema, columns: Vec<Vec<Value>>, rows: usize,
+    ) -> Result<Self> {
+        if columns.len() != schema.len() {
+            return Err(Error::Schema("column count does not match schema".into()));
+        }
+        if columns.iter().any(|column| column.len() != rows) {
+            return Err(Error::Schema("all columns must have the same length".into()));
+        }
+        Ok(Self { schema, columns, rows })
+    }
+
+
     pub fn empty(schema: Schema) -> Self {
         let columns = vec![Vec::new(); schema.len()];
         Self {

@@ -667,6 +667,45 @@ mod combined_parquet_scan_pushdown_regressions {
 }
 
 #[cfg(test)]
+mod wide_parquet_projection_lookup_regressions {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn resolves_many_out_of_order_columns_without_changing_file_order() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-wide-projection-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let mut fields = (0..128).map(|index|
+            Field::new(format!("col_{index:03}"), DataType::Integer, false)
+        ).collect::<Vec<_>>();
+        fields.push(Field::new("東京A", DataType::Integer, false));
+        let native = Batch::from_rows(Schema::new(fields).unwrap(),
+            vec![(0..129).map(Value::Integer).collect()]).unwrap();
+        let record = arrow_bridge::to_arrow(&native).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), record.schema(), None,
+        ).unwrap();
+        writer.write(&record).unwrap();
+        writer.close().unwrap();
+        let mut reader = scan_columns(&path, 4, &["東京a", "COL_127", "col_000"]).unwrap();
+        let output = reader.next().unwrap().unwrap();
+        assert_eq!(output.schema().fields().iter().map(|field| field.name.as_str())
+            .collect::<Vec<_>>(), ["col_000", "col_127", "東京A"]);
+        assert_eq!(output.row(0).unwrap(), vec![
+            Value::Integer(0), Value::Integer(127), Value::Integer(128),
+        ]);
+        assert!(reader.next().is_none());
+        assert!(scan_columns(&path, 4, &["col_001", "COL_001"]).is_err());
+        assert!(scan_columns(&path, 4, &["unknown"]).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod parquet_projection_index_regressions {
     use super::*;
     use std::sync::Arc;

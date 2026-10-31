@@ -484,3 +484,73 @@ mod borrowed_boolean_pruning_regressions {
             Expr::Literal(Value::Boolean(false))))));
     }
 }
+
+#[cfg(test)]
+mod nested_partition_pruning_preflight_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn summary() -> ColumnStatistics {
+        ColumnStatistics { rows: 50, nulls: 0,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(19)) }
+    }
+    fn gt(column: &str, threshold: i64) -> Expr {
+        Expr::binary(Expr::Column(column.into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(threshold)))
+    }
+
+    #[test]
+    fn deeply_nested_boolean_predicates_preserve_three_valued_pruning() {
+        let stats = HashMap::from([
+            ("a".to_string(), summary()),
+            ("b".to_string(), summary()),
+            ("c".to_string(), summary()),
+        ]);
+        let mut impossible = gt("a", 30);
+        for index in 0..96 {
+            impossible = Expr::binary(impossible, BinaryOp::Or,
+                gt(if index % 2 == 0 { "b" } else { "c" }, 50));
+        }
+        assert!(can_skip_columns(&stats, &impossible));
+        let possible = Expr::binary(impossible, BinaryOp::Or, gt("missing", 1));
+        assert!(!can_skip_columns(&stats, &possible));
+        let corrupt = HashMap::from([
+            ("a".into(), summary()),
+            ("b".into(), ColumnStatistics { rows: 49, ..summary() }),
+        ]);
+        assert!(!can_skip_columns(&corrupt, &gt("a", 30)));
+        assert!(can_skip_columns(&HashMap::new(),
+            &Expr::Literal(Value::Boolean(false))));
+    }
+
+    #[test]
+    fn impossible_constant_branch_prunes_even_without_statistics() {
+        let stats = HashMap::new();
+        let predicate = Expr::binary(
+            Expr::Literal(Value::Boolean(true)), BinaryOp::And,
+            Expr::Literal(Value::Boolean(false)),
+        );
+        assert!(can_skip_columns(&stats, &predicate));
+        let predicate = Expr::binary(
+            Expr::Literal(Value::Boolean(false)), BinaryOp::Or,
+            Expr::Literal(Value::Boolean(true)),
+        );
+        assert!(!can_skip_columns(&stats, &predicate));
+    }
+
+    #[test]
+    fn compound_negations_remain_equivalent_to_demorgan_rewrites() {
+        let stats = HashMap::from([("a".to_string(), summary())]);
+        let left = gt("a", 9);
+        let right = gt("a", 20);
+        let negated = Expr::Not(Box::new(Expr::binary(
+            left.clone(), BinaryOp::Or, right.clone(),
+        )));
+        let rewritten = Expr::binary(
+            Expr::Not(Box::new(left)), BinaryOp::And,
+            Expr::Not(Box::new(right)),
+        );
+        assert_eq!(can_skip_columns(&stats, &negated),
+            can_skip_columns(&stats, &rewritten));
+    }
+}

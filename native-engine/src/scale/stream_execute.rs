@@ -1,5 +1,5 @@
 //! Streaming physical execution of the supported native logical-plan subset.
-use std::{collections::HashMap, fs::File, hash::{Hash, Hasher}, io::BufReader, path::PathBuf};
+use std::{cell::RefCell, collections::HashMap, fs::File, hash::{Hash, Hasher}, io::BufReader, path::PathBuf};
 use crate::{
     aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
     project::Selection, scalar::Value,
@@ -280,14 +280,24 @@ impl Default for StreamOptions {
     }
 }
 
+// Cache schemas for immutable plan nodes for the duration of one query.
+#[derive(Default)]
+struct SchemaCache {
+    schemas: RefCell<HashMap<*const Plan, Schema>>,
+}
+
 fn infer(
-    plan: &Plan, catalog: &FileCatalog, depth: usize, max_depth: usize
+    plan: &Plan, catalog: &FileCatalog, depth: usize, max_depth: usize,
+    cache: &SchemaCache,
 ) -> Result<Schema> {
     if depth >= max_depth {
         return Err(Error::Execution("streaming query exceeds plan depth budget".into()));
     }
-    let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth);
-    match plan {
+    if let Some(schema) = cache.schemas.borrow().get(&(plan as *const Plan)).cloned() {
+        return Ok(schema);
+    }
+    let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth, cache);
+    let schema = match plan {
         Plan::Values { batch } => Ok(batch.schema().clone()),
         Plan::OneRow => Schema::new(vec![]),
         Plan::Scan { table } => Ok(catalog.schema(table)?.clone()),
@@ -333,7 +343,9 @@ fn infer(
                     return Err(Error::Unsupported(
                         "stream global DISTINCT aggregates require a spill path".into()));
                 }
-                return aggregate::global_output_schema(&schema, aggregates);
+                let result = aggregate::global_output_schema(&schema, aggregates)?;
+                cache.schemas.borrow_mut().insert(plan as *const Plan, result.clone());
+                return Ok(result);
             }
             let source = child(input)?;
             let mut fields = Vec::new();
@@ -399,7 +411,9 @@ fn infer(
         _ => Err(Error::Unsupported(
             "streaming schema inference is unavailable for this operator".into(),
         )),
-    }
+    }?;
+    cache.schemas.borrow_mut().insert(plan as *const Plan, schema.clone());
+    Ok(schema)
 }
 
 /// Depth limits alone do not bound a wide binary plan. Check the total
@@ -438,22 +452,29 @@ fn validate_plan_nodes(plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+fn output_schema_cached(
+    plan: &Plan, catalog: &FileCatalog, options: &StreamOptions,
+    cache: &SchemaCache,
+) -> Result<Schema> {
+    validate_plan_nodes(plan)?;
+    infer(plan, catalog, 0, options.max_plan_depth, cache)
+}
+
 pub fn output_schema(
     plan: &Plan, catalog: &FileCatalog, options: &StreamOptions
 ) -> Result<Schema> {
-    validate_plan_nodes(plan)?;
-    infer(plan, catalog, 0, options.max_plan_depth)
+    output_schema_cached(plan, catalog, options, &SchemaCache::default())
 }
 
 fn lower(
     plan: &Plan, catalog: &FileCatalog, options: &StreamOptions,
-    control: &QueryControl, depth: usize
+    control: &QueryControl, depth: usize, cache: &SchemaCache,
 ) -> Result<BatchStream> {
     if depth >= options.max_plan_depth {
         return Err(Error::Execution("streaming plan exceeds depth budget".into()));
     }
     control.check()?;
-    let child = |plan: &Plan| lower(plan, catalog, options, control, depth + 1);
+    let child = |plan: &Plan| lower(plan, catalog, options, control, depth + 1, cache);
     match plan {
         Plan::Values { batch } => Ok(Box::new(std::iter::once(Ok(batch.clone())))),
         Plan::OneRow => Ok(Box::new(std::iter::once(Ok(
@@ -474,7 +495,7 @@ fn lower(
             let Plan::UnionAll { left, right } = input.as_ref() else {
                 unreachable!("checked UNION ALL plan");
             };
-            let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
             let left = lower(left, catalog, options, control, depth + 2)?;
             let right = lower(right, catalog, options, control, depth + 2)?;
             Ok(Box::new(UnionDistinctStream::new(
@@ -486,8 +507,8 @@ fn lower(
             child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
         ))),
         Plan::CrossJoin { left, right } => {
-            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
-            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth, cache)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth, cache)?;
             Ok(Box::new(CrossJoinStream::new(
                 child(left)?, child(right)?, left_schema, right_schema,
                 options.batch_rows, control.clone(),
@@ -496,8 +517,8 @@ fn lower(
         Plan::Join { left, right, left_key, right_key, kind } => {
             // Partitioned grace_join already tracks matched build keys across
             // all probe batches. Do not downgrade RIGHT/FULL to an inner join.
-            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
-            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth, cache)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth, cache)?;
             let files = grace_join(
                 child(left)?, child(right)?, left_schema, right_schema,
                 left_key, right_key, *kind, &options.scratch_directory,
@@ -509,7 +530,7 @@ fn lower(
             }))
         }
         Plan::Aggregate { input, group_by, aggregates } => {
-            let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
             if group_by.is_empty() {
                 let result = aggregate::aggregate_global_stream(
                     child(input)?, &schema, aggregates, || control.check(),
@@ -537,7 +558,7 @@ fn lower(
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
-            let schema = infer(input, catalog, depth + 1, options.max_plan_depth)?;
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
             for key in keys {
                 let crate::expr::Expr::Column(name) = &key.expression else {
                     return Err(Error::Unsupported("external sort requires column keys".into()));
@@ -562,8 +583,8 @@ fn lower(
         Plan::IntersectAll { left, right } |
         Plan::Except { left, right } |
         Plan::ExceptAll { left, right } => {
-            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth)?;
-            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth)?;
+            let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth, cache)?;
+            let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth, cache)?;
             let mode = match plan {
                 Plan::Intersect { .. } => SetMode::IntersectDistinct,
                 Plan::IntersectAll { .. } => SetMode::IntersectAll,
@@ -576,7 +597,7 @@ fn lower(
             )?))
         }
         Plan::UnionAll { left, right } => {
-            let schema = infer(plan, catalog, depth, options.max_plan_depth)?;
+            let schema = infer(plan, catalog, depth, options.max_plan_depth, cache)?;
             Ok(Box::new(UnionAllStream::new(
                 child(left)?, child(right)?, schema, control.clone()
             )))
@@ -598,8 +619,9 @@ pub fn execute(
         return Err(Error::Execution("invalid streaming executor settings".into()));
     }
     control.check()?;
-    output_schema(plan, catalog, options)?;
-    lower(plan, catalog, options, &control, 0)
+    let cache = SchemaCache::default();
+    output_schema_cached(plan, catalog, options, &cache)?;
+    lower(plan, catalog, options, &control, 0, &cache)
 }
 
 #[cfg(test)]
@@ -1099,5 +1121,56 @@ mod borrowed_stream_distinct_probe_regressions {
         let row = output.next().unwrap().unwrap();
         assert_eq!(row.rows().unwrap(), vec![vec![Value::Integer(42)]]);
         assert_eq!(output.unique_keys, 2);
+    }
+}
+
+#[cfg(test)]
+mod streaming_schema_cache_regressions {
+    use super::*;
+
+    fn balanced_union() -> Plan {
+        let schema = Schema::new(vec![
+            Field::new("value", DataType::Integer, false),
+        ]).unwrap();
+        let mut plans = (0..128).map(|n| Plan::Values {
+            batch: Batch::from_rows(schema.clone(),
+                vec![vec![Value::Integer(n)]]).unwrap(),
+        }).collect::<Vec<_>>();
+        while plans.len() > 1 {
+            let mut next = Vec::with_capacity(plans.len() / 2);
+            let mut iter = plans.into_iter();
+            while let Some(left) = iter.next() {
+                let right = iter.next().expect("power of two input leaves");
+                next.push(Plan::UnionAll {
+                    left: Box::new(left), right: Box::new(right),
+                });
+            }
+            plans = next;
+        }
+        plans.pop().unwrap()
+    }
+
+    #[test]
+    fn balanced_union_infers_every_plan_node_only_once() {
+        let plan = balanced_union();
+        let catalog = FileCatalog::new();
+        let options = StreamOptions::default();
+        let cache = SchemaCache::default();
+        let inferred = output_schema_cached(&plan, &catalog, &options, &cache).unwrap();
+        assert_eq!(cache.schemas.borrow().len(), 255);
+        let again = infer(&plan, &catalog, 0, options.max_plan_depth, &cache).unwrap();
+        assert_eq!(inferred, again);
+        assert_eq!(cache.schemas.borrow().len(), 255);
+    }
+
+    #[test]
+    fn cached_lowering_retains_full_union_row_order() {
+        let plan = balanced_union();
+        let catalog = FileCatalog::new();
+        let options = StreamOptions::default();
+        let rows = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().map(|result| result.unwrap().rows().unwrap())
+            .flatten().collect::<Vec<_>>();
+        assert_eq!(rows, (0..128).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
     }
 }
