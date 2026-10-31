@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 import time
+import math
 
 MAX_SQL_RESULT_BYTES = 8 * 1024 * 1024
 
@@ -28,7 +29,9 @@ def _kill_backend_group(process: subprocess.Popen) -> None:
 def run_bounded(command: list[str], *, timeout: float,
                 max_bytes: int = MAX_SQL_RESULT_BYTES) -> subprocess.CompletedProcess:
     """Kill a backend that exceeds its stdout budget or wall clock deadline."""
-    if max_bytes <= 0 or timeout <= 0:
+    if (type(max_bytes) is not int or max_bytes <= 0
+            or type(timeout) not in (int, float)
+            or not math.isfinite(timeout) or timeout <= 0):
         raise ValueError("Invalid backend resource budget")
     output = bytearray()
     overflow = threading.Event()
