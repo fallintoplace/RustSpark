@@ -137,8 +137,10 @@ impl SetStream {
                 // Right-hand membership already holds every qualifying key.
                 // Remove a match on first use instead of keeping a second
                 // key copy in the emitted set and charging the budget twice.
-                if self.right_counts.remove(row).is_some() {
-                    let bytes = super::row_footprint::footprint(row.iter());
+                if let Some((stored_key, _)) = self.right_counts.remove_entry(row) {
+                    // The incoming row may have a different TEXT capacity
+                    // from the owned right-side key, even when they compare equal.
+                    let bytes = super::row_footprint::footprint(stored_key.iter());
                     self.retained_bytes -= bytes;
                     true
                 } else {
@@ -492,5 +494,32 @@ mod trusted_set_output_regressions {
                 vec![Value::Float(2.0)], vec![Value::Null],
             ]);
         assert_eq!(output[0].schema().fields()[0].data_type, DataType::Float);
+    }
+}
+
+
+#[cfg(test)]
+mod retained_set_key_accounting_regressions {
+    use super::*;
+
+    #[test]
+    fn intersect_distinct_releases_stored_key_size_not_probe_capacity() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let mut larger_capacity = String::with_capacity(16 * 1024);
+        larger_capacity.push_str("same");
+        let left = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text(larger_capacity)]]).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text("same".into())]]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 2, 4096,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("same".into())]]);
+        assert_eq!(stream.retained_bytes, 0);
+        assert!(stream.next().is_none());
     }
 }
