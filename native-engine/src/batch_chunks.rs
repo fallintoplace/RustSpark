@@ -39,6 +39,16 @@ impl Iterator for BatchChunks<'_> {
         let batches = remaining.div_ceil(self.size);
         (batches, Some(batches))
     }
+
+    fn count(self) -> usize {
+        self.size_hint().0
+    }
+
+    fn last(mut self) -> Option<Self::Item> {
+        let remaining = self.size_hint().0;
+        if remaining == 0 { return None; }
+        self.nth(remaining - 1)
+    }
 }
 
 impl ExactSizeIterator for BatchChunks<'_> {}
@@ -201,5 +211,29 @@ mod already_validated_chunk_concatenation_tests {
             .collect::<Vec<_>>();
         assert_eq!(concatenate(&parts).unwrap().num_rows(), 12);
         assert!(concatenate(&[chunks[0].clone(), Batch::empty(zero)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod chunk_iterator_terminal_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn count_and_last_match_materialized_chunks() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..23)
+            .map(|id| vec![Value::Integer(id)]).collect()).unwrap();
+        for chunk_size in [1, 2, 3, 17, 1024] {
+            let mut materialized = chunks(&input, chunk_size).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            let expected_count = materialized.len();
+            let expected_last = materialized.pop();
+            assert_eq!(chunks(&input, chunk_size).unwrap().count(), expected_count);
+            assert_eq!(chunks(&input, chunk_size).unwrap().last().transpose().unwrap(), expected_last);
+        }
+        let empty = Batch::empty(input.schema().clone());
+        assert_eq!(chunks(&empty, 3).unwrap().count(), 0);
+        assert!(chunks(&empty, 3).unwrap().last().is_none());
     }
 }
