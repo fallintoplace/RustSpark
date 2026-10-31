@@ -9,7 +9,14 @@ pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
         // The result is known without scanning any source columns.
         return Ok(Batch::empty(batch.schema().clone()));
     }
-    batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
+    let indices = crate::vector_filter::select_indices(batch, predicate)?;
+    if indices.len() == batch.num_rows() {
+        return Ok(batch.clone());
+    }
+    if indices.is_empty() {
+        return Ok(Batch::empty(batch.schema().clone()));
+    }
+    batch.take(&indices)
 }
 
 /// Filter an owned native batch. An always-true predicate can reuse all columns.
@@ -23,6 +30,9 @@ pub fn filter_owned(batch: Batch, predicate: &Expr) -> Result<Batch> {
     let indices = crate::vector_filter::select_indices(&batch, predicate)?;
     if indices.len() == batch.num_rows() {
         return Ok(batch);
+    }
+    if indices.is_empty() {
+        return Ok(Batch::empty(batch.schema().clone()));
     }
     batch.take_sorted_owned(&indices)
 }
@@ -316,5 +326,35 @@ mod bounded_boolean_column_tests {
         assert_eq!(filter_first(&batch, &Expr::Column("flag".into()), 0)
             .unwrap().num_rows(), 0);
         assert!(filter_first(&batch, &Expr::Column("text".into()), 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod dense_filter_selection_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn dense_and_empty_selections_preserve_schema_and_rows() {
+        let schema = Schema::new(vec![
+            Field::new("ok", DataType::Boolean, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let predicate = Expr::Column("ok".into());
+        let payload = "large-value".repeat(2000);
+        let dense = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Boolean(true), Value::Text(payload.clone())],
+            vec![Value::Boolean(true), Value::Text(payload)],
+        ]).unwrap();
+        assert_eq!(filter(&dense, &predicate).unwrap(), dense);
+        assert_eq!(filter_owned(dense.clone(), &predicate).unwrap(), dense);
+        let empty = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Boolean(false), Value::Text("a".into())],
+            vec![Value::Null, Value::Text("b".into())],
+        ]).unwrap();
+        let borrowed = filter(&empty, &predicate).unwrap();
+        let owned = filter_owned(empty, &predicate).unwrap();
+        assert_eq!(borrowed, Batch::empty(schema.clone()));
+        assert_eq!(owned, Batch::empty(schema));
     }
 }
