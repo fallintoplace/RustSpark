@@ -170,7 +170,7 @@ func TestDecodeRowsRejectsDuplicateJSONKeysAtEveryDepth(t *testing.T) {
         `[{"id":1,"id":2}]`,
         `[{"nested":{"id":1,"id":2}}]`,
         `[{"nested":[{"name":"a","name":"b"}]}]`,
-        `[{"a":1,"\\u0061":2}]`,
+        `[{"a":1,"\u0061":2}]`,
     }
     for _, raw := range invalid {
         if _, err := decodeRows(strings.NewReader(raw)); err == nil ||
