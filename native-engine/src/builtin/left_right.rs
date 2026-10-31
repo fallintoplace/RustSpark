@@ -55,6 +55,12 @@ fn reverse(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("REVERSE input exceeds 16 MiB".into()));
     }
+    if text.is_ascii() {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.reverse();
+        return Ok(Value::Text(String::from_utf8(bytes)
+            .expect("ASCII reversal preserves UTF-8")));
+    }
     let mut result = String::with_capacity(text.len());
     for character in text.chars().rev() {
         result.push(character);
@@ -184,5 +190,21 @@ mod equal_common_prefix_fast_path_tests {
         assert_eq!(common_prefix(&[Value::Text("".into()),
             Value::Text("".into())]).unwrap(), Value::Text("".into()));
         assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_reverse_buffer_regressions {
+    use super::*;
+
+    #[test]
+    fn handles_long_ascii_inputs_and_unicode_fallback() {
+        let ascii = "abcXYZ012345".repeat(20_000);
+        let expected = ascii.chars().rev().collect::<String>();
+        assert_eq!(reverse(&[Value::Text(ascii)]).unwrap(), Value::Text(expected));
+        assert_eq!(reverse(&[Value::Text("aé🙂b".into())]).unwrap(),
+            Value::Text("b🙂éa".into()));
+        assert_eq!(reverse(&[Value::Text(String::new())]).unwrap(), Value::Text(String::new()));
+        assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
     }
 }
