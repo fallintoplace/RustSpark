@@ -350,31 +350,52 @@ fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
             _ => unreachable!(),
         })));
     }
-    let text = input.chars().collect::<Vec<_>>();
-    if (text.len() + 1).checked_mul(pieces.len() + 1)
+    // Keep the existing admission budget, but do not materialize the input
+    // as char[] or allocate two input-sized DP rows. SQL LIKE is a glob over
+    // Unicode scalar values, so backtrack only to the most recent '%'.
+    let text_chars = if input.is_ascii() { input.len() } else { input.chars().count() };
+    if text_chars.checked_add(1)
+        .and_then(|len| len.checked_mul(pieces.len().saturating_add(1)))
         .is_none_or(|cells| cells > 8_000_000) {
         return Err(Error::Execution("LIKE pattern exceeds work budget".into()));
     }
-    let mut prev = vec![false; text.len() + 1];
-    let mut next = vec![false; text.len() + 1];
-    prev[0] = true;
-    for piece in pieces {
-        next.fill(false);
-        match piece {
-            LikePiece::Many => {
-                next[0] = prev[0];
-                for i in 1..=text.len() { next[i] = prev[i] || next[i - 1]; }
+    let mut at = 0usize;
+    let mut piece = 0usize;
+    // (next pattern position, first input position not yet tried by '%').
+    let mut wildcard = None::<(usize, usize)>;
+    while at < input.len() {
+        let character = input[at..].chars().next()
+            .expect("LIKE position is on a UTF-8 boundary");
+        match pieces.get(piece).copied() {
+            Some(LikePiece::Literal(expected)) if expected == character => {
+                at += character.len_utf8();
+                piece += 1;
             }
-            LikePiece::One => {
-                for i in 1..=text.len() { next[i] = prev[i - 1]; }
+            Some(LikePiece::One) => {
+                at += character.len_utf8();
+                piece += 1;
             }
-            LikePiece::Literal(symbol) => {
-                for i in 1..=text.len() { next[i] = prev[i - 1] && text[i - 1] == symbol; }
+            Some(LikePiece::Many) => {
+                piece += 1;
+                wildcard = Some((piece, at));
+            }
+            _ => {
+                let Some((after_many, consumed)) = wildcard else { return Ok(false); };
+                if consumed == input.len() { return Ok(false); }
+                // Widen the most recent '%' by exactly one Unicode scalar.
+                let advance = input[consumed..].chars().next()
+                    .expect("LIKE backtracking position is on a UTF-8 boundary")
+                    .len_utf8();
+                at = consumed + advance;
+                wildcard = Some((after_many, at));
+                piece = after_many;
             }
         }
-        std::mem::swap(&mut prev, &mut next);
     }
-    Ok(prev[text.len()])
+    while matches!(pieces.get(piece), Some(LikePiece::Many)) {
+        piece += 1;
+    }
+    Ok(piece == pieces.len())
 }
 
 #[cfg(test)]
@@ -805,5 +826,41 @@ mod like_anchored_fast_path_tests {
         assert!(sql_like(&text, &pattern).unwrap());
         assert!(sql_like_escape("a_b", r"a!_%", '!').unwrap());
         assert!(sql_like_escape("a_b", "a!", '!').is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_like_matcher_tests {
+    use super::*;
+
+    #[test]
+    fn greedy_backtracking_keeps_unicode_and_escaped_wildcard_semantics() {
+        for (text, pattern, expected) in [
+            ("", "%", true),
+            ("", "_", false),
+            ("abbbaa", "%ab%a", true),
+            ("abba", "a%ba", true),
+            ("abb", "a%ba", false),
+            ("café", "caf_", true),
+            ("🙂a🙂b", "%🙂_b", false),
+            ("🙂a🙂b", "%🙂__b", true),
+            ("a%b", r"a\%b", true),
+            ("a_b", r"a\_b", true),
+            ("abc%", r"%\%", true),
+            ("aaaab", "a%a%a%a%b", true),
+            ("aaaaa", "a%a%a%a%b", false),
+        ] {
+            assert_eq!(sql_like_escape(text, pattern, '\\').unwrap(), expected,
+                "text={text:?}, pattern={pattern:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_wildcards_preserve_native_work_budget_without_allocating_text_chars() {
+        let huge = "a".repeat(5_000_000);
+        assert!(sql_like(&huge, "a%_").unwrap_err()
+            .to_string().contains("work budget"));
+        assert!(sql_like(&huge, "a%").unwrap());
+        assert!(sql_like(&"é🙂".repeat(5_000), "é%🙂").unwrap());
     }
 }
