@@ -108,9 +108,55 @@ fn json_has_key_type(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Boolean)
 }
+// Read only root keys and validate every value without retaining their trees.
+struct RootHasKey<'a>(&'a str);
+
+impl<'de> serde::de::DeserializeSeed<'de> for RootHasKey<'_> {
+    type Value = bool;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D)
+        -> std::result::Result<Self::Value, D::Error>
+    {
+        struct KeyVisitor<'a>(&'a str);
+        impl<'de> serde::de::Visitor<'de> for KeyVisitor<'_> {
+            type Value = bool;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                let mut found = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    found |= key == self.0;
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+                Ok(found)
+            }
+        }
+        deserializer.deserialize_map(KeyVisitor(self.0))
+    }
+}
+
 fn json_has_key(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(key) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    if text.trim_start().starts_with('{') {
+        use serde::de::DeserializeSeed;
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let found = RootHasKey(key).deserialize(&mut deserializer)
+            .and_then(|found| deserializer.end().map(|()| found))
+            .map_err(|error| Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        return Ok(Value::Boolean(found));
+    }
+    // Preserve the existing type error for valid non-object roots.
     let doc = json_path::parse(text)?;
     match doc {
         serde_json::Value::Object(fields) => Ok(Value::Boolean(fields.contains_key(key))),
@@ -176,6 +222,39 @@ mod json_object_keys_budget_tests {
         assert!(serialize_keys(map, 8).is_err());
         let document = serde_json::json!({"\u{0000}\u{0000}\u{0000}": 1});
         assert!(serialize_keys(document.as_object().unwrap(), 12).is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_root_key_membership_tests {
+    use super::*;
+
+    #[test]
+    fn scans_wide_objects_and_decodes_escaped_names() {
+        let keys = (0..5_000).map(|index|
+            format!(r#""key{index}":{{"nested":[1,2,{{"text":"🙂"}}]}}"#)
+        ).collect::<Vec<_>>().join(",");
+        let document = Value::Text(format!("{{{keys}}}"));
+        for (key, expected) in [("key0", true), ("key4999", true), ("absent", false)] {
+            assert_eq!(json_has_key(&[document.clone(), Value::Text(key.into())]).unwrap(),
+                Value::Boolean(expected));
+        }
+        let escaped = Value::Text(r#"{"a\u0062":null,"a":1}"#.into());
+        assert_eq!(json_has_key(&[escaped, Value::Text("ab".into())]).unwrap(),
+            Value::Boolean(true));
+    }
+
+    #[test]
+    fn validates_remainder_even_after_finding_target_key() {
+        for invalid in [r#"{"target":1,"later":[}"#, r#"{"target":1} extra"#] {
+            assert!(matches!(json_has_key(&[
+                Value::Text(invalid.into()), Value::Text("target".into()),
+            ]), Err(Error::Execution(_))));
+        }
+        assert!(matches!(json_has_key(&[Value::Text("[]".into()),
+            Value::Text("x".into())]), Err(Error::Type(_))));
+        assert_eq!(json_has_key(&[Value::Null, Value::Text("x".into())]).unwrap(),
+            Value::Null);
     }
 }
 
