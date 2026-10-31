@@ -11,7 +11,8 @@ import json
 import math
 import os
 import signal
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+import socket
 from pathlib import Path
 import re
 import subprocess
@@ -151,9 +152,53 @@ def run_bounded_backend(command: list[str], timeout: float,
             command, process.returncode, output.decode("utf-8"), ""
         )
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Keep slow local clients from blocking other requests or spawning unlimited threads."""
+
+    daemon_threads = True
+
+    def __init__(self, address, handler, *, max_clients: int = 16):
+        if type(max_clients) is not int or max_clients < 1:
+            raise ValueError("max_clients must be positive")
+        self._available = threading.BoundedSemaphore(max_clients)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._available.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._available.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._available.release()
+
+
 def make_handler(*, secret: str, queries: Path, database: Path,
-                 binary: str, max_rows: int, timeout: int):
+                 binary: str, max_rows: int, timeout: int,
+                 read_timeout: float = 5.0):
+    if (type(read_timeout) not in (int, float) or not math.isfinite(read_timeout)
+            or read_timeout <= 0):
+        raise ValueError("read_timeout must be finite and positive")
+
     class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            self.request.settimeout(read_timeout)
+            super().setup()
+
         def send_json(self, status, payload):
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
@@ -201,13 +246,25 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 return
             length = int(lengths[0])
             if not 0 <= length <= MAX_REQUEST_BYTES:
+                self.close_connection = True
                 self.send_json(413, {"error": "Request too large"})
                 return
             if self.headers.get_content_type() != "application/json":
+                self.close_connection = True
                 self.send_json(415, {"error": "application/json required"})
                 return
             try:
-                params = validate_params(self.rfile.read(length))
+                request_body = self.rfile.read(length)
+            except (TimeoutError, socket.timeout):
+                self.close_connection = True
+                self.send_json(408, {"error": "Request body timeout"})
+                return
+            if len(request_body) != length:
+                self.close_connection = True
+                self.send_json(400, {"error": "Incomplete request body"})
+                return
+            try:
+                params = validate_params(request_body)
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 self.send_json(400, {"error": "Invalid request"})
                 return
@@ -258,7 +315,7 @@ def main():
         max_rows=args.max_rows, timeout=args.query_timeout,
     )
     # Intentionally loopback only; use TLS and a trusted reverse proxy for remote use.
-    with HTTPServer(("127.0.0.1", args.port), handler) as server:
+    with BoundedThreadingHTTPServer(("127.0.0.1", args.port), handler) as server:
         print(f"RustSpark SQL template gateway listening on 127.0.0.1:{args.port}")
         server.serve_forever()
 
