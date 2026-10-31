@@ -23,8 +23,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
         let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        if text.is_ascii() {
-            offset.min(text.len())
+        // No UTF-8 string contains more characters than bytes.
+        if offset >= text.len() {
+            text.len()
+        } else if text.is_ascii() {
+            offset
         } else {
             text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
         }
@@ -314,5 +317,31 @@ mod ascii_regex_replace_position_fast_path_tests {
             Value::Text("é🙂abc".into()), Value::Text("a".into()),
             Value::Text("X".into()), Value::Integer(3),
         ]).unwrap(), Value::Text("é🙂Xbc".into()));
+    }
+}
+
+#[cfg(test)]
+mod oversized_replace_position_regressions {
+    use super::*;
+
+    #[test]
+    fn huge_offsets_match_existing_unicode_position_semantics() {
+        let run = |text: &str, position: i64| {
+            evaluate(&[
+                Value::Text(text.into()), Value::Text("x".into()),
+                Value::Text("Q".into()), Value::Integer(position),
+            ]).unwrap()
+        };
+        let long = "x".repeat(1024);
+        for text in ["", "abc", "é🙂x", long.as_str()] {
+            let expected = Value::Text(text.into());
+            assert_eq!(run(text, i64::MAX), expected);
+            assert_eq!(run(text, text.len() as i64 + 1), expected);
+        }
+        assert_eq!(run("é🙂x", 3), Value::Text("é🙂Q".into()));
+        assert!(evaluate(&[
+            Value::Text("abc".into()), Value::Text("(".into()),
+            Value::Text("Q".into()), Value::Integer(i64::MAX),
+        ]).is_err());
     }
 }
