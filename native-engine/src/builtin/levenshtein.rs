@@ -19,6 +19,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { None };
     if first == second { return Ok(Value::Integer(0)); }
     if threshold == Some(0) { return Ok(Value::Integer(-1)); }
+    if first.is_empty() || second.is_empty() {
+        // Distance from the empty string is just the Unicode character count.
+        // No dynamic-programming state or character vector is required.
+        let other = if first.is_empty() { second } else { first };
+        let distance = if other.is_ascii() { other.len() } else { other.chars().count() };
+        if threshold.is_some_and(|limit| distance > limit) {
+            return Ok(Value::Integer(-1));
+        }
+        return i64::try_from(distance).map(Value::Integer)
+            .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()));
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     // Removing identical edges does not change the edit distance.
@@ -183,5 +194,24 @@ mod distance_fast_path_tests {
         assert_eq!(evaluate(&[Value::Text("same".into()), Value::Text("sane".into()), Value::Integer(0)]).unwrap(), Value::Integer(-1));
         assert_eq!(hamming_distance(&[Value::Text("AABB".into()), Value::Text("ABBA".into())]).unwrap(), Value::Integer(2));
         assert!(hamming_distance(&[Value::Text("A".into()), Value::Text("AB".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod empty_operand_edit_distance_fast_path_tests {
+    use super::*;
+    #[test]
+    fn counts_unicode_without_materializing_character_vectors() {
+        let text = Value::Text("é🙂東京".repeat(25_000));
+        assert_eq!(evaluate(&[Value::Text(String::new()), text.clone()]).unwrap(),
+            Value::Integer(100_000));
+        assert_eq!(evaluate(&[text.clone(), Value::Text(String::new())]).unwrap(),
+            Value::Integer(100_000));
+        assert_eq!(evaluate(&[Value::Text(String::new()), text.clone(),
+            Value::Integer(99_999)]).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[Value::Text(String::new()), text,
+            Value::Integer(100_000)]).unwrap(), Value::Integer(100_000));
+        assert_eq!(evaluate(&[Value::Text(String::new()),
+            Value::Text(String::new())]).unwrap(), Value::Integer(0));
     }
 }
