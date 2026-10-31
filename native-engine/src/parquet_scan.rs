@@ -112,10 +112,17 @@ pub fn scan_with_options(
             return Err(Error::Schema("Parquet projection must have at least one column".into()));
         }
         let fields = builder.schema().fields();
+        // Resolve every file field once instead of rescanning the full schema
+        // for each requested column. Keep the first case-insensitive match,
+        // matching the previous behavior for unusual duplicate file names.
+        let mut positions = std::collections::HashMap::with_capacity(fields.len());
+        for (index, field) in fields.iter().enumerate() {
+            positions.entry(field.name().to_ascii_lowercase()).or_insert(index);
+        }
         let mut selected = Vec::with_capacity(columns.len());
         let mut seen = std::collections::HashSet::with_capacity(columns.len());
         for &name in columns {
-            let index = fields.iter().position(|field| field.name().eq_ignore_ascii_case(name))
+            let index = *positions.get(&name.to_ascii_lowercase())
                 .ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
             if !seen.insert(index) {
                 return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
@@ -640,6 +647,45 @@ mod combined_parquet_scan_pushdown_regressions {
             offset: usize::MAX, limit: Some(1), ..ParquetScanOptions::default()
         }).is_err());
         assert!(scan_with_options(&path, 0, ParquetScanOptions::default()).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod wide_parquet_projection_lookup_regressions {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn resolves_many_out_of_order_columns_without_changing_file_order() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-wide-projection-{}-{}.parquet",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let mut fields = (0..128).map(|index|
+            Field::new(format!("col_{index:03}"), DataType::Integer, false)
+        ).collect::<Vec<_>>();
+        fields.push(Field::new("東京A", DataType::Integer, false));
+        let native = Batch::from_rows(Schema::new(fields).unwrap(),
+            vec![(0..129).map(Value::Integer).collect()]).unwrap();
+        let record = arrow_bridge::to_arrow(&native).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), record.schema(), None,
+        ).unwrap();
+        writer.write(&record).unwrap();
+        writer.close().unwrap();
+        let mut reader = scan_columns(&path, 4, &["東京a", "COL_127", "col_000"]).unwrap();
+        let output = reader.next().unwrap().unwrap();
+        assert_eq!(output.schema().fields().iter().map(|field| field.name.as_str())
+            .collect::<Vec<_>>(), ["col_000", "col_127", "東京A"]);
+        assert_eq!(output.row(0).unwrap(), vec![
+            Value::Integer(0), Value::Integer(127), Value::Integer(128),
+        ]);
+        assert!(reader.next().is_none());
+        assert!(scan_columns(&path, 4, &["col_001", "COL_001"]).is_err());
+        assert!(scan_columns(&path, 4, &["unknown"]).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
