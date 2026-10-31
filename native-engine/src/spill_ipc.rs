@@ -2,7 +2,7 @@
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
     time::{SystemTime, UNIX_EPOCH},
 };
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
@@ -12,28 +12,37 @@ use crate::{arrow_bridge, batch::Batch, schema::Schema, Error, Result};
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
+struct SpillPath(PathBuf);
+
+impl Drop for SpillPath {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
+#[derive(Debug)]
 pub struct SpillFile {
-    path: PathBuf,
+    owner: Arc<SpillPath>,
 }
 
 impl SpillFile {
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn path(&self) -> &Path { &self.owner.0 }
 
     pub fn read(&self) -> Result<SpillReader> {
-        let file = File::open(&self.path)?;
+        let file = File::open(self.path())?;
         let inner = FileReader::try_new(file, None)
             .map_err(|e| Error::Execution(format!("open Arrow spill: {e}")))?;
-        Ok(SpillReader { inner, failed: false })
+        Ok(SpillReader {
+            inner,
+            failed: false,
+            _owner: Arc::clone(&self.owner),
+        })
     }
 }
 
-impl Drop for SpillFile {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); }
-}
-
 pub struct SpillReader {
+    // Drop the open file before the last ownership token can delete it.
     inner: FileReader<File>,
     failed: bool,
+    _owner: Arc<SpillPath>,
 }
 
 impl Iterator for SpillReader {
@@ -63,7 +72,7 @@ pub fn spill(dir: impl AsRef<Path>, schema: &Schema, batches: &[Batch]) -> Resul
         std::process::id()
     ));
     let output = OpenOptions::new().write(true).create_new(true).open(&path)?;
-    let temporary = SpillFile { path };
+    let temporary = SpillFile { owner: Arc::new(SpillPath(path)) };
     let arrow_schema = arrow_bridge::to_arrow(&Batch::empty(schema.clone()))?.schema();
     let mut writer = FileWriter::try_new(output, &arrow_schema)
         .map_err(|e| Error::Execution(format!("create Arrow spill: {e}")))?;
@@ -117,9 +126,32 @@ mod malformed_ipc_reader_tests {
         let mut writer = FileWriter::try_new(File::create(&path).unwrap(), &record.schema()).unwrap();
         writer.write(&record).unwrap();
         writer.finish().unwrap();
-        let file = SpillFile { path };
+        let file = SpillFile { owner: Arc::new(SpillPath(path)) };
         let mut reader = file.read().unwrap();
         assert!(reader.next().unwrap().is_err());
         assert!(reader.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod spill_reader_ownership_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn open_reader_keeps_scratch_file_alive_after_owner_drop() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(11)], vec![Value::Integer(12)],
+        ]).unwrap();
+        let file = spill(std::env::temp_dir(), &schema, &[batch.clone()]).unwrap();
+        let path = file.path().to_owned();
+        let mut reader = file.read().unwrap();
+        drop(file);
+        assert!(path.exists(), "reader must retain the spill file");
+        assert_eq!(reader.next().unwrap().unwrap(), batch);
+        assert!(reader.next().is_none());
+        drop(reader);
+        assert!(!path.exists(), "last reader must remove the scratch file");
     }
 }
