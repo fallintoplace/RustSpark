@@ -36,8 +36,8 @@ pub fn merge_to_fan_in(
     if !(2..=64).contains(&fan_in) {
         return Err(Error::Execution("external merge fan-in must be 2..=64".into()));
     }
-    if io_batch_rows == 0 {
-        return Err(Error::Execution("external merge I/O batch size must be positive".into()));
+    if !(1..=65_536).contains(&io_batch_rows) {
+        return Err(Error::Execution("external merge I/O batch size must be in 1..=65536".into()));
     }
     if source.schema() != &schema {
         return Err(Error::Schema("multi-pass sort schema mismatch".into()));
@@ -131,5 +131,21 @@ mod merge_batch_size_diagnostics_tests {
             &[SortKey::ascending(crate::expr::Expr::Column("key".into()))],
             Path::new("."), 1, &QueryControl::default()
         ).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod merge_pass_large_batch_rejection_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+    #[test]
+    fn rejects_invalid_batch_sizes_even_with_no_merge_work() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let source = super::super::sorted_runs::write_sorted_runs(
+            std::iter::empty::<Result<crate::batch::Batch>>(), schema.clone(),
+            &keys, Path::new("."), 1, &QueryControl::default()).unwrap();
+        assert!(merge_to_fan_in(source, Path::new("."), schema, &keys,
+            2, 65_537, &QueryControl::default()).is_err());
     }
 }
