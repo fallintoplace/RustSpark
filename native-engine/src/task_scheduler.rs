@@ -87,6 +87,17 @@ impl TaskScheduler {
             counts: TaskCounts { queued, ..TaskCounts::default() } })
     }
 
+    fn lease_ready(&mut self, worker: u64, until: Instant) -> Option<Lease> {
+        let id = self.ready.pop_first()?;
+        let task = self.tasks.get_mut(&id).expect("queued task exists");
+        task.attempts += 1;
+        task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
+        self.counts.queued -= 1;
+        self.counts.leased += 1;
+        self.deadlines.insert((until, id));
+        Some(Lease { task: id, worker, attempt: task.attempts })
+    }
+
     pub fn lease(&mut self, worker: u64, now: Instant, ttl: Duration) -> Result<Option<Lease>> {
         if ttl.is_zero() {
             return Err(Error::Execution("task lease duration must be positive".into()));
@@ -94,14 +105,26 @@ impl TaskScheduler {
         let until = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
         self.expire_leases(now);
-        let Some(id) = self.ready.pop_first() else { return Ok(None); };
-        let task = self.tasks.get_mut(&id).expect("queued task exists");
-        task.attempts += 1;
-        task.status = TaskStatus::Leased { worker, attempt: task.attempts, until };
-        self.counts.queued -= 1;
-        self.counts.leased += 1;
-        self.deadlines.insert((until, id));
-        Ok(Some(Lease { task: id, worker, attempt: task.attempts }))
+        Ok(self.lease_ready(worker, until))
+    }
+
+    /// Claim a bounded window of tasks with one expiry sweep and deadline
+    /// calculation. Single-task leasing remains allocation-free.
+    pub fn lease_many(
+        &mut self, worker: u64, now: Instant, ttl: Duration, max_tasks: usize,
+    ) -> Result<Vec<Lease>> {
+        if ttl.is_zero() {
+            return Err(Error::Execution("task lease duration must be positive".into()));
+        }
+        let until = now.checked_add(ttl)
+            .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
+        self.expire_leases(now);
+        let count = max_tasks.min(self.ready.len());
+        let mut leases = Vec::with_capacity(count);
+        for _ in 0..count {
+            leases.push(self.lease_ready(worker, until).expect("ready task exists"));
+        }
+        Ok(leases)
     }
 
     /// Reclaim expired leases independently of worker requests, so monitoring
@@ -532,5 +555,39 @@ mod constant_time_task_counts_regressions {
         scheduler.cancel_pending();
         assert_eq!(scheduler.counts(), recompute(&scheduler));
         assert_eq!(scheduler.counts().queued + scheduler.counts().leased, 0);
+    }
+}
+
+#[cfg(test)]
+mod batched_native_scheduler_lease_tests {
+    use super::*;
+
+    #[test]
+    fn claims_worker_windows_without_duplicate_or_missing_tasks() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let mut scheduler = TaskScheduler::new([4, 1, 3, 2], 3).unwrap();
+        let first = scheduler.lease_many(7, now, ttl, 3).unwrap();
+        assert_eq!(first.iter().map(|lease| lease.task).collect::<Vec<_>>(), [1, 2, 3]);
+        assert!(first.iter().all(|lease| lease.worker == 7 && lease.attempt == 1));
+        assert_eq!(scheduler.counts(), TaskCounts {
+            queued: 1, leased: 3, done: 0, failed: 0,
+        });
+        let second = scheduler.lease_many(8, now, ttl, 100).unwrap();
+        assert_eq!(second.iter().map(|lease| lease.task).collect::<Vec<_>>(), [4]);
+        assert!(scheduler.lease_many(9, now, ttl, 100).unwrap().is_empty());
+        assert!(scheduler.lease_many(9, now, ttl, 0).unwrap().is_empty());
+        assert!(scheduler.lease_many(9, now, Duration::ZERO, 2).is_err());
+
+        assert!(scheduler.renew(&first[1], now + Duration::from_secs(2),
+            Duration::from_secs(10)).unwrap());
+        let retries = scheduler.lease_many(10, now + Duration::from_secs(6), ttl, 10).unwrap();
+        assert_eq!(retries.iter().map(|lease| lease.task).collect::<Vec<_>>(),
+            [1, 3, 4]);
+        assert!(retries.iter().all(|lease| lease.attempt == 2));
+        assert!(!scheduler.finish_at(&first[0], true, now + Duration::from_secs(6)));
+        assert_eq!(scheduler.counts(), TaskCounts {
+            queued: 0, leased: 4, done: 0, failed: 0,
+        });
     }
 }

@@ -17,11 +17,16 @@ enum State {
     AfterQuote,
 }
 
+const READ_CHUNK_BYTES: usize = 8 * 1024;
+
 struct Records<R> {
     input: R,
     max_record_bytes: usize,
     pending: Option<u8>,
     skip_lf: bool,
+    buffer: [u8; READ_CHUNK_BYTES],
+    cursor: usize,
+    filled: usize,
 }
 
 impl<R: BufRead> Records<R> {
@@ -29,12 +34,22 @@ impl<R: BufRead> Records<R> {
         if let Some(byte) = self.pending.take() {
             return Ok(Some(byte));
         }
-        let slice = self.input.fill_buf()?;
-        let byte = slice.first().copied();
-        if byte.is_some() {
-            self.input.consume(1);
+        if self.cursor == self.filled {
+            // The CSV parser consumes one byte at a time, but the underlying
+            // reader must not be polled separately for every byte in a row.
+            self.filled = loop {
+                match std::io::Read::read(&mut self.input, &mut self.buffer) {
+                    Ok(count) => break count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            self.cursor = 0;
+            if self.filled == 0 { return Ok(None); }
         }
-        Ok(byte)
+        let byte = self.buffer[self.cursor];
+        self.cursor += 1;
+        Ok(Some(byte))
     }
 
     fn record(&mut self) -> Result<Option<Vec<String>>> {
@@ -136,6 +151,7 @@ impl<R: BufRead> CsvStream<R> {
         }
         let mut records = Records {
             input, max_record_bytes, pending: None, skip_lf: false,
+            buffer: [0; READ_CHUNK_BYTES], cursor: 0, filled: 0,
         };
         let mut names = records.record()?.ok_or_else(|| Error::Parse("CSV header missing".into()))?;
         if let Some(first) = names.first_mut() {
@@ -434,5 +450,46 @@ mod csv_byte_budget_regressions {
         assert_eq!(stream.next_with_byte_budget(budget).unwrap().unwrap().num_rows(), 1);
         assert!(stream.next_with_byte_budget(budget).unwrap().is_err());
         assert!(stream.next_with_byte_budget(budget).is_none());
+    }
+}
+
+#[cfg(test)]
+mod buffered_csv_record_boundary_tests {
+    use super::*;
+    use std::io::{BufReader, Cursor, Read};
+
+    struct Fragmented<R>(R);
+    impl<R: Read> Read for Fragmented<R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(&mut bytes[..bytes.len().min(3)])
+        }
+    }
+
+    #[test]
+    fn quoted_utf8_and_crlf_survive_fragmented_input() {
+        let input = "name,notes\r\n\"é🙂\",\"hello,\"\"quoted\"\"\r\nnext\"\r\nlast,x\n";
+        let stream = CsvStream::new(BufReader::with_capacity(2,
+            Fragmented(Cursor::new(input.as_bytes()))), 1, 4096).unwrap();
+        let actual = stream.collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.len(), 2);
+        assert_eq!(actual[0].row(0).unwrap(), vec![
+            Value::Text("é🙂".into()), Value::Text("hello,\"quoted\"\r\nnext".into())
+        ]);
+        assert_eq!(actual[1].row(0).unwrap(), vec![
+            Value::Text("last".into()), Value::Text("x".into())
+        ]);
+    }
+
+    #[test]
+    fn long_records_and_batched_rows_cross_internal_read_boundaries() {
+        let long = "a".repeat(READ_CHUNK_BYTES * 2 + 13);
+        let input = format!("payload\n{long}\nsmall\n");
+        let rows = CsvStream::new(BufReader::new(Cursor::new(input)), 2,
+            READ_CHUNK_BYTES * 3).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rows().unwrap(), vec![
+            vec![Value::Text(long)], vec![Value::Text("small".into())]
+        ]);
     }
 }

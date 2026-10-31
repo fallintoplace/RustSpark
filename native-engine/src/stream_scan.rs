@@ -12,6 +12,7 @@ pub struct ScanCursor<'a> {
     identity_projection: bool,
     target_rows: usize,
     next_row: usize,
+    pending_error: Option<Error>,
     failed: bool,
 }
 
@@ -57,7 +58,7 @@ pub fn scan<'a>(
     };
     Ok(ScanCursor {
         source, predicate, columns, output_schema, identity_projection,
-        target_rows, next_row, failed: false,
+        target_rows, next_row, pending_error: None, failed: false,
     })
 }
 
@@ -66,6 +67,10 @@ impl Iterator for ScanCursor<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.failed { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.failed = true;
+            return Some(Err(error));
+        }
         if self.predicate.is_none() {
             if self.next_row == self.source.num_rows() { return None; }
             let start = self.next_row;
@@ -96,8 +101,14 @@ impl Iterator for ScanCursor<'_> {
                     .and_then(|value| value.as_boolean()) {
                     Ok(result) => result == Some(true),
                     Err(error) => {
-                        self.failed = true;
-                        return Some(Err(error));
+                        if selected.is_empty() {
+                            self.failed = true;
+                            return Some(Err(error));
+                        }
+                        // Deliver matches already evaluated successfully.
+                        // Do not evaluate rows after the terminal error.
+                        self.pending_error = Some(error);
+                        break;
                     },
                 },
                 None => true,
@@ -247,9 +258,13 @@ mod scan_failure_tests {
     fn predicate_errors_terminate_the_scan() {
         let input = Batch::from_rows(
             Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
-            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+            vec![vec![Value::Integer(0)], vec![Value::Integer(2)]],
         ).unwrap();
-        let mut cursor = scan(&input, Some(Expr::Column("n".into())), &[], 1).unwrap();
+        let division = Expr::binary(Expr::Literal(Value::Integer(1)),
+            crate::expr::BinaryOp::Divide, Expr::Column("n".into()));
+        let predicate = Expr::binary(division, crate::expr::BinaryOp::Greater,
+            Expr::Literal(Value::Float(0.0)));
+        let mut cursor = scan(&input, Some(predicate), &[], 1).unwrap();
         assert!(cursor.next().unwrap().is_err());
         assert!(cursor.next().is_none());
     }
@@ -387,5 +402,50 @@ mod contiguous_projected_scan_regressions {
         let mut cursor = scan(&empty, None, &["second"], 1).unwrap();
         assert!(cursor.next().is_none());
         assert!(cursor.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod predicate_error_deferred_prefix_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field}};
+
+    fn input() -> Batch {
+        let schema = Schema::new(vec![
+            Field::new("num", DataType::Integer, false),
+            Field::new("den", DataType::Integer, false),
+        ]).unwrap();
+        Batch::from_rows(schema, vec![
+            vec![Value::Integer(5), Value::Integer(1)],
+            vec![Value::Integer(8), Value::Integer(2)],
+            vec![Value::Integer(7), Value::Integer(0)],
+            vec![Value::Integer(9), Value::Integer(3)],
+        ]).unwrap()
+    }
+
+    fn predicate() -> Expr {
+        Expr::binary(Expr::binary(Expr::Column("num".into()),
+            BinaryOp::Divide, Expr::Column("den".into())),
+            BinaryOp::Greater, Expr::Literal(Value::Float(0.0)))
+    }
+
+    #[test]
+    fn returns_valid_selected_prefix_then_exact_terminal_error() {
+        let batch = input();
+        let mut scan = scan(&batch, Some(predicate()), &["num"], 10).unwrap();
+        assert_eq!(scan.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(5)], vec![Value::Integer(8)]
+        ]);
+        assert!(scan.next().unwrap().unwrap_err().to_string()
+            .contains("division by zero"));
+        assert!(scan.next().is_none());
+    }
+
+    #[test]
+    fn pagination_does_not_evaluate_rows_beyond_fulfilled_limit() {
+        let batch = input();
+        let result = scan_window(&batch, Some(predicate()), &["num"], 10, 0, 1)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result[0].rows().unwrap(), vec![vec![Value::Integer(5)]]);
     }
 }

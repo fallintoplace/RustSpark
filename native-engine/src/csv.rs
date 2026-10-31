@@ -162,34 +162,29 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
             .map(|(column, name)| Field::new(name, kind(&records[1..], column), true))
             .collect(),
     )?;
-    let rows = records
-        .into_iter()
-        .skip(1)
-        .map(|record| {
-            record
-                .into_iter()
-                .enumerate()
-                .map(|(index, text)| {
-                    if text.is_empty() {
-                        return Ok(Value::Null);
-                    }
-                    match schema.field(index)?.data_type {
-                        DataType::Boolean => Ok(Value::Boolean(text.eq_ignore_ascii_case("true"))),
-                        DataType::Integer => text
-                            .parse::<i64>()
-                            .map(Value::Integer)
-                            .map_err(|_| Error::Parse("invalid integer in CSV".into())),
-                        DataType::Float => text
-                            .parse::<f64>()
-                            .map(Value::Float)
-                            .map_err(|_| Error::Parse("invalid float in CSV".into())),
-                        DataType::Text => Ok(Value::Text(text)),
-                    }
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Batch::from_rows(schema, rows)
+    let row_count = records.len() - 1;
+    // Build column vectors directly. Previously the importer allocated a
+    // Vec<Value> for every row, then Batch::from_rows transposed them again.
+    let mut columns = (0..schema.len())
+        .map(|_| Vec::with_capacity(row_count)).collect::<Vec<_>>();
+    for record in records.into_iter().skip(1) {
+        for (index, text) in record.into_iter().enumerate() {
+            let value = if text.is_empty() {
+                Value::Null
+            } else {
+                match schema.field(index)?.data_type {
+                    DataType::Boolean => Value::Boolean(text.eq_ignore_ascii_case("true")),
+                    DataType::Integer => text.parse::<i64>().map(Value::Integer)
+                        .map_err(|_| Error::Parse("invalid integer in CSV".into()))?,
+                    DataType::Float => text.parse::<f64>().map(Value::Float)
+                        .map_err(|_| Error::Parse("invalid float in CSV".into()))?,
+                    DataType::Text => Value::Text(text),
+                }
+            };
+            columns[index].push(value);
+        }
+    }
+    Batch::new_with_row_count(schema, columns, row_count)
 }
 
 pub fn read_csv(path: impl AsRef<Path>) -> Result<Batch> {
@@ -255,25 +250,33 @@ pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
     if records.len() - 1 > MAX_CSV_ROWS {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
-    let rows = records.into_iter().skip(1).map(|record| {
+    let row_count = records.len() - 1;
+    let mut columns = (0..schema.len())
+        .map(|_| Vec::with_capacity(row_count)).collect::<Vec<_>>();
+    for record in records.into_iter().skip(1) {
         if record.len() != schema.len() {
             return Err(Error::Parse("CSV row width differs from header".into()));
         }
-        record.into_iter().enumerate().map(|(index, text)| {
-            if text.is_empty() { return Ok(Value::Null); }
-            match schema.field(index)?.data_type {
-                DataType::Text => Ok(Value::Text(text)),
-                DataType::Integer => text.parse::<i64>().map(Value::Integer)
-                    .map_err(|_| Error::Parse("invalid typed CSV integer".into())),
-                DataType::Float => text.parse::<f64>().ok().filter(|n| n.is_finite())
-                    .map(Value::Float).ok_or_else(|| Error::Parse("invalid typed CSV float".into())),
-                DataType::Boolean if text.eq_ignore_ascii_case("true") => Ok(Value::Boolean(true)),
-                DataType::Boolean if text.eq_ignore_ascii_case("false") => Ok(Value::Boolean(false)),
-                DataType::Boolean => Err(Error::Parse("invalid typed CSV boolean".into())),
-            }
-        }).collect::<Result<Vec<_>>>()
-    }).collect::<Result<Vec<_>>>()?;
-    Batch::from_rows(schema, rows)
+        for (index, text) in record.into_iter().enumerate() {
+            let value = if text.is_empty() {
+                Value::Null
+            } else {
+                match schema.field(index)?.data_type {
+                    DataType::Text => Value::Text(text),
+                    DataType::Integer => text.parse::<i64>().map(Value::Integer)
+                        .map_err(|_| Error::Parse("invalid typed CSV integer".into()))?,
+                    DataType::Float => text.parse::<f64>().ok().filter(|n| n.is_finite())
+                        .map(Value::Float)
+                        .ok_or_else(|| Error::Parse("invalid typed CSV float".into()))?,
+                    DataType::Boolean if text.eq_ignore_ascii_case("true") => Value::Boolean(true),
+                    DataType::Boolean if text.eq_ignore_ascii_case("false") => Value::Boolean(false),
+                    DataType::Boolean => return Err(Error::Parse("invalid typed CSV boolean".into())),
+                }
+            };
+            columns[index].push(value);
+        }
+    }
+    Batch::new_with_row_count(schema, columns, row_count)
 }
 
 #[cfg(test)]
@@ -366,5 +369,41 @@ mod csv_data_row_limit_accounting_tests {
         assert!(parse_records_with_limit(input, 2).is_err());
         assert_eq!(parse_records_with_limit(input, 3).unwrap().len(), 3);
         assert_eq!(from_csv_str(input).unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod direct_columnar_csv_decode_regressions {
+    use super::*;
+
+    #[test]
+    fn untyped_inference_preserves_nullable_mixed_columns_and_unicode() {
+        let csv = "id,active,label,score\r\n1,true,\"é,🙂\",1.5\r\n2,false,,2.5\r\n3,,東京,\r\n";
+        let batch = from_csv_str(csv).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.schema().field(0).unwrap().data_type, DataType::Integer);
+        assert_eq!(batch.schema().field(1).unwrap().data_type, DataType::Boolean);
+        assert_eq!(batch.schema().field(2).unwrap().data_type, DataType::Text);
+        assert_eq!(batch.schema().field(3).unwrap().data_type, DataType::Float);
+        assert_eq!(batch.column(2).unwrap(), &[
+            Value::Text("é,🙂".into()), Value::Null, Value::Text("東京".into())
+        ]);
+        assert_eq!(from_csv_str("id,label\n").unwrap().num_rows(), 0);
+    }
+
+    #[test]
+    fn declared_types_still_validate_required_cells_and_row_width() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap();
+        let input = from_csv_str_typed("id,tag\n1,é🙂\n2,\n", schema.clone()).unwrap();
+        assert_eq!(input.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("é🙂".into())],
+            vec![Value::Integer(2), Value::Null],
+        ]);
+        assert!(from_csv_str_typed("id,tag\n,missing\n", schema.clone()).is_err());
+        assert!(from_csv_str_typed("id,tag\n1\n", schema.clone()).is_err());
+        assert!(from_csv_str_typed("id,tag\n1,extra,third\n", schema).is_err());
     }
 }

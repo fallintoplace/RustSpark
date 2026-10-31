@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, hash::{Hash, Hasher}};
 
 use crate::{
     batch::Batch,
@@ -298,8 +298,8 @@ pub fn aggregate_global_stream(
 const MAX_GROUP_KEY_BYTES: usize = 64 * 1024 * 1024;
 
 fn group_key_state_bytes(key: &[Value], state_count: usize) -> Result<usize> {
-    // GROUP BY keeps one copy in the hash index and one in the result rows.
-    // Account for both owned keys and the per-group aggregate states.
+    // Conservatively account for hash buckets, retained keys and per-group
+    // aggregate states before admitting a new group.
     let fixed = 128usize.checked_add(state_count.checked_mul(std::mem::size_of::<State>())
         .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?)
         .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?;
@@ -344,7 +344,9 @@ pub fn aggregate_with_limits(
         fields.push(Field::new(&item.alias, item.output_type(batch.schema())?, nullable));
     }
     let schema = Schema::new(fields)?;
-    let mut group_indices: HashMap<Vec<Value>, usize> = HashMap::new();
+    // Fingerprints point to candidate groups. Full key equality resolves
+    // hash collisions, while repeated TEXT keys stay borrowed from input.
+    let mut group_indices: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
     let mut retained_group_bytes = 0usize;
 
@@ -369,26 +371,35 @@ pub fn aggregate_with_limits(
         } else {
             let key = group_by.iter().zip(&bound_columns)
                 .map(|((expr, _), column)| match column {
-                    Some(values) => Ok(values[row].clone()),
-                    None => expr.evaluate(batch, row),
+                    Some(values) => Ok(std::borrow::Cow::Borrowed(&values[row])),
+                    None => expr.evaluate(batch, row).map(std::borrow::Cow::Owned),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            match group_indices.entry(key) {
-                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    if groups.len() >= max_groups {
-                        return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
-                    }
-                    let bytes = group_key_state_bytes(entry.key(), items.len())?;
-                    let next = retained_group_bytes.checked_add(bytes)
-                        .filter(|&size| size <= max_key_state_bytes)
-                        .ok_or_else(|| Error::Execution("GROUP BY key state byte budget exceeded".into()))?;
-                    let index = groups.len();
-                    groups.push((entry.key().clone(), items.iter().map(|item| State::new(&item.op)).collect()));
-                    entry.insert(index);
-                    retained_group_bytes = next;
-                    index
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.len().hash(&mut hasher);
+            for value in &key { value.as_ref().hash(&mut hasher); }
+            let fingerprint = hasher.finish();
+            let existing = group_indices.get(&fingerprint)
+                .and_then(|candidates| candidates.iter().copied().find(|&index| {
+                    groups[index].0.iter().eq(key.iter().map(|value| value.as_ref()))
+                }));
+            if let Some(index) = existing {
+                index
+            } else {
+                if groups.len() >= max_groups {
+                    return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
                 }
+                let owned_key = key.into_iter().map(|value| value.into_owned())
+                    .collect::<Vec<_>>();
+                let bytes = group_key_state_bytes(&owned_key, items.len())?;
+                let next = retained_group_bytes.checked_add(bytes)
+                    .filter(|&size| size <= max_key_state_bytes)
+                    .ok_or_else(|| Error::Execution("GROUP BY key state byte budget exceeded".into()))?;
+                let index = groups.len();
+                groups.push((owned_key, items.iter().map(|item| State::new(&item.op)).collect()));
+                group_indices.entry(fingerprint).or_default().push(index);
+                retained_group_bytes = next;
+                index
             }
         };
         for (state, item) in groups[index].1.iter_mut().zip(items) {
@@ -692,5 +703,58 @@ mod in_memory_group_key_byte_admission_regressions {
         let exact = group_key_state_bytes(&[], items.len()).unwrap();
         let result = aggregate_with_limits(&input, &[], &items, 1, exact).unwrap();
         assert_eq!(result.row(0).unwrap(), vec![Value::Integer(1)]);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_group_key_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_wide_text_groups_and_nulls_preserve_counts_and_order() {
+        let schema = Schema::new(vec![
+            Field::new("tag", DataType::Text, true),
+            Field::new("partition", DataType::Integer, false),
+        ]).unwrap();
+        let long = "東京".repeat(2048);
+        let source = Batch::from_rows(schema, (0..1000).map(|index| vec![
+            if index % 3 == 0 { Value::Null } else { Value::Text(long.clone()) },
+            Value::Integer(index % 2),
+        ]).collect()).unwrap();
+        let groups = [
+            (Expr::Column("tag".into()), "tag".into()),
+            (Expr::Column("partition".into()), "partition".into()),
+        ];
+        let result = aggregate_with_limits(&source, &groups,
+            &[AggregateItem::new(AggregateOp::CountAll, "count")],
+            4, 1_000_000).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        let count = result.column(2).unwrap().iter().map(|value| match value {
+            Value::Integer(count) => *count, _ => panic!("COUNT returned wrong type"),
+        }).sum::<i64>();
+        assert_eq!(count, 1000);
+        assert_eq!(result.value(0, 0).unwrap(), &Value::Null);
+        assert_eq!(result.value(0, 1).unwrap(), &Value::Integer(0));
+        assert!(aggregate_with_limits(&source, &groups,
+            &[AggregateItem::new(AggregateOp::CountAll, "count")],
+            3, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn floating_key_hashes_canonicalize_signed_zero_and_nan() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Float, true)]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Float(0.0)], vec![Value::Float(-0.0)],
+            vec![Value::Float(f64::NAN)], vec![Value::Float(-f64::NAN)],
+            vec![Value::Null], vec![Value::Float(1.0)],
+        ]).unwrap();
+        let result = aggregate_with_limits(&source,
+            &[(Expr::Column("key".into()), "key".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "count")],
+            4, 4096).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        assert_eq!(result.column(1).unwrap(),
+            &[Value::Integer(2), Value::Integer(2),
+              Value::Integer(1), Value::Integer(1)]);
     }
 }

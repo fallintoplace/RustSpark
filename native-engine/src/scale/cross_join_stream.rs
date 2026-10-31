@@ -16,7 +16,7 @@ pub struct CrossJoinStream {
     right_bytes: Vec<usize>,
     left_batch: Option<Batch>,
     left_row: usize,
-    current_left: Option<Vec<Value>>,
+    left_ready: bool,
     current_left_bytes: usize,
     right_row: usize,
     batch_rows: usize,
@@ -60,7 +60,7 @@ impl CrossJoinStream {
         }
         Ok(Self {
             left, left_schema, output_schema, right_rows, right_bytes,
-            left_batch: None, left_row: 0, current_left: None,
+            left_batch: None, left_row: 0, left_ready: false,
             current_left_bytes: 0, right_row: 0,
             batch_rows, control, stopped: false,
         })
@@ -80,13 +80,20 @@ impl CrossJoinStream {
         let mut output_bytes = 0usize;
         while output_rows < self.batch_rows {
             if output_rows % 256 == 0 { self.control.check()?; }
-            if self.current_left.is_none() {
+            if !self.left_ready {
                 loop {
                     if let Some(batch) = &self.left_batch {
                         if self.left_row < batch.num_rows() {
-                            let row = batch.row(self.left_row)?;
-                            self.current_left_bytes = super::row_footprint::footprint(row.iter());
-                            self.current_left = Some(row);
+                            // Retain only the row index. Borrow the left values
+                            // from the resident batch until every right row has
+                            // been emitted, instead of cloning a wide left row.
+                            let columns = (0..self.left_schema.len())
+                                .map(|index| batch.column(index))
+                                .collect::<Result<Vec<_>>>()?;
+                            self.current_left_bytes = super::row_footprint::footprint(
+                                columns.iter().map(|column| &column[self.left_row])
+                            );
+                            self.left_ready = true;
                             self.right_row = 0;
                             break;
                         }
@@ -105,7 +112,7 @@ impl CrossJoinStream {
                     self.left_batch = Some(batch);
                 }
             }
-            let left = self.current_left.as_ref().expect("initialized left row");
+            let left = self.left_batch.as_ref().expect("initialized left batch");
             let next_bytes = self.current_left_bytes
                 .saturating_add(self.right_bytes[self.right_row]);
             if next_bytes > MAX_OUTPUT_BATCH_BYTES {
@@ -115,14 +122,17 @@ impl CrossJoinStream {
                 break;
             }
             output_bytes += next_bytes;
-            for (column, value) in output.iter_mut()
-                .zip(left.iter().chain(self.right_rows[self.right_row].iter())) {
+            for (index, column) in output.iter_mut().take(self.left_schema.len()).enumerate() {
+                column.push(left.value(self.left_row, index)?.clone());
+            }
+            for (column, value) in output.iter_mut().skip(self.left_schema.len())
+                .zip(&self.right_rows[self.right_row]) {
                 column.push(value.clone());
             }
             output_rows += 1;
             self.right_row += 1;
             if self.right_row == self.right_rows.len() {
-                self.current_left = None;
+                self.left_ready = false;
                 self.left_row += 1;
             }
         }
@@ -248,5 +258,40 @@ mod column_major_cross_join_perf_tests {
         ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(actual.iter().flat_map(|batch| batch.rows().unwrap())
             .collect::<Vec<_>>(), expected);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_cross_join_left_rows_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn reuses_wide_left_row_across_right_batches_without_changing_cartesian_result() {
+        let left_schema = Schema::new(vec![
+            Field::new("left_payload", DataType::Text, false),
+            Field::new("left_id", DataType::Integer, false),
+        ]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("right_id", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "é🙂".repeat(2048);
+        let left = Batch::from_rows(left_schema.clone(), vec![
+            vec![Value::Text(wide.clone()), Value::Integer(2)],
+            vec![Value::Text("other".into()), Value::Integer(3)],
+        ]).unwrap();
+        let right = Batch::from_rows(right_schema.clone(), vec![
+            vec![Value::Integer(5)], vec![Value::Integer(8)],
+            vec![Value::Integer(13)], vec![Value::Integer(21)],
+        ]).unwrap();
+        let expected = join::cross_join(&left, &right).unwrap().rows().unwrap();
+        let stream = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            left_schema, right_schema, 2, QueryControl::default(),
+        ).unwrap();
+        let actual = stream.collect::<Result<Vec<_>>>().unwrap().into_iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }

@@ -150,6 +150,20 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     else { Value::Integer(i64::from(values.value(row))) }
                 }).collect())
             }
+            ArrowType::UInt64 => {
+                let values = array.as_any().downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| Error::Type("invalid UInt64 Arrow array".into()))?;
+                // The UInt64-to-BIGINT boundary is checked per non-null value,
+                // but the Arrow downcast itself is shared by the whole column.
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) {
+                        Ok(Value::Null)
+                    } else {
+                        i64::try_from(values.value(row)).map(Value::Integer)
+                            .map_err(|_| Error::Type("UInt64 exceeds native integer range".into()))
+                    }
+                }).collect::<Result<Vec<_>>>()?)
+            }
             ArrowType::Float32 => {
                 let values = array.as_any().downcast_ref::<Float32Array>()
                     .ok_or_else(|| Error::Type("invalid Float32 Arrow array".into()))?;
@@ -237,9 +251,6 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     .ok_or_else(|| Error::Type("invalid Int32 Arrow array".into()))?.value(row))),
                 ArrowType::Int64 => Value::Integer(array.as_any().downcast_ref::<Int64Array>()
                     .ok_or_else(|| Error::Type("invalid Int64 Arrow array".into()))?.value(row)),
-                ArrowType::UInt64 => Value::Integer(i64::try_from(array.as_any().downcast_ref::<UInt64Array>()
-                    .ok_or_else(|| Error::Type("invalid UInt64 Arrow array".into()))?.value(row))
-                    .map_err(|_| Error::Type("UInt64 exceeds native integer range".into()))?),
                 ArrowType::Float32 => Value::Float(f64::from(array.as_any().downcast_ref::<Float32Array>()
                     .ok_or_else(|| Error::Type("invalid Float32 Arrow array".into()))?.value(row))),
                 ArrowType::Float64 => Value::Float(array.as_any().downcast_ref::<Float64Array>()
@@ -423,5 +434,36 @@ mod zero_column_arrow_cardinality_tests {
         let native = from_arrow(&arrow).unwrap();
         assert_eq!(native.num_rows(), 3);
         assert_eq!(native.rows().unwrap(), vec![vec![]; 3]);
+    }
+}
+
+#[cfg(test)]
+mod arrow_unsigned_64_columnar_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn converts_large_uint64_columns_without_losing_nulls_or_sign_bounds() {
+        let values = (0..8192).map(|row| {
+            if row % 97 == 0 { None }
+            else { Some(i64::MAX as u64 - row as u64) }
+        }).collect::<Vec<_>>();
+        let record = RecordBatch::try_from_iter(vec![
+            ("n", Arc::new(UInt64Array::from(values.clone())) as ArrayRef)
+        ]).unwrap();
+        let native = from_arrow(&record).unwrap();
+        assert_eq!(native.num_rows(), 8192);
+        for (row, original) in values.iter().enumerate() {
+            assert_eq!(native.value(row, 0).unwrap(), &original
+                .map_or(Value::Null, |value| Value::Integer(value as i64)));
+        }
+    }
+
+    #[test]
+    fn rejects_uint64_overflow_late_in_a_nullable_column() {
+        let input = Arc::new(UInt64Array::from(vec![
+            None, Some(0), Some(i64::MAX as u64), Some(i64::MAX as u64 + 1)
+        ])) as ArrayRef;
+        let record = RecordBatch::try_from_iter(vec![("n", input)]).unwrap();
+        assert!(matches!(from_arrow(&record), Err(Error::Type(_))));
     }
 }

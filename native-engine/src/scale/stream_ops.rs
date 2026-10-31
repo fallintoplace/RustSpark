@@ -36,7 +36,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
                     // columns for a constant-true filter.
                     Ok(batch)
                 } else {
-                    filter::filter(&batch, &self.predicate)
+                    filter::filter_owned(batch, &self.predicate)
                 }
             });
             match result {
@@ -78,7 +78,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
                 self.stopped = true;
                 return None;
             };
-            match next.and_then(|batch| project::project(&batch, &self.selections)) {
+            match next.and_then(|batch| project::project_owned(batch, &self.selections)) {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
                 Err(error) => {
@@ -141,7 +141,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LimitStream<I> {
             if skipped == 0 && count == batch.num_rows() {
                 return Some(Ok(batch));
             }
-            return Some(batch.slice_rows(skipped, skipped + count));
+            return Some(batch.slice_rows_owned(skipped, skipped + count));
         }
     }
 }
@@ -337,5 +337,53 @@ mod fused_stream_operator_eof_tests {
         assert!(limited.next().is_none());
         assert!(limited.next().is_none());
         assert_eq!(limited_polls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod stream_owned_filter_payload_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn partial_filter_moves_large_text_values_without_duplication() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("body", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("discard".repeat(1024))],
+            vec![Value::Integer(9), Value::Text("keep🙂".repeat(2048))],
+            vec![Value::Integer(8), Value::Null],
+        ]).unwrap();
+        let ptr = match batch.value(1, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let predicate = Expr::binary(
+            Expr::Column("id".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(5)),
+        );
+        let expected = filter::filter(&batch, &predicate).unwrap();
+        let mut stream = FilterStream::new(
+            std::iter::once(Ok(batch)), predicate, QueryControl::default(),
+        );
+        let output = stream.next().unwrap().unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(match output.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn owned_filter_preserves_zero_column_rows() {
+        let input = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        let output = FilterStream::new(
+            std::iter::once(Ok(input)), Expr::Literal(Value::Boolean(true)),
+            QueryControl::default(),
+        ).next().unwrap().unwrap();
+        assert_eq!(output.num_rows(), 3);
     }
 }
