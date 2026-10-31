@@ -421,7 +421,7 @@ mod scheduler_ready_task_inspection_tests {
         let now = Instant::now();
         let mut scheduler = TaskScheduler::new([9, 1, 5, 3], 2).unwrap();
         assert_eq!(scheduler.queued_tasks(2), vec![1, 3]);
-        assert_eq!(scheduler.queued_tasks(0), vec![]);
+        assert_eq!(scheduler.queued_tasks(0), Vec::<u64>::new());
         let first = scheduler.lease(4, now, Duration::from_secs(10))
             .unwrap().unwrap();
         assert_eq!(first.task, 1);
