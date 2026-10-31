@@ -18,6 +18,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .ok_or_else(|| Error::Execution("REGEXP_COUNT overflow".into()))?;
         return Ok(Value::Integer(count));
     }
+    // An anchored identifier literal can match at most once.
+    if let Some(prefix) = pattern.strip_prefix('^') {
+        if prefix.len() <= 4095 && prefix.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || byte == b'_') {
+            return Ok(Value::Integer(i64::from(text.starts_with(prefix))));
+        }
+    }
     if pattern == "." {
         // Rust regex dot matches a Unicode scalar except LF by default.
         let count = text.chars().filter(|&ch| ch != '\n').count();
@@ -128,5 +135,24 @@ mod dot_pattern_count_tests {
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod anchored_literal_count_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_counts_match_the_regex_engine() {
+        for text in ["", "foo", "foobar", "xfoo", "\nfoo", "éfoo", "foo\nfoo"] {
+            for pattern in ["^", "^foo", "^foo_bar", "^1", "^FOO", "^f.o", "(?m)^foo"] {
+                let actual = evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap();
+                let expected = regex_support::compile(pattern).unwrap().find_iter(text).count();
+                assert_eq!(actual, Value::Integer(expected as i64),
+                    "pattern={pattern:?} text={text:?}");
+            }
+        }
     }
 }

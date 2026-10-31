@@ -28,6 +28,24 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let lowercase = replacement(args, 2, Some('x'))?;
     let digits = replacement(args, 3, Some('n'))?;
     let others = replacement(args, 4, None)?;
+    // Default MASK replacements are ASCII. Transform a byte copy in place
+    // instead of encoding each output scalar through String::push.
+    if input.is_ascii() &&
+        [uppercase, lowercase, digits, others].into_iter().flatten()
+            .all(|character| character.is_ascii()) {
+        let mut bytes = input.as_bytes().to_vec();
+        for byte in &mut bytes {
+            let selected = match *byte {
+                b'A'..=b'Z' => uppercase,
+                b'a'..=b'z' => lowercase,
+                b'0'..=b'9' => digits,
+                _ => others,
+            };
+            if let Some(character) = selected { *byte = character as u8; }
+        }
+        return Ok(Value::Text(String::from_utf8(bytes)
+            .expect("ASCII MASK replacements preserve ASCII")));
+    }
     let mut result = String::with_capacity(input.len());
     if input.is_ascii() {
         for &byte in input.as_bytes() {
@@ -134,5 +152,27 @@ mod ascii_mask_classifier_regressions {
         ]), Err(Error::Execution(_))));
         assert_eq!(evaluate(&[Value::Text("é🙂".into())]).unwrap(),
             Value::Text("x🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_mask_byte_buffer_regressions {
+    use super::*;
+
+    #[test]
+    fn masks_ascii_classes_and_preserves_multibyte_fallback() {
+        assert_eq!(evaluate(&[Value::Text("Aa19?!".into())]).unwrap(),
+            Value::Text("Xxnn?!".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("Aa19?!".into()),
+            Value::Null, Value::Text("q".into()),
+            Value::Text("4".into()), Value::Text("_".into()),
+        ]).unwrap(), Value::Text("Aq44__".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("Ab".into()), Value::Text("é".into()),
+        ]).unwrap(), Value::Text("éx".into()));
+        assert_eq!(evaluate(&[Value::Text("Ab🙂3".into())]).unwrap(),
+            Value::Text("Xx🙂n".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }

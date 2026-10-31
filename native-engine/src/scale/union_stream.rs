@@ -263,9 +263,54 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 if selected.len() == batch.num_rows() {
                     return Some(Ok(batch));
                 }
-                return Some(batch.take(&selected));
+                // Rows are gathered in ascending input order. The input
+                // batch is owned, so move retained TEXT allocations instead
+                // of cloning them for partial DISTINCT output.
+                return Some(batch.take_sorted_owned(&selected));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod union_distinct_owned_gather_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn moves_retained_text_from_partially_duplicate_batches() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "🙂".repeat(8192);
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("dup".into()), Value::Integer(1)],
+            vec![Value::Text("dup".into()), Value::Integer(1)],
+            vec![Value::Text(wide.clone()), Value::Integer(2)],
+            vec![Value::Null, Value::Integer(3)],
+            vec![Value::Text(wide.clone()), Value::Integer(2)],
+        ]).unwrap();
+        let pointer = match source.value(2, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let result = UnionDistinctStream::new(
+            [Ok(source)].into_iter(), std::iter::empty(),
+            schema, QueryControl::default(), 10, 1_000_000,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.iter().map(Batch::num_rows).sum::<usize>(), 3);
+        assert_eq!(result[0].row(0).unwrap(),
+            vec![Value::Text("dup".into()), Value::Integer(1)]);
+        assert_eq!(result[0].row(1).unwrap(),
+            vec![Value::Text(wide), Value::Integer(2)]);
+        assert_eq!(result[0].row(2).unwrap(),
+            vec![Value::Null, Value::Integer(3)]);
+        let retained = match result[0].value(1, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(retained, pointer);
     }
 }
 

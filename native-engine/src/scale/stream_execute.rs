@@ -266,7 +266,10 @@ impl Iterator for DistinctOutput {
                 if selected.len() == batch.num_rows() {
                     return Some(Ok(batch));
                 }
-                return Some(batch.take(&selected));
+                // DISTINCT selections are monotonically increasing.
+                // Since the input batch is owned, move retained TEXT buffers
+                // into the output rather than cloning every selected cell.
+                return Some(batch.take_sorted_owned(&selected));
             }
         }
     }
@@ -1085,6 +1088,47 @@ mod wide_stream_plan_admission_tests {
             right: Box::new(Plan::scan("t")),
         };
         assert_eq!(output_schema(&small, &registered, &options).unwrap(), schema);
+    }
+}
+
+#[cfg(test)]
+mod streaming_distinct_owned_gather_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn retained_text_uses_the_input_allocation_after_duplicate_removal() {
+        let wide = "large🙂".repeat(4096);
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("dup".into())],
+            vec![Value::Integer(1), Value::Text("dup".into())],
+            vec![Value::Integer(2), Value::Text(wide.clone())],
+            vec![Value::Integer(3), Value::Null],
+            vec![Value::Integer(2), Value::Text(wide.clone())],
+        ]).unwrap();
+        let original_ptr = match input.value(2, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let mut source = DistinctOutput::new(
+            Box::new([Ok(input)].into_iter()), QueryControl::default(),
+            8, 1_000_000,
+        );
+        let output = source.next().unwrap().unwrap();
+        assert_eq!(output.num_rows(), 3);
+        assert_eq!(output.column(0).unwrap(),
+            &[Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        assert_eq!(output.value(1, 1).unwrap(), &Value::Text(wide));
+        let output_ptr = match output.value(1, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(output_ptr, original_ptr);
+        assert!(source.next().is_none());
     }
 }
 
