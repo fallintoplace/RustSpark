@@ -48,6 +48,10 @@ mod tests {
 /// UNION DISTINCT matches columns by position and removes repeated complete rows.
 pub fn union_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
+    if schema.is_empty() {
+        let rows = usize::from(left.num_rows() != 0 || right.num_rows() != 0);
+        return Batch::new_with_row_count(schema, vec![], rows);
+    }
     let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
     for input in [&*left, &*right] {
@@ -118,5 +122,20 @@ mod zero_column_union_consolidation_tests {
         let b = Batch::new_with_row_count(schema, vec![], 3).unwrap();
         assert_eq!(union_all(&a, &b).unwrap().rows().unwrap(), vec![vec![]; 5]);
         assert_eq!(union_distinct(&a, &b).unwrap().rows().unwrap(), vec![vec![]]);
+    }
+}
+
+#[cfg(test)]
+mod union_distinct_empty_schema_fast_path_tests {
+    use super::*;
+    #[test]
+    fn avoids_enumerating_every_zero_column_row() {
+        let schema = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 100_000).unwrap();
+        let right = Batch::new_with_row_count(schema.clone(), vec![], 200_000).unwrap();
+        assert_eq!(union_distinct(&left, &right).unwrap().num_rows(), 1);
+        let empty = Batch::new_with_row_count(schema, vec![], 0).unwrap();
+        assert_eq!(union_distinct(&empty, &empty).unwrap().num_rows(), 0);
+        assert_eq!(union_distinct(&empty, &right).unwrap().num_rows(), 1);
     }
 }
