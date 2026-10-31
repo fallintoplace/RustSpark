@@ -32,8 +32,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // The first pass validates the bound; the second writes once into the result.
     let mut output = String::with_capacity(length);
     let mut first = true;
+    // The sizing pass already checked every argument's type and NULL state.
     for arg in &args[1..] {
-        if let Some(text) = super::string(arg)? {
+        if let Value::Text(text) = arg {
             if !first { output.push_str(separator); }
             output.push_str(text);
             first = false;
@@ -98,5 +99,26 @@ mod single_value_concat_ws_fast_path_tests {
             Value::Text("b".into())]).unwrap(), Value::Text("a/b".into()));
         assert!(evaluate(&[Value::Text(".".into()),
             Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod validated_concat_ws_output_regressions {
+    use super::*;
+
+    #[test]
+    fn keeps_nullable_unicode_arguments_and_rejects_wrong_types() {
+        let mut args = vec![Value::Text("🙂".into())];
+        for index in 0..64 {
+            args.push(if index % 3 == 0 { Value::Null }
+                else { Value::Text(format!("界{index}")) });
+        }
+        let actual = evaluate(&args).unwrap();
+        let expected = args[1..].iter().filter_map(|arg| match arg {
+            Value::Text(text) => Some(text.as_str()), _ => None,
+        }).collect::<Vec<_>>().join("🙂");
+        assert_eq!(actual, Value::Text(expected));
+        args[30] = Value::Integer(42);
+        assert!(matches!(evaluate(&args), Err(Error::Type(_))));
     }
 }
