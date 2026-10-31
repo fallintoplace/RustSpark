@@ -85,6 +85,7 @@ mod cot;
 mod csc;
 mod sec;
 mod md5_digest;
+mod parse_url;
 mod sha2_digest;
 // MODULE_IMPORTS
 
@@ -189,6 +190,7 @@ const MODULES: &[&[Function]] = &[
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
     &md5_digest::FUNCTIONS,
+    &parse_url::FUNCTIONS,
     &sha2_digest::FUNCTIONS,
     // FUNCTION_LIST
 ];
