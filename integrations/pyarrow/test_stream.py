@@ -1,5 +1,7 @@
 import unittest
 import io
+import os
+import signal
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -68,7 +70,8 @@ class ArrowStreamCommandTests(unittest.TestCase):
             def wait(self, timeout=None):
                 return 1
 
-        def start(command, *, stdout, stderr):
+        def start(command, *, stdout, stderr, start_new_session):
+            self.assertEqual(start_new_session, os.name == "posix")
             self.assertEqual(stdout, subprocess.PIPE)
             self.assertNotEqual(stderr, subprocess.PIPE)
             self.assertEqual(command[command.index("--database-dir") + 1], "/tmp/my db")
@@ -88,6 +91,37 @@ class ArrowStreamCommandTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "table name"):
                 build_command("SELECT 1", csv_tables={"valid": "good.csv", name: "bad.csv"})
 
+
+
+class EarlyCloseCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_closing_iterator_kills_child_process_group(self):
+        class FakeProcess:
+            pid = 123456
+            stdout = io.BytesIO()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return -9
+
+        process = FakeProcess()
+        def start(command, *, stdout, stderr, start_new_session):
+            self.assertTrue(start_new_session)
+            self.assertEqual(stdout, subprocess.PIPE)
+            return process
+
+        arrow = SimpleNamespace(ipc=SimpleNamespace(
+            open_stream=lambda stream: nullcontext(iter(["batch"]))
+        ))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", side_effect=start
+        ), patch("stream.os.killpg") as kill_group:
+            batches = iter_arrow_batches("SELECT 1")
+            self.assertEqual(next(batches), "batch")
+            batches.close()
+            kill_group.assert_called_once_with(process.pid, signal.SIGKILL)
 
 
 class NamedInputTextPathTests(unittest.TestCase):

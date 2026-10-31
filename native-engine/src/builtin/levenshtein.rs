@@ -63,6 +63,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if threshold == Some(1) {
             return Ok(Value::Integer(single_ascii_edit(first.as_bytes(), second.as_bytes())));
         }
+        if threshold == Some(2) {
+            return Ok(Value::Integer(two_ascii_edits(first.as_bytes(), second.as_bytes())));
+        }
         return distance_units(first.as_bytes(), second.as_bytes(), threshold);
     }
     let a = first.chars().collect::<Vec<_>>();
@@ -90,6 +93,31 @@ fn single_ascii_edit(a: &[u8], b: &[u8]) -> i64 {
     }
     edits += (longer.len() - i) + (shorter.len() - j);
     if edits <= 1 { edits as i64 } else { -1 }
+}
+
+// With a threshold of two, at most two mismatch branches can be taken.
+// This bounded search reuses input byte slices and needs no DP allocations.
+fn two_ascii_edits(a: &[u8], b: &[u8]) -> i64 {
+    fn bounded(mut a: &[u8], mut b: &[u8], remaining: u8) -> Option<u8> {
+        if a.len().abs_diff(b.len()) > usize::from(remaining) { return None; }
+        while !a.is_empty() && !b.is_empty() && a[0] == b[0] {
+            a = &a[1..];
+            b = &b[1..];
+        }
+        if a.is_empty() || b.is_empty() {
+            let tail = a.len().saturating_add(b.len());
+            return (tail <= usize::from(remaining)).then_some(tail as u8);
+        }
+        if remaining == 0 { return None; }
+        // Replace, delete, or insert one byte. The recursion depth is at
+        // most two, so the search examines a constant number of suffixes.
+        [(&a[1..], &b[1..]), (&a[1..], b), (a, &b[1..])]
+            .into_iter()
+            .filter_map(|(left, right)| bounded(left, right, remaining - 1))
+            .min()
+            .map(|cost| cost + 1)
+    }
+    bounded(a, b, 2).map_or(-1, i64::from)
 }
 
 fn distance_units<T: Eq + Copy>(
@@ -519,5 +547,44 @@ mod ascii_single_edit_fast_path_tests {
         assert_eq!(evaluate(&[
             Value::Text("é".into()), Value::Text("e".into()), Value::Integer(1),
         ]).unwrap(), Value::Integer(1));
+    }
+}
+
+
+#[cfg(test)]
+mod ascii_two_edit_threshold_regressions {
+    use super::*;
+
+    #[test]
+    fn two_edit_search_matches_dynamic_programming_for_small_ascii_strings() {
+        let mut samples = Vec::new();
+        for length in 0..=5u32 {
+            for mut value in 0..3usize.pow(length) {
+                let mut bytes = vec![b'a'; length as usize];
+                for byte in &mut bytes {
+                    *byte = b'a' + (value % 3) as u8;
+                    value /= 3;
+                }
+                samples.push(bytes);
+            }
+        }
+        for left in &samples {
+            for right in &samples {
+                let exact = distance_units(left, right, None).unwrap();
+                let Value::Integer(distance) = exact else { unreachable!() };
+                let expected = if distance <= 2 { distance } else { -1 };
+                assert_eq!(two_ascii_edits(left, right), expected,
+                    "left={left:?} right={right:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn long_shifted_ascii_input_with_two_edits_needs_no_dp_rows() {
+        let left = format!("a{}z", "x".repeat(20_000));
+        let right = format!("b{}y", "x".repeat(20_000));
+        assert_eq!(evaluate(&[
+            Value::Text(left), Value::Text(right), Value::Integer(2)
+        ]).unwrap(), Value::Integer(2));
     }
 }

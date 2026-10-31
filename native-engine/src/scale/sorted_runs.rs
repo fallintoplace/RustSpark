@@ -1,6 +1,5 @@
 //! Generate independently sorted spill runs with deterministic scratch cleanup.
 use std::{
-    fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -63,7 +62,7 @@ fn flush_pending_run(
     let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
     let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());
     let path = directory.join(filename);
-    let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    let file = super::private_files::create_private(&path)?;
     runs.files.push(path);
     let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
     writer.write_batch(&sorted)?;
@@ -99,17 +98,20 @@ where I: IntoIterator<Item = Result<Batch>>
                     &schema, keys, directory, max_rows_per_run, control)?;
             }
         } else {
-            // Split only batches that cross run boundaries. Entire small
-            // batches are transferred, avoiding an extra per-row clone.
-            let mut start = 0;
-            while start < incoming.num_rows() {
+            // A large incoming batch crosses multiple run boundaries.
+            // Move its column values into each window instead of cloning
+            // every heap-backed TEXT cell through borrowed row slices.
+            let mut remaining = incoming.num_rows();
+            let mut sources = incoming.into_columns().into_iter()
+                .map(Vec::into_iter).collect::<Vec<_>>();
+            while remaining != 0 {
                 control.check()?;
-                let take = (max_rows_per_run - pending_rows)
-                    .min(incoming.num_rows() - start);
-                let end = start + take;
-                pending.push(incoming.slice_rows(start, end)?);
+                let take = (max_rows_per_run - pending_rows).min(remaining);
+                let columns: Vec<Vec<crate::scalar::Value>> = sources.iter_mut()
+                    .map(|source| source.by_ref().take(take).collect()).collect();
+                pending.push(Batch::from_validated_columns(schema.clone(), columns, take)?);
                 pending_rows += take;
-                start = end;
+                remaining -= take;
                 if pending_rows == max_rows_per_run {
                     flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
                         &schema, keys, directory, max_rows_per_run, control)?;
@@ -300,5 +302,47 @@ mod owned_sorted_spill_run_regressions {
         drop(runs);
         assert!(paths.iter().all(|path| !path.exists()));
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod owned_large_sorted_run_windows {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field},
+        scale::spill::SpillReader};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn long_text_and_null_rows_cross_run_boundaries_without_loss() {
+        let dir = std::env::temp_dir().join(format!("native-owned-run-{}-{}",
+            std::process::id(), RUN_ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..17).rev().map(|n| vec![
+            Value::Integer(n),
+            if n % 4 == 0 { Value::Null }
+            else { Value::Text(format!("{n}-{}", "x".repeat(4096))) },
+        ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let runs = write_sorted_runs([Ok(input.clone())], schema, &keys,
+            &dir, 3, &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 6);
+        let mut rows = Vec::new();
+        for file in runs.files() {
+            let mut reader = SpillReader::new(BufReader::new(fs::File::open(file).unwrap()), 3).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                rows.extend(batch.rows().unwrap());
+            }
+        }
+        rows.sort_by_key(|row| match row[0] { Value::Integer(n) => n, _ => unreachable!() });
+        let mut expected = input.rows().unwrap();
+        expected.sort_by_key(|row| match row[0] { Value::Integer(n) => n, _ => unreachable!() });
+        assert_eq!(rows, expected);
+        drop(runs);
+        fs::remove_dir(&dir).unwrap();
     }
 }
