@@ -27,10 +27,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("OVERLAY input exceeds native 16 MiB budget".into()));
     }
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
-    let begin = text.char_indices().nth(index)
-        .map_or(text.len(), |(byte, _)| byte);
-    let end = text[begin..].char_indices().nth(count)
-        .map_or(text.len(), |(byte, _)| begin + byte);
+    // A byte count bounds the number of UTF-8 characters, so impossible
+    // character positions need no iterator traversal.
+    let begin = if index >= text.len() { text.len() } else {
+        text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
+    };
+    let remaining = &text[begin..];
+    let end = if count >= remaining.len() { text.len() } else {
+        remaining.char_indices().nth(count).map_or(text.len(), |(byte, _)| begin + byte)
+    };
     let result_len = begin.checked_add(replacement.len())
         .and_then(|n| n.checked_add(text.len() - end))
         .filter(|&n| n <= MAX_BYTES)
@@ -88,6 +93,14 @@ mod tests {
             Value::Text("abc".into()), Value::Text("X".into()),
             Value::Integer(2), Value::Integer(0),
         ]).unwrap(), Value::Text("aXbc".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("a🙂b".into()), Value::Text("!".into()),
+            Value::Integer(i64::MAX),
+        ]).unwrap(), Value::Text("a🙂b!".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("a🙂b".into()), Value::Text("!".into()),
+            Value::Integer(2), Value::Integer(i64::MAX),
+        ]).unwrap(), Value::Text("a!".into()));
     }
 }
 
