@@ -35,12 +35,21 @@ def commands(scale, binary, output):
     return fixture, report, prepare, run
 
 
+def finite_positive_duration(value):
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def valid_query_measurement(row):
     median = row.get("median_ms")
     rows = row.get("result_rows")
     hashes = (row.get("sql_sha256"), row.get("result_sha256"))
     return (row.get("status") == "ok"
-            and type(median) in (int, float) and math.isfinite(median) and median > 0
+            and finite_positive_duration(median)
             and type(rows) is int and rows >= 0
             and all(type(value) is str and len(value) == 64
                     and all(char in "0123456789abcdef" for char in value)

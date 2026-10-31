@@ -1,7 +1,6 @@
 //! Multi-pass external merge to bound open file descriptors.
 use std::{
     collections::HashSet,
-    fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -58,7 +57,7 @@ pub fn merge_to_fan_in(
             }
             let id = PASS_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("rustspark-merge-{}-{id}.rspill", std::process::id()));
-            let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+            let file = super::private_files::create_private(&path)?;
             result.scratch.push(path.clone());
             let merger = RunMerger::new(
                 group, schema.clone(), keys, io_batch_rows, io_batch_rows, control.clone()

@@ -25,13 +25,14 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    // Enforce the same resource limit regardless of the first character.
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("SOUNDEX input exceeds native 16 MiB budget".into()));
+    }
     let mut characters = text.chars();
     let Some(first) = characters.next() else { return Ok(Value::Text(String::new())); };
     if !first.is_ascii_alphabetic() {
         // Non-letter prefixes return the whole input, not the four-byte code.
-        if text.len() > 16 * 1024 * 1024 {
-            return Err(Error::Execution("SOUNDEX output exceeds native 16 MiB budget".into()));
-        }
         return Ok(Value::Text(text.to_owned()));
     }
     let mut result = String::with_capacity(4);
@@ -129,5 +130,19 @@ mod soundex_ascii_prefix_early_exit_tests {
         assert_eq!(evaluate(&[Value::Text(input)]).unwrap(),
             Value::Text("R163".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod soundex_input_bound_regressions {
+    use super::*;
+
+    #[test]
+    fn alphabetic_prefix_cannot_bypass_native_input_budget() {
+        let oversized = format!("Robert{}", "A".repeat(16 * 1024 * 1024));
+        assert!(matches!(evaluate(&[Value::Text(oversized)]),
+            Err(Error::Execution(_))));
+        assert_eq!(evaluate(&[Value::Text("Robert".into())]).unwrap(),
+            Value::Text("R163".into()));
     }
 }

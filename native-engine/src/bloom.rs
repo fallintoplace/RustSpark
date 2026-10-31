@@ -82,9 +82,8 @@ impl BloomFilter {
 
     /// Admit a native column's keys without materializing row tuples.
     pub fn insert_batch(&mut self, keys: &[Value]) {
-        // A saturated bitset can never change after more insertions.
-        // Stop visiting the rest of a large build-side batch once full.
-        if self.occupied_bits == self.bits { return; }
+        // Inserting into a saturated filter cannot change membership.
+        if self.occupied_bits == self.bits && self.populated { return; }
         for key in keys {
             self.insert(key);
             if self.occupied_bits == self.bits { break; }
@@ -142,7 +141,7 @@ impl BloomFilter {
         }
         // An unpopulated filter has no set bits. Avoid visiting large
         // bitsets for the common case of an empty build-side partition.
-        if !other.populated { return Ok(()); }
+        if !other.populated || self.occupied_bits == self.bits { return Ok(()); }
         if !self.populated {
             self.words.copy_from_slice(&other.words);
             self.occupied_bits = other.occupied_bits;
@@ -192,6 +191,14 @@ impl BloomFilter {
             self.words.fill(0);
             self.occupied_bits = 0;
             self.populated = false;
+            return Ok(());
+        }
+        // AND with a saturated bitset is identity. If only the target is
+        // saturated, copying the source avoids one popcount per word.
+        if other.occupied_bits == other.bits { return Ok(()); }
+        if self.occupied_bits == self.bits {
+            self.words.copy_from_slice(&other.words);
+            self.occupied_bits = other.occupied_bits;
             return Ok(());
         }
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
@@ -500,6 +507,50 @@ mod saturated_bloom_shortcut_regressions {
             filter.intersect_with(&other).unwrap();
             assert!(filter.might_contain(&Value::Integer(123)));
             assert_eq!(filter.bits_set(), other.bits_set());
+        }
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_bulk_operations_tests {
+    use super::*;
+
+    fn saturated(bits: usize, hashes: u32) -> BloomFilter {
+        let mut filter = BloomFilter::new(bits, hashes).unwrap();
+        for word in &mut filter.words { *word = u64::MAX; }
+        filter.populated = true;
+        filter.occupied_bits = bits;
+        filter
+    }
+
+    #[test]
+    fn union_and_inserts_leave_saturated_filter_unchanged() {
+        let mut all = saturated(8192, 5);
+        let mut other = BloomFilter::new(8192, 5).unwrap();
+        other.insert(&Value::Text("data".repeat(5000)));
+        let original = all.words.clone();
+        all.insert_batch(&(0..250).map(Value::Integer).collect::<Vec<_>>());
+        all.union_with(&other).unwrap();
+        assert_eq!(all.words, original);
+        assert_eq!(all.bits_set(), 8192);
+        assert!(all.might_contain(&Value::Integer(99)));
+    }
+
+    #[test]
+    fn intersection_with_full_filter_is_identity_and_from_full_copies_source() {
+        let full = saturated(8192, 5);
+        let mut partial = BloomFilter::new(8192, 5).unwrap();
+        partial.insert(&Value::Text("🙂".into()));
+        partial.insert(&Value::Integer(777));
+        let before = partial.words.clone();
+        partial.intersect_with(&full).unwrap();
+        assert_eq!(partial.words, before);
+        let mut destination = full;
+        destination.intersect_with(&partial).unwrap();
+        assert_eq!(destination.words, before);
+        assert_eq!(destination.bits_set(), partial.bits_set());
+        for value in [Value::Integer(777), Value::Text("🙂".into())] {
+            assert!(destination.might_contain(&value));
         }
     }
 }
