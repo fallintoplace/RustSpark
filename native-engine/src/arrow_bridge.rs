@@ -74,6 +74,19 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
         .map_err(|err| Error::Execution(format!("Arrow conversion failed: {err}")))
 }
 
+/// Decode dictionary indices before accessing the value array. Invalid
+/// signed indices and out-of-range codes must return a typed error.
+fn dictionary_text_value(values: &StringArray, code: i32) -> Result<Value> {
+    let index = usize::try_from(code).ok()
+        .filter(|&index| index < values.len())
+        .ok_or_else(|| Error::Type("Arrow dictionary key out of bounds".into()))?;
+    if values.is_null(index) {
+        Ok(Value::Null)
+    } else {
+        Ok(Value::Text(values.value(index).into()))
+    }
+}
+
 pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
     let mut fields = Vec::new();
     let mut columns = Vec::new();
@@ -211,16 +224,12 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                 let values = dictionary.values().as_any().downcast_ref::<StringArray>()
                     .ok_or_else(|| Error::Type("dictionary values are not UTF-8".into()))?;
                 Some((0..dictionary.len()).map(|row| {
-                    if dictionary.is_null(row) { Value::Null }
-                    else {
-                        let code = dictionary.keys().value(row) as usize;
-                        if values.is_null(code) {
-                            Value::Null
-                        } else {
-                            Value::Text(values.value(code).into())
-                        }
+                    if dictionary.is_null(row) {
+                        Ok(Value::Null)
+                    } else {
+                        dictionary_text_value(values, dictionary.keys().value(row))
                     }
-                }).collect())
+                }).collect::<Result<Vec<_>>>()?)
             }
             _ => None,
         };
@@ -516,5 +525,20 @@ mod arrow_decoded_column_validation_tests {
             vec![Value::Integer(8), Value::Null, Value::Null],
         ]).unwrap();
         assert_eq!(from_arrow(&to_arrow(&batch).unwrap()).unwrap(), batch);
+    }
+}
+
+#[cfg(test)]
+mod checked_arrow_dictionary_index_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_signed_and_out_of_range_codes_are_errors() {
+        let values = StringArray::from(vec![Some("東京"), None]);
+        assert_eq!(dictionary_text_value(&values, 0).unwrap(), Value::Text("東京".into()));
+        assert_eq!(dictionary_text_value(&values, 1).unwrap(), Value::Null);
+        for code in [-1, -20, i32::MIN, 2, i32::MAX] {
+            assert!(dictionary_text_value(&values, code).is_err(), "code={code}");
+        }
     }
 }
