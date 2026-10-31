@@ -51,6 +51,7 @@ pub struct SetStream {
     max_keys: usize,
     max_bytes: usize,
     retained_bytes: usize,
+    pending_error: Option<Error>,
     stopped: bool,
 }
 
@@ -98,7 +99,8 @@ impl SetStream {
         }
         Ok(Self {
             left, left_schema, output_schema, right_counts, emitted: HashSet::new(),
-            mode, control, max_keys, max_bytes, retained_bytes, stopped: false,
+            mode, control, max_keys, max_bytes, retained_bytes,
+            pending_error: None, stopped: false,
         })
     }
 
@@ -153,6 +155,10 @@ impl Iterator for SetStream {
     type Item = Result<Batch>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         loop {
             if let Err(error) = self.control.check() {
                 self.stopped = true;
@@ -171,19 +177,38 @@ impl Iterator for SetStream {
                     .map(|_| Vec::new()).collect();
                 let mut selected = 0usize;
                 for index in 0..batch.num_rows() {
-                    if index % 1024 == 0 { self.control.check()?; }
-                    let row = convert_row(&batch, index, &self.output_schema)?;
-                    if self.select_row(&row)? {
-                        for (column, value) in output.iter_mut().zip(row) {
-                            column.push(value);
+                    let row_result: Result<Option<Vec<Value>>> = (|| {
+                        if index % 1024 == 0 { self.control.check()?; }
+                        let row = convert_row(&batch, index, &self.output_schema)?;
+                        Ok(self.select_row(&row)?.then_some(row))
+                    })();
+                    match row_result {
+                        Ok(Some(row)) => {
+                            for (column, value) in output.iter_mut().zip(row) {
+                                column.push(value);
+                            }
+                            selected += 1;
                         }
-                        selected += 1;
+                        Ok(None) => {}
+                        Err(error) if selected > 0 => {
+                            // Emit previously selected rows before the terminal
+                            // failure. No later left-side input is consumed.
+                            self.pending_error = Some(error);
+                            break;
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
                 Batch::new_with_row_count(self.output_schema.clone(), output, selected)
             })();
             match result {
-                Ok(batch) if batch.num_rows() == 0 => continue,
+                Ok(batch) if batch.num_rows() == 0 => {
+                    if let Some(error) = self.pending_error.take() {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                    continue;
+                },
                 Ok(batch) => return Some(Ok(batch)),
                 Err(error) => { self.stopped = true; return Some(Err(error)); }
             }
@@ -231,6 +256,23 @@ mod tests {
             Box::new([Ok(right.clone())].into_iter()), left.schema().clone(),
             right.schema().clone(), SetMode::IntersectAll, QueryControl::default(),
             1, 10_000).is_err());
+    }
+
+    #[test]
+    fn preserves_selected_rows_before_late_left_side_memory_error() {
+        let left = batch(&[Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        let right = batch(&[]);
+        let mut stream = SetStream::new(
+            Box::new([Ok(left.clone())].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            left.schema().clone(), right.schema().clone(),
+            SetMode::ExceptDistinct, QueryControl::default(), 2, 4096,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 
     #[test]
