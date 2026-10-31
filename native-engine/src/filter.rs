@@ -17,6 +17,9 @@ pub fn filter_owned(batch: Batch, predicate: &Expr) -> Result<Batch> {
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch);
     }
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
+        return Ok(Batch::empty(batch.schema().clone()));
+    }
     let indices = crate::vector_filter::select_indices(&batch, predicate)?;
     if indices.len() == batch.num_rows() {
         return Ok(batch);
@@ -69,6 +72,7 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
     if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
         return batch.slice_rows(0, 0);
     }
+    // Keep type validation above this shortcut, including when no rows are requested.
     if max_rows == 0 { return batch.slice_rows(0, 0); }
     let direct_column = match predicate {
         Expr::Column(name) => Some((name.as_str(), true)),
@@ -259,6 +263,28 @@ mod move_owned_filter_payloads {
         assert!(filter_owned(input, &Expr::Column("id".into())).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
         assert_eq!(filter_owned(zero, &Expr::Literal(Value::Boolean(true))).unwrap().num_rows(), 4);
+    }
+}
+
+#[cfg(test)]
+mod owned_literal_false_filter_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn constant_false_and_unknown_drop_all_columns_without_changing_schema() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(4096))], vec![Value::Null],
+        ]).unwrap();
+        for predicate in [Value::Boolean(false), Value::Null] {
+            let result = filter_owned(input.clone(), &Expr::Literal(predicate)).unwrap();
+            assert_eq!(result.schema(), &schema);
+            assert_eq!(result.num_rows(), 0);
+            assert!(result.column(0).unwrap().is_empty());
+        }
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        assert_eq!(filter_owned(zero, &Expr::Literal(Value::Null)).unwrap().num_rows(), 0);
     }
 }
 
