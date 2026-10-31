@@ -335,6 +335,14 @@ impl Parser {
                 left = Expr::Call { name: "concat".into(), args: vec![left, right] };
                 continue;
             }
+            // DIV follows Spark's multiplicative operator precedence.
+            if self.peek_word("DIV") {
+                if min_precedence > 9 { break; }
+                self.next();
+                let right = self.expression(10)?;
+                left = Expr::Call { name: "div".into(), args: vec![left, right] };
+                continue;
+            }
             if self.peek() == Some(&Token::Operator("%".into())) {
                 if min_precedence > 9 { break; }
                 let _ = self.next();
