@@ -158,20 +158,28 @@ impl PartitionWriter {
         let key_slices = self.key_columns.iter()
             .map(|&index| batch.column(index)).collect::<Result<Vec<_>>>()?;
         let mut dense: Option<Vec<Vec<usize>>> = None;
+        // Sparse exchanges can span many small batches. Reuse the shard
+        // buckets instead of rebuilding a hash table and row vectors for each.
+        let mut sparse = std::collections::HashMap::<usize, Vec<usize>>::new();
+        let mut touched = Vec::<usize>::new();
         let mut start = 0;
         while start < batch.num_rows() {
             control.check()?;
             let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
             if writers.len() > (end - start).saturating_mul(4) {
-                let mut sparse = std::collections::HashMap::<usize, Vec<usize>>::new();
                 for row in start..end {
                     let index = bucket_bound(&key_slices, row, writers.len());
-                    sparse.entry(index).or_default().push(row);
+                    let rows = sparse.entry(index).or_default();
+                    if rows.is_empty() { touched.push(index); }
+                    rows.push(row);
                 }
-                for (index, rows) in sparse {
+                for &index in &touched {
+                    let rows = &sparse[&index];
                     write_shard(writers, &mut self.open_order, &mut self.initialized,
-                        &owned.paths, &owned.schema, index, batch, &rows)?;
+                        &owned.paths, &owned.schema, index, batch, rows)?;
+                    sparse.get_mut(&index).expect("touched shard exists").clear();
                 }
+                touched.clear();
             } else {
                 let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
                 for group in groups.iter_mut() { group.clear(); }
@@ -531,5 +539,45 @@ mod prebound_spill_keys_perf_tests {
                     bucket(&batch, row, &[0, 1], count).unwrap());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reusable_sparse_partition_buffers_tests {
+    use super::*;
+    use std::{fs, io::BufReader, sync::atomic::{AtomicU64, Ordering as TestOrdering}};
+    use crate::{schema::{DataType, Field}, scale::spill::SpillReader};
+    static ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn sparse_shards_reuse_row_buffers_across_batches_without_leaking_rows() {
+        let dir = std::env::temp_dir().join(format!("sparse-shards-{}-{}",
+            std::process::id(), ID.fetch_add(1, TestOrdering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let inputs = [
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(1)],
+            ]).unwrap(),
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(2)], vec![Value::Null], vec![Value::Integer(3)],
+            ]).unwrap(),
+        ];
+        let mut writer = PartitionWriter::new(&dir, schema, &["key"], 16, 2).unwrap();
+        for batch in &inputs {
+            writer.write_batch(batch, &QueryControl::default()).unwrap();
+        }
+        let files = writer.finish().unwrap();
+        let expected = crate::hash_partition::partition_batches(&inputs, &["key"], 16).unwrap();
+        for (index, path) in files.paths().iter().enumerate() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 4).unwrap();
+            let mut rows = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                rows.extend(batch.rows().unwrap());
+            }
+            assert_eq!(rows, expected[index].rows().unwrap(), "shard {index}");
+        }
+        drop(files);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

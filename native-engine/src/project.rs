@@ -62,6 +62,132 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
     Batch::new_with_row_count(schema, columns, batch.num_rows())
 }
 
+
+/** Project an owned batch without cloning direct source columns.
+ *
+ * Computed expressions are evaluated before moving the input columns.
+ * Repeated references clone only the earlier occurrences; the last use
+ * consumes the original column and preserves heap-backed TEXT allocations.
+ */
+pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
+    let schema = Schema::new(selections.iter().map(|selection| {
+        Ok(Field::new(
+            &selection.alias,
+            selection.expression.output_type(batch.schema())?,
+            expression_nullable(&selection.expression, batch.schema())?,
+        ))
+    }).collect::<Result<Vec<_>>>()?)?;
+    let rows = batch.num_rows();
+    let mut sources = Vec::with_capacity(selections.len());
+    let mut prepared = Vec::with_capacity(selections.len());
+    let mut remaining = vec![0usize; batch.schema().len()];
+    for selection in selections {
+        match &selection.expression {
+            Expr::Column(name) => {
+                let index = batch.schema().column(name)?;
+                remaining[index] += 1;
+                sources.push(Some(index));
+                prepared.push(None);
+            }
+            Expr::Literal(value) => {
+                sources.push(None);
+                prepared.push(Some(vec![value.clone(); rows]));
+            }
+            expression => {
+                sources.push(None);
+                let mut values = Vec::with_capacity(rows);
+                for row in 0..rows {
+                    values.push(expression.evaluate(&batch, row)?);
+                }
+                prepared.push(Some(values));
+            }
+        }
+    }
+    let mut owned = batch.into_columns().into_iter().map(Some).collect::<Vec<_>>();
+    let columns = prepared.into_iter().zip(sources).map(|(values, source)| {
+        if let Some(index) = source {
+            remaining[index] -= 1;
+            if remaining[index] == 0 {
+                owned[index].take().expect("last source projection owns its column")
+            } else {
+                owned[index].as_ref().expect("source projection is available").clone()
+            }
+        } else {
+            values.expect("computed projection already evaluated")
+        }
+    }).collect();
+    Batch::new_with_row_count(schema, columns, rows)
+}
+
+#[cfg(test)]
+mod owned_projection_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn moves_large_text_columns_and_preserves_computed_results() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("é🙂".repeat(2048)), Value::Integer(2)],
+            vec![Value::Null, Value::Integer(4)],
+        ]).unwrap();
+        let ptr = match input.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let selections = [
+            Selection::new(Expr::Column("payload".into()), "body"),
+            Selection::new(Expr::binary(
+                Expr::Column("id".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)),
+            ), "plus_one"),
+        ];
+        let expected = project(&input, &selections).unwrap();
+        let output = project_owned(input, &selections).unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(match output.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn repeated_aliases_keep_values_and_move_last_reference() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("hello".repeat(500))],
+            vec![Value::Null],
+        ]).unwrap();
+        let ptr = match input.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let selections = [
+            Selection::new(Expr::Column("text".into()), "first"),
+            Selection::new(Expr::Column("TEXT".into()), "last"),
+        ];
+        let expected = project(&input, &selections).unwrap();
+        let output = project_owned(input, &selections).unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(match output.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
+        assert!(project_owned(output, &[Selection::new(
+            Expr::Column("missing".into()), "bad",
+        )]).is_err());
+    }
+
+    #[test]
+    fn zero_width_projection_preserves_row_count() {
+        let input = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 5).unwrap();
+        assert_eq!(project_owned(input, &[]).unwrap().num_rows(), 5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

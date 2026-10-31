@@ -43,9 +43,18 @@ impl MemoryPool {
     /// Atomically claim at most the requested number of free bytes.
     /// Callers can shrink work units when less capacity is available.
     pub fn reserve_up_to(self: &Arc<Self>, requested: usize) -> Result<Reservation> {
+        if requested == 0 {
+            return Ok(Reservation { pool: Arc::clone(self), bytes: 0 });
+        }
         let mut current = self.used.load(Ordering::Acquire);
         loop {
             let available = self.limit.saturating_sub(current);
+            // Do not write a full pool's cache line for zero-byte claims.
+            // The snapshot is an allowed linearization point for claiming
+            // no capacity, and a later caller can retry after releases.
+            if available == 0 {
+                return Ok(Reservation { pool: Arc::clone(self), bytes: 0 });
+            }
             let bytes = requested.min(available);
             let next = current.checked_add(bytes)
                 .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
@@ -302,6 +311,36 @@ mod partial_native_memory_admission_tests {
         });
         assert_eq!(reservations.iter().map(Reservation::bytes).sum::<usize>(), 100);
         drop(reservations);
+        assert_eq!(pool.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod zero_capacity_partial_claim_contention_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn fully_reserved_pool_returns_empty_guards_without_changing_ownership() {
+        let pool = MemoryPool::new(64);
+        let full = pool.reserve(64).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let pool = Arc::clone(&pool);
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        let claim = pool.reserve_up_to(64).unwrap();
+                        assert_eq!(claim.bytes(), 0);
+                    }
+                });
+            }
+        });
+        assert_eq!(pool.used(), 64);
+        assert_eq!(pool.reserve_up_to(0).unwrap().bytes(), 0);
+        drop(full);
+        let claim = pool.reserve_up_to(64).unwrap();
+        assert_eq!(claim.bytes(), 64);
+        drop(claim);
         assert_eq!(pool.used(), 0);
     }
 }

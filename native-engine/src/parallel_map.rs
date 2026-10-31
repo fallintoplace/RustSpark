@@ -4,6 +4,8 @@ use std::{panic::{AssertUnwindSafe, catch_unwind},
 use crate::{batch::Batch, Error, Result};
 
 const MAX_OS_WORKERS: usize = 256;
+// Amortize task queue synchronization for pipelines with tiny partitions.
+const TASK_CLAIM_BATCH: usize = 16;
 
 fn worker_count(partitions: usize, requested: usize) -> usize {
     partitions.min(requested).min(MAX_OS_WORKERS)
@@ -42,12 +44,20 @@ where
             let failed = &failed;
             scope.spawn(move || loop {
                 if failed.load(Ordering::Acquire) { break; }
-                let next = tasks.lock().unwrap_or_else(|e| e.into_inner()).next();
-                let Some((index, batch)) = next else { break; };
-                let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
-                    .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
-                if result.is_err() { failed.store(true, Ordering::Release); }
-                let _ = output[index].set(result);
+                // Claim several adjacent partitions under one mutex
+                // acquisition, then run all operators outside the lock.
+                let claimed = {
+                    let mut queue = tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    queue.by_ref().take(TASK_CLAIM_BATCH).collect::<Vec<_>>()
+                };
+                if claimed.is_empty() { break; }
+                for (index, batch) in claimed {
+                    if failed.load(Ordering::Acquire) { break; }
+                    let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
+                        .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
+                    if result.is_err() { failed.store(true, Ordering::Release); }
+                    let _ = output[index].set(result);
+                }
             });
         }
     });
@@ -245,5 +255,45 @@ mod contention_free_result_tests {
         for (i, batch) in result.iter().enumerate() {
             assert_eq!(batch.value(0, 0).unwrap(), &crate::scalar::Value::Integer(i as i64));
         }
+    }
+}
+
+#[cfg(test)]
+mod chunk_claim_parallel_map_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn inputs(count: i64) -> Vec<Batch> {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        (0..count).map(|n| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(n)]]).unwrap()).collect()
+    }
+
+    #[test]
+    fn uneven_task_claims_process_every_partition_once_in_order() {
+        for count in [1, 15, 16, 17, 63, 257, 1025] {
+            let calls = AtomicUsize::new(0);
+            let actual = map_partitions(inputs(count), 7, |batch| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(batch)
+            }).unwrap();
+            assert_eq!(calls.load(Ordering::Relaxed), count as usize);
+            assert_eq!(actual.len(), count as usize);
+            for (i, batch) in actual.iter().enumerate() {
+                assert_eq!(batch.value(0, 0).unwrap(), &Value::Integer(i as i64));
+            }
+        }
+    }
+
+    #[test]
+    fn failed_claim_reports_operator_error_not_a_missing_partition() {
+        let result = map_partitions(inputs(257), 8, |batch| {
+            if batch.value(0, 0)? == &Value::Integer(0) {
+                return Err(Error::Execution("injected task failure".into()));
+            }
+            Ok(batch)
+        });
+        assert!(result.unwrap_err().to_string().contains("injected task failure"));
     }
 }

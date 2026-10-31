@@ -75,9 +75,11 @@ fn load_build_bounded(
         let next_bytes = retained_bytes.checked_add(batch_bytes)
             .filter(|total| *total <= max_build_bytes)
             .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
-        // No copy happens until both limits are admitted.
-        for (column, output) in columns.iter_mut().enumerate() {
-            output.extend_from_slice(batch.column(column)?);
+        // The spill reader transfers ownership of each decoded batch.
+        // Move heap-backed TEXT values into the build columns rather than
+        // duplicating every String after the row and byte checks succeed.
+        for (output, values) in columns.iter_mut().zip(batch.into_columns()) {
+            output.extend(values);
         }
         rows = next_rows;
         retained_bytes = next_bytes;
@@ -499,5 +501,48 @@ mod bounded_grace_build_bytes_tests {
             .unwrap_err().to_string().contains("byte budget"));
         assert!(load_build_bounded(&path, &schema, 2, 2, total, &control).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_grace_build_admission_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    use std::{fs, io::BufWriter};
+
+    #[test]
+    fn moves_large_nullable_text_builds_across_multiple_spill_batches() {
+        let path = std::env::temp_dir().join(format!(
+            "native-build-move-{}-{}.rspill", std::process::id(),
+            JOIN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let long = "🙂".repeat(8192);
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text(long.clone())],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3), Value::Text(long.clone())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(
+            BufWriter::new(File::create(&path).unwrap()), schema.clone(),
+        ).unwrap();
+        writer.write_batch(&first).unwrap();
+        writer.write_batch(&second).unwrap();
+        writer.finish().unwrap();
+        let actual = load_build_bounded(&path, &schema, 3, 2, 1_000_000,
+            &QueryControl::default()).unwrap();
+        let expected = first.rows().unwrap().into_iter()
+            .chain(second.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual.rows().unwrap(), expected);
+        assert!(load_build_bounded(&path, &schema, 2, 2, 1_000_000,
+            &QueryControl::default()).is_err());
+        assert!(load_build_bounded(&path, &schema, 3, 2, 5_000,
+            &QueryControl::default()).is_err());
+        fs::remove_file(path).unwrap();
     }
 }

@@ -36,20 +36,22 @@ impl std::io::Write for PatchOutput {
 
 fn json_merge_patch_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
-fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+fn apply_merge_patch(target: &mut serde_json::Value, patch: serde_json::Value) {
     match patch {
         serde_json::Value::Object(updates) => {
             if !target.is_object() { *target = serde_json::Value::Object(serde_json::Map::new()); }
-            let Some(fields) = target.as_object_mut() else { return; };
+            let fields = target.as_object_mut().expect("target was normalized to object");
             for (key, value) in updates {
                 if value.is_null() {
-                    fields.remove(key);
+                    fields.remove(&key);
                 } else {
-                    apply_merge_patch(fields.entry(key.clone()).or_insert(serde_json::Value::Null), value);
+                    // A parsed patch is already owned. Move its keys and
+                    // replacement subtrees instead of recursively cloning them.
+                    apply_merge_patch(fields.entry(key).or_insert(serde_json::Value::Null), value);
                 }
             }
         }
-        _ => *target = patch.clone(),
+        replacement => *target = replacement,
     }
 }
 fn json_merge_patch(args: &[Value]) -> Result<Value> {
@@ -57,7 +59,7 @@ fn json_merge_patch(args: &[Value]) -> Result<Value> {
     let Some(patch) = super::string(&args[1])? else { return Ok(Value::Null); };
     let mut document = json_path::parse(document)?;
     let patch = json_path::parse(patch)?;
-    apply_merge_patch(&mut document, &patch);
+    apply_merge_patch(&mut document, patch);
     let mut writer = PatchOutput { bytes: Vec::new(), limit: 16 * 1024 * 1024 };
     serde_json::to_writer(&mut writer, &document)
         .map_err(|error| Error::Execution(format!("JSON_MERGE_PATCH output failed: {error}")))?;
@@ -122,5 +124,42 @@ mod json_patch_bounded_output_tests {
         let value = json_merge_patch(&[Value::Text(r#"{"a":1}"#.into()),
             Value::Text(r#"{"b":2}"#.into())]).unwrap();
         assert_eq!(value, Value::Text(r#"{"a":1,"b":2}"#.into()));
+    }
+}
+
+#[cfg(test)]
+mod owned_json_merge_patch_regressions {
+    use super::*;
+
+    #[test]
+    fn large_nested_arrays_are_moved_into_target_without_semantic_changes() {
+        let values = (0..10_000_i64).map(|index|
+            serde_json::json!({"n": index, "label": format!("item-{index}")})
+        ).collect::<Vec<_>>();
+        let patch = serde_json::json!({
+            "events": values,
+            "nested": {"remove": null, "add": [true, false]}
+        });
+        let mut original = serde_json::json!({
+            "nested": {"remove": "old", "keep": 9},
+            "unchanged": "stable"
+        });
+        apply_merge_patch(&mut original, patch.clone());
+        assert_eq!(original["events"], patch["events"]);
+        assert_eq!(original["nested"]["keep"], serde_json::json!(9));
+        assert!(original["nested"].get("remove").is_none());
+        assert_eq!(original["nested"]["add"], serde_json::json!([true, false]));
+        assert_eq!(original["unchanged"], serde_json::json!("stable"));
+    }
+
+    #[test]
+    fn non_object_patch_replaces_root_and_object_patch_materializes_it() {
+        let mut root = serde_json::json!({"old": true});
+        apply_merge_patch(&mut root, serde_json::json!([1, 2, 3]));
+        assert_eq!(root, serde_json::json!([1, 2, 3]));
+        apply_merge_patch(&mut root, serde_json::json!({"field": "new"}));
+        assert_eq!(root, serde_json::json!({"field": "new"}));
+        apply_merge_patch(&mut root, serde_json::Value::Null);
+        assert!(root.is_null());
     }
 }

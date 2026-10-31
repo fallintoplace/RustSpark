@@ -262,7 +262,15 @@ impl<R: Read> SpillReader<R> {
 
     fn read_batch(&mut self) -> Result<Option<Batch>> {
         let mut first = [0u8; 1];
-        if self.input.read(&mut first)? == 0 { return Ok(None); }
+        // Interrupted at a batch boundary is not EOF or a corrupt spill file.
+        loop {
+            match self.input.read(&mut first) {
+                Ok(0) => return Ok(None),
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
         let mut remaining = [0u8; 3];
         self.input.read_exact(&mut remaining)?;
         let rows = u32::from_le_bytes([first[0], remaining[0], remaining[1], remaining[2]]) as usize;
@@ -319,7 +327,7 @@ impl<R: Read> SpillReader<R> {
                 column.push(value);
             }
         }
-        Ok(Some(Batch::new_with_row_count(self.schema.clone(), columns, rows)?))
+        Ok(Some(Batch::from_validated_columns(self.schema.clone(), columns, rows)?))
     }
 }
 
@@ -634,6 +642,88 @@ mod early_spill_tag_validation_regressions {
         let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
         assert!(reader.next_batch().unwrap_err().to_string().contains("schema"));
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod interrupted_spill_boundary_tests {
+    use super::*;
+    use std::io::{self, Cursor, Read};
+
+    struct InterruptAtFirstBatch {
+        inner: Cursor<Vec<u8>>,
+        remaining_before_interrupt: usize,
+        interrupted: bool,
+    }
+    impl Read for InterruptAtFirstBatch {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted && self.remaining_before_interrupt == 0 {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let limit = if self.interrupted { bytes.len() }
+                else { bytes.len().min(self.remaining_before_interrupt) };
+            let count = self.inner.read(&mut bytes[..limit])?;
+            if !self.interrupted { self.remaining_before_interrupt -= count; }
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn interruption_at_record_boundary_is_retried_without_losing_rows() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(7)], vec![Value::Integer(11)],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let bytes = writer.finish().unwrap();
+        // Signature, field count, length-prefixed field name, type and nullability.
+        let header_len = 8 + 4 + 4 + "id".len() + 2;
+        let input = InterruptAtFirstBatch {
+            inner: Cursor::new(bytes),
+            remaining_before_interrupt: header_len,
+            interrupted: false,
+        };
+        let mut reader = SpillReader::new(input, 16).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(batch));
+        assert_eq!(reader.next_batch().unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod single_pass_spill_decode_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn decoded_values_and_zero_width_row_counts_roundtrip() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, false),
+            Field::new("value", DataType::Float, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".into()), Value::Null],
+            vec![Value::Text("abc".into()), Value::Float(-0.0)],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&input).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 3).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(input));
+        assert_eq!(reader.next_batch().unwrap(), None);
+
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let zero_width = Batch::new_with_row_count(empty_schema.clone(), vec![], 4).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), empty_schema).unwrap();
+        writer.write_batch(&zero_width).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 4).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(zero_width));
+    }
+
+    #[test]
+    fn trusted_constructor_still_rejects_mismatched_column_lengths() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
+        assert!(Batch::from_validated_columns(schema, vec![vec![]], 1).is_err());
     }
 }
 

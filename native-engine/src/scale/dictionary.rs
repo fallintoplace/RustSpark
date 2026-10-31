@@ -1,10 +1,10 @@
 //! Lossless bounded dictionary encoding for repetitive native text columns.
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use crate::{batch::Batch, scalar::Value, schema::DataType, Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct DictionaryColumn {
-    dictionary: Vec<String>,
+    dictionary: Arc<Vec<String>>,
     indices: Vec<Option<u32>>,
     encoded_string_bytes: usize,
 }
@@ -49,7 +49,7 @@ impl DictionaryColumn {
                 _ => return Err(Error::Type("dictionary value is not text".into())),
             }
         }
-        Ok(Self { dictionary, indices, encoded_string_bytes: bytes })
+        Ok(Self { dictionary: Arc::new(dictionary), indices, encoded_string_bytes: bytes })
     }
 
     pub fn distinct_count(&self) -> usize { self.dictionary.len() }
@@ -143,7 +143,8 @@ impl DictionaryColumn {
             return Err(Error::Execution("left dictionary exceeds merge budget".into()));
         }
         // Shuffle partitions often retain the same dictionary across batches.
-        // Equal tables have identical codes, so no hash map or remapping is needed.
+        // Equal tables have identical codes, so no hash map, remapping, or
+        // copying of potentially large immutable strings is needed.
         if left.dictionary == right.dictionary {
             if right.indices.iter().flatten().any(|&code| code as usize >= right.dictionary.len()) {
                 return Err(Error::Execution("invalid dictionary remap code".into()));
@@ -152,12 +153,12 @@ impl DictionaryColumn {
             indices.extend_from_slice(&left.indices);
             indices.extend_from_slice(&right.indices);
             return Ok(Self {
-                dictionary: left.dictionary.clone(),
+                dictionary: Arc::clone(&left.dictionary),
                 indices,
                 encoded_string_bytes: left.encoded_string_bytes,
             });
         }
-        let mut dictionary = left.dictionary.clone();
+        let mut dictionary = left.dictionary.as_ref().clone();
         let mut seen: HashMap<&str, u32> = left.dictionary.iter().enumerate()
             .map(|(index, text)| (text.as_str(), index as u32)).collect();
         let mut bytes = left.encoded_string_bytes;
@@ -188,7 +189,7 @@ impl DictionaryColumn {
                 None => None,
             });
         }
-        Ok(Self { dictionary, indices, encoded_string_bytes: bytes })
+        Ok(Self { dictionary: Arc::new(dictionary), indices, encoded_string_bytes: bytes })
     }
 }
 
@@ -335,5 +336,40 @@ mod identical_dictionary_merge_perf_tests {
         let mut corrupted = dictionary.clone();
         corrupted.indices[0] = Some(300);
         assert!(DictionaryColumn::concatenate(&dictionary, &corrupted, 2, 4096, 6).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shared_dictionary_table_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn repeated_identical_merges_share_dictionary_storage() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let source = Batch::from_rows(schema,
+            (0..128).map(|index| vec![
+                Value::Text(format!("label-{}-{}", index % 8, "x".repeat(2048)))
+            ]).collect()).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&source, "label", 8, 32_768, 128).unwrap();
+        let first = DictionaryColumn::concatenate(&dictionary, &dictionary, 8, 32_768, 256).unwrap();
+        let second = DictionaryColumn::concatenate(&first, &dictionary, 8, 32_768, 384).unwrap();
+        assert!(Arc::ptr_eq(&dictionary.dictionary, &first.dictionary));
+        assert!(Arc::ptr_eq(&first.dictionary, &second.dictionary));
+        assert_eq!(second.row_count(), 384);
+        assert_eq!(second.decode_with_budget(900_000).unwrap().len(), 384);
+        assert!(DictionaryColumn::concatenate(&first, &dictionary, 7, 32_768, 384).is_err());
+    }
+
+    #[test]
+    fn distinct_tables_keep_owned_merged_dictionary_with_same_values() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![vec![Value::Text("a".into())]]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![Value::Text("b".into())]]).unwrap();
+        let a = DictionaryColumn::from_batch(&left, "s", 2, 10, 1).unwrap();
+        let b = DictionaryColumn::from_batch(&right, "s", 2, 10, 1).unwrap();
+        let combined = DictionaryColumn::concatenate(&a, &b, 2, 10, 2).unwrap();
+        assert!(!Arc::ptr_eq(&a.dictionary, &combined.dictionary));
+        assert_eq!(combined.decode().unwrap(), vec![Value::Text("a".into()), Value::Text("b".into())]);
     }
 }
