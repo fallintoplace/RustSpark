@@ -133,11 +133,11 @@ mod bounded_json_quote_regression_tests {
     #[test]
     fn streams_escaped_text_without_exceeding_output_limit() {
         let mut writer = BoundedJsonQuote { bytes: Vec::new(), limit: 16 };
-        assert!(serde_json::to_writer(&mut writer, &"\\0".repeat(4)).is_err());
+        assert!(serde_json::to_writer(&mut writer, &"\0".repeat(4)).is_err());
         assert!(writer.bytes.len() <= 16);
         assert_eq!(json_quote(&[Value::Text("a\\n🙂".into())]).unwrap(),
             Value::Text("\\\"a\\\\n🙂\\\"".into()));
-        assert!(matches!(json_quote(&[Value::Text("\\0".repeat(3 * 1024 * 1024))]),
+        assert!(matches!(json_quote(&[Value::Text("\0".repeat(3 * 1024 * 1024))]),
             Err(Error::Execution(_))));
         assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
     }
