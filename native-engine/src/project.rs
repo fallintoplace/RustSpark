@@ -146,10 +146,29 @@ pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
             }
             expression => {
                 sources.push(None);
-                let mut values = Vec::with_capacity(rows);
-                for row in 0..rows {
-                    values.push(expression.evaluate(&batch, row)?);
-                }
+                let values = if let Some((column, is_null)) =
+                    bound_null_test(&batch, expression)? {
+                    column.iter().map(|value|
+                        Value::Boolean(value.is_null() == is_null)).collect()
+                } else if let Some((column, literal, negated)) =
+                    bound_distinct_comparison(&batch, expression)? {
+                    column.iter().map(|value| {
+                        let distinct = match (value.is_null(), literal.is_null()) {
+                            (true, true) => false,
+                            (true, false) | (false, true) => true,
+                            (false, false) => value.sql_equal(literal)?
+                                .map(|equal| !equal)
+                                .unwrap_or_else(|| value != literal),
+                        };
+                        Ok(Value::Boolean(if negated { !distinct } else { distinct }))
+                    }).collect::<Result<Vec<_>>>()?
+                } else {
+                    let mut values = Vec::with_capacity(rows);
+                    for row in 0..rows {
+                        values.push(expression.evaluate(&batch, row)?);
+                    }
+                    values
+                };
                 prepared.push(Some(values));
             }
         }
@@ -464,5 +483,76 @@ mod borrowed_projection_predicate_regressions {
             Value::Boolean(true), Value::Boolean(false),
             Value::Boolean(false), Value::Boolean(true),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod owned_bound_predicate_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn nullable_long_text_predicates_match_borrowed_projection_and_move_payload() {
+        let large = "é🙂".repeat(4096);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text(large.clone())],
+            vec![Value::Null],
+            vec![Value::Text("different".into())],
+        ]).unwrap();
+        let ptr = match batch.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let key = || Expr::Column("key".into());
+        let null_test = || Expr::IsNull(Box::new(key()));
+        let distinct = |negated| Expr::IsDistinctFrom {
+            left: Box::new(key()),
+            right: Box::new(Expr::Literal(Value::Text(large.clone()))),
+            negated,
+        };
+        let selections = [
+            Selection::new(null_test(), "is_null"),
+            Selection::new(Expr::Not(Box::new(null_test())), "is_not_null"),
+            Selection::new(distinct(false), "different"),
+            Selection::new(distinct(true), "same"),
+            Selection::new(key(), "retained"),
+        ];
+        let expected = project(&batch, &selections).unwrap();
+        let actual = project_owned(batch, &selections).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.rows().unwrap()[1][0], Value::Boolean(true));
+        assert_eq!(actual.rows().unwrap()[1][2], Value::Boolean(true));
+        assert_eq!(actual.rows().unwrap()[0][3], Value::Boolean(true));
+        assert_eq!(match actual.value(0, 4).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn null_safe_float_and_null_comparisons_remain_exact() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("x", DataType::Float, true),
+        ]).unwrap(), vec![
+            vec![Value::Float(f64::NAN)],
+            vec![Value::Float(-0.0)],
+            vec![Value::Null],
+        ]).unwrap();
+        let selections = [
+            Selection::new(Expr::IsDistinctFrom {
+                left: Box::new(Expr::Column("x".into())),
+                right: Box::new(Expr::Literal(Value::Float(f64::NAN))),
+                negated: false,
+            }, "different"),
+            Selection::new(Expr::IsDistinctFrom {
+                left: Box::new(Expr::Column("x".into())),
+                right: Box::new(Expr::Literal(Value::Null)),
+                negated: true,
+            }, "null_eq"),
+        ];
+        assert_eq!(project_owned(batch.clone(), &selections).unwrap(),
+            project(&batch, &selections).unwrap());
     }
 }
