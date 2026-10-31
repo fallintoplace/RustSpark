@@ -137,8 +137,10 @@ impl SetStream {
                 // Right-hand membership already holds every qualifying key.
                 // Remove a match on first use instead of keeping a second
                 // key copy in the emitted set and charging the budget twice.
-                if self.right_counts.remove(row).is_some() {
-                    let bytes = super::row_footprint::footprint(row.iter());
+                if let Some((retained, _count)) = self.right_counts.remove_entry(row) {
+                    // The left row may have a different String capacity from
+                    // the owned right-side key admitted to the budget.
+                    let bytes = super::row_footprint::footprint(retained.iter());
                     self.retained_bytes -= bytes;
                     true
                 } else {
@@ -492,5 +494,33 @@ mod trusted_set_output_regressions {
                 vec![Value::Float(2.0)], vec![Value::Null],
             ]);
         assert_eq!(output[0].schema().fields()[0].data_type, DataType::Float);
+    }
+}
+
+#[cfg(test)]
+mod intersect_retained_key_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn releases_right_key_capacity_not_mismatched_left_string_capacity() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, false)
+        ]).unwrap();
+        let mut oversized = String::with_capacity(16_384);
+        oversized.push_str("same");
+        let left = Batch::new_with_row_count(
+            schema.clone(), vec![vec![Value::Text(oversized)]], 1,
+        ).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text("same".into())]]).unwrap();
+        let stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 4, 1024,
+        ).unwrap();
+        let result = stream.collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), vec![vec![Value::Text("same".into())]]);
     }
 }
