@@ -476,8 +476,8 @@ mod prebound_group_keys_perf_tests {
             let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 31).unwrap();
             while let Some(batch) = reader.next_batch().unwrap() {
                 for row in batch.rows().unwrap() {
-                    let Value::Integer(count) = row[1] else { panic!("invalid count") };
-                    actual.insert(row[0].clone(), count);
+                    let Value::Integer(count) = &row[1] else { panic!("invalid count") };
+                    actual.insert(row[0].clone(), *count);
                 }
             }
         }
