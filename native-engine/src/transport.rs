@@ -173,6 +173,37 @@ pub fn write_frames_limited(
     Ok(())
 }
 
+/// Write frames from a producer without first retaining all frames in memory.
+///
+/// The per-frame, cumulative payload, and frame-count budgets are enforced
+/// before each frame is emitted. Unlike write_frames_limited(), late producer
+/// errors can leave a valid prefix on the wire: callers must treat that stream
+/// as aborted and must not commit a partial exchange.
+pub fn write_frame_stream_limited<I>(
+    output: &mut impl Write, frames: I,
+    max_frame_bytes: usize, max_total_bytes: usize, max_frames: usize,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = Result<Frame>>,
+{
+    let mut emitted = 0usize;
+    let mut payload_bytes = 0usize;
+    for item in frames {
+        if emitted >= max_frames {
+            return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
+        }
+        let frame = item?;
+        let total = payload_bytes.checked_add(frame.payload.len())
+            .filter(|&bytes| bytes <= max_total_bytes)
+            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
+        // write_frame separately rejects per-frame memory and u32 wire limits.
+        write_frame(output, &frame, max_frame_bytes)?;
+        emitted += 1;
+        payload_bytes = total;
+    }
+    Ok(emitted)
+}
+
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
     let mut header = [0u8; HEADER_BYTES];
@@ -739,5 +770,72 @@ mod vectored_exchange_write_regressions {
         }
         let frame = Frame { stage: 0, task: 0, attempt: 0, payload: Vec::new() };
         assert!(write_frame(&mut ZeroWriter, &frame, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod iterator_exchange_writer_tests {
+    use super::*;
+
+    fn generated(count: u64, payload: usize) -> impl Iterator<Item = Result<Frame>> {
+        (0..count).map(move |task| Ok(Frame {
+            stage: 3, task, attempt: 1, payload: vec![task as u8; payload],
+        }))
+    }
+
+    #[test]
+    fn streamed_frames_match_batch_writer_and_roundtrip() {
+        let frames = generated(17, 9).collect::<Result<Vec<_>>>().unwrap();
+        let mut expected = Vec::new();
+        write_frames_limited(&mut expected, &frames, 9, 153, 17).unwrap();
+        let mut actual = Vec::new();
+        let count = write_frame_stream_limited(
+            &mut actual, generated(17, 9), 9, 153, 17,
+        ).unwrap();
+        assert_eq!(count, 17);
+        assert_eq!(actual, expected);
+        assert_eq!(read_frames_limited(&mut actual.as_slice(), 9, 153, 17).unwrap(), frames);
+    }
+
+    #[test]
+    fn streaming_admission_emits_only_a_valid_prefix_on_late_failures() {
+        let mut wire = Vec::new();
+        let result = write_frame_stream_limited(
+            &mut wire, generated(3, 3), 3, 6, 4,
+        );
+        assert!(result.unwrap_err().to_string().contains("byte budget"));
+        let prefix = read_frames_limited(&mut wire.as_slice(), 3, 6, 2).unwrap();
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(prefix[0].payload, vec![0; 3]);
+        assert_eq!(prefix[1].payload, vec![1; 3]);
+
+        let mut count_limited = Vec::new();
+        assert!(write_frame_stream_limited(
+            &mut count_limited, generated(3, 1), 1, 3, 2,
+        ).is_err());
+        assert_eq!(read_frames_limited(&mut count_limited.as_slice(), 1, 2, 2)
+            .unwrap().len(), 2);
+
+        let mut oversized = Vec::new();
+        assert!(write_frame_stream_limited(
+            &mut oversized, generated(1, 4), 3, 100, 3,
+        ).is_err());
+        assert!(oversized.is_empty());
+    }
+
+    #[test]
+    fn propagates_producer_errors_without_emitting_invalid_frames() {
+        let producer = generated(2, 2).chain(std::iter::once(Err(
+            Error::Execution("producer aborted".into())
+        )));
+        let mut wire = Vec::new();
+        let error = write_frame_stream_limited(&mut wire, producer, 2, 4, 3)
+            .unwrap_err();
+        assert!(error.to_string().contains("producer aborted"));
+        assert_eq!(read_frames_limited(&mut wire.as_slice(), 2, 4, 2)
+            .unwrap().len(), 2);
+        assert_eq!(write_frame_stream_limited(
+            &mut Vec::new(), std::iter::empty::<Result<Frame>>(), 0, 0, 0,
+        ).unwrap(), 0);
     }
 }
