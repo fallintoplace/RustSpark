@@ -67,6 +67,29 @@ impl<R: BufRead> Records<R> {
         let mut size = 0usize;
         let mut seen = false;
         loop {
+            // Most CSV bytes are plain unquoted field content. Copy a whole
+            // buffer run at once instead of dispatching the state machine
+            // and pushing into Vec for each byte.
+            if self.pending.is_none() &&
+                matches!(state, State::Start | State::Unquoted) &&
+                self.cursor < self.filled
+            {
+                let available = &self.buffer[self.cursor..self.filled];
+                let plain = available.iter().position(|&byte|
+                    matches!(byte, b',' | b'"' | b'\r' | b'\n'))
+                    .unwrap_or(available.len());
+                if plain > 0 {
+                    if size.saturating_add(plain) > self.max_record_bytes {
+                        return Err(Error::Execution("CSV record exceeds configured byte limit".into()));
+                    }
+                    field.extend_from_slice(&available[..plain]);
+                    self.cursor += plain;
+                    size += plain;
+                    seen = true;
+                    state = State::Unquoted;
+                    continue;
+                }
+            }
             let byte = match self.byte()? {
                 Some(byte) => byte,
                 None => {
@@ -290,6 +313,32 @@ impl<R: BufRead> Iterator for CsvStream<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_with_byte_budget(MAX_BATCH_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod buffered_unquoted_record_scan_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn copies_long_unicode_fields_across_read_chunks_and_keeps_csv_rules() {
+        let long = "é🙂data".repeat(2400);
+        let csv = format!("text,key\r\n{long},ok\r\n\"escaped,\"\"quote\"\"\",three\r\n");
+        let mut stream = CsvStream::new(Cursor::new(csv), 8, 100_000).unwrap();
+        let batch = stream.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.row(0).unwrap(), vec![
+            Value::Text(long.clone()), Value::Text("ok".into()),
+        ]);
+        assert_eq!(batch.row(1).unwrap(), vec![
+            Value::Text("escaped,\"quote\"".into()), Value::Text("three".into()),
+        ]);
+        assert!(stream.next().is_none());
+
+        let too_small = format!("text,key\n{long},ok\n");
+        let mut invalid = CsvStream::new(Cursor::new(too_small), 8, long.len()).unwrap();
+        assert!(invalid.next().unwrap().is_err());
     }
 }
 

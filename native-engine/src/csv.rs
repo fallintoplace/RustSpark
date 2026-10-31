@@ -39,7 +39,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
     }
     // Unquoted LF files can be split a record at a time without per-character
     // parser state. Empty physical lines are ignored by the general scanner.
-    if !input.as_bytes().contains(&b'"') && !input.as_bytes().contains(&b'\r') {
+    if !input.as_bytes().iter().any(|&byte| byte == b'"' || byte == b'\r') {
         let mut records = Vec::new();
         for line in input.split('\n').filter(|line| !line.is_empty()) {
             records.push(line.split(',').map(str::to_owned).collect());
@@ -127,8 +127,17 @@ fn kind(values: &[Vec<String>], column: usize) -> DataType {
         if boolean {
             boolean = value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false");
         }
-        if integer { integer = value.parse::<i64>().is_ok(); }
-        if float { float = value.parse::<f64>().is_ok_and(f64::is_finite); }
+        // Every valid i64 has a finite f64 representation, so integer
+        // fields do not need a second float parse for every CSV cell.
+        // Fall back to the float parser only after integer inference fails.
+        if integer {
+            if value.parse::<i64>().is_err() {
+                integer = false;
+                if float { float = value.parse::<f64>().is_ok_and(f64::is_finite); }
+            }
+        } else if float {
+            float = value.parse::<f64>().is_ok_and(f64::is_finite);
+        }
         if !boolean && !integer && !float { return DataType::Text; }
     }
     if !nonempty { DataType::Text }
@@ -201,6 +210,29 @@ pub fn read_csv(path: impl AsRef<Path>) -> Result<Batch> {
         return Err(Error::Execution("CSV file exceeds 64 MiB input limit".into()));
     }
     from_csv_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
+}
+
+#[cfg(test)]
+mod numeric_csv_inference_fastpath_tests {
+    use super::*;
+
+    #[test]
+    fn integer_fields_skip_redundant_float_parsing_without_changing_types() {
+        let integers = "n\n".to_string()
+            + &(0..10_000).map(|n| format!("{n}\n")).collect::<String>();
+        let batch = from_csv_str(&integers).unwrap();
+        assert_eq!(batch.schema().fields()[0].data_type, DataType::Integer);
+        assert_eq!(batch.num_rows(), 10_000);
+        assert_eq!(batch.value(9999, 0).unwrap(), &Value::Integer(9999));
+
+        let floats = from_csv_str("n\n1\n2\n3.5\n4\n").unwrap();
+        assert_eq!(floats.schema().fields()[0].data_type, DataType::Float);
+        assert_eq!(floats.column(0).unwrap()[2], Value::Float(3.5));
+
+        let text = from_csv_str("n\n1\n2\n1e9999\n").unwrap();
+        assert_eq!(text.schema().fields()[0].data_type, DataType::Text);
+        assert_eq!(from_csv_str("n\r\n1\r\n2\r\n").unwrap().num_rows(), 2);
+    }
 }
 
 #[cfg(test)]

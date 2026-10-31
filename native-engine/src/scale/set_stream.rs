@@ -65,6 +65,8 @@ impl SetStream {
         let output_schema = set_schema(&left_schema, &right_schema)?;
         let mut right_counts: HashMap<Vec<Value>, usize> = HashMap::new();
         let track_multiplicity = matches!(mode, SetMode::IntersectAll | SetMode::ExceptAll);
+        let borrow_right = right_schema.len() == 1 &&
+            right_schema.fields()[0].data_type == output_schema.fields()[0].data_type;
         let mut retained_bytes = 0usize;
         // Bounded materialization of right-hand distinct keys, not its row count.
         for batch in right {
@@ -75,6 +77,19 @@ impl SetStream {
             }
             for row in 0..batch.num_rows() {
                 if row % 1024 == 0 { control.check()?; }
+                // For common single-column sets, probe an existing key with
+                // the borrowed cell. Duplicate TEXT rows need no temporary
+                // Vec or cloned String on the right-hand build side.
+                if borrow_right {
+                    let value = &batch.column(0)?[row];
+                    if let Some(count) = right_counts.get_mut(std::slice::from_ref(value)) {
+                        if track_multiplicity {
+                            *count = count.checked_add(1)
+                                .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+                        }
+                        continue;
+                    }
+                }
                 let values = convert_row(&batch, row, &output_schema)?;
                 let at_limit = right_counts.len() >= max_keys;
                 match right_counts.entry(values) {
@@ -104,7 +119,7 @@ impl SetStream {
         })
     }
 
-    fn select_row(&mut self, row: &Vec<Value>) -> Result<bool> {
+    fn select_row(&mut self, row: &[Value]) -> Result<bool> {
         let selected = match self.mode {
             SetMode::IntersectAll => {
                 if let Some(remaining) = self.right_counts.get_mut(row) {
@@ -142,7 +157,7 @@ impl SetStream {
                         return Err(Error::Execution("stream set memory budget exceeded".into()));
                     }
                     self.retained_bytes = next.expect("checked set budget");
-                    self.emitted.insert(row.clone());
+                    self.emitted.insert(row.to_vec());
                     true
                 }
             }
@@ -176,9 +191,19 @@ impl Iterator for SetStream {
                 let mut output: Vec<Vec<Value>> = (0..self.output_schema.len())
                     .map(|_| Vec::new()).collect();
                 let mut selected = 0usize;
+                let borrowed = (batch.schema().len() == 1 &&
+                    batch.schema().fields()[0].data_type == self.output_schema.fields()[0].data_type)
+                    .then(|| batch.column(0)).transpose()?;
                 for index in 0..batch.num_rows() {
                     let row_result: Result<Option<Vec<Value>>> = (|| {
                         if index % 1024 == 0 { self.control.check()?; }
+                        if let Some(column) = borrowed {
+                            let value = &column[index];
+                            // Rejected single-column rows require no owned
+                            // vector or cloned TEXT cell.
+                            return Ok(self.select_row(std::slice::from_ref(value))?
+                                .then(|| vec![value.clone()]));
+                        }
                         let row = convert_row(&batch, index, &self.output_schema)?;
                         Ok(self.select_row(&row)?.then_some(row))
                     })();
@@ -215,6 +240,41 @@ impl Iterator for SetStream {
                 Err(error) => { self.stopped = true; return Some(Err(error)); }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_single_column_set_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_wide_text_and_null_bags_preserve_all_set_modes() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, true)]).unwrap();
+        let wide = "w".repeat(8192);
+        let make = |values: Vec<Value>| Batch::from_rows(schema.clone(),
+            values.into_iter().map(|value| vec![value]).collect()).unwrap();
+        let left = make(vec![
+            Value::Text(wide.clone()), Value::Null,
+            Value::Text("other".into()), Value::Text(wide.clone()),
+        ]);
+        let right = make(std::iter::repeat_n(Value::Text(wide.clone()), 256)
+            .chain([Value::Null]).collect());
+        let run = |mode| SetStream::new(
+            Box::new([Ok(left.clone())].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            schema.clone(), schema.clone(), mode, QueryControl::default(),
+            4, 20_000,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(run(SetMode::IntersectAll), vec![
+            vec![Value::Text(wide.clone())], vec![Value::Null],
+            vec![Value::Text(wide.clone())],
+        ]);
+        assert_eq!(run(SetMode::IntersectDistinct), vec![
+            vec![Value::Text(wide.clone())], vec![Value::Null],
+        ]);
+        assert_eq!(run(SetMode::ExceptDistinct),
+            vec![vec![Value::Text("other".into())]]);
     }
 }
 
