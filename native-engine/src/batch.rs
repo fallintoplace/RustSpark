@@ -122,6 +122,20 @@ impl Batch {
         self.columns
     }
 
+    /// Split an owned batch at a row boundary. TEXT allocations are moved
+    /// between column buffers instead of being cloned on both sides.
+    pub(crate) fn split_rows_owned(self, at: usize) -> Result<(Self, Self)> {
+        if at > self.rows {
+            return Err(Error::Execution(format!("row split index out of bounds: {at}")));
+        }
+        let Self { schema, mut columns, rows } = self;
+        let trailing = columns.iter_mut().map(|column| column.split_off(at)).collect();
+        Ok((
+            Self { schema: schema.clone(), columns, rows: at },
+            Self { schema, columns: trailing, rows: rows - at },
+        ))
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
@@ -618,5 +632,49 @@ mod owned_empty_slice_fast_path_tests {
         }
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 10).unwrap();
         assert_eq!(zero.slice_rows_owned(5, 5).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_row_split_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn splits_wide_text_at_boundary_without_copying_payloads() {
+        let first = "é".repeat(100_000);
+        let second = "🙂".repeat(50_000);
+        let first_ptr = first.as_ptr();
+        let second_ptr = second.as_ptr();
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("index", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(first), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text(second), Value::Integer(3)],
+        ]).unwrap();
+        let (head, tail) = batch.split_rows_owned(2).unwrap();
+        assert_eq!(head.num_rows(), 2);
+        assert_eq!(tail.num_rows(), 1);
+        assert!(matches!(head.value(0, 0).unwrap(),
+            Value::Text(s) if s.as_ptr() == first_ptr));
+        assert!(matches!(tail.value(0, 0).unwrap(),
+            Value::Text(s) if s.as_ptr() == second_ptr));
+        assert_eq!(tail.value(0, 1).unwrap(), &Value::Integer(3));
+        assert!(tail.split_rows_owned(2).is_err());
+    }
+
+    #[test]
+    fn zero_width_rows_and_extreme_split_points_preserve_cardinality() {
+        let schema = Schema::new(vec![]).unwrap();
+        for split in 0..=5 {
+            let batch = Batch::new_with_row_count(schema.clone(), vec![], 5).unwrap();
+            let (left, right) = batch.split_rows_owned(split).unwrap();
+            assert_eq!((left.num_rows(), right.num_rows()), (split, 5 - split));
+            assert_eq!(left.schema(), &schema);
+            assert_eq!(right.schema(), &schema);
+        }
     }
 }
