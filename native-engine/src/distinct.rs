@@ -40,6 +40,17 @@ pub fn distinct_with_limit(batch: &Batch, max_keys: usize) -> Result<Batch> {
 
 /// Deduplicate with independent key-cardinality and estimated byte budgets.
 pub fn distinct_with_budget(batch: &Batch, max_keys: usize, max_bytes: usize) -> Result<Batch> {
+    if batch.schema().is_empty() {
+        if batch.num_rows() == 0 { return Ok(Batch::empty(batch.schema().clone())); }
+        if max_keys == 0 {
+            return Err(crate::Error::Execution("DISTINCT key limit exceeded".into()));
+        }
+        if max_bytes < 64 {
+            return Err(crate::Error::Execution("DISTINCT byte budget exceeded".into()));
+        }
+        // Every row is the same empty key. Do not hash all input row indices.
+        return Batch::new_with_row_count(batch.schema().clone(), vec![], 1);
+    }
     let columns = (0..batch.schema().len())
         .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
     let mut seen = HashMap::<BorrowedRow<'_>, ()>::new();
@@ -263,5 +274,21 @@ mod distinct_on_duplicate_columns_tests {
         let batch = Batch::from_rows(schema, vec![vec![crate::scalar::Value::Integer(1)]]).unwrap();
         assert!(distinct_on(&batch, &["Id", "id"]).is_err());
         assert_eq!(distinct_on(&batch, &["id"]).unwrap().num_rows(), 1);
+    }
+}
+
+#[cfg(test)]
+mod zero_column_distinct_fast_path_tests {
+    use super::*;
+    use crate::schema::Schema;
+    #[test]
+    fn deduplicates_wide_empty_schemas_without_row_hashing() {
+        let schema = Schema::new(vec![]).unwrap();
+        let wide = Batch::new_with_row_count(schema.clone(), vec![], 100_000).unwrap();
+        assert_eq!(distinct_with_budget(&wide, 1, 64).unwrap().num_rows(), 1);
+        assert!(distinct_with_budget(&wide, 0, 64).is_err());
+        assert!(distinct_with_budget(&wide, 1, 63).is_err());
+        let empty = Batch::empty(schema);
+        assert_eq!(distinct_with_budget(&empty, 0, 0).unwrap().num_rows(), 0);
     }
 }
