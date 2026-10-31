@@ -66,11 +66,24 @@ impl Iterator for ScanCursor<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.failed { return None; }
-        if self.predicate.is_none() && self.identity_projection {
+        if self.predicate.is_none() {
             if self.next_row == self.source.num_rows() { return None; }
-            let end = self.next_row.saturating_add(self.target_rows).min(self.source.num_rows());
-            let result = self.source.slice_rows(self.next_row, end);
+            let start = self.next_row;
+            let end = start.saturating_add(self.target_rows).min(self.source.num_rows());
             self.next_row = end;
+            // Unfiltered projections always select a contiguous window.
+            // Slice the requested columns directly instead of allocating
+            // row coordinates and gathering each value one by one.
+            let result = if self.identity_projection {
+                self.source.slice_rows(start, end)
+            } else {
+                self.columns.iter().map(|&column| {
+                    Ok(self.source.column(column)?[start..end].to_vec())
+                }).collect::<Result<Vec<_>>>()
+                    .and_then(|columns| Batch::new_with_row_count(
+                        self.output_schema.clone(), columns, end - start,
+                    ))
+            };
             if result.is_err() { self.failed = true; }
             return Some(result);
         }
@@ -312,5 +325,67 @@ mod constant_false_scan_tests {
             assert!(cursor.next().is_none());
             assert!(scan(&source, Some(Expr::Literal(predicate)), &["missing"], 1).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod contiguous_projected_scan_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn unfiltered_projections_match_reference_for_all_chunk_sizes() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema, (0..163).map(|index| vec![
+            Value::Integer(index),
+            if index % 13 == 0 { Value::Null }
+            else { Value::Text(format!("row-{index}-{}", "🙂".repeat(20))) },
+            if index % 5 == 0 { Value::Null }
+            else { Value::Boolean(index % 2 == 0) },
+        ]).collect()).unwrap();
+
+        for projection in [
+            vec!["payload"], vec!["flag", "id"], vec!["id", "payload", "flag"],
+        ] {
+            for chunk_size in [1, 7, 32, 163, 500] {
+                let result = scan(&source, None, &projection, chunk_size).unwrap()
+                    .collect::<Result<Vec<_>>>().unwrap();
+                let flattened = result.iter().flat_map(|batch| batch.rows().unwrap())
+                    .collect::<Vec<_>>();
+                let indices = projection.iter().map(|name| source.schema().column(name).unwrap())
+                    .collect::<Vec<_>>();
+                let expected = (0..source.num_rows()).map(|row| {
+                    indices.iter().map(|&column| source.value(row, column).unwrap().clone())
+                        .collect::<Vec<_>>()
+                }).collect::<Vec<_>>();
+                assert_eq!(flattened, expected);
+                assert!(result.iter().all(|part| part.num_rows() <= chunk_size));
+                assert!(result.iter().all(|part| part.schema().len() == indices.len()));
+            }
+        }
+    }
+
+    #[test]
+    fn constant_true_uses_same_projected_path_and_empty_scan_fuses() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("first", DataType::Integer, false),
+            Field::new("second", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("é".repeat(1000))],
+        ]).unwrap();
+        let projected = scan(&source, Some(Expr::Literal(Value::Boolean(true))),
+            &["second"], 1).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].row(0).unwrap(), vec![Value::Null]);
+        assert_eq!(projected[1].row(0).unwrap(), vec![Value::Text("é".repeat(1000))]);
+        let empty = Batch::empty(source.schema().clone());
+        let mut cursor = scan(&empty, None, &["second"], 1).unwrap();
+        assert!(cursor.next().is_none());
+        assert!(cursor.next().is_none());
     }
 }
