@@ -39,7 +39,7 @@ fn split_count(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null); };
     let count = if delimiter.is_empty() {
-        if input.is_ascii() { input.len() } else { input.chars().count() }
+        super::char_length::character_count(input)
     } else if delimiter.len() == 1 && delimiter.is_ascii() {
         let needle = delimiter.as_bytes()[0];
         input.as_bytes().iter().filter(|&&byte| byte == needle)
