@@ -116,8 +116,12 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     let sources = input.iter().map(|batch| (0..schema.len())
         .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()
     ).collect::<Result<Vec<_>>>()?;
-    // Keep only row coordinates until all source batches have been partitioned.
-    let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
+    // Construct each destination column on the first matching row.
+    // This avoids retaining O(total_rows) (batch, row) coordinates and a
+    // separate second pass to materialize the partition payloads.
+    let mut buckets: Vec<Option<Vec<Vec<crate::scalar::Value>>>> =
+        std::iter::repeat_with(|| None).take(partitions).collect();
+    let mut row_counts = vec![0usize; partitions];
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
         let bound = &sources[batch_index];
@@ -131,19 +135,20 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
                 Some(mask) => (hash as usize) & mask,
                 None => (hash % partitions as u64) as usize,
             };
-            buckets[bucket].push((batch_index, row));
+            let columns = buckets[bucket].get_or_insert_with(|| {
+                (0..schema.len()).map(|_| Vec::new()).collect::<Vec<_>>()
+            });
+            for (destination, source) in columns.iter_mut().zip(bound) {
+                destination.push(source[row].clone());
+            }
+            row_counts[bucket] += 1;
         }
     }
-    buckets.into_iter().map(|entries| {
-        let count = entries.len();
-        let mut columns = (0..schema.len()).map(|_| Vec::with_capacity(count))
-            .collect::<Vec<_>>();
-        for (batch_index, row) in entries {
-            for (index, column) in columns.iter_mut().enumerate() {
-                column.push(sources[batch_index][index][row].clone());
-            }
-        }
-        Batch::new_with_row_count(schema.clone(), columns, count)
+    buckets.into_iter().zip(row_counts).map(|(columns, rows)| {
+        let columns = columns.unwrap_or_else(|| {
+            (0..schema.len()).map(|_| Vec::new()).collect()
+        });
+        Batch::new_with_row_count(schema.clone(), columns, rows)
     }).collect()
 }
 
@@ -373,6 +378,41 @@ mod borrowed_shuffle_column_sources_tests {
                         .rows().unwrap()
                 ).collect::<Vec<_>>();
                 assert_eq!(output[shard].rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_column_partition_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn sparse_and_dense_fanouts_match_per_batch_partitioning() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let batches = (0..17).map(|part| {
+            Batch::from_rows(schema.clone(), (0..61).map(|row| vec![
+                if row % 7 == 0 { Value::Null } else {
+                    Value::Text(format!("key-{}", row % 11)) },
+                Value::Integer(part * 100 + row),
+                Value::Text(format!("{part}:{row}:{}", "é".repeat(20))),
+            ]).collect()).unwrap()
+        }).collect::<Vec<_>>();
+        for partitions in [2, 7, 64, 1024] {
+            let direct = partition_batches(&batches, &["key"], partitions).unwrap();
+            assert_eq!(direct.len(), partitions);
+            assert_eq!(direct.iter().map(Batch::num_rows).sum::<usize>(), 17 * 61);
+            let pieces = batches.iter().map(|batch| partition(batch, &["key"], partitions).unwrap())
+                .collect::<Vec<_>>();
+            for index in 0..partitions {
+                let expected = pieces.iter().flat_map(|set| set[index].rows().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(direct[index].rows().unwrap(), expected);
             }
         }
     }
