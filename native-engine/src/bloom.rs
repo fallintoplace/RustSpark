@@ -57,6 +57,7 @@ impl BloomFilter {
 
     pub fn insert(&mut self, key: &Value) {
         self.populated = true;
+        if self.occupied_bits == self.bits { return; }
         let (first, step) = self.hash_pair(key);
         for seed in 0..self.hashes {
             let bit = self.probe(first, step, seed);
@@ -70,6 +71,7 @@ impl BloomFilter {
 
     pub fn might_contain(&self, key: &Value) -> bool {
         if !self.populated { return false; }
+        if self.occupied_bits == self.bits { return true; }
         let (first, step) = self.hash_pair(key);
         (0..self.hashes).all(|seed| {
             let bit = self.probe(first, step, seed);
@@ -437,5 +439,26 @@ mod empty_bloom_set_operation_shortcuts {
             combined.insert(&Value::Integer(51));
             assert!(combined.might_contain(&Value::Integer(51)));
         }
+    }
+}
+
+#[cfg(test)]
+mod fully_saturated_bloom_regressions {
+    use super::*;
+
+    #[test]
+    fn saturated_filter_accepts_every_key_and_stays_saturated() {
+        let mut filter = BloomFilter::new(1, 4).unwrap();
+        let large = Value::Text("é🙂".repeat(100_000));
+        assert!(!filter.might_contain(&large));
+        filter.insert(&Value::Integer(7));
+        assert_eq!(filter.bits_set(), 1);
+        assert!(filter.might_contain(&large));
+        assert!(filter.might_contain(&Value::Null));
+        assert_eq!(filter.probe_batch(&[Value::Integer(-4), Value::Null]),
+            vec![true, true]);
+        filter.insert_batch(&[large, Value::Integer(11)]);
+        assert_eq!(filter.bits_set(), 1);
+        assert_eq!(filter.estimated_false_positive_rate(), 1.0);
     }
 }
