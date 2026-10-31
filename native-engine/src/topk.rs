@@ -180,6 +180,15 @@ pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize
     }
     let required = offset.checked_add(count)
         .ok_or_else(|| crate::Error::Execution("top-K pagination overflow".into()))?;
+    // No row can survive an offset past the end. Column-only sort keys
+    // cannot fail during evaluation, so avoid a full sort and row copies.
+    if offset >= batch.num_rows() &&
+        keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        for key in keys {
+            key.expression.output_type(batch.schema())?;
+        }
+        return batch.take(&[]);
+    }
     let best = top_k(batch, keys, required)?;
     crate::limit::limit(&best, offset, Some(count))
 }
@@ -315,5 +324,33 @@ mod singleton_topk_column_scan_tests {
             assert_eq!(result.num_rows(), 1);
             assert_eq!(result.value(0, 1).unwrap(), expected.value(0, 1).unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod topk_out_of_range_offset_shortcut_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn offset_past_rows_keeps_schema_and_validates_sort_keys() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..128).rev()
+            .map(|id| vec![
+                Value::Text(format!("{}-{id}", "long".repeat(100))),
+                Value::Integer(id),
+            ]).collect()).unwrap();
+        let key = SortKey::ascending(Expr::Column("text".into()));
+        for offset in [128, 129, usize::MAX - 2] {
+            let actual = top_k_offset(&batch, &[key.clone()], offset, 1).unwrap();
+            assert_eq!(actual.num_rows(), 0);
+            assert_eq!(actual.schema(), &schema);
+        }
+        let invalid = SortKey::ascending(Expr::Column("missing".into()));
+        assert!(top_k_offset(&batch, &[invalid], 128, 1).is_err());
+        assert!(top_k_offset(&batch, &[key], usize::MAX, 1).is_err());
     }
 }

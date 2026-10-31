@@ -111,16 +111,20 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
         return Ok(vec![Batch::new_with_row_count(schema.clone(), columns, total)?]);
     }
 
+    // Bind each source column once. Hashing and output reconstruction can
+    // access borrowed slices without repeated Batch::value bounds checks.
+    let sources = input.iter().map(|batch| (0..schema.len())
+        .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()
+    ).collect::<Result<Vec<_>>>()?;
     // Keep only row coordinates until all source batches have been partitioned.
     let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
-        let key_slices = key_columns.iter().map(|&column| batch.column(column))
-            .collect::<Result<Vec<_>>>()?;
+        let bound = &sources[batch_index];
         for row in 0..batch.num_rows() {
             let mut hasher = PartitionHasher::default();
-            for values in &key_slices {
-                values[row].hash(&mut hasher);
+            for &column in &key_columns {
+                bound[column][row].hash(&mut hasher);
             }
             let hash = hasher.finish();
             let bucket = match mask {
@@ -136,7 +140,7 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
             .collect::<Vec<_>>();
         for (batch_index, row) in entries {
             for (index, column) in columns.iter_mut().enumerate() {
-                column.push(input[batch_index].value(row, index)?.clone());
+                column.push(sources[batch_index][index][row].clone());
             }
         }
         Batch::new_with_row_count(schema.clone(), columns, count)
@@ -334,6 +338,41 @@ mod prebound_multi_batch_keys_tests {
             }).collect::<Vec<_>>();
             for (batch, expected) in actual.iter().zip(reference) {
                 assert_eq!(batch.rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_shuffle_column_sources_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn wide_mixed_columns_match_partitioning_each_batch_separately() {
+        let schema = Schema::new(vec![
+            Field::new("integer", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let inputs = (0..5).map(|part| Batch::from_rows(schema.clone(),
+            (0..31).map(|row| vec![
+                if row % 11 == 0 { Value::Null }
+                    else { Value::Integer((row + part) % 7) },
+                if row % 5 == 0 { Value::Null }
+                    else { Value::Text(format!("segment-{}", (row + part) % 9)) },
+                if row % 3 == 0 { Value::Null } else { Value::Boolean(row % 2 == 0) },
+                Value::Text(format!("{part}:{row}:{}", "É🙂".repeat(128))),
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        for fanout in [2, 7, 16, 127] {
+            let output = partition_batches(&inputs, &["integer", "text"], fanout).unwrap();
+            for shard in 0..fanout {
+                let expected = inputs.iter().flat_map(|batch|
+                    partition(batch, &["integer", "text"], fanout).unwrap()[shard]
+                        .rows().unwrap()
+                ).collect::<Vec<_>>();
+                assert_eq!(output[shard].rows().unwrap(), expected);
             }
         }
     }
