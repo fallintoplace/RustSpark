@@ -24,6 +24,25 @@ pub fn concat(
         return Err(Error::Execution("batch collection row limit exceeded".into()));
     }
     let Some(second) = inputs.next() else { return Ok(first); };
+    // A provably exhausted iterator with one empty batch can move its
+    // nonempty batch directly instead of duplicating all column values.
+    if inputs.size_hint().1 == Some(0) {
+        if second.schema() != schema {
+            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
+        }
+        if second.num_rows() == 0 {
+            if first.num_rows() > max_rows {
+                return Err(Error::Execution("batch collection row limit exceeded".into()));
+            }
+            return Ok(first);
+        }
+        if first.num_rows() == 0 {
+            if second.num_rows() > max_rows {
+                return Err(Error::Execution("batch collection row limit exceeded".into()));
+            }
+            return Ok(second);
+        }
+    }
     let mut total = 0usize;
     let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
     for batch in std::iter::once(first).chain(std::iter::once(second)).chain(inputs) {
@@ -169,5 +188,25 @@ mod inexact_single_batch_concat_tests {
             .unwrap().num_rows(), 5);
         let empty = concat(&zero_width, std::iter::empty(), 0).unwrap();
         assert_eq!(empty.num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod empty_pair_concat_passthrough_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field}, scalar::Value};
+
+    #[test]
+    fn moves_nonempty_batch_past_empty_prefix_or_suffix() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let populated = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text("🙂".repeat(20_000))], vec![Value::Null]]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        assert_eq!(concat(&schema, [empty.clone(), populated.clone()], 2).unwrap(), populated);
+        assert_eq!(concat(&schema, [populated.clone(), empty], 2).unwrap(), populated);
+        assert!(concat(&schema, [Batch::empty(schema.clone()), populated.clone()], 1).is_err());
+        assert!(concat(&schema, [populated, Batch::empty(schema.clone())], 1).is_err());
+        let mismatched = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
+        assert!(concat(&schema, [Batch::empty(schema.clone()), Batch::empty(mismatched)], 2).is_err());
     }
 }
