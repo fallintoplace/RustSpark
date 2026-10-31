@@ -204,6 +204,19 @@ impl<R: Read> Iterator for FrameReader<R> {
     type Item = Result<Frame>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
+        // The count limit must be checked before reading an extra payload.
+        // Probe one byte to distinguish clean EOF from another frame.
+        if self.frames_seen >= self.max_frames {
+            self.finished = true;
+            let mut first = [0u8; 1];
+            return match self.input.read(&mut first) {
+                Ok(0) => None,
+                Ok(_) => Some(Err(Error::Execution(
+                    "exchange stream frame count limit exceeded".into()
+                ))),
+                Err(error) => Some(Err(error.into())),
+            };
+        }
         let remaining = self.max_total_bytes.saturating_sub(self.bytes_seen);
         match read_frame(&mut self.input, self.max_frame_bytes.min(remaining)) {
             Ok(None) => { self.finished = true; None }
@@ -245,20 +258,9 @@ pub fn read_frames_limited(
     max_total_bytes: usize,
     max_frames: usize,
 ) -> Result<Vec<Frame>> {
-    let mut frames = Vec::new();
-    let mut total = 0_usize;
-    while let Some(frame) = read_frame(
-        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
-    )? {
-        if frames.len() >= max_frames {
-            return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
-        }
-        total = total.checked_add(frame.payload.len())
-            .filter(|used| *used <= max_total_bytes)
-            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
-        frames.push(frame);
-    }
-    Ok(frames)
+    // Share the incremental reader's preflight checks. In particular,
+    // a frame over the count limit must not allocate its payload.
+    FrameReader::new(input, max_frame_bytes, max_total_bytes, max_frames).collect()
 }
 
 #[cfg(test)]
@@ -466,5 +468,37 @@ mod shuffle_header_integrity_tests {
         let mut legacy = encoded;
         legacy[..4].copy_from_slice(b"RSP1");
         assert!(read_frame(&mut legacy.as_slice(), 128).is_err());
+    }
+}
+
+#[cfg(test)]
+mod frame_count_preflight_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn excess_frames_fail_without_reading_their_payloads() {
+        let mut wire = Vec::new();
+        for task in 0..2 {
+            write_frame(&mut wire, &Frame {
+                stage: 1, task, attempt: 0, payload: vec![7; 4096],
+            }, 4096).unwrap();
+        }
+        // The first byte proves there is an additional frame, but no
+        // header or payload from it is needed to enforce the count.
+        let mut cursor = Cursor::new(&wire);
+        assert!(read_frames_limited(&mut cursor, 4096, 8192, 0).is_err());
+        assert_eq!(cursor.position(), 1);
+
+        let mut cursor = Cursor::new(&wire);
+        let mut frames = FrameReader::new(&mut cursor, 4096, 8192, 1);
+        assert!(frames.next().unwrap().is_ok());
+        assert!(frames.next().unwrap().is_err());
+        assert!(frames.next().is_none());
+        drop(frames);
+        assert_eq!(cursor.position(), (HEADER_BYTES + 4096 + 1) as u64);
+
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        assert!(read_frames_limited(&mut empty, 4096, 8192, 0).unwrap().is_empty());
     }
 }
