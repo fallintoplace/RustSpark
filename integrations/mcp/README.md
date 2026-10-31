@@ -29,3 +29,8 @@ to the protocol stream.
 ```sh
 cd integrations/mcp && python3 -m unittest -v test_query_templates.py
 ```
+
+SQL templates are pinned to a private, temporary copy before starting the
+backend. This prevents a template path from being replaced with a symlink
+between allowlist validation and execution. Templates must be regular files
+no larger than 1 MiB. The copy is deleted when the query ends.
