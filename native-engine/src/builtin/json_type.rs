@@ -9,6 +9,27 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let Some(path) = super::string(&args[1])? else { return Ok(Value::Null); };
         path
     } else { "$" };
+    if path == "$" {
+        // A valid JSON document's first token determines its root type.
+        // Validate all syntax without allocating the nested value tree.
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(crate::Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        serde_json::from_str::<serde::de::IgnoredAny>(text)
+            .map_err(|error| crate::Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        let kind = match text.trim_start().as_bytes()[0] {
+            b'{' => "OBJECT",
+            b'[' => "ARRAY",
+            b'"' => "STRING",
+            b't' | b'f' => "BOOLEAN",
+            b'n' => "NULL",
+            b'-' | b'0'..=b'9' => "NUMBER",
+            _ => unreachable!("validated JSON has a known root token"),
+        };
+        return Ok(Value::Text(kind.into()));
+    }
     let document = json_path::parse(text)?;
     let Some(found) = json_path::lookup(Some(&document), path)? else { return Ok(Value::Null); };
     let label = match found {
@@ -130,5 +151,38 @@ mod json_depth_wide_object_tests {
                 Value::Integer(expected));
         }
         assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streaming_json_type_root_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_all_valid_root_json_tokens() {
+        for (input, kind) in [
+            ("null", "NULL"), ("false", "BOOLEAN"), ("true", "BOOLEAN"),
+            ("0", "NUMBER"), ("-2.5e+2", "NUMBER"),
+            (r#""café🙂""#, "STRING"), ("[]", "ARRAY"), ("{}", "OBJECT"),
+        ] {
+            assert_eq!(evaluate(&[Value::Text(format!(" \n{input}\t"))]).unwrap(),
+                Value::Text(kind.into()));
+        }
+        let large = format!("[{}]", vec![r#"{"a":[1,2,{"b":"é"}]}"#; 15_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(large)]).unwrap(),
+            Value::Text("ARRAY".into()));
+    }
+
+    #[test]
+    fn validates_full_document_and_preserves_nested_paths() {
+        for invalid in ["", "[1] trailing", r#"{"ok":true,"bad":[}"#, "tru"] {
+            assert!(matches!(evaluate(&[Value::Text(invalid.into())]),
+                Err(crate::Error::Execution(_))));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text(r#"{"obj":{"x":1}}"#.into()),
+            Value::Text("$.obj".into()),
+        ]).unwrap(), Value::Text("OBJECT".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
