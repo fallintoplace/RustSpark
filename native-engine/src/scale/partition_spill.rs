@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use crate::{batch::Batch, schema::Schema, Error, Result};
+use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
 use super::{cancel::QueryControl, spill::SpillWriter};
 
 static PARTITION_ID: AtomicU64 = AtomicU64::new(1);
@@ -34,6 +34,7 @@ pub struct PartitionWriter {
     batch_rows: usize,
 }
 
+#[cfg(test)]
 fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usize> {
     if count == 0 {
         return Err(Error::Execution("partition count must be positive".into()));
@@ -46,6 +47,18 @@ fn bucket(batch: &Batch, row: usize, keys: &[usize], count: usize) -> Result<usi
     } else {
         (hashed % count as u64) as usize
     })
+}
+
+// These column slices are schema-checked once for the whole incoming batch.
+fn bucket_bound(columns: &[&[Value]], row: usize, count: usize) -> usize {
+    let mut hash = crate::hash_partition::PartitionHasher::default();
+    for column in columns { column[row].hash(&mut hash); }
+    let hashed = hash.finish();
+    if count.is_power_of_two() {
+        (hashed as usize) & (count - 1)
+    } else {
+        (hashed % count as u64) as usize
+    }
 }
 
 fn write_shard(
@@ -108,6 +121,8 @@ impl PartitionWriter {
             }
             return Ok(());
         }
+        let key_slices = self.key_columns.iter()
+            .map(|&index| batch.column(index)).collect::<Result<Vec<_>>>()?;
         let mut dense: Option<Vec<Vec<usize>>> = None;
         let mut start = 0;
         while start < batch.num_rows() {
@@ -116,7 +131,7 @@ impl PartitionWriter {
             if writers.len() > (end - start).saturating_mul(4) {
                 let mut sparse = std::collections::HashMap::<usize, Vec<usize>>::new();
                 for row in start..end {
-                    let index = bucket(batch, row, &self.key_columns, writers.len())?;
+                    let index = bucket_bound(&key_slices, row, writers.len());
                     sparse.entry(index).or_default().push(row);
                 }
                 for (index, rows) in sparse {
@@ -126,7 +141,7 @@ impl PartitionWriter {
                 let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
                 for group in groups.iter_mut() { group.clear(); }
                 for row in start..end {
-                    let index = bucket(batch, row, &self.key_columns, writers.len())?;
+                    let index = bucket_bound(&key_slices, row, writers.len());
                     groups[index].push(row);
                 }
                 for (index, rows) in groups.iter().enumerate() {
@@ -415,5 +430,30 @@ mod empty_partition_bucket_tests {
         let batch = Batch::from_rows(schema, vec![vec![Value::Integer(7)]]).unwrap();
         assert!(bucket(&batch, 0, &[0], 0).is_err());
         assert_eq!(bucket(&batch, 0, &[0], 1).unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod prebound_spill_keys_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn borrowed_column_hashes_match_checked_row_keys_at_many_fanouts() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..2048_i64).map(|i| vec![
+            if i % 17 == 0 { Value::Null } else { Value::Integer(i % 127) },
+            if i % 31 == 0 { Value::Null } else { Value::Text(format!("tag-{}", i % 37)) },
+        ]).collect()).unwrap();
+        let columns = [batch.column(0).unwrap(), batch.column(1).unwrap()];
+        for count in [2, 4, 31, 128, 1024, 4096] {
+            for row in 0..batch.num_rows() {
+                assert_eq!(bucket_bound(&columns, row, count),
+                    bucket(&batch, row, &[0, 1], count).unwrap());
+            }
+        }
     }
 }
