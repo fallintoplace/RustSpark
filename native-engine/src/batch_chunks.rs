@@ -68,7 +68,9 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         }
     }
-    Batch::new_with_row_count(schema, columns, total)
+    // Source batches are already type-checked and all schemas match.
+    // Validate shape, not every cloned scalar, on concatenation.
+    Batch::from_validated_columns(schema, columns, total)
 }
 
 #[cfg(test)]
@@ -150,5 +152,29 @@ mod batch_chunk_nth_skip_tests {
         assert!(iter.nth(usize::MAX).is_none());
         assert_eq!(iter.len(), 0);
         assert!(iter.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod trusted_concatenation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn concatenation_matches_public_validation_for_nullable_wide_text() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let wide = Value::Text("界".repeat(2048));
+        let rows = vec![
+            vec![wide.clone(), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![wide, Value::Integer(3)],
+        ];
+        let inputs = rows.chunks(1).map(|chunk| Batch::from_rows(
+            schema.clone(), chunk.to_vec()
+        ).unwrap()).collect::<Vec<_>>();
+        assert_eq!(concatenate(&inputs).unwrap(), Batch::from_rows(schema, rows).unwrap());
     }
 }
