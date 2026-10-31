@@ -215,3 +215,31 @@ func TestDecodeRowsRejectsNonfiniteJSONExponents(t *testing.T) {
         t.Fatalf("lost large integer precision: %#v", rows[0]["id"])
     }
 }
+
+
+func TestDecodeRowsStreamsIntoTypedRowSlice(t *testing.T) {
+    var wire strings.Builder
+    wire.WriteByte('[')
+    for n := 0; n < 10_000; n++ {
+        if n > 0 { wire.WriteByte(',') }
+        fmt.Fprintf(&wire, `{"n":%d,"metadata":{"nullable":null}}`, n)
+    }
+    wire.WriteByte(']')
+    rows, err := decodeRows(strings.NewReader(wire.String()))
+    if err != nil { t.Fatal(err) }
+    if len(rows) != 10_000 { t.Fatalf("lost rows: %d", len(rows)) }
+    if rows[9_999]["n"].(json.Number).String() != "9999" {
+        t.Fatalf("lost integer precision: %#v", rows[9_999])
+    }
+}
+
+func TestDecodeRowsFailsClosedOnTruncatedOrTrailingArrays(t *testing.T) {
+    for _, wire := range []string{
+        `[{"n":1}`, `[{"n":1}][{"n":2}]`, `[{"n":1}]x`,
+        `{"n":1}`, `[{},null]`, `[{"n":1},"bad"]`,
+    } {
+        if rows, err := decodeRows(strings.NewReader(wire)); err == nil {
+            t.Fatalf("accepted malformed result %q: %#v", wire, rows)
+        }
+    }
+}
