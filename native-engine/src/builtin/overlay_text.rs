@@ -61,11 +61,12 @@ fn common_suffix(args: &[Value]) -> Result<Value> {
     if left == right {
         return Ok(Value::Text(left.to_owned()));
     }
-    let mut start = left.len();
-    for ((offset, first), (_, second)) in left.char_indices().rev().zip(right.char_indices().rev()) {
-        if first != second { break; }
-        start = offset;
-    }
+    let common_bytes = left.as_bytes().iter().rev().zip(right.as_bytes().iter().rev())
+        .take_while(|(first, second)| first == second).count();
+    let mut start = left.len() - common_bytes;
+    // Equal trailing UTF-8 continuation bytes do not imply equal characters.
+    // Discard any leading fragment before slicing at a scalar boundary.
+    while !left.is_char_boundary(start) { start += 1; }
     Ok(Value::Text(left[start..].to_string()))
 }
 
@@ -187,5 +188,26 @@ mod overlay_ascii_offset_perf_tests {
         ]).unwrap(), Value::Text("🙂é".into()));
         let same = Value::Text("é🙂".repeat(30_000));
         assert_eq!(common_suffix(&[same.clone(), same.clone()]).unwrap(), same);
+    }
+}
+
+#[cfg(test)]
+mod utf8_common_suffix_byte_scan_tests {
+    use super::*;
+
+    #[test]
+    fn excludes_matching_continuation_bytes_from_different_scalars() {
+        let suffix = |left: &str, right: &str| common_suffix(&[
+            Value::Text(left.into()), Value::Text(right.into()),
+        ]).unwrap();
+        assert_eq!(suffix("abcxyz", "12xyz"), Value::Text("xyz".into()));
+        assert_eq!(suffix("é", "©"), Value::Text(String::new()));
+        assert_eq!(suffix("éx", "©x"), Value::Text("x".into()));
+        assert_eq!(suffix("abc🙂東京", "xyz🙂東京"), Value::Text("🙂東京".into()));
+        assert_eq!(suffix("a", "a"), Value::Text("a".into()));
+        assert_eq!(suffix("abc", ""), Value::Text(String::new()));
+        let long = "xyz".repeat(100_000);
+        assert_eq!(suffix(&format!("A{long}"), &format!("B{long}")), Value::Text(long));
+        assert_eq!(common_suffix(&[Value::Null, Value::Text("abc".into())]).unwrap(), Value::Null);
     }
 }
