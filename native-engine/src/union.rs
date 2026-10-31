@@ -18,6 +18,39 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
     Batch::new_with_row_count(schema, columns, count)
 }
 
+/// Concatenate temporary inputs by consuming their columns. A changed numeric
+/// result type still widens INTEGER values to FLOAT before appending.
+pub fn union_all_owned(left: Batch, right: Batch) -> Result<Batch> {
+    let schema = crate::set_ops::compatible_schema(&left, &right)?;
+    let count = left.num_rows().checked_add(right.num_rows())
+        .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
+    let left_types = left.schema().fields().iter().map(|field| field.data_type)
+        .collect::<Vec<_>>();
+    let right_types = right.schema().fields().iter().map(|field| field.data_type)
+        .collect::<Vec<_>>();
+    let mut columns = left.into_columns();
+    let mut right_columns = right.into_columns();
+    for (index, (left_values, right_values)) in columns.iter_mut()
+        .zip(right_columns.iter_mut()).enumerate() {
+        let target = schema.fields()[index].data_type;
+        for (values, source_type) in [
+            (left_values.as_mut_slice(), left_types[index]),
+            (right_values.as_mut_slice(), right_types[index]),
+        ] {
+            if source_type == crate::schema::DataType::Integer &&
+                target == crate::schema::DataType::Float {
+                for value in values {
+                    if let crate::scalar::Value::Integer(number) = value {
+                        *value = crate::scalar::Value::Float(*number as f64);
+                    }
+                }
+            }
+        }
+        left_values.append(right_values);
+    }
+    Batch::new_with_row_count(schema, columns, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +294,69 @@ mod borrowed_union_distinct_budget_regressions {
         assert!(union_distinct_with_budget(&left, &right, 1, 63).is_err());
         assert_eq!(union_distinct_with_budget(&Batch::empty(schema.clone()),
             &Batch::empty(schema), 0, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_union_all_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn reuses_wide_text_allocations_from_both_inputs() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let large = "é🙂".repeat(4096);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(large.clone()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text(large.clone()), Value::Integer(3)],
+        ]).unwrap();
+        let left_ptr = match left.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        };
+        let right_ptr = match right.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        };
+        let expected = union_all(&left, &right).unwrap();
+        let result = union_all_owned(left, right).unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(match result.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        }, left_ptr);
+        assert_eq!(match result.value(2, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        }, right_ptr);
+    }
+
+    #[test]
+    fn widens_numeric_columns_preserving_order_nullability_and_empty_width() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("lhs", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(7)], vec![Value::Integer(9)],
+        ]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("rhs", DataType::Float, true),
+        ]).unwrap(), vec![
+            vec![Value::Float(2.5)], vec![Value::Null],
+        ]).unwrap();
+        let expected = union_all(&left, &right).unwrap();
+        let result = union_all_owned(left, right).unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Float(7.0)], vec![Value::Float(9.0)],
+            vec![Value::Float(2.5)], vec![Value::Null],
+        ]);
+        assert_eq!(result.schema().field(0).unwrap().name, "lhs");
+        assert!(result.schema().field(0).unwrap().nullable);
+        let empty = Schema::new(vec![]).unwrap();
+        let one = Batch::new_with_row_count(empty.clone(), vec![], 2).unwrap();
+        let two = Batch::new_with_row_count(empty, vec![], 3).unwrap();
+        assert_eq!(union_all_owned(one, two).unwrap().num_rows(), 5);
     }
 }
