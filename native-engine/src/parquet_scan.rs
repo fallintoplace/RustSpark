@@ -5,6 +5,15 @@ use parquet::arrow::{ProjectionMask, arrow_reader::{ParquetRecordBatchReader, Pa
 
 use crate::{arrow_bridge, batch::Batch, Error, Result};
 
+// Bound native Value slots per decoded batch, even for a very wide Parquet
+// schema. The caller's batch_size remains an upper limit, not a target.
+const MAX_NATIVE_VALUE_SLOT_BYTES: usize = 64 * 1024 * 1024;
+
+fn bounded_native_batch_rows(requested: usize, columns: usize) -> usize {
+    let per_row = columns.max(1).saturating_mul(std::mem::size_of::<crate::scalar::Value>());
+    requested.min((MAX_NATIVE_VALUE_SLOT_BYTES / per_row.max(1)).max(1))
+}
+
 pub struct ParquetScan {
     inner: ParquetRecordBatchReader,
     finished: bool,
@@ -73,7 +82,8 @@ fn scan_with_expected_schema(
             ));
         }
     }
-    let reader = builder.with_batch_size(batch_size)
+    let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+    let reader = builder.with_batch_size(rows)
         .build()
         .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
     Ok(ParquetScan { inner: reader, finished: false })
@@ -161,7 +171,9 @@ pub fn scan_with_options(
     if let Some(limit) = options.limit {
         builder = builder.with_limit(limit);
     }
-    let inner = builder.with_batch_size(batch_size)
+    let projected_width = options.columns.map_or(builder.schema().fields().len(), |columns| columns.len());
+    let rows = bounded_native_batch_rows(batch_size, projected_width);
+    let inner = builder.with_batch_size(rows)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
     Ok(ParquetScan { inner, finished: false })
 }
@@ -741,5 +753,29 @@ mod parquet_projection_index_regressions {
             .collect::<Vec<_>>();
         assert_eq!(projection_indices(&fields, &wanted).unwrap(), expected);
         assert_eq!(projection_indices(&fields, &["column_0"]).unwrap(), vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_wide_parquet_batch_regressions {
+    use super::*;
+
+    #[test]
+    fn huge_row_requests_are_capped_by_decoded_column_width() {
+        let requested = 1_000_000;
+        let one = bounded_native_batch_rows(requested, 1);
+        let wide = bounded_native_batch_rows(requested, 1024);
+        assert_eq!(one, requested);
+        assert!(wide < one);
+        assert!(wide > 0);
+        for columns in [1, 8, 128, 1024, 4096] {
+            let rows = bounded_native_batch_rows(requested, columns);
+            assert!(rows <= requested);
+            assert!(rows > 0);
+            let slots = rows * columns * std::mem::size_of::<crate::scalar::Value>();
+            assert!(slots <= MAX_NATIVE_VALUE_SLOT_BYTES);
+        }
+        assert_eq!(bounded_native_batch_rows(5, 1024), 5);
+        assert_eq!(bounded_native_batch_rows(5, 0), 5);
     }
 }

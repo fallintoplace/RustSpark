@@ -25,7 +25,13 @@ def checked_hash(value, label):
 
 
 def checked_number(value, label):
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+    if type(value) not in (int, float) or value <= 0:
+        raise ValueError(f"{label} must be a positive finite number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError(f"{label} must be a positive finite number")
     return value
 
@@ -124,13 +130,18 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         if (p95 + 0.01 < median
                 or not math.isclose(p95, measured_p95, rel_tol=0, abs_tol=0.01)):
             raise ValueError(f"Query {number} p95 is inconsistent with timing samples")
-        if not math.isclose(statistics.median(samples), median, abs_tol=0.01):
+        if not math.isclose(statistics.median(samples), median, rel_tol=0, abs_tol=0.01):
             raise ValueError(f"Query {number} median is inconsistent with timing samples")
         if (type(reference.get("expected_rows")) is not int
                 or type(reference.get("actual_rows")) is not int
                 or reference["expected_rows"] != reference["actual_rows"]):
             raise ValueError(f"Query {number} has inconsistent result row counts")
         total_median_ms.append(median)
+
+    try:
+        total_seconds = math.fsum(total_median_ms) / 1000
+    except OverflowError as error:
+        raise ValueError("TPC-H median total exceeds finite numeric range") from error
 
     return {
         "qualification": "complete-22-query-cold-tpch",
@@ -142,7 +153,7 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         "samples_per_query": repeat,
         "warmups_per_query": warmup,
         "binary_sha256": binary,
-        "sum_query_medians_seconds": round(math.fsum(total_median_ms) / 1000, 3),
+        "sum_query_medians_seconds": round(total_seconds, 3),
         "note": "Evidence for this workload only, not a Spark or DuckDB speedup claim",
     }
 

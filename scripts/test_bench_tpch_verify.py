@@ -37,6 +37,16 @@ class ComparisonTests(unittest.TestCase):
             [{"v": 1}], [{"v": 1.0}], Decimal(0), False,
         ))
 
+    def test_invalid_verification_parameters_fail_before_opening_duckdb(self):
+        for field, values in (
+            ("timeout", [True, 0, 1.5, float("nan"), float("inf"), "120"]),
+            ("partitions", [True, 0, 1.5, float("nan"), "2"]),
+            ("tolerance", [True, -1, "0.01", Decimal("NaN"), Decimal("-0.01")]),
+        ):
+            for invalid in values:
+                with self.subTest(field=field, invalid=invalid), self.assertRaisesRegex(ValueError, "verification parameters"):
+                    verify.verify("rs", None, [], **{field: invalid})
+
     def test_numeric_tolerance(self):
         self.assertTrue(verify.same_value(Decimal("1.000001"), 1, Decimal("0.000002")))
         self.assertFalse(verify.same_value(1.1, 1, Decimal("0.01")))
