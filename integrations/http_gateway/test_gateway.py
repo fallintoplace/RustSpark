@@ -3,6 +3,8 @@ import unittest
 import tempfile
 import subprocess
 import sys
+import os
+import time
 from pathlib import Path
 from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend
 
@@ -92,6 +94,22 @@ class BoundedBackendTests(unittest.TestCase):
                 [sys.executable, "-c", "import time; time.sleep(2)"],
                 timeout=0.1, max_bytes=32,
             )
+
+
+class BackendDescendantCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process-group signaling requires POSIX")
+    def test_timeout_closes_inherited_stdout_from_grandchildren(self):
+        script = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('started',flush=True);time.sleep(6)"
+        )
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded_backend([sys.executable, "-c", script],
+                                timeout=0.4, max_bytes=1024)
+        self.assertLess(time.monotonic() - started, 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

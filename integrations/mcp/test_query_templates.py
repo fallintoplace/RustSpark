@@ -86,5 +86,28 @@ class BoundedMcpBackendTests(unittest.TestCase):
             run_bounded([sys.executable, "-c", "import time; time.sleep(2)"],
                         timeout=0.1, max_bytes=128)
 
+
+class ProcessGroupCleanupTests(unittest.TestCase):
+    def test_timeout_terminates_descendants_inheriting_the_pipe(self):
+        import os
+        import subprocess
+        import sys
+        import time
+        from bounded_backend import run_bounded
+
+        if os.name != "posix":
+            self.skipTest("process-group signaling requires POSIX")
+        script = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('started',flush=True);time.sleep(6)"
+        )
+        start = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded([sys.executable, "-c", script],
+                        timeout=0.4, max_bytes=1024)
+        self.assertLess(time.monotonic() - start, 3.0)
+
+
 if __name__ == "__main__":
     unittest.main()
