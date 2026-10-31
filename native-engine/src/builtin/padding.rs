@@ -42,9 +42,9 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
     } else {
-        let pad_chars = pad.chars().collect::<Vec<_>>();
-        for i in 0..(target - size) {
-            result.push(pad_chars[i % pad_chars.len()]);
+        // Cycle the borrowed pattern instead of allocating a character vector.
+        for character in pad.chars().cycle().take(target - size) {
+            result.push(character);
         }
     }
     if left { result.push_str(text); }
@@ -119,6 +119,9 @@ mod single_character_padding_tests {
             Value::Text("x界界界".into()));
         assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(4), Value::Text("ab".into())]).unwrap(),
             Value::Text("xaba".into()));
+        let long_pattern = format!("🙂{}", "z".repeat(20_000));
+        assert_eq!(rpad(&[Value::Text("x".into()), Value::Integer(3),
+            Value::Text(long_pattern)]).unwrap(), Value::Text("x🙂z".into()));
     }
 }
 
