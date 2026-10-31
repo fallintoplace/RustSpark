@@ -66,6 +66,7 @@ def pinned_template(path: Path) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix="rustspark-mcp-sql-") as directory:
         snapshot = Path(directory) / "query.sql"
         snapshot.write_bytes(sql)
+        snapshot.chmod(0o600)
         yield snapshot
 
 
