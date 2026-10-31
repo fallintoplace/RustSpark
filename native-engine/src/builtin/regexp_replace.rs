@@ -32,24 +32,25 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
         !replacement.contains('$') {
-        const LIMIT: usize = 16 * 1024 * 1024;
+        // Scan once, appending whole unchanged UTF-8 spans. Check the
+        // output budget incrementally to reject expansion before allocating it.
         let mut result = String::with_capacity(text.len());
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
         for (index, _) in suffix.match_indices(pattern) {
             let unchanged = &suffix[consumed..index];
-            if result.len().checked_add(unchanged.len())
+            let next_len = result.len().checked_add(unchanged.len())
                 .and_then(|len| len.checked_add(replacement.len()))
-                .is_none_or(|len| len > LIMIT) {
-                return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-            }
+                .filter(|&len| len <= 16 * 1024 * 1024)
+                .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
             result.push_str(unchanged);
             result.push_str(replacement);
+            debug_assert_eq!(result.len(), next_len);
             consumed = index + pattern.len();
         }
         let remaining = &suffix[consumed..];
         if result.len().checked_add(remaining.len())
-            .is_none_or(|len| len > LIMIT) {
+            .is_none_or(|len| len > 16 * 1024 * 1024) {
             return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
         }
         result.push_str(remaining);
@@ -212,6 +213,47 @@ mod literal_regexp_replace_fast_path_tests {
             Value::Text("z".repeat(17)),
         ];
         assert!(matches!(evaluate(&args), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod literal_regex_single_pass_tests {
+    use super::*;
+
+    #[test]
+    fn handles_large_mixed_unicode_text_with_nonoverlapping_matches() {
+        let input = format!("{}aabaa{}", "é🙂".repeat(3000), "界".repeat(3000));
+        let expected = input.replace("aa", "XYZ");
+        assert_eq!(evaluate(&[
+            Value::Text(input), Value::Text("aa".into()), Value::Text("XYZ".into())
+        ]).unwrap(), Value::Text(expected));
+    }
+
+    #[test]
+    fn accepts_exact_budget_and_rejects_overflow() {
+        let block = "z".repeat(1024 * 1024);
+        let accepted = evaluate(&[
+            Value::Text("a".repeat(16)), Value::Text("a".into()),
+            Value::Text(block.clone()),
+        ]).unwrap();
+        let Value::Text(accepted) = accepted else { unreachable!() };
+        assert_eq!(accepted.len(), 16 * 1024 * 1024);
+        assert!(matches!(evaluate(&[
+            Value::Text("a".repeat(17)), Value::Text("a".into()),
+            Value::Text(block),
+        ]), Err(Error::Execution(_))));
+    }
+
+    #[test]
+    fn position_and_regex_capture_fallback_remain_unchanged() {
+        assert_eq!(evaluate(&[
+            Value::Text("éabcabc".into()), Value::Text("abc".into()),
+            Value::Text("x".into()), Value::Integer(5),
+        ]).unwrap(), Value::Text("éabcx".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("abcabc".into()), Value::Text("(abc)".into()),
+            Value::Text("$1!".into()),
+        ]).unwrap(), Value::Text("abc!abc!".into()));
     }
 }
 
