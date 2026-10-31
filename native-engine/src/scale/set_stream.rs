@@ -191,6 +191,7 @@ impl Iterator for SetStream {
                 let mut output: Vec<Vec<Value>> = (0..self.output_schema.len())
                     .map(|_| Vec::new()).collect();
                 let mut selected = 0usize;
+                let mut retained_rows = Vec::new();
                 let borrowed = (batch.schema().len() == 1 &&
                     batch.schema().fields()[0].data_type == self.output_schema.fields()[0].data_type)
                     .then(|| batch.column(0)).transpose()?;
@@ -201,8 +202,10 @@ impl Iterator for SetStream {
                             let value = &column[index];
                             // Rejected single-column rows require no owned
                             // vector or cloned TEXT cell.
-                            return Ok(self.select_row(std::slice::from_ref(value))?
-                                .then(|| vec![value.clone()]));
+                            if self.select_row(std::slice::from_ref(value))? {
+                                retained_rows.push(index);
+                            }
+                            return Ok(None);
                         }
                         let row = convert_row(&batch, index, &self.output_schema)?;
                         Ok(self.select_row(&row)?.then_some(row))
@@ -215,7 +218,7 @@ impl Iterator for SetStream {
                             selected += 1;
                         }
                         Ok(None) => {}
-                        Err(error) if selected > 0 => {
+                        Err(error) if selected > 0 || !retained_rows.is_empty() => {
                             // Emit previously selected rows before the terminal
                             // failure. No later left-side input is consumed.
                             self.pending_error = Some(error);
@@ -223,6 +226,12 @@ impl Iterator for SetStream {
                         }
                         Err(error) => return Err(error),
                     }
+                }
+                if borrowed.is_some() {
+                    // No numeric conversion is needed for the borrowed
+                    // one-column path. Transfer selected owned TEXT values.
+                    return batch.take_sorted_owned(&retained_rows)?
+                        .relabel(self.output_schema.clone());
                 }
                 // Rows come from typed input batches. The only conversion is
                 // INTEGER to FLOAT, and the output nullability is widened.
@@ -492,5 +501,52 @@ mod trusted_set_output_regressions {
                 vec![Value::Float(2.0)], vec![Value::Null],
             ]);
         assert_eq!(output[0].schema().fields()[0].data_type, DataType::Float);
+    }
+}
+
+#[cfg(test)]
+mod owned_set_output_tests {
+    use super::*;
+
+    #[test]
+    fn selected_text_keeps_the_left_input_allocation() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let payload = "spill-safe-".repeat(20_000);
+        let ptr = payload.as_ptr();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(payload)],
+            vec![Value::Text("absent".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("spill-safe-".repeat(20_000))],
+        ]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 8, 2_000_000,
+        ).unwrap();
+        let batch = stream.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert!(matches!(batch.value(0, 0).unwrap(), Value::Text(text) if text.as_ptr() == ptr));
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn limit_failure_preserves_selected_prefix_and_stops() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(4)],
+        ]).unwrap();
+        let right = Batch::empty(schema.clone());
+        let mut stream = SetStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            schema.clone(), schema, SetMode::ExceptDistinct,
+            QueryControl::default(), 1, 1024,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![vec![Value::Integer(3)]]);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }
