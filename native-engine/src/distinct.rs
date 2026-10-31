@@ -117,38 +117,76 @@ mod tests {
 /// Keep the first input row for each distinct combination of key columns.
 /// NULL and signed zero compare equal as grouping keys.
 pub fn distinct_on(batch: &Batch, keys: &[&str]) -> Result<Batch> {
+    distinct_on_with_budget(batch, keys, usize::MAX, usize::MAX)
+}
+
+/// Select the first row for each key tuple with distinct-key and estimated
+/// in-memory byte budgets. Borrowed keys avoid cloning variable-width values.
+pub fn distinct_on_with_budget(
+    batch: &Batch, keys: &[&str], max_keys: usize, max_bytes: usize,
+) -> Result<Batch> {
     if keys.is_empty() {
         return Err(crate::Error::Schema("DISTINCT ON requires key columns".into()));
     }
-    let columns = keys.iter().map(|key| batch.schema().column(key))
+    let indices = keys.iter().map(|key| batch.schema().column(key))
         .collect::<Result<Vec<_>>>()?;
-    let mut unique = HashSet::with_capacity(columns.len());
-    if columns.iter().any(|&column| !unique.insert(column)) {
+    let mut unique = HashSet::with_capacity(indices.len());
+    if indices.iter().any(|&index| !unique.insert(index)) {
         return Err(crate::Error::Schema("DISTINCT ON key columns must be unique".into()));
     }
+    let columns = indices.iter().map(|&index| batch.column(index))
+        .collect::<Result<Vec<_>>>()?;
+    let base = 64usize.checked_add(columns.len()
+        .checked_mul(std::mem::size_of::<crate::scalar::Value>())
+        .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget overflow".into()))?)
+        .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget overflow".into()))?;
+    let footprint = |row: usize| -> Result<usize> {
+        columns.iter().try_fold(base, |total, column| {
+            let payload = match &column[row] {
+                crate::scalar::Value::Text(text) => text.len(),
+                _ => 0,
+            };
+            total.checked_add(payload)
+                .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget overflow".into()))
+        })
+    };
+    let mut bytes = 0usize;
+    let mut selected = Vec::new();
     if columns.len() == 1 {
-        let column = batch.column(columns[0])?;
-        let mut seen = HashSet::new();
-        let mut indices = Vec::new();
-        for (row, value) in column.iter().enumerate() {
-            if seen.insert(value) {
-                indices.push(row);
+        // A one-column set avoids any tuple allocation or per-row row wrapper.
+        let mut seen = HashSet::<&crate::scalar::Value>::new();
+        for (row, value) in columns[0].iter().enumerate() {
+            if seen.contains(value) { continue; }
+            if seen.len() >= max_keys {
+                return Err(crate::Error::Execution("DISTINCT ON key budget exceeded".into()));
+            }
+            bytes = bytes.checked_add(footprint(row)?)
+                .filter(|&total| total <= max_bytes)
+                .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget exceeded".into()))?;
+            seen.insert(value);
+            selected.push(row);
+        }
+    } else {
+        let mut seen = HashMap::<BorrowedRow<'_>, ()>::new();
+        for row in 0..batch.num_rows() {
+            let key = BorrowedRow { columns: &columns, row };
+            let at_limit = seen.len() >= max_keys;
+            match seen.entry(key) {
+                Entry::Occupied(_) => {}
+                Entry::Vacant(entry) => {
+                    if at_limit {
+                        return Err(crate::Error::Execution("DISTINCT ON key budget exceeded".into()));
+                    }
+                    bytes = bytes.checked_add(footprint(row)?)
+                        .filter(|&total| total <= max_bytes)
+                        .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget exceeded".into()))?;
+                    entry.insert(());
+                    selected.push(row);
+                }
             }
         }
-        return batch.take(&indices);
     }
-    let mut seen = HashSet::new();
-    let mut indices = Vec::new();
-    for row in 0..batch.num_rows() {
-        // Keep keys borrowed from the immutable batch instead of cloning text values
-        // for every input row. Only selected output rows are copied by `take`.
-        let key = columns.iter().map(|&column| batch.value(row, column))
-            .collect::<Result<Vec<_>>>()?;
-        if seen.insert(key) {
-            indices.push(row);
-        }
-    }
-    batch.take(&indices)
+    batch.take(&selected)
 }
 
 #[cfg(test)]
@@ -290,5 +328,55 @@ mod zero_column_distinct_fast_path_tests {
         assert!(distinct_with_budget(&wide, 1, 63).is_err());
         let empty = Batch::empty(schema);
         assert_eq!(distinct_with_budget(&empty, 0, 0).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod bounded_borrowed_distinct_on_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn repeated_long_composite_keys_consume_only_distinct_budget() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+            Field::new("version", DataType::Float, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let name = "é🙂".repeat(2048);
+        let data = Batch::from_rows(schema, vec![
+            vec![Value::Text(name.clone()), Value::Float(-0.0), Value::Text("a".into())],
+            vec![Value::Text(name.clone()), Value::Float(0.0), Value::Text("dup".into())],
+            vec![Value::Text(name.clone()), Value::Float(f64::NAN), Value::Text("b".into())],
+            vec![Value::Text(name.clone()), Value::Float(f64::NAN), Value::Text("dup2".into())],
+            vec![Value::Null, Value::Null, Value::Text("c".into())],
+        ]).unwrap();
+        let single = 64 + 2 * std::mem::size_of::<Value>() + name.len();
+        let max_bytes = 2 * single + 64 + 2 * std::mem::size_of::<Value>();
+        let result = distinct_on_with_budget(&data, &["name", "version"], 3, max_bytes)
+            .unwrap();
+        assert_eq!(result.column(2).unwrap(), &[
+            Value::Text("a".into()), Value::Text("b".into()), Value::Text("c".into()),
+        ]);
+        assert!(distinct_on_with_budget(&data, &["name", "version"], 2, max_bytes).is_err());
+        assert!(distinct_on_with_budget(&data, &["name", "version"], 3, max_bytes - 1).is_err());
+        assert_eq!(result, distinct_on(&data, &["name", "version"]).unwrap());
+    }
+
+    #[test]
+    fn key_admission_checks_only_unique_single_column_values() {
+        let data = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null],
+        ]).unwrap();
+        let base = 64 + std::mem::size_of::<Value>();
+        assert_eq!(distinct_on_with_budget(&data, &["key"], 2, base * 2)
+            .unwrap().num_rows(), 2);
+        assert!(distinct_on_with_budget(&data, &["key"], 1, base * 2).is_err());
+        assert!(distinct_on_with_budget(&data, &["key"], 2, base * 2 - 1).is_err());
+        assert!(distinct_on_with_budget(&data, &["key", "KEY"], 5, usize::MAX).is_err());
+        assert_eq!(distinct_on_with_budget(&Batch::empty(data.schema().clone()),
+            &["key"], 0, 0).unwrap().num_rows(), 0);
     }
 }
