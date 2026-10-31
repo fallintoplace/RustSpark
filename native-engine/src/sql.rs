@@ -177,10 +177,10 @@ impl Parser {
             Token::Operator(op) if op == "<=" => Some((BinaryOp::LessEqual, 3)),
             Token::Operator(op) if op == ">" => Some((BinaryOp::Greater, 3)),
             Token::Operator(op) if op == ">=" => Some((BinaryOp::GreaterEqual, 3)),
-            Token::Operator(op) if op == "+" => Some((BinaryOp::Add, 4)),
-            Token::Operator(op) if op == "-" => Some((BinaryOp::Subtract, 4)),
-            Token::Symbol('*') => Some((BinaryOp::Multiply, 5)),
-            Token::Operator(op) if op == "/" => Some((BinaryOp::Divide, 5)),
+            Token::Operator(op) if op == "+" => Some((BinaryOp::Add, 8)),
+            Token::Operator(op) if op == "-" => Some((BinaryOp::Subtract, 8)),
+            Token::Symbol('*') => Some((BinaryOp::Multiply, 9)),
+            Token::Operator(op) if op == "/" => Some((BinaryOp::Divide, 9)),
             _ => None,
         }
     }
@@ -329,25 +329,46 @@ impl Parser {
                 }
             }
             if self.peek() == Some(&Token::Operator("||".into())) {
-                if min_precedence > 4 { break; }
+                if min_precedence > 8 { break; }
                 let _ = self.next();
-                let right = self.expression(5)?;
+                let right = self.expression(9)?;
                 left = Expr::Call { name: "concat".into(), args: vec![left, right] };
                 continue;
             }
-            // DIV has the same precedence as multiplication and remainder.
+            // DIV follows Spark's multiplicative operator precedence.
             if self.peek_word("DIV") {
-                if min_precedence > 5 { break; }
+                if min_precedence > 9 { break; }
                 self.next();
-                let right = self.expression(6)?;
+                let right = self.expression(10)?;
                 left = Expr::Call { name: "div".into(), args: vec![left, right] };
                 continue;
             }
             if self.peek() == Some(&Token::Operator("%".into())) {
-                if min_precedence > 5 { break; }
+                if min_precedence > 9 { break; }
                 let _ = self.next();
-                let right = self.expression(6)?;
+                let right = self.expression(10)?;
                 left = Expr::Call { name: "mod".into(), args: vec![left, right] };
+                continue;
+            }
+            // Spark bitwise operators bind more tightly than comparisons and
+            // less tightly than arithmetic; shifts bind more tightly than &, ^, |.
+            let bitwise = match self.peek() {
+                Some(Token::Operator(op)) => match op.as_str() {
+                    "|" => Some(("bitwise_or", 4)),
+                    "^" => Some(("bitwise_xor", 5)),
+                    "&" => Some(("bitwise_and", 6)),
+                    "<<" => Some(("shiftleft", 7)),
+                    ">>" => Some(("shiftright", 7)),
+                    ">>>" => Some(("shiftrightunsigned", 7)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((function, precedence)) = bitwise {
+                if precedence < min_precedence { break; }
+                self.next();
+                let right = self.expression(precedence + 1)?;
+                left = Expr::Call { name: function.into(), args: vec![left, right] };
                 continue;
             }
             let Some((op, precedence)) = self.binary_operator() else {
@@ -364,12 +385,17 @@ impl Parser {
     }
 
     fn prefix(&mut self) -> Result<Expr> {
-        if self.take_word("NOT") {
+        if self.take_word("NOT") || self.peek() == Some(&Token::Operator("!".into())) {
+            if self.peek() == Some(&Token::Operator("!".into())) { self.next(); }
             return Ok(Expr::Not(Box::new(self.expression(3)?)));
+        }
+        if self.peek() == Some(&Token::Operator("~".into())) {
+            self.next();
+            return Ok(Expr::Call { name: "bitwise_not".into(), args: vec![self.expression(10)?] });
         }
         if self.peek() == Some(&Token::Operator("+".into())) {
             let _ = self.next();
-            return self.expression(6);
+            return self.expression(10);
         }
         if self.peek() == Some(&Token::Operator("-".into())) {
             let _ = self.next();
@@ -381,7 +407,7 @@ impl Parser {
             return Ok(Expr::binary(
                 Expr::Literal(Value::Integer(0)),
                 BinaryOp::Subtract,
-                self.expression(6)?,
+                self.expression(10)?,
             ));
         }
         if self.take_symbol('(') {
@@ -1574,5 +1600,38 @@ mod native_limit_all_syntax_tests {
         assert_eq!(executor::execute(&offset, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
         assert!(parse_sql("SELECT n FROM numbers LIMIT ALL FETCH FIRST 1 ROWS ONLY").is_err());
+    }
+}
+
+#[cfg(test)]
+mod spark_bitwise_operator_sql_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor, schema::{Field, Schema}};
+
+    #[test]
+    fn sql_operators_follow_spark_precedence_and_jvm_shift_masking() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema,
+            vec![vec![Value::Integer(0)]]).unwrap()).unwrap();
+        let sql = "SELECT 3 & 5 AS a, 1 | 2 AS o, 7 ^ 3 AS x, ~0 AS n, \
+            1 << 3 AS l, -2 >> 1 AS r, -1 >>> 1 AS u, \
+            1 | 2 & 4 AS precedence, 3 + 1 << 2 AS shifted, !FALSE AS truth FROM t";
+        let rows = executor::execute(&parse_sql(sql).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Integer(1), Value::Integer(3), Value::Integer(4),
+            Value::Integer(-1), Value::Integer(8), Value::Integer(-1),
+            Value::Integer(i64::MAX), Value::Integer(1), Value::Integer(16),
+            Value::Boolean(true)
+        ]]);
+    }
+
+    #[test]
+    fn bitwise_types_and_nulls_are_checked_on_empty_inputs() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::empty(schema)).unwrap();
+        assert!(executor::execute(&parse_sql("SELECT 'x' & 1 FROM t").unwrap(), &catalog).is_err());
+        assert!(crate::lexer::tokenize("SELECT 1 || 2, 3 | 4, 5 >>> 2 FROM t").is_ok());
     }
 }
