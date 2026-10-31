@@ -25,7 +25,13 @@ def checked_hash(value, label):
 
 
 def checked_number(value, label):
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+    if type(value) not in (int, float) or value <= 0:
+        raise ValueError(f"{label} must be a positive finite number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError(f"{label} must be a positive finite number")
     return value
 
@@ -132,6 +138,11 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
             raise ValueError(f"Query {number} has inconsistent result row counts")
         total_median_ms.append(median)
 
+    try:
+        total_seconds = math.fsum(total_median_ms) / 1000
+    except OverflowError as error:
+        raise ValueError("TPC-H median total exceeds finite numeric range") from error
+
     return {
         "qualification": "complete-22-query-cold-tpch",
         "source_lineitem_rows": manifest["rows"]["lineitem"],
@@ -142,7 +153,7 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         "samples_per_query": repeat,
         "warmups_per_query": warmup,
         "binary_sha256": binary,
-        "sum_query_medians_seconds": round(math.fsum(total_median_ms) / 1000, 3),
+        "sum_query_medians_seconds": round(total_seconds, 3),
         "note": "Evidence for this workload only, not a Spark or DuckDB speedup claim",
     }
 
