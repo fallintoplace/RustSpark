@@ -5,11 +5,14 @@ fn output(types: &[DataType]) -> Result<DataType> {
     if types.iter().all(|&kind| kind == DataType::Integer) { Ok(DataType::Integer) }
     else { Err(Error::Type("shift SQL functions require integer operands".into())) }
 }
+fn masked_shift(count: i64) -> u32 {
+    // JVM long shifts use the low six bits, including for negative counts.
+    (count as u32) & 63
+}
 fn parts(args: &[Value]) -> Result<Option<(i64, u32)>> {
     let Some(value) = super::integer(&args[0])? else { return Ok(None) };
     let Some(shift) = super::integer(&args[1])? else { return Ok(None) };
-    // Spark follows JVM long-shift semantics: only the low six bits count.
-    let shift = (shift as u32) & 63;
+    let shift = masked_shift(shift);
     Ok(Some((value, shift)))
 }
 fn left(args: &[Value]) -> Result<Value> {
@@ -25,7 +28,7 @@ fn unsigned_right(args: &[Value]) -> Result<Value> {
 fn rotate_left(args: &[Value]) -> Result<Value> {
     let Some(number) = super::integer(&args[0])? else { return Ok(Value::Null); };
     let Some(count) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    Ok(Value::Integer(number.rotate_left((count as u32) & 63)))
+    Ok(Value::Integer(number.rotate_left(masked_shift(count))))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -74,6 +77,18 @@ mod rotate_mask_regression_tests {
             let value = 0x1234_5678_9abc_def0_i64;
             let actual = rotate_left(&[Value::Integer(value), Value::Integer(shift)]).unwrap();
             assert_eq!(actual, Value::Integer(value.rotate_left(shift.rem_euclid(64) as u32)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod masked_shift_semantics_tests {
+    use super::*;
+
+    #[test]
+    fn masks_positive_and_negative_counts_the_same_way_as_jvm() {
+        for count in [-65, -1, 0, 1, 64, 65, i64::MIN, i64::MAX] {
+            assert_eq!(masked_shift(count), count.rem_euclid(64) as u32);
         }
     }
 }
