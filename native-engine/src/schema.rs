@@ -48,13 +48,21 @@ impl Field {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Schema {
     // Schemas are immutable after construction and are cloned for most batches.
     // Share metadata instead of copying every field name and lookup entry.
     fields: Arc<[Field]>,
     indices: Arc<HashMap<String, usize>>,
 }
+
+impl PartialEq for Schema {
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.fields, &other.fields) || self.fields == other.fields)
+            && (Arc::ptr_eq(&self.indices, &other.indices) || self.indices == other.indices)
+    }
+}
+impl Eq for Schema {}
 
 impl Schema {
     pub fn new(fields: Vec<Field>) -> Result<Self> {
@@ -186,5 +194,27 @@ mod shared_schema_metadata_tests {
             assert_eq!(copy.column(&format!("LONGCOLUMNNAME_{i}")).unwrap(), i);
         }
         assert!(copy.column("missing").is_err());
+    }
+}
+
+#[cfg(test)]
+mod schema_identity_equality_tests {
+    use super::*;
+
+    #[test]
+    fn shared_and_independent_schemas_compare_by_content() {
+        let fields = (0..256)
+            .map(|i| Field::new(format!("wide_column_{i}"), DataType::Text, true))
+            .collect::<Vec<_>>();
+        let original = Schema::new(fields.clone()).unwrap();
+        let shared = original.clone();
+        let independent = Schema::new(fields.clone()).unwrap();
+        assert!(Arc::ptr_eq(&original.fields, &shared.fields));
+        assert_eq!(original, shared);
+        assert_eq!(original, independent);
+
+        let mut changed = fields;
+        changed[255].nullable = false;
+        assert_ne!(original, Schema::new(changed).unwrap());
     }
 }
