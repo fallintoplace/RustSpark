@@ -222,6 +222,23 @@ impl Batch {
         Ok(())
     }
 
+    /// Move a consumed row into output columns without cloning text payloads.
+    /// The caller must advance its cursor and never inspect the replaced row.
+    pub(crate) fn move_row_to_columns(
+        &mut self, row: usize, output: &mut [Vec<Value>],
+    ) -> Result<()> {
+        if row >= self.rows {
+            return Err(Error::Execution(format!("row index out of bounds: {row}")));
+        }
+        if output.len() != self.columns.len() {
+            return Err(Error::Schema("row append column count mismatch".into()));
+        }
+        for (target, source) in output.iter_mut().zip(&mut self.columns) {
+            target.push(std::mem::replace(&mut source[row], Value::Null));
+        }
+        Ok(())
+    }
+
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
         let mut rows = (0..self.rows)
             .map(|_| Vec::with_capacity(self.columns.len()))
@@ -618,5 +635,37 @@ mod owned_empty_slice_fast_path_tests {
         }
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 10).unwrap();
         assert_eq!(zero.slice_rows_owned(5, 5).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod move_row_to_columns_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn moves_wide_text_without_copying_and_rejects_invalid_targets() {
+        let payload = "ä".repeat(100_000);
+        let ptr = payload.as_ptr();
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let mut batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(payload), Value::Integer(7)],
+        ]).unwrap();
+        assert!(batch.move_row_to_columns(1, &mut [vec![], vec![]]).is_err());
+        assert!(batch.move_row_to_columns(0, &mut [vec![]]).is_err());
+        let mut columns = [Vec::new(), Vec::new()];
+        batch.move_row_to_columns(0, &mut columns).unwrap();
+        assert!(matches!(&columns[0][0], Value::Text(s) if s.as_ptr() == ptr));
+        assert_eq!(columns[1], vec![Value::Integer(7)]);
+    }
+
+    #[test]
+    fn moves_zero_width_rows_without_changing_cardinality() {
+        let mut batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 2).unwrap();
+        batch.move_row_to_columns(1, &mut []).unwrap();
+        assert_eq!(batch.num_rows(), 2);
     }
 }
