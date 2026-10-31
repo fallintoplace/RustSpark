@@ -5,6 +5,10 @@ pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch.clone());
     }
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
+        // The result is known without scanning any source columns.
+        return Ok(Batch::empty(batch.schema().clone()));
+    }
     batch.take(&crate::vector_filter::select_indices(batch, predicate)?)
 }
 
@@ -161,5 +165,25 @@ mod owned_filter_operator_tests {
         assert_eq!(filter_owned(batch.clone(), &Expr::Literal(Value::Boolean(true))).unwrap(), batch);
         assert_eq!(filter_owned(batch.clone(), &Expr::Literal(Value::Boolean(false))).unwrap().num_rows(), 0);
         assert!(filter_owned(batch, &Expr::Column("missing".into())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod literal_false_filter_fast_path_tests {
+    use super::*;
+    use crate::schema::{Schema, Field, DataType};
+    #[test]
+    fn false_and_unknown_filters_skip_large_column_values() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(100_000))],
+            vec![Value::Null],
+        ]).unwrap();
+        for predicate in [Expr::Literal(Value::Boolean(false)), Expr::Literal(Value::Null)] {
+            let empty = filter(&batch, &predicate).unwrap();
+            assert_eq!(empty.num_rows(), 0);
+            assert_eq!(empty.schema(), &schema);
+            assert_eq!(empty.column(0).unwrap(), &[]);
+        }
     }
 }
