@@ -11,7 +11,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 || from.len() > 16_384 || to.len() > 16_384 {
         return Err(Error::Execution("TRANSLATE input exceeds memory budget".into()));
     }
-    if text.is_empty() { return Ok(Value::Text(String::new())); }
+    if text.is_empty() {
+        // The character mapping cardinality limit applies even when no output
+        // characters are produced. Skip only the actual replacement work.
+        if !from.is_ascii() &&
+            from.chars().collect::<std::collections::HashSet<_>>().len() > 4096 {
+            return Err(Error::Execution("TRANSLATE map exceeds 4096 characters".into()));
+        }
+        return Ok(Value::Text(String::new()));
+    }
     if from.is_empty() { return Ok(Value::Text(text.to_owned())); }
     // Identical source and replacement positions cannot change output.
     // Preserve the Unicode mapping cardinality budget for oversized patterns.
@@ -148,5 +156,9 @@ mod translate_empty_text_tests {
             Value::Null]).unwrap(), Value::Null);
         assert!(evaluate(&[Value::Text(String::new()),
             Value::Text("x".repeat(16_385)), Value::Text(String::new())]).is_err());
+        let distinct = (0x1000..=0x2000)
+            .map(|code| char::from_u32(code).unwrap()).collect::<String>();
+        assert!(evaluate(&[Value::Text(String::new()), Value::Text(distinct),
+            Value::Text("x".into())]).is_err());
     }
 }
