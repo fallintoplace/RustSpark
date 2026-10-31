@@ -84,7 +84,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
                     }
                     // Validate each incoming row before adding it to the current
                     // batch. A late invalid cell must not discard earlier good rows
-                    // when Batch::new_with_row_count validates the final columns.
+                    // when the already-validated columns are assembled into a batch.
                     if let Some(field) = self.schema.fields().iter().zip(&row)
                         .find_map(|(field, value)| {
                             (!field.data_type.accepts(value) ||
@@ -135,7 +135,9 @@ where I: Iterator<Item = Result<Vec<Value>>>
             }
         }
         if row_count == 0 { return None; }
-        let batch = Batch::new_with_row_count(self.schema.clone(), columns, row_count);
+        // Each admitted row was checked against the schema above.
+        // Only column lengths need checking when building the batch.
+        let batch = Batch::from_validated_columns(self.schema.clone(), columns, row_count);
         if batch.is_err() { self.finished = true; }
         Some(batch)
     }
@@ -400,5 +402,33 @@ mod late_row_type_error_regressions {
         ).unwrap();
         assert!(first.next().unwrap().is_err());
         assert!(first.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod trusted_stream_batch_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn preserves_nullable_unicode_rows_across_byte_bounded_batches() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let expected = (0..128).map(|n| vec![
+            Value::Integer(n),
+            if n % 7 == 0 { Value::Null }
+            else { Value::Text(format!("界-{n}-{}", "x".repeat(19))) },
+        ]).collect::<Vec<_>>();
+        let batches = RowBatcher::with_byte_budget(
+            expected.clone().into_iter().map(Ok), schema.clone(), 100, 512
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(batches.len() > 1);
+        assert_eq!(batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), expected);
+        for batch in batches {
+            assert_eq!(batch, Batch::from_rows(schema.clone(), batch.rows().unwrap()).unwrap());
+        }
     }
 }
