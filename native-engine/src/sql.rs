@@ -605,8 +605,11 @@ impl Parser {
                 break;
             }
         }
-        self.expect_word("FROM")?;
-        let mut plan = self.from_relation()?;
+        let mut plan = if self.take_word("FROM") {
+            self.from_relation()?
+        } else {
+            Plan::OneRow
+        };
         loop {
             if self.take_word("CROSS") {
                 self.expect_word("JOIN")?;
@@ -1600,6 +1603,40 @@ mod native_limit_all_syntax_tests {
         assert_eq!(executor::execute(&offset, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
         assert!(parse_sql("SELECT n FROM numbers LIMIT ALL FETCH FIRST 1 ROWS ONLY").is_err());
+    }
+}
+
+#[cfg(test)]
+mod spark_source_free_select_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    #[test]
+    fn scalar_queries_run_without_tables_and_preserve_one_row_cardinality() {
+        let catalog = Catalog::new();
+        let run = |query: &str| executor::execute(&parse_sql(query).unwrap(), &catalog)
+            .unwrap().rows().unwrap();
+        assert_eq!(run("SELECT 1 AS one"), vec![vec![Value::Integer(1)]]);
+        assert_eq!(run("SELECT 1 + 2 AS three, 'hello' AS greeting"),
+            vec![vec![Value::Integer(3), Value::Text("hello".into())]]);
+        assert_eq!(run("SELECT COUNT(*) AS count"), vec![vec![Value::Integer(1)]]);
+        assert_eq!(run("SELECT 1 AS n WHERE TRUE"), vec![vec![Value::Integer(1)]]);
+        assert!(run("SELECT 1 AS n WHERE FALSE").is_empty());
+        assert!(run("SELECT 1 AS n WHERE NULL").is_empty());
+    }
+
+    #[test]
+    fn source_free_relations_compose_with_sets_and_subqueries() {
+        let catalog = Catalog::new();
+        let run = |query: &str| executor::execute(&parse_sql(query).unwrap(), &catalog)
+            .unwrap().rows().unwrap();
+        assert_eq!(run("SELECT 1 AS n UNION ALL SELECT 2 AS n"),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+        assert_eq!(run("SELECT n FROM (SELECT 7 AS n) AS t"),
+            vec![vec![Value::Integer(7)]]);
+        assert_eq!(run("SELECT COUNT(*) AS n WHERE FALSE"),
+            vec![vec![Value::Integer(0)]]);
+        assert_eq!(parse_sql("SELECT 1").unwrap().scanned_tables(), Vec::<&str>::new());
     }
 }
 

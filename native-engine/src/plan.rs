@@ -9,6 +9,8 @@ use crate::{
 /// An owned, DataFusion-independent logical query tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plan {
+    /// Spark's one-row, zero-column relation for SELECT without FROM.
+    OneRow,
     Scan {
         table: String,
     },
@@ -73,7 +75,7 @@ pub enum Plan {
 impl Plan {
     fn push_children<'a>(&'a self, pending: &mut Vec<&'a Self>) {
         match self {
-            Self::Scan { .. } => {}
+            Self::OneRow | Self::Scan { .. } => {}
             Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::Aggregate { input, .. }
