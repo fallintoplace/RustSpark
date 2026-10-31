@@ -57,7 +57,8 @@ mod md5_hex_pair_encoding_regressions {
 
     #[test]
     fn byte_pairs_match_known_digests_and_reference_formatter() {
-        for text in ["", "abc", "é🙂", "a long field".repeat(2048).as_str()] {
+        let long = "a long field".repeat(2048);
+        for text in ["", "abc", "é🙂", long.as_str()] {
             let digest = Md5::digest(text.as_bytes());
             let expected = digest.iter().map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
