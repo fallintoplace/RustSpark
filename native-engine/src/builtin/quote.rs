@@ -8,19 +8,31 @@ fn output(types: &[DataType]) -> Result<DataType> {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let escaped = text.bytes().filter(|&byte| byte == b'\'' || byte == b'\\').count();
-    let capacity = text.len().checked_add(escaped)
-        .and_then(|length| length.checked_add(2))
+    const MAX_OUTPUT: usize = 16 * 1024 * 1024;
+    let base_length = text.len().checked_add(2)
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
-    if capacity > 16 * 1024 * 1024 {
+    if base_length > MAX_OUTPUT {
         return Err(Error::Execution("QUOTE output exceeds native 16 MiB budget".into()));
     }
-    let mut output = String::with_capacity(capacity);
+
+    // Copy intact UTF-8 runs and escape only the two special ASCII bytes.
+    // This avoids an escape-count scan followed by a full char-by-char scan.
+    let mut output = String::with_capacity(base_length);
     output.push('\'');
-    for ch in text.chars() {
-        if ch == '\'' || ch == '\\' { output.push('\\'); }
-        output.push(ch);
+    let mut remaining = text;
+    let mut escapes = 0usize;
+    let available_escapes = MAX_OUTPUT - base_length;
+    while let Some(index) = remaining.find(['\'', '\\']) {
+        escapes += 1;
+        if escapes > available_escapes {
+            return Err(Error::Execution("QUOTE output exceeds native 16 MiB budget".into()));
+        }
+        output.push_str(&remaining[..index]);
+        output.push('\\');
+        output.push(char::from(remaining.as_bytes()[index]));
+        remaining = &remaining[index + 1..];
     }
+    output.push_str(remaining);
     output.push('\'');
     Ok(Value::Text(output))
 }
@@ -159,5 +171,30 @@ mod json_quote_bounded_writer_tests {
         assert!(writer.exceeded);
         assert!(writer.bytes.len() <= JSON_QUOTE_LIMIT);
         assert!(matches!(json_quote(&[Value::Text(text)]), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod sparse_quote_escaping_tests {
+    use super::*;
+
+    #[test]
+    fn copies_long_unicode_spans_and_escapes_sparse_ascii_bytes() {
+        let chunk = "é🙂".repeat(9_000);
+        let input = format!("{chunk}'{chunk}\\{chunk}");
+        let expected = format!("'{chunk}\\'{chunk}\\\\{chunk}'");
+        assert_eq!(evaluate(&[Value::Text(input)]).unwrap(), Value::Text(expected));
+        assert_eq!(evaluate(&[Value::Text("plain".into())]).unwrap(),
+            Value::Text("'plain'".into()));
+    }
+
+    #[test]
+    fn checks_expansion_at_output_limit() {
+        let limit = 16 * 1024 * 1024;
+        let fits = format!("{}'", "a".repeat(limit - 4));
+        let Value::Text(quoted) = evaluate(&[Value::Text(fits)]).unwrap() else { panic!("expected text"); };
+        assert_eq!(quoted.len(), limit);
+        assert!(matches!(evaluate(&[Value::Text(format!("{}'", "a".repeat(limit - 3)))]),
+            Err(Error::Execution(_))));
     }
 }
