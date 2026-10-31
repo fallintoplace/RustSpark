@@ -99,17 +99,18 @@ where I: IntoIterator<Item = Result<Batch>>
                     &schema, keys, directory, max_rows_per_run, control)?;
             }
         } else {
-            // Split only batches that cross run boundaries. Entire small
-            // batches are transferred, avoiding an extra per-row clone.
-            let mut start = 0;
-            while start < incoming.num_rows() {
+            // Split only batches that cross run boundaries. Consume each
+            // owned remainder, moving large TEXT values into separate run
+            // buffers without deep-cloning them through slice_rows().
+            let mut remaining = incoming;
+            while remaining.num_rows() != 0 {
                 control.check()?;
                 let take = (max_rows_per_run - pending_rows)
-                    .min(incoming.num_rows() - start);
-                let end = start + take;
-                pending.push(incoming.slice_rows(start, end)?);
+                    .min(remaining.num_rows());
+                let (head, tail) = remaining.split_rows_owned(take)?;
+                pending.push(head);
                 pending_rows += take;
-                start = end;
+                remaining = tail;
                 if pending_rows == max_rows_per_run {
                     flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
                         &schema, keys, directory, max_rows_per_run, control)?;
@@ -296,6 +297,54 @@ mod owned_sorted_spill_run_regressions {
             std::fs::File::open(&runs.files()[0]).unwrap()), 16).unwrap();
         assert_eq!(reader.next_batch().unwrap().unwrap(), expected);
         assert!(reader.next_batch().unwrap().is_none());
+        let paths = runs.files().to_vec();
+        drop(runs);
+        assert!(paths.iter().all(|path| !path.exists()));
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_cross_run_split_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field},
+        scale::spill::SpillReader};
+    use std::{fs, fs::File, io::BufReader};
+
+    #[test]
+    fn spills_multiple_wide_text_run_boundaries_without_losing_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-cross-run-move-{}-{}",
+            std::process::id(), RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let payload = "é🙂".repeat(20_000);
+        let input = Batch::from_rows(schema.clone(), (0..7_i64).rev()
+            .map(|k| vec![
+                Value::Integer(k),
+                if k == 3 { Value::Null }
+                else { Value::Text(format!("{k}-{payload}")) },
+            ]).collect()).unwrap();
+        let expected = input.rows().unwrap();
+        let keys = [SortKey::ascending(Expr::Column("k".into()))];
+        let runs = write_sorted_runs([Ok(input)], schema, &keys, &dir, 2,
+            &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 4);
+        let mut rows = Vec::new();
+        for path in runs.files() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                rows.extend(batch.rows().unwrap());
+            }
+        }
+        rows.sort_by_key(|row| match &row[0] { Value::Integer(n) => *n, _ => unreachable!() });
+        let mut expected = expected;
+        expected.sort_by_key(|row| match &row[0] { Value::Integer(n) => *n, _ => unreachable!() });
+        assert_eq!(rows, expected);
         let paths = runs.files().to_vec();
         drop(runs);
         assert!(paths.iter().all(|path| !path.exists()));
