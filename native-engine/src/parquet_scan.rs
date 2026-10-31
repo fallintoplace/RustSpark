@@ -358,7 +358,7 @@ mod parquet_file_summary_tests {
             if n == 0 { Value::Null } else { Value::Text(format!("v{n}")) },
         ]).collect()).unwrap();
         let arrow = arrow_bridge::to_arrow(&input).unwrap();
-        let props = WriterProperties::builder().set_max_row_group_size(2).build();
+        let props = WriterProperties::builder().set_max_row_group_row_count(Some(2)).build();
         let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
             arrow.schema(), Some(props)).unwrap();
         writer.write(&arrow).unwrap();
@@ -422,7 +422,7 @@ mod parquet_row_group_selection_tests {
             Field::new("id", DataType::Integer, false),
         ]).unwrap(), (0..6).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
         let arrow = arrow_bridge::to_arrow(&batch).unwrap();
-        let props = WriterProperties::builder().set_max_row_group_size(2).build();
+        let props = WriterProperties::builder().set_max_row_group_row_count(Some(2)).build();
         let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
             arrow.schema(), Some(props)).unwrap();
         writer.write(&arrow).unwrap();
@@ -608,7 +608,7 @@ mod combined_parquet_scan_pushdown_regressions {
             Value::Boolean(n % 2 == 0),
         ]).collect()).unwrap();
         let record = crate::arrow_bridge::to_arrow(&input).unwrap();
-        let props = WriterProperties::builder().set_max_row_group_size(2).build();
+        let props = WriterProperties::builder().set_max_row_group_row_count(Some(2)).build();
         let mut writer = ArrowWriter::try_new(
             File::create(&path).unwrap(), record.schema(), Some(props)).unwrap();
         writer.write(&record).unwrap();
