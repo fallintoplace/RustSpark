@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, hash::{Hash, Hasher}};
+use std::{borrow::Cow, collections::{HashMap, HashSet}, hash::{Hash, Hasher}};
 
 use crate::{
     batch::Batch,
@@ -89,8 +89,11 @@ impl State {
     }
 
     fn update(&mut self, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
-        let value = match op {
-            AggregateOp::CountAll => Value::Integer(1),
+        // Direct column aggregates can borrow the typed cell. Only computed
+        // expressions must own a temporary. COUNT and duplicate DISTINCT
+        // rows should never clone large TEXT values just to inspect them.
+        let value: Cow<'_, Value> = match op {
+            AggregateOp::CountAll => Cow::Owned(Value::Integer(1)),
             AggregateOp::Count(expr)
             | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr)
@@ -98,7 +101,11 @@ impl State {
             | AggregateOp::Avg(expr)
             | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr)
-            | AggregateOp::Max(expr) => expr.evaluate(batch, row)?,
+            | AggregateOp::Max(expr) => match expr {
+                Expr::Column(name) =>
+                    Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
+                _ => Cow::Owned(expr.evaluate(batch, row)?),
+            },
         };
         match self {
             Self::Count(count) => {
@@ -109,12 +116,12 @@ impl State {
                 }
             }
             Self::CountDistinct { seen, bytes } => {
-                if !value.is_null() && !seen.contains(&value) {
+                if !value.is_null() && !seen.contains(value.as_ref()) {
                     if seen.len() >= MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP {
                         return Err(Error::Execution("COUNT DISTINCT key budget exceeded".into()));
                     }
                     let footprint = 64usize.saturating_add(std::mem::size_of::<Value>())
-                        .saturating_add(match &value {
+                        .saturating_add(match value.as_ref() {
                             Value::Text(text) => text.len(),
                             _ => 0,
                         });
@@ -122,25 +129,25 @@ impl State {
                         .filter(|size| *size <= 64 * 1024 * 1024)
                         .ok_or_else(|| Error::Execution(
                             "COUNT DISTINCT byte budget exceeded".into()))?;
-                    seen.insert(value);
+                    seen.insert(value.into_owned());
                     *bytes = total;
                 }
             }
-            Self::Sum(total) => add_sum(total, &value)?,
+            Self::Sum(total) => add_sum(total, value.as_ref())?,
             Self::SumDistinct { seen, total } => {
-                if !value.is_null() && !seen.contains(&value) {
+                if !value.is_null() && !seen.contains(value.as_ref()) {
                     check_distinct_budget(seen)?;
-                    add_sum(total, &value)?;
-                    seen.insert(value);
+                    add_sum(total, value.as_ref())?;
+                    seen.insert(value.into_owned());
                 }
             }
             Self::Avg { sum, compensation, count } =>
-                add_avg(sum, compensation, count, &value)?,
+                add_avg(sum, compensation, count, value.as_ref())?,
             Self::AvgDistinct { seen, sum, compensation, count } => {
-                if !value.is_null() && !seen.contains(&value) {
+                if !value.is_null() && !seen.contains(value.as_ref()) {
                     check_distinct_budget(seen)?;
-                    add_avg(sum, compensation, count, &value)?;
-                    seen.insert(value);
+                    add_avg(sum, compensation, count, value.as_ref())?;
+                    seen.insert(value.into_owned());
                 }
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
@@ -165,6 +172,40 @@ impl State {
                 value.unwrap_or(Value::Null)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod borrowed_aggregate_cells_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn text_aggregates_and_computed_numeric_expressions_agree() {
+        let huge = "x".repeat(32 * 1024);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("label", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text(format!("z{huge}")), Value::Integer(2)],
+            vec![Value::Text(format!("z{huge}")), Value::Integer(3)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text(format!("a{huge}")), Value::Integer(4)],
+        ]).unwrap();
+        let items = vec![
+            AggregateItem { op: AggregateOp::Count(Expr::Column("label".into())), alias: "count".into() },
+            AggregateItem { op: AggregateOp::CountDistinct(Expr::Column("label".into())), alias: "unique".into() },
+            AggregateItem { op: AggregateOp::Min(Expr::Column("label".into())), alias: "min".into() },
+            AggregateItem { op: AggregateOp::Max(Expr::Column("label".into())), alias: "max".into() },
+            AggregateItem { op: AggregateOp::Sum(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)))), alias: "total".into() },
+        ];
+        assert_eq!(aggregate(&batch, &[], &items).unwrap().row(0).unwrap(), vec![
+            Value::Integer(3), Value::Integer(2),
+            Value::Text(format!("a{huge}")), Value::Text(format!("z{huge}")),
+            Value::Integer(14),
+        ]);
     }
 }
 
@@ -223,7 +264,7 @@ fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value
     Ok(())
 }
 
-fn update_extreme(current: &mut Option<Value>, value: Value, minimum: bool) -> Result<()> {
+fn update_extreme(current: &mut Option<Value>, value: Cow<'_, Value>, minimum: bool) -> Result<()> {
     if value.is_null() {
         return Ok(());
     }
@@ -232,10 +273,10 @@ fn update_extreme(current: &mut Option<Value>, value: Value, minimum: bool) -> R
             .sql_compare(existing)?
             .ok_or_else(|| Error::Type("MIN/MAX cannot compare NaN".into()))?;
         if (minimum && comparison.is_lt()) || (!minimum && comparison.is_gt()) {
-            *existing = value;
+            *existing = value.into_owned();
         }
     } else {
-        *current = Some(value);
+        *current = Some(value.into_owned());
     }
     Ok(())
 }
