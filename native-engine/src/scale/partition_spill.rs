@@ -89,6 +89,9 @@ fn ensure_open(
         };
         writers[index] = Some(writer);
     } else {
+        // Consecutive writes to a hot shard are common in skewed exchanges.
+        // It is already most-recently-used, so leave the LRU untouched.
+        if order.back() == Some(&index) { return Ok(()); }
         let position = order.iter().position(|&active| active == index)
             .expect("open writer must be in LRU order");
         order.remove(position);
@@ -579,5 +582,29 @@ mod reusable_sparse_partition_buffers_tests {
         }
         drop(files);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod repeated_shard_lru_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_hot_shard_writes_keep_unique_lru_entries() {
+        let schema = Schema::new(vec![]).unwrap();
+        let directory = std::env::temp_dir();
+        let path = directory.join(format!("rustspark-hot-lru-{}-{}.rspill",
+            std::process::id(), PARTITION_ID.fetch_add(1, Ordering::Relaxed)));
+        let mut writers = vec![None];
+        let mut order = VecDeque::new();
+        let mut initialized = vec![false];
+        let paths = [path.clone()];
+        for _ in 0..128 {
+            ensure_open(&mut writers, &mut order, &mut initialized,
+                &paths, &schema, 0).unwrap();
+            assert_eq!(order.iter().copied().collect::<Vec<_>>(), vec![0]);
+        }
+        writers[0].take().unwrap().finish().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }
