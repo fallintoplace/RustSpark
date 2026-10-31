@@ -59,7 +59,7 @@ def validate_params(body: bytes) -> dict[str, str]:
     for name, typed_value in params.items():
         if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
             raise ValueError("Invalid parameter name")
-        if not isinstance(typed_value, str) or ":" not in typed_value or len(typed_value) > 8192:
+        if not isinstance(typed_value, str) or ":" not in typed_value or len(typed_value.encode("utf-8")) > 8192:
             raise ValueError("Parameters must be typed strings such as int64:123")
     return params
 
