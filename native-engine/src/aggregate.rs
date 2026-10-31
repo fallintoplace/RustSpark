@@ -406,16 +406,20 @@ pub fn aggregate_with_limits(
         Expr::Column(name) => Ok(Some(batch.column(batch.schema().column(name)?)?)),
         _ => Ok(None),
     }).collect::<Result<Vec<_>>>()?;
+    // Reuse the key vector for repeated groups rather than allocating one
+    // temporary vector per row in the common GROUP BY hot path.
+    let mut key = Vec::with_capacity(group_by.len());
     for row in 0..batch.num_rows() {
         let index = if group_by.is_empty() {
             0
         } else {
-            let key = group_by.iter().zip(&bound_columns)
-                .map(|((expr, _), column)| match column {
-                    Some(values) => Ok(std::borrow::Cow::Borrowed(&values[row])),
-                    None => expr.evaluate(batch, row).map(std::borrow::Cow::Owned),
-                })
-                .collect::<Result<Vec<_>>>()?;
+            key.clear();
+            for ((expr, _), column) in group_by.iter().zip(&bound_columns) {
+                key.push(match column {
+                    Some(values) => std::borrow::Cow::Borrowed(&values[row]),
+                    None => std::borrow::Cow::Owned(expr.evaluate(batch, row)?),
+                });
+            }
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             key.len().hash(&mut hasher);
             for value in &key { value.as_ref().hash(&mut hasher); }
@@ -430,7 +434,9 @@ pub fn aggregate_with_limits(
                 if groups.len() >= max_groups {
                     return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
                 }
-                let owned_key = key.into_iter().map(|value| value.into_owned())
+                // Drain only on new groups to move computed key payloads
+                // while retaining the allocated scratch vector for reuse.
+                let owned_key = key.drain(..).map(std::borrow::Cow::into_owned)
                     .collect::<Vec<_>>();
                 let bytes = group_key_state_bytes(&owned_key, items.len())?;
                 let next = retained_group_bytes.checked_add(bytes)
@@ -797,5 +803,31 @@ mod borrowed_group_key_regressions {
         assert_eq!(result.column(1).unwrap(),
             &[Value::Integer(2), Value::Integer(2),
               Value::Integer(1), Value::Integer(1)]);
+    }
+}
+
+#[cfg(test)]
+mod reused_group_key_allocation_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn repeated_wide_keys_and_new_groups_keep_exact_counts() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..1000).map(|n| vec![
+            Value::Text(format!("{}-{}", "🚀".repeat(128), n % 7))
+        ]).collect();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let result = aggregate_with_limits(&batch,
+            &[(Expr::Column("key".into()), "key".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "hits")],
+            7, 1024 * 1024).unwrap();
+        assert_eq!(result.num_rows(), 7);
+        for index in 0..7 {
+            assert_eq!(result.value(index, 1).unwrap(),
+                &Value::Integer(if index < 6 { 143 } else { 142 }));
+        }
     }
 }
