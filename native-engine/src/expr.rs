@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crate::{
     batch::Batch,
@@ -233,13 +233,24 @@ impl Expr {
                 Ok(Value::Boolean(if *negated { !distinct } else { distinct }))
             },
             Self::Like { value, pattern, escape } => {
-                let value = value.evaluate(batch, row)?;
-                let pattern = pattern.evaluate(batch, row)?;
-                let escaped = match escape {
-                    None => Value::Text("\\".into()),
-                    Some(expr) => expr.evaluate(batch, row)?,
+                // LIKE only reads its operands. Avoid cloning long input TEXT,
+                // patterns and ESCAPE literals for every row.
+                let borrowed = |expr: &Expr| -> Result<Cow<'_, Value>> {
+                    match expr {
+                        Expr::Column(name) => Ok(Cow::Borrowed(
+                            batch.value(row, batch.schema().column(name)?)?
+                        )),
+                        Expr::Literal(value) => Ok(Cow::Borrowed(value)),
+                        expr => Ok(Cow::Owned(expr.evaluate(batch, row)?)),
+                    }
                 };
-                match (value, pattern, escaped) {
+                let value = borrowed(value)?;
+                let pattern = borrowed(pattern)?;
+                let escaped = match escape {
+                    None => Cow::Owned(Value::Text("\\".into())),
+                    Some(expr) => borrowed(expr)?,
+                };
+                match (value.as_ref(), pattern.as_ref(), escaped.as_ref()) {
                     (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) =>
                         Ok(Value::Null),
                     (Value::Text(value), Value::Text(pattern), Value::Text(escape)) => {
@@ -249,7 +260,7 @@ impl Expr {
                         if chars.next().is_some() {
                             return Err(Error::Type("LIKE ESCAPE must be one character".into()));
                         }
-                        Ok(Value::Boolean(sql_like_escape(&value, &pattern, escape)?))
+                        Ok(Value::Boolean(sql_like_escape(value, pattern, escape)?))
                     }
                     _ => Err(Error::Type("LIKE and ESCAPE require text values".into())),
                 }
@@ -862,5 +873,46 @@ mod streaming_like_matcher_tests {
             .to_string().contains("work budget"));
         assert!(sql_like(&huge, "a%").unwrap());
         assert!(sql_like(&"é🙂".repeat(5_000), "é%🙂").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_like_operands_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn unicode_wide_text_escaped_wildcards_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("body", DataType::Text, true),
+            Field::new("pattern", DataType::Text, true),
+        ]).unwrap();
+        let long = "é🙂".repeat(40_000);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(format!("start{long}finish")), Value::Text("start%finish".into())],
+            vec![Value::Text("a_b".into()), Value::Text("a\\_b".into())],
+            vec![Value::Null, Value::Text("%".into())],
+            vec![Value::Text("x".into()), Value::Null],
+        ]).unwrap();
+        let like = Expr::Like {
+            value: Box::new(Expr::Column("body".into())),
+            pattern: Box::new(Expr::Column("pattern".into())),
+            escape: None,
+        };
+        assert_eq!(like.evaluate(&batch, 0).unwrap(), Value::Boolean(true));
+        assert_eq!(like.evaluate(&batch, 1).unwrap(), Value::Boolean(true));
+        assert_eq!(like.evaluate(&batch, 2).unwrap(), Value::Null);
+        assert_eq!(like.evaluate(&batch, 3).unwrap(), Value::Null);
+        let escaped = Expr::Like {
+            value: Box::new(Expr::Literal(Value::Text("a_b".into()))),
+            pattern: Box::new(Expr::Literal(Value::Text("a!_b".into()))),
+            escape: Some(Box::new(Expr::Literal(Value::Text("!".into())))),
+        };
+        assert_eq!(escaped.evaluate(&batch, 0).unwrap(), Value::Boolean(true));
+        let invalid = Expr::Like {
+            value: Box::new(Expr::Column("body".into())),
+            pattern: Box::new(Expr::Literal(Value::Text("%".into()))),
+            escape: Some(Box::new(Expr::Literal(Value::Text("xx".into())))),
+        };
+        assert!(invalid.evaluate(&batch, 0).is_err());
     }
 }
