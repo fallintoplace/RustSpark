@@ -1,5 +1,57 @@
 use super::{Function, json_path};
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
+use serde::{Deserialize, de::{IgnoredAny, MapAccess, SeqAccess, Visitor}};
+use std::fmt;
+
+// Root JSON_TYPE only needs the shape, not an allocated value tree.
+struct RootJsonType(&'static str);
+
+impl<'de> Deserialize<'de> for RootJsonType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct Classifier;
+
+        impl<'de> Visitor<'de> for Classifier {
+            type Value = RootJsonType;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NULL"))
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("BOOLEAN"))
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NUMBER"))
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NUMBER"))
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("NUMBER"))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Self::Value, E> {
+                Ok(RootJsonType("STRING"))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RootJsonType("ARRAY"))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                while map.next_entry::<String, IgnoredAny>()?.is_some() {}
+                Ok(RootJsonType("OBJECT"))
+            }
+        }
+        deserializer.deserialize_any(Classifier)
+    }
+}
+
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
@@ -10,25 +62,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         path
     } else { "$" };
     if path == "$" {
-        // A valid JSON document's first token determines its root type.
-        // Validate all syntax without allocating the nested value tree.
         if text.len() > 16 * 1024 * 1024 {
-            return Err(crate::Error::Execution("native JSON input exceeds 16 MiB".into()));
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
         }
-        serde_json::from_str::<serde::de::IgnoredAny>(text)
-            .map_err(|error| crate::Error::Execution(format!(
-                "invalid native JSON input: {error}"
-            )))?;
-        let kind = match text.trim_start().as_bytes()[0] {
-            b'{' => "OBJECT",
-            b'[' => "ARRAY",
-            b'"' => "STRING",
-            b't' | b'f' => "BOOLEAN",
-            b'n' => "NULL",
-            b'-' | b'0'..=b'9' => "NUMBER",
-            _ => unreachable!("validated JSON has a known root token"),
-        };
-        return Ok(Value::Text(kind.into()));
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let RootJsonType(label) = RootJsonType::deserialize(&mut deserializer)
+            .and_then(|value| deserializer.end().map(|()| value))
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Text(label.into()));
     }
     let document = json_path::parse(text)?;
     let Some(found) = json_path::lookup(Some(&document), path)? else { return Ok(Value::Null); };
@@ -155,34 +196,38 @@ mod json_depth_wide_object_tests {
 }
 
 #[cfg(test)]
-mod streaming_json_type_root_tests {
+mod streaming_root_json_type_tests {
     use super::*;
 
     #[test]
-    fn classifies_all_valid_root_json_tokens() {
-        for (input, kind) in [
-            ("null", "NULL"), ("false", "BOOLEAN"), ("true", "BOOLEAN"),
-            ("0", "NUMBER"), ("-2.5e+2", "NUMBER"),
-            (r#""café🙂""#, "STRING"), ("[]", "ARRAY"), ("{}", "OBJECT"),
-        ] {
-            assert_eq!(evaluate(&[Value::Text(format!(" \n{input}\t"))]).unwrap(),
-                Value::Text(kind.into()));
-        }
-        let large = format!("[{}]", vec![r#"{"a":[1,2,{"b":"é"}]}"#; 15_000].join(","));
-        assert_eq!(evaluate(&[Value::Text(large)]).unwrap(),
+    fn classifies_large_root_arrays_and_objects_without_materialization() {
+        let array = format!("[{}]", vec![r#"{"data":[1,2,"🙂"]}"#; 10_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(array)]).unwrap(),
             Value::Text("ARRAY".into()));
+        let object = format!(r#"{{"items":[{}],"meta":{{"key":"é"}}}}"#,
+            vec!["null"; 20_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(object)]).unwrap(),
+            Value::Text("OBJECT".into()));
+        for (text, expected) in [
+            ("null", "NULL"), ("false", "BOOLEAN"), ("42", "NUMBER"),
+            ("-1.5e3", "NUMBER"), (r#""é🙂""#, "STRING"),
+            ("[]", "ARRAY"), ("{}", "OBJECT"),
+        ] {
+            assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(),
+                Value::Text(expected.into()));
+        }
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 
     #[test]
-    fn validates_full_document_and_preserves_nested_paths() {
-        for invalid in ["", "[1] trailing", r#"{"ok":true,"bad":[}"#, "tru"] {
-            assert!(matches!(evaluate(&[Value::Text(invalid.into())]),
-                Err(crate::Error::Execution(_))));
+    fn rejects_invalid_json_and_keeps_nested_path_behavior() {
+        for invalid in ["[1,INVALID]", "{\"a\":1} trailing", "{bad}", ""] {
+            assert!(evaluate(&[Value::Text(invalid.into())]).is_err(),
+                "{invalid}");
         }
-        assert_eq!(evaluate(&[
-            Value::Text(r#"{"obj":{"x":1}}"#.into()),
-            Value::Text("$.obj".into()),
-        ]).unwrap(), Value::Text("OBJECT".into()));
-        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("[1,\"x\"]".into()),
+            Value::Text("$[1]".into())]).unwrap(), Value::Text("STRING".into()));
+        assert_eq!(evaluate(&[Value::Text("[1,\"x\"]".into()),
+            Value::Text("$[99]".into())]).unwrap(), Value::Null);
     }
 }
