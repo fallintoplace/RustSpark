@@ -163,7 +163,7 @@ class TypedParameterAdmissionTests(unittest.TestCase):
         }), [])
 
 
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_utf8_typed_parameter_budget_is_measured_in_bytes(self, run):
         client = RustSpark()
         with self.assertRaisesRegex(ValueError, "bounded"):
