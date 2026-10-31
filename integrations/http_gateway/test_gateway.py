@@ -30,6 +30,14 @@ class GatewayTests(unittest.TestCase):
                 validate_params(body)
 
 
+    def test_multibyte_parameters_obey_utf8_byte_budget(self):
+        accepted = {"params": {"name": "utf8:" + "é" * 4093}}
+        rejected = {"params": {"name": "utf8:" + "é" * 4094}}
+        self.assertEqual(validate_params(json.dumps(accepted).encode("utf-8")),
+                         accepted["params"])
+        with self.assertRaisesRegex(ValueError, "typed strings"):
+            validate_params(json.dumps(rejected, ensure_ascii=False).encode("utf-8"))
+
     def test_duplicate_json_request_keys_are_not_accepted(self):
         for body in (
             b'{"params":{"id":"int64:1","id":"int64:2"}}',
