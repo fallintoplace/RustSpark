@@ -26,8 +26,43 @@ fn expression_nullable(expression: &Expr, schema: &Schema) -> Result<bool> {
         Expr::Column(name) => Ok(schema.field(schema.column(name)?)?.nullable),
         Expr::Literal(value) => Ok(value.is_null()),
         Expr::IsNull(_) | Expr::IsDistinctFrom { .. } => Ok(false),
+        Expr::Not(inner) if matches!(inner.as_ref(),
+            Expr::IsNull(_) | Expr::IsDistinctFrom { .. }) => Ok(false),
         _ => Ok(true),
     }
+}
+
+/// Bind predicates on a source column once, rather than cloning each
+/// TEXT scalar and resolving its name again for every projected row.
+fn bound_null_test<'a>(
+    batch: &'a Batch, expression: &Expr,
+) -> Result<Option<(&'a [Value], bool)>> {
+    let (inner, is_null) = match expression {
+        Expr::IsNull(inner) => (inner.as_ref(), true),
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::IsNull(column) => (column.as_ref(), false),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let Expr::Column(name) = inner else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    Ok(Some((batch.column(index)?, is_null)))
+}
+
+fn bound_distinct_comparison<'a>(
+    batch: &'a Batch, expression: &'a Expr,
+) -> Result<Option<(&'a [Value], &'a Value, bool)>> {
+    let Expr::IsDistinctFrom { left, right, negated } = expression else {
+        return Ok(None);
+    };
+    let (name, literal) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(name), Expr::Literal(value)) |
+        (Expr::Literal(value), Expr::Column(name)) => (name, value),
+        _ => return Ok(None),
+    };
+    let index = batch.schema().column(name)?;
+    Ok(Some((batch.column(index)?, literal, *negated)))
 }
 
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
@@ -53,6 +88,22 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
             column.extend_from_slice(batch.column(index)?);
         } else if let Expr::Literal(value) = &selection.expression {
             column.resize(batch.num_rows(), value.clone());
+        } else if let Some((values, is_null)) =
+            bound_null_test(batch, &selection.expression)? {
+            column.extend(values.iter().map(|value|
+                Value::Boolean(value.is_null() == is_null)));
+        } else if let Some((values, literal, negated)) =
+            bound_distinct_comparison(batch, &selection.expression)? {
+            for value in values {
+                let distinct = match (value.is_null(), literal.is_null()) {
+                    (true, true) => false,
+                    (true, false) | (false, true) => true,
+                    (false, false) => value.sql_equal(literal)?
+                        .map(|equal| !equal)
+                        .unwrap_or_else(|| value != literal),
+                };
+                column.push(Value::Boolean(if negated { !distinct } else { distinct }));
+            }
         } else {
             for row in 0..batch.num_rows() {
                 column.push(selection.expression.evaluate(batch, row)?);
@@ -346,5 +397,72 @@ mod projection_fast_paths_perf_tests {
             vec![Value::Null, Value::Null, Value::Integer(7), Value::Null],
         ]);
         assert_eq!(project(&Batch::empty(input.schema().clone()), &selections).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_projection_predicate_regressions {
+    use super::*;
+
+    #[test]
+    fn large_nullable_text_predicates_match_scalar_evaluation() {
+        let schema = Schema::new(vec![
+            Field::new("message", crate::schema::DataType::Text, true),
+        ]).unwrap();
+        let wide = "🍕".repeat(4096);
+        let rows = (0..201).map(|n| vec![
+            if n % 11 == 0 { Value::Null }
+            else if n % 7 == 0 { Value::Text("other".into()) }
+            else { Value::Text(wide.clone()) },
+        ]).collect();
+        let source = Batch::from_rows(schema, rows).unwrap();
+        let col = || Expr::Column("message".into());
+        let selections = vec![
+            Selection::new(Expr::IsNull(Box::new(col())), "isnull"),
+            Selection::new(Expr::Not(Box::new(Expr::IsNull(Box::new(col())))), "notnull"),
+            Selection::new(Expr::IsDistinctFrom {
+                left: Box::new(col()), right: Box::new(Expr::Literal(Value::Text(wide.clone()))),
+                negated: false,
+            }, "distinct"),
+            Selection::new(Expr::IsDistinctFrom {
+                left: Box::new(Expr::Literal(Value::Text(wide))),
+                right: Box::new(col()), negated: true,
+            }, "same"),
+            Selection::new(Expr::IsDistinctFrom {
+                left: Box::new(col()), right: Box::new(Expr::Literal(Value::Null)),
+                negated: false,
+            }, "notnull_distinct"),
+        ];
+        let actual = project(&source, &selections).unwrap();
+        for (position, selection) in selections.iter().enumerate() {
+            assert_eq!(actual.schema().field(position).unwrap().nullable, false);
+            for row in 0..source.num_rows() {
+                assert_eq!(actual.value(row, position).unwrap(),
+                    &selection.expression.evaluate(&source, row).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn floating_distinct_comparison_keeps_nan_and_signed_zero_semantics() {
+        let schema = Schema::new(vec![
+            Field::new("key", crate::schema::DataType::Float, true),
+        ]).unwrap();
+        let data = Batch::from_rows(schema, vec![
+            vec![Value::Float(f64::NAN)],
+            vec![Value::Float(-0.0)],
+            vec![Value::Float(0.0)],
+            vec![Value::Null],
+        ]).unwrap();
+        let expression = Expr::IsDistinctFrom {
+            left: Box::new(Expr::Column("key".into())),
+            right: Box::new(Expr::Literal(Value::Float(0.0))),
+            negated: false,
+        };
+        let projected = project(&data, &[Selection::new(expression, "distinct")]).unwrap();
+        assert_eq!(projected.column(0).unwrap(), &[
+            Value::Boolean(true), Value::Boolean(false),
+            Value::Boolean(false), Value::Boolean(true),
+        ]);
     }
 }
