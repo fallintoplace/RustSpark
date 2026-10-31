@@ -179,32 +179,41 @@ impl<R: BufRead> CsvStream<R> {
 }
 
 impl<R: BufRead> CsvStream<R> {
-    fn read_row(&mut self) -> Result<Option<Vec<Value>>> {
-        let Some(fields) = self.records.record()? else { return Ok(None); };
+    // Reuse one row buffer per output batch, then drain its cells directly
+    // into columns. Avoid allocating a Vec<Value> for every CSV record.
+    fn read_row_into(&mut self, row: &mut Vec<Value>) -> Result<bool> {
+        let Some(fields) = self.records.record()? else { return Ok(false); };
         if fields.len() != self.schema.len() {
             return Err(Error::Parse("CSV row width differs from header".into()));
         }
-        fields.into_iter().zip(self.schema.fields()).map(|(text, field)| {
-            if text.is_empty() { return Ok(Value::Null); }
-            match field.data_type {
-                DataType::Text => Ok(Value::Text(text)),
-                DataType::Boolean if text.eq_ignore_ascii_case("true") =>
-                    Ok(Value::Boolean(true)),
-                DataType::Boolean if text.eq_ignore_ascii_case("false") =>
-                    Ok(Value::Boolean(false)),
-                DataType::Boolean => Err(Error::Parse("invalid boolean in CSV stream".into())),
-                DataType::Integer => text.parse::<i64>().map(Value::Integer)
-                    .map_err(|_| Error::Parse("invalid integer in CSV stream".into())),
-                DataType::Float => {
-                    let value = text.parse::<f64>()
-                        .map_err(|_| Error::Parse("invalid float in CSV stream".into()))?;
-                    if !value.is_finite() {
-                        return Err(Error::Parse("nonfinite float in CSV stream".into()));
+        row.clear();
+        for (text, field) in fields.into_iter().zip(self.schema.fields()) {
+            let value = if text.is_empty() {
+                Value::Null
+            } else {
+                match field.data_type {
+                    DataType::Text => Value::Text(text),
+                    DataType::Boolean if text.eq_ignore_ascii_case("true") =>
+                        Value::Boolean(true),
+                    DataType::Boolean if text.eq_ignore_ascii_case("false") =>
+                        Value::Boolean(false),
+                    DataType::Boolean =>
+                        return Err(Error::Parse("invalid boolean in CSV stream".into())),
+                    DataType::Integer => Value::Integer(text.parse::<i64>()
+                        .map_err(|_| Error::Parse("invalid integer in CSV stream".into()))?),
+                    DataType::Float => {
+                        let value = text.parse::<f64>()
+                            .map_err(|_| Error::Parse("invalid float in CSV stream".into()))?;
+                        if !value.is_finite() {
+                            return Err(Error::Parse("nonfinite float in CSV stream".into()));
+                        }
+                        Value::Float(value)
                     }
-                    Ok(Value::Float(value))
                 }
-            }
-        }).collect::<Result<Vec<_>>>().map(Some)
+            };
+            row.push(value);
+        }
+        Ok(true)
     }
 
     fn next_with_byte_budget(&mut self, byte_budget: usize) -> Option<Result<Batch>> {
@@ -213,17 +222,22 @@ impl<R: BufRead> CsvStream<R> {
             self.exhausted = true;
             return Some(Err(error));
         }
-        let mut rows = Vec::with_capacity(self.batch_rows.min(1_024));
+        let mut columns = (0..self.schema.len()).map(|_|
+            Vec::with_capacity(self.batch_rows.min(1_024))
+        ).collect::<Vec<_>>();
+        let mut row = Vec::with_capacity(self.schema.len());
+        let mut row_count = 0usize;
         let mut used = 0usize;
         let row_width = self.schema.len().saturating_mul(std::mem::size_of::<Value>());
         for _ in 0..self.batch_rows.min(65_536) {
-            let next = if let Some(row) = self.pending_row.take() {
-                Ok(Some(row))
+            let next = if let Some(pending) = self.pending_row.take() {
+                row = pending;
+                Ok(true)
             } else {
-                self.read_row()
+                self.read_row_into(&mut row)
             };
             match next {
-                Ok(Some(row)) => {
+                Ok(true) => {
                     let row_bytes = row.iter().fold(row_width, |total, value|
                         total.saturating_add(match value {
                             Value::Text(text) => text.len(), _ => 0,
@@ -231,26 +245,29 @@ impl<R: BufRead> CsvStream<R> {
                     );
                     if row_bytes > byte_budget {
                         let error = Error::Execution("CSV row exceeds batch byte budget".into());
-                        if rows.is_empty() {
+                        if row_count == 0 {
                             self.exhausted = true;
                             return Some(Err(error));
                         }
                         self.pending_error = Some(error);
                         break;
                     }
-                    if !rows.is_empty() && used.saturating_add(row_bytes) > byte_budget {
+                    if row_count != 0 && used.saturating_add(row_bytes) > byte_budget {
                         self.pending_row = Some(row);
                         break;
                     }
                     used += row_bytes;
-                    rows.push(row);
+                    row_count += 1;
+                    for (column, value) in columns.iter_mut().zip(row.drain(..)) {
+                        column.push(value);
+                    }
                 }
-                Ok(None) => {
+                Ok(false) => {
                     self.exhausted = true;
                     break;
                 }
                 Err(error) => {
-                    if rows.is_empty() {
+                    if row_count == 0 {
                         self.exhausted = true;
                         return Some(Err(error));
                     }
@@ -259,8 +276,10 @@ impl<R: BufRead> CsvStream<R> {
                 }
             }
         }
-        if rows.is_empty() { return None; }
-        let result = Batch::from_rows(self.schema.clone(), rows);
+        if row_count == 0 { return None; }
+        // Preserve nullable and type validation while skipping row-major
+        // buffering and a second row-to-column transposition.
+        let result = Batch::new_with_row_count(self.schema.clone(), columns, row_count);
         if result.is_err() { self.exhausted = true; }
         Some(result)
     }
@@ -491,5 +510,39 @@ mod buffered_csv_record_boundary_tests {
         assert_eq!(rows[0].rows().unwrap(), vec![
             vec![Value::Text(long)], vec![Value::Text("small".into())]
         ]);
+    }
+}
+
+#[cfg(test)]
+mod column_direct_csv_batch_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn large_nullable_quoted_rows_match_across_batch_boundaries() {
+        let mut csv = String::from("id,payload,flag\\n");
+        let mut expected = Vec::new();
+        for n in 0..257 {
+            let text = if n % 11 == 0 { String::new() } else {
+                format!("payload-{n}-{}", "é".repeat(32))
+            };
+            csv.push_str(&format!("{n},\\\"{text}\\\",{}\\n", n % 2 == 0));
+            expected.push(vec![
+                Value::Integer(n),
+                if text.is_empty() { Value::Null } else { Value::Text(text) },
+                Value::Boolean(n % 2 == 0),
+            ]);
+        }
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+            Field::new("flag", DataType::Boolean, false),
+        ]).unwrap();
+        for batch_rows in [1, 7, 64, 500] {
+            let batches = CsvStream::new_typed(Cursor::new(csv.as_bytes()), batch_rows, 4096,
+                schema.clone()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+            let rows = batches.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
     }
 }
