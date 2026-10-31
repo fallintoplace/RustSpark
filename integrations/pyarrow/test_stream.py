@@ -132,5 +132,44 @@ class NamedInputTextPathTests(unittest.TestCase):
         self.assertIn("events=events.json", build_command("SELECT 1", json_tables={"events": "events.json"}))
 
 
+class ArrowStreamDeadlineTests(unittest.TestCase):
+    def test_rejects_invalid_process_deadlines_before_spawning(self):
+        for invalid in (0, -1, True, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "process_timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=invalid))
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
+    def test_stream_deadline_kills_child_group_while_decoder_is_blocked(self):
+        import threading
+        wake = threading.Event()
+
+        class FakeProcess:
+            pid = 123456
+            stdout = io.BytesIO()
+            def poll(self): return None
+            def wait(self, timeout=None): return -9
+
+        class BlockingReader:
+            def __iter__(self):
+                if not wake.wait(1):
+                    raise AssertionError("deadline did not stop blocked Arrow decode")
+                raise RuntimeError("IPC reader aborted after child exit")
+
+        arrow = SimpleNamespace(ipc=SimpleNamespace(
+            open_stream=lambda stream: nullcontext(BlockingReader())
+        ))
+
+        def signal_group(pid, signo):
+            self.assertEqual((pid, signo), (123456, signal.SIGKILL))
+            wake.set()
+
+        with patch.dict(sys.modules, {"pyarrow": arrow}), \
+             patch("stream.subprocess.Popen", return_value=FakeProcess()), \
+             patch("stream.os.killpg", side_effect=signal_group) as kill_group:
+            with self.assertRaisesRegex(TimeoutError, "process timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=0.02))
+            self.assertGreaterEqual(kill_group.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
