@@ -128,7 +128,7 @@ class RustSpark:
         for name in sorted(params):
             typed_value = params[name]
             if (not isinstance(typed_value, str)
-                or ":" not in typed_value or len(typed_value) > 8192):
+                or ":" not in typed_value or len(typed_value.encode("utf-8")) > 8192):
                 raise ValueError(f"Use bounded type:value for parameter {name!r}")
             command.extend(["--named-param", f"{name}={typed_value}"])
         if max_rows is not None:

@@ -163,6 +163,19 @@ class TypedParameterAdmissionTests(unittest.TestCase):
         }), [])
 
 
+    @patch("rustspark_local.subprocess.run")
+    def test_utf8_typed_parameter_budget_is_measured_in_bytes(self, run):
+        client = RustSpark()
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            client.query("SELECT 1", named_params={"payload": "utf8:" + "é" * 4094})
+        run.assert_not_called()
+        run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        self.assertEqual(client.query(
+            "SELECT 1", named_params={"payload": "utf8:" + "é" * 4093}
+        ), [])
+        argv = run.call_args.args[0]
+        self.assertIn("payload=" + "utf8:" + "é" * 4093, argv)
+
     def test_named_table_paths_are_nonempty_text_paths(self):
         for path in ("", b"/tmp/events.json", 17):
             with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Named source paths"):
