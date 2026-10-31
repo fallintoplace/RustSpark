@@ -58,6 +58,7 @@ mod tests {
 #[cfg(test)]
 mod direct_limit_slice_tests {
     use super::*;
+    use crate::scalar::Value;
     use crate::schema::{DataType, Field, Schema};
 
     #[test]

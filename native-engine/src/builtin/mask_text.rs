@@ -29,6 +29,22 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let digits = replacement(args, 3, Some('n'))?;
     let others = replacement(args, 4, None)?;
     let mut result = String::with_capacity(input.len());
+    if input.is_ascii() {
+        for &byte in input.as_bytes() {
+            let original = char::from(byte);
+            let selected = match byte {
+                b'A'..=b'Z' => uppercase.unwrap_or(original),
+                b'a'..=b'z' => lowercase.unwrap_or(original),
+                b'0'..=b'9' => digits.unwrap_or(original),
+                _ => others.unwrap_or(original),
+            };
+            if selected.len_utf8() > MAX_OUTPUT.saturating_sub(result.len()) {
+                return Err(Error::Execution("MASK output exceeds 16 MiB budget".into()));
+            }
+            result.push(selected);
+        }
+        return Ok(Value::Text(result));
+    }
     for character in input.chars() {
         let substitution = if character.is_uppercase() {
             uppercase
@@ -96,5 +112,27 @@ mod tests {
         assert!(evaluate(&[huge, text("🙂")]).is_ok());
         let huge = text(&"A".repeat(MAX_OUTPUT / 4 + 1));
         assert!(evaluate(&[huge, text("🙂")]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ascii_mask_classifier_regressions {
+    use super::*;
+
+    #[test]
+    fn classifies_ascii_and_handles_unicode_replacement_growth() {
+        let input = Value::Text("Aa1-+? ".repeat(3000));
+        assert_eq!(evaluate(&[input]).unwrap(),
+            Value::Text("Xxn-+? ".repeat(3000)));
+        assert_eq!(evaluate(&[
+            Value::Text("Aa1!".into()), Value::Text("🙂".into()),
+            Value::Text("é".into()), Value::Null, Value::Text("界".into()),
+        ]).unwrap(), Value::Text("🙂é1界".into()));
+        assert!(matches!(evaluate(&[
+            Value::Text("A".repeat(MAX_OUTPUT / 4 + 1)),
+            Value::Text("🙂".into()),
+        ]), Err(Error::Execution(_))));
+        assert_eq!(evaluate(&[Value::Text("é🙂".into())]).unwrap(),
+            Value::Text("x🙂".into()));
     }
 }

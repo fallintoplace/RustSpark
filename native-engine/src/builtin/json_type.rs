@@ -33,31 +33,18 @@ fn json_depth(args: &[Value]) -> Result<Value> {
     if !matches!(document, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
         return Ok(Value::Integer(1));
     }
-    let mut nodes = vec![(&document, 1_i64)];
-    let mut maximum = 0_i64;
-    while let Some((node, depth)) = nodes.pop() {
-        maximum = maximum.max(depth);
+    // serde_json enforces a bounded nesting depth while parsing. Visit that
+    // tree directly instead of allocating a heap stack for each wide object.
+    fn depth(node: &serde_json::Value) -> i64 {
         match node {
-            serde_json::Value::Array(items) => {
-                for child in items {
-                    maximum = maximum.max(depth + 1);
-                    if matches!(child, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
-                        nodes.push((child, depth + 1));
-                    }
-                }
-            }
-            serde_json::Value::Object(fields) => {
-                for child in fields.values() {
-                    maximum = maximum.max(depth + 1);
-                    if matches!(child, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
-                        nodes.push((child, depth + 1));
-                    }
-                }
-            }
-            _ => {}
+            serde_json::Value::Array(items) =>
+                1 + items.iter().map(depth).max().unwrap_or(0),
+            serde_json::Value::Object(fields) =>
+                1 + fields.values().map(depth).max().unwrap_or(0),
+            _ => 1,
         }
     }
-    Ok(Value::Integer(maximum))
+    Ok(Value::Integer(depth(&document)))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -116,5 +103,32 @@ mod wide_json_depth_tests {
         assert_eq!(json_depth(&[Value::Text("[[1],true]".into())]).unwrap(), Value::Integer(3));
         assert_eq!(json_depth(&[Value::Text(r#"{"a":{"b":2},"c":null}"#.into())]).unwrap(),
             Value::Integer(3));
+    }
+}
+
+#[cfg(test)]
+mod json_depth_wide_object_tests {
+    use super::*;
+
+    #[test]
+    fn computes_large_wide_objects_without_heap_worklists() {
+        let flat = serde_json::json!({
+            "rows": (0..20_000).collect::<Vec<_>>(),
+            "meta": {"a": [null, {"b": true}]},
+        }).to_string();
+        assert_eq!(json_depth(&[Value::Text(flat)]).unwrap(), Value::Integer(5));
+    }
+
+    #[test]
+    fn empty_and_nested_containers_preserve_depth_semantics() {
+        for (json, expected) in [
+            ("{}", 1), ("[]", 1), ("null", 1),
+            ("[1,2]", 2), ("{\"a\":{\"b\":[{}]}}", 4),
+            ("[[], [1, [2]]]", 4),
+        ] {
+            assert_eq!(json_depth(&[Value::Text(json.into())]).unwrap(),
+                Value::Integer(expected));
+        }
+        assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
     }
 }

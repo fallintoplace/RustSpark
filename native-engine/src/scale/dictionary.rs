@@ -145,7 +145,8 @@ impl DictionaryColumn {
         // Shuffle partitions often retain the same dictionary across batches.
         // Equal tables have identical codes, so no hash map, remapping, or
         // copying of potentially large immutable strings is needed.
-        if left.dictionary == right.dictionary {
+        if Arc::ptr_eq(&left.dictionary, &right.dictionary) ||
+            left.dictionary == right.dictionary {
             if right.indices.iter().flatten().any(|&code| code as usize >= right.dictionary.len()) {
                 return Err(Error::Execution("invalid dictionary remap code".into()));
             }
@@ -158,23 +159,26 @@ impl DictionaryColumn {
                 encoded_string_bytes: left.encoded_string_bytes,
             });
         }
-        let mut dictionary = left.dictionary.as_ref().clone();
+        // Keep the left table shared until the first genuinely new key.
+        // Subset merges need only remapped codes, not cloned strings.
+        let mut dictionary: Option<Vec<String>> = None;
         let mut seen: HashMap<&str, u32> = left.dictionary.iter().enumerate()
             .map(|(index, text)| (text.as_str(), index as u32)).collect();
         let mut bytes = left.encoded_string_bytes;
         let mut mapping = Vec::with_capacity(right.dictionary.len());
         for text in right.dictionary.iter() {
-            let code = if let Some(&existing) = seen.get(text) {
+            let code = if let Some(&existing) = seen.get(text.as_str()) {
                 existing
             } else {
-                if dictionary.len() >= max_distinct {
+                let distinct = dictionary.as_ref().map_or(left.dictionary.len(), Vec::len);
+                if distinct >= max_distinct {
                     return Err(Error::Execution("dictionary combined cardinality limit exceeded".into()));
                 }
                 bytes = bytes.checked_add(text.len()).filter(|value| *value <= max_dictionary_bytes)
                     .ok_or_else(|| Error::Execution("dictionary combined byte limit exceeded".into()))?;
-                let next = u32::try_from(dictionary.len())
+                let next = u32::try_from(distinct)
                     .map_err(|_| Error::Execution("dictionary combined ID overflow".into()))?;
-                dictionary.push(text.clone());
+                dictionary.get_or_insert_with(|| left.dictionary.as_ref().clone()).push(text.clone());
                 seen.insert(text.as_str(), next);
                 next
             };
@@ -189,7 +193,10 @@ impl DictionaryColumn {
                 None => None,
             });
         }
-        Ok(Self { dictionary: Arc::new(dictionary), indices, encoded_string_bytes: bytes })
+        Ok(Self {
+            dictionary: dictionary.map(Arc::new).unwrap_or_else(|| Arc::clone(&left.dictionary)),
+            indices, encoded_string_bytes: bytes,
+        })
     }
 }
 
@@ -371,5 +378,54 @@ mod shared_dictionary_table_regressions {
         let combined = DictionaryColumn::concatenate(&a, &b, 2, 10, 2).unwrap();
         assert!(!Arc::ptr_eq(&a.dictionary, &combined.dictionary));
         assert_eq!(combined.decode().unwrap(), vec![Value::Text("a".into()), Value::Text("b".into())]);
+    }
+}
+
+#[cfg(test)]
+mod lazy_dictionary_subset_merge_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn subset_right_keys_reuse_table_and_new_keys_copy_on_write() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let make = |rows: Vec<Value>| {
+            let batch = Batch::from_rows(schema.clone(),
+                rows.into_iter().map(|value| vec![value]).collect()).unwrap();
+            DictionaryColumn::from_batch(&batch, "key", 10, 100_000, 100).unwrap()
+        };
+        let left = make(vec![
+            Value::Text("alpha".repeat(1000)),
+            Value::Text("βeta".into()),
+            Value::Text("γamma".into()),
+            Value::Null,
+        ]);
+        let right = make(vec![Value::Text("γamma".into()),
+            Value::Text("alpha".repeat(1000)), Value::Null]);
+        let joined = DictionaryColumn::concatenate(&left, &right, 10, 100_000, 100).unwrap();
+        assert!(Arc::ptr_eq(&left.dictionary, &joined.dictionary));
+        let expected = left.decode().unwrap().into_iter()
+            .chain(right.decode().unwrap()).collect::<Vec<_>>();
+        assert_eq!(joined.decode().unwrap(), expected);
+        let fresh = make(vec![Value::Text("new".into())]);
+        let grown = DictionaryColumn::concatenate(&joined, &fresh, 10, 100_000, 100).unwrap();
+        assert!(!Arc::ptr_eq(&left.dictionary, &grown.dictionary));
+        assert_eq!(grown.distinct_count(), left.distinct_count() + 1);
+        let mut expected = expected;
+        expected.push(Value::Text("new".into()));
+        assert_eq!(grown.decode().unwrap(), expected);
+    }
+
+    #[test]
+    fn subset_merge_still_rejects_corrupted_right_codes() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let make = |value: &str| DictionaryColumn::from_batch(
+            &Batch::from_rows(schema.clone(), vec![vec![Value::Text(value.into())]]).unwrap(),
+            "key", 10, 100, 10,
+        ).unwrap();
+        let left = make("alpha");
+        let mut right = make("alpha");
+        right.indices[0] = Some(42);
+        assert!(DictionaryColumn::concatenate(&left, &right, 10, 100, 10).is_err());
     }
 }

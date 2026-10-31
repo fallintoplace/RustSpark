@@ -398,6 +398,7 @@ mod elt_lazy_evaluation_tests {
 #[cfg(test)]
 mod builtin_stack_storage_regression_tests {
     use super::*;
+    use crate::schema::Field;
     #[test]
     fn builtin_scalar_calls_use_small_and_large_arity_paths() {
         let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
