@@ -53,6 +53,30 @@ impl ColumnStatistics {
                 max: max.map(Value::Integer),
             });
         }
+        if batch.schema().field(column)?.data_type == DataType::Boolean {
+            // Boolean bounds need only two flags, not per-row dynamic SQL
+            // comparisons or temporary Value clones.
+            let rows = u64::try_from(values.len())
+                .map_err(|_| Error::Execution("statistics row count overflow".into()))?;
+            let mut nulls = 0u64;
+            let mut seen_false = false;
+            let mut seen_true = false;
+            for value in values {
+                match value {
+                    Value::Null => nulls += 1,
+                    Value::Boolean(false) => seen_false = true,
+                    Value::Boolean(true) => seen_true = true,
+                    _ => unreachable!("native batch schema was validated"),
+                }
+            }
+            return Ok(Self {
+                rows, nulls,
+                min: if seen_false { Some(Value::Boolean(false)) }
+                    else if seen_true { Some(Value::Boolean(true)) } else { None },
+                max: if seen_true { Some(Value::Boolean(true)) }
+                    else if seen_false { Some(Value::Boolean(false)) } else { None },
+            });
+        }
         let mut stats = Self::default();
         for value in values { stats.observe(value)?; }
         Ok(stats)
@@ -312,5 +336,46 @@ mod invalid_input_summary_regressions {
         let mut malformed = invalid.clone();
         assert!(malformed.merge(&original).is_err());
         assert_eq!(malformed, invalid);
+    }
+}
+
+#[cfg(test)]
+mod boolean_vector_statistics_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn typed_boolean_bounds_match_incremental_reference() {
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true)]).unwrap();
+        for values in [
+            vec![],
+            vec![Value::Null, Value::Null],
+            vec![Value::Boolean(true), Value::Boolean(true)],
+            vec![Value::Boolean(false), Value::Boolean(false)],
+            vec![Value::Boolean(true), Value::Null, Value::Boolean(false), Value::Boolean(true)],
+        ] {
+            let batch = Batch::from_rows(schema.clone(),
+                values.iter().cloned().map(|value| vec![value]).collect()).unwrap();
+            let summary = ColumnStatistics::from_batch(&batch, "flag").unwrap();
+            let mut reference = ColumnStatistics::default();
+            for value in &values { reference.observe(value).unwrap(); }
+            assert_eq!(summary, reference);
+        }
+    }
+
+    #[test]
+    fn boolean_summaries_merge_without_losing_nulls_or_bounds() {
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true)]).unwrap();
+        let create = |values: Vec<Value>| Batch::from_rows(schema.clone(),
+            values.into_iter().map(|v| vec![v]).collect()).unwrap();
+        let left = create(vec![Value::Null, Value::Boolean(true)]);
+        let right = create(vec![Value::Boolean(false), Value::Null]);
+        let all = create(vec![Value::Null, Value::Boolean(true),
+            Value::Boolean(false), Value::Null]);
+        let mut merged = ColumnStatistics::from_batch(&left, "flag").unwrap();
+        merged.merge(&ColumnStatistics::from_batch(&right, "flag").unwrap()).unwrap();
+        assert_eq!(merged, ColumnStatistics::from_batch(&all, "flag").unwrap());
+        assert_eq!(merged.min, Some(Value::Boolean(false)));
+        assert_eq!(merged.max, Some(Value::Boolean(true)));
     }
 }
