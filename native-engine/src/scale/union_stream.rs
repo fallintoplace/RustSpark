@@ -231,20 +231,35 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
                     break;
                 }
-                let footprint = super::row_footprint::footprint(
-                    columns.iter().map(|column| &column[row])
+                // This row will be cloned into the hash table. The input
+                // String can reserve much more than its length, but its clone
+                // has a different capacity. Preflight the minimum retained
+                // size before allocating, then charge the actual cloned key.
+                let minimum = columns.iter().fold(
+                    64usize.saturating_add(columns.len().saturating_mul(
+                        std::mem::size_of::<crate::scalar::Value>())),
+                    |bytes, column| match &column[row] {
+                        crate::scalar::Value::Text(text) => bytes.saturating_add(text.len()),
+                        _ => bytes,
+                    },
                 );
-                let Some(next_total) = self.retained_bytes.checked_add(footprint)
-                    .filter(|&bytes| bytes <= self.max_bytes) else {
+                if self.retained_bytes.checked_add(minimum)
+                    .is_none_or(|bytes| bytes > self.max_bytes) {
                     self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
                     break;
-                };
+                }
                 let key = match batch.row(row) {
                     Ok(key) => key,
                     Err(error) => {
                         self.pending_error = Some(error);
                         break;
                     }
+                };
+                let actual = super::row_footprint::footprint(key.iter());
+                let Some(next_total) = self.retained_bytes.checked_add(actual)
+                    .filter(|&bytes| bytes <= self.max_bytes) else {
+                    self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
+                    break;
                 };
                 self.retained_bytes = next_total;
                 self.unique_keys += 1;
@@ -625,5 +640,51 @@ mod union_narrow_nullability_regression {
         );
         assert_eq!(accepted.next().unwrap().unwrap().row(0).unwrap(),
             vec![Value::Float(2.0)]);
+    }
+}
+
+#[cfg(test)]
+mod union_distinct_compact_retained_key_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn huge_input_text_capacity_does_not_consume_retained_key_budget() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let mut text = String::with_capacity(32_768);
+        text.push_str("small");
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(text)],
+            vec![Value::Text("small".into())],
+            vec![Value::Text("other".into())],
+        ]).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            [Ok(batch)].into_iter(), std::iter::empty(),
+            schema, QueryControl::default(), 4, 256,
+        ).unwrap();
+        let result = stream.next().unwrap().unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Text("small".into())],
+            vec![Value::Text("other".into())],
+        ]);
+        assert!(stream.retained_bytes <= 256);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn oversized_cloned_key_is_still_rejected_after_valid_prefix() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("ok".into())],
+            vec![Value::Text("x".repeat(1000))],
+        ]).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            [Ok(batch)].into_iter(), std::iter::empty(),
+            schema, QueryControl::default(), 5, 256,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("ok".into())]]);
+        assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
+        assert!(stream.next().is_none());
     }
 }

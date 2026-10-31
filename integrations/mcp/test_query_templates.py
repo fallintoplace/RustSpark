@@ -52,6 +52,11 @@ class TemplatesTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_query_rows(text)
 
+    def test_deeply_nested_json_result_has_a_bounded_failure(self):
+        deep = '[{"v":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            parse_query_rows(deep)
+
     def test_mixed_type_parameter_keys_are_rejected_before_sorting(self):
         for invalid in (None, 3):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "parameter name"):
@@ -71,6 +76,18 @@ class DuplicateResultKeysTests(unittest.TestCase):
 
 
 class BoundedMcpBackendTests(unittest.TestCase):
+    def test_rejects_nonfinite_or_noninteger_budgets_before_spawn(self):
+        from bounded_backend import run_bounded
+        import sys
+
+        command = [sys.executable, "-c", "print('ok')"]
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0, -1, True, "1"):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded(command, timeout=timeout, max_bytes=100)
+        for max_bytes in (float("nan"), float("inf"), 0, -1, True, 1.5, "100"):
+            with self.subTest(max_bytes=max_bytes), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded(command, timeout=1, max_bytes=max_bytes)
+
     def test_output_is_bounded_without_buffering_unlimited_backend_data(self):
         import subprocess
         import sys
@@ -85,6 +102,29 @@ class BoundedMcpBackendTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             run_bounded([sys.executable, "-c", "import time; time.sleep(2)"],
                         timeout=0.1, max_bytes=128)
+
+
+class ProcessGroupCleanupTests(unittest.TestCase):
+    def test_timeout_terminates_descendants_inheriting_the_pipe(self):
+        import os
+        import subprocess
+        import sys
+        import time
+        from bounded_backend import run_bounded
+
+        if os.name != "posix":
+            self.skipTest("process-group signaling requires POSIX")
+        script = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('started',flush=True);time.sleep(6)"
+        )
+        start = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded([sys.executable, "-c", script],
+                        timeout=0.4, max_bytes=1024)
+        self.assertLess(time.monotonic() - start, 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 //! Disk-partitioned equijoins. The build side is bounded per partition.
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -50,7 +50,9 @@ fn load_build_bounded(
     if reader.schema() != schema {
         return Err(Error::Schema("join build schema mismatch".into()));
     }
-    let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
+    // Keep the first decoded batch's owned columns as the build buffers.
+    // Small spill partitions need not allocate and refill new vectors.
+    let mut columns: Option<Vec<Vec<Value>>> = None;
     let mut rows = 0usize;
     let mut retained_bytes = 0usize;
     let fixed_row_bytes = schema.len()
@@ -78,12 +80,18 @@ fn load_build_bounded(
         // The spill reader transfers ownership of each decoded batch.
         // Move heap-backed TEXT values into the build columns rather than
         // duplicating every String after the row and byte checks succeed.
-        for (output, values) in columns.iter_mut().zip(batch.into_columns()) {
-            output.extend(values);
+        let incoming = batch.into_columns();
+        if let Some(existing) = columns.as_mut() {
+            for (output, values) in existing.iter_mut().zip(incoming) {
+                output.extend(values);
+            }
+        } else {
+            columns = Some(incoming);
         }
         rows = next_rows;
         retained_bytes = next_bytes;
     }
+    let columns = columns.unwrap_or_else(|| (0..schema.len()).map(|_| Vec::new()).collect());
     Batch::from_validated_columns(schema.clone(), columns, rows)
 }
 
@@ -143,7 +151,7 @@ where L: IntoIterator<Item = Result<Batch>>,
         }
         let id = JOIN_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-join-{}-{id}.rspill", std::process::id()));
-        let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+        let file = super::private_files::create_private(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
         // LEFT, FULL and ANTI must still visit the probe side even when
@@ -544,5 +552,40 @@ mod owned_grace_build_admission_tests {
         assert!(load_build_bounded(&path, &schema, 3, 2, 5_000,
             &QueryControl::default()).is_err());
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_first_grace_build_batch_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn handles_empty_prefix_and_moves_multiple_owned_text_batches() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-build-first-{}-{}.rspill", std::process::id(),
+            JOIN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(1024))],
+            vec![Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("tail".into())],
+        ]).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        writer.write_batch(&Batch::empty(schema.clone())).unwrap();
+        writer.write_batch(&first).unwrap();
+        writer.write_batch(&second).unwrap();
+        writer.finish().unwrap();
+        let loaded = load_build_bounded(&path, &schema, 3, 2, 100_000,
+            &QueryControl::default()).unwrap();
+        assert_eq!(loaded.rows().unwrap(), first.rows().unwrap().into_iter()
+            .chain(second.rows().unwrap()).collect::<Vec<_>>());
+        assert!(load_build_bounded(&path, &schema, 2, 2, 100_000,
+            &QueryControl::default()).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }
