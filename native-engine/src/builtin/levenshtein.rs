@@ -30,6 +30,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return i64::try_from(distance).map(Value::Integer)
             .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()));
     }
+    if let Some(limit) = threshold {
+        // Every edit changes the length by at most one Unicode scalar.
+        // Reject impossible thresholds before allocating two character arrays
+        // (potentially many MiB for long input strings).
+        let first_len = if first.is_ascii() { first.len() } else { first.chars().count() };
+        let second_len = if second.is_ascii() { second.len() } else { second.chars().count() };
+        if first_len.abs_diff(second_len) > limit {
+            return Ok(Value::Integer(-1));
+        }
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     // Removing identical edges does not change the edit distance.
@@ -213,5 +223,34 @@ mod empty_operand_edit_distance_fast_path_tests {
             Value::Integer(100_000)]).unwrap(), Value::Integer(100_000));
         assert_eq!(evaluate(&[Value::Text(String::new()),
             Value::Text(String::new())]).unwrap(), Value::Integer(0));
+    }
+}
+
+#[cfg(test)]
+mod levenshtein_threshold_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn large_length_difference_rejects_without_unicode_buffers() {
+        let long = Value::Text("é🙂".repeat(50_000));
+        let short = Value::Text("é🙂".repeat(50));
+        assert_eq!(evaluate(&[long.clone(), short.clone(), Value::Integer(3)]).unwrap(),
+            Value::Integer(-1));
+        assert_eq!(evaluate(&[short, long, Value::Integer(3)]).unwrap(),
+            Value::Integer(-1));
+    }
+
+    #[test]
+    fn equal_unicode_character_counts_still_use_edit_distance() {
+        assert_eq!(evaluate(&[
+            Value::Text("é🙂".into()),
+            Value::Text("é界".into()),
+            Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[
+            Value::Text("abc".into()),
+            Value::Text("ab".into()),
+            Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
     }
 }
