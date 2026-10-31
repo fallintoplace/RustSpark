@@ -304,7 +304,9 @@ impl<R: Read> SpillReader<R> {
                 column.push(value);
             }
         }
-        Ok(Some(Batch::new_with_row_count(self.schema.clone(), columns, rows)?))
+        // Tags, nullability, and scalar types were checked while reading
+        // each cell. Avoid validating every decoded value a second time.
+        Ok(Some(Batch::from_validated_columns(self.schema.clone(), columns, rows)?))
     }
 }
 
@@ -619,5 +621,41 @@ mod early_spill_tag_validation_regressions {
         let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
         assert!(reader.next_batch().unwrap_err().to_string().contains("schema"));
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod single_pass_spill_decode_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn decoded_values_and_zero_width_row_counts_roundtrip() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, false),
+            Field::new("value", DataType::Float, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".into()), Value::Null],
+            vec![Value::Text("abc".into()), Value::Float(-0.0)],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&input).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 3).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(input));
+        assert_eq!(reader.next_batch().unwrap(), None);
+
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let zero_width = Batch::new_with_row_count(empty_schema.clone(), vec![], 4).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), empty_schema).unwrap();
+        writer.write_batch(&zero_width).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 4).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(zero_width));
+    }
+
+    #[test]
+    fn trusted_constructor_still_rejects_mismatched_column_lengths() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
+        assert!(Batch::from_validated_columns(schema, vec![vec![]], 1).is_err());
     }
 }
