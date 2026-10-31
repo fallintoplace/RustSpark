@@ -81,6 +81,7 @@ mod len;
 mod soundex;
 mod luhn_check;
 mod quote;
+mod mask_text;
 mod cot;
 mod csc;
 mod sec;
@@ -186,6 +187,7 @@ const MODULES: &[&[Function]] = &[
     &soundex::FUNCTIONS,
     &luhn_check::FUNCTIONS,
     &quote::FUNCTIONS,
+    &mask_text::FUNCTIONS,
     &cot::FUNCTIONS,
     &csc::FUNCTIONS,
     &sec::FUNCTIONS,
