@@ -25,17 +25,22 @@ impl BloomFilter {
     }
 
     fn hash_pair(&self, key: &Value) -> (u64, u64) {
-        let mut first = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut first);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let first = hasher.finish();
+        // The Bloom layout is only local, never serialized. Derive the
+        // second probe stride with an avalanche mix rather than hashing the
+        // entire key twice, especially expensive for large text join keys.
+        // The odd stride visits independent positions in power-of-two tables.
         let step = if self.hashes > 1 {
-            let mut second = std::collections::hash_map::DefaultHasher::new();
-            1_u8.hash(&mut second);
-            key.hash(&mut second);
-            second.finish() | 1
+            let mut mixed = first.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            (mixed ^ (mixed >> 31)) | 1
         } else {
             0
         };
-        (first.finish(), step)
+        (first, step)
     }
 
     fn probe(&self, first: u64, step: u64, seed: u32) -> usize {
@@ -336,5 +341,55 @@ mod cached_bloom_occupancy_regressions {
         assert_eq!(first.bits_set(), 0);
         first.insert(&Value::Integer(5));
         verify(&first);
+    }
+}
+
+#[cfg(test)]
+mod single_hash_double_probing_tests {
+    use super::*;
+
+    #[test]
+    fn derived_stride_is_odd_and_null_numeric_and_unicode_membership_is_exact() {
+        for bits in [1, 63, 64, 65, 2048, 8191, 65_536] {
+            for hashes in [1, 2, 5, 16] {
+                let mut filter = BloomFilter::new(bits, hashes).unwrap();
+                let values = vec![
+                    Value::Null,
+                    Value::Integer(i64::MIN),
+                    Value::Integer(i64::MAX),
+                    Value::Float(-0.0),
+                    Value::Float(f64::NAN),
+                    Value::Text("é🙂東京".repeat(4096)),
+                ];
+                for value in &values {
+                    let (_, step) = filter.hash_pair(value);
+                    if hashes == 1 { assert_eq!(step, 0); }
+                    else { assert_eq!(step & 1, 1); }
+                    filter.insert(value);
+                }
+                assert!(values.iter().all(|value| filter.might_contain(value)));
+                assert!(filter.might_contain(&Value::Float(0.0)));
+                assert!(filter.might_contain(&Value::Float(-f64::NAN)));
+                let mut other = BloomFilter::new(bits, hashes).unwrap();
+                other.insert(&Value::Text("another".into()));
+                filter.union_with(&other).unwrap();
+                assert!(filter.might_contain(&Value::Text("another".into())));
+                assert!(values.iter().all(|value| filter.might_contain(value)));
+            }
+        }
+    }
+
+    #[test]
+    fn large_text_keys_hash_once_for_multiple_bloom_probes() {
+        let filter = BloomFilter::new(65_536, 7).unwrap();
+        let text = Value::Text("wide-join-payload".repeat(8192));
+        let (first, step) = filter.hash_pair(&text);
+        let mut direct = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut direct);
+        assert_eq!(first, direct.finish());
+        assert_eq!(step & 1, 1);
+        for seed in 0..7 {
+            assert!(filter.probe(first, step, seed) < 65_536);
+        }
     }
 }

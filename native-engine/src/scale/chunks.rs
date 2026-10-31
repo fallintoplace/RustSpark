@@ -82,6 +82,23 @@ where I: Iterator<Item = Result<Vec<Value>>>
                         self.pending_error = Some(error);
                         break;
                     }
+                    // Validate each incoming row before adding it to the current
+                    // batch. A late invalid cell must not discard earlier good rows
+                    // when Batch::new_with_row_count validates the final columns.
+                    if let Some(field) = self.schema.fields().iter().zip(&row)
+                        .find_map(|(field, value)| {
+                            (!field.data_type.accepts(value) ||
+                                (!field.nullable && value.is_null())).then_some(field)
+                        })
+                    {
+                        let error = Error::Type(format!("invalid value in column {}", field.name));
+                        if row_count == 0 {
+                            self.finished = true;
+                            return Some(Err(error));
+                        }
+                        self.pending_error = Some(error);
+                        break;
+                    }
                     let row_bytes = estimated_row_bytes(&row, row_width);
                     if row_bytes > self.max_batch_bytes {
                         let error = Error::Execution("row exceeds native batch byte budget".into());
@@ -334,5 +351,54 @@ mod unknown_length_batch_stream_tests {
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(output.iter().map(Batch::num_rows).sum::<usize>(), 300);
         assert_eq!(output[0].value(299, 0).unwrap(), &Value::Integer(299));
+    }
+}
+
+#[cfg(test)]
+mod late_row_type_error_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn malformed_type_reports_valid_prefix_before_terminal_error() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let rows = vec![
+            Ok(vec![Value::Integer(1), Value::Text("first".into())]),
+            Ok(vec![Value::Integer(2), Value::Null]),
+            Ok(vec![Value::Integer(3), Value::Integer(99)]),
+            Ok(vec![Value::Integer(4), Value::Text("unreachable".into())]),
+        ];
+        let polls = Rc::new(Cell::new(0usize));
+        let counter = Rc::clone(&polls);
+        let input = rows.into_iter().inspect(move |_| counter.set(counter.get() + 1));
+        let mut batches = RowBatcher::new(input, schema, 8).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("first".into())],
+            vec![Value::Integer(2), Value::Null],
+        ]);
+        assert!(batches.next().unwrap().unwrap_err().to_string().contains("payload"));
+        assert!(batches.next().is_none());
+        assert_eq!(polls.get(), 3);
+    }
+
+    #[test]
+    fn required_null_and_first_row_errors_do_not_drop_valid_prefixes() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = vec![Ok(vec![Value::Integer(9)]), Ok(vec![Value::Null])];
+        let mut batches = RowBatcher::new(input.into_iter(), schema.clone(), 16).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap().row(0).unwrap(),
+            vec![Value::Integer(9)]);
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
+
+        let mut first = RowBatcher::new(
+            [Ok(vec![Value::Text("wrong".into())])].into_iter(), schema, 16,
+        ).unwrap();
+        assert!(first.next().unwrap().is_err());
+        assert!(first.next().is_none());
     }
 }

@@ -170,70 +170,68 @@ mod tests {
  
 /// Conservative pruning across column statistics and boolean predicates.
 /// Missing statistics never cause a data partition to be discarded.
+/// Conservatively decide whether a boolean tree is impossible using a
+/// borrowed expression. Carry NOT as a flag so nested AND/OR predicates do
+/// not repeatedly clone entire expression subtrees for De Morgan rewrites.
+fn can_skip_columns_inner(
+    stats: &std::collections::HashMap<String, ColumnStatistics>,
+    predicate: &Expr, negated: bool,
+) -> bool {
+    match predicate {
+        Expr::Literal(Value::Null) => true,
+        Expr::Literal(Value::Boolean(value)) => *value == negated,
+        Expr::Not(inner) => can_skip_columns_inner(stats, inner, !negated),
+        Expr::Binary { left, op: BinaryOp::And, right } => {
+            if negated {
+                // NOT (A AND B) is NOT A OR NOT B.
+                can_skip_columns_inner(stats, left, true)
+                    && can_skip_columns_inner(stats, right, true)
+            } else {
+                can_skip_columns_inner(stats, left, false)
+                    || can_skip_columns_inner(stats, right, false)
+            }
+        }
+        Expr::Binary { left, op: BinaryOp::Or, right } => {
+            if negated {
+                // NOT (A OR B) is NOT A AND NOT B.
+                can_skip_columns_inner(stats, left, true)
+                    || can_skip_columns_inner(stats, right, true)
+            } else {
+                can_skip_columns_inner(stats, left, false)
+                    && can_skip_columns_inner(stats, right, false)
+            }
+        }
+        _ => {
+            // Only the leaf needs inversion. Build it once, not once per
+            // column or ancestor in the boolean expression tree.
+            let inverse = negated.then(|| Expr::Not(Box::new(predicate.clone())));
+            let leaf = inverse.as_ref().unwrap_or(predicate);
+            stats.iter().any(|(column, summary)| can_skip(summary, column, leaf))
+        }
+    }
+}
+
+/// Conservative pruning across column statistics and boolean predicates.
+/// Missing statistics never cause a data partition to be discarded.
 pub fn can_skip_columns(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
     predicate: &Expr,
 ) -> bool {
-    // Constant false/unknown predicates do not need any metadata.
+    // Constants do not require a statistics lookup, even on empty metadata.
     if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) ||
         matches!(predicate, Expr::Not(inner)
             if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
         return true;
     }
-    // Never make a skip decision from internally inconsistent summaries.
     if stats.values().any(|summary| !trustworthy(summary)) {
         return false;
     }
-    // Inconsistent metadata is not proof that any row can be skipped.
     if let Some(first) = stats.values().next() {
         if stats.values().any(|column| column.rows != first.rows) {
             return false;
         }
     }
-    can_skip_columns_verified(stats, predicate)
-}
-
-/// Called only after all supplied column statistics passed integrity checks.
-/// Recursive AND/OR/NOT evaluation must not rescan the full summary map.
-fn can_skip_columns_verified(
-    stats: &std::collections::HashMap<String, ColumnStatistics>,
-    predicate: &Expr,
-) -> bool {
-    // The constant-false/unknown shortcut must also apply inside
-    // AND/OR trees when no usable column statistics are available.
-    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) ||
-        matches!(predicate, Expr::Not(inner)
-            if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
-        return true;
-    }
-    match predicate {
-        Expr::Binary { left, op: BinaryOp::And, right } =>
-            can_skip_columns_verified(stats, left) || can_skip_columns_verified(stats, right),
-        Expr::Binary { left, op: BinaryOp::Or, right } =>
-            can_skip_columns_verified(stats, left) && can_skip_columns_verified(stats, right),
-        // De Morgan's laws hold in SQL's three-valued boolean logic.
-        // Retain the existing conservative behavior for missing statistics.
-        Expr::Not(inner) => match inner.as_ref() {
-            Expr::Binary { left, op: BinaryOp::And, right } => {
-                let negated_left = Expr::Not(left.clone());
-                let negated_right = Expr::Not(right.clone());
-                // NOT (A AND B) = NOT A OR NOT B: neither arm may
-                // produce a TRUE row before we can discard the partition.
-                can_skip_columns_verified(stats, &negated_left) &&
-                    can_skip_columns_verified(stats, &negated_right)
-            }
-            Expr::Binary { left, op: BinaryOp::Or, right } => {
-                let negated_left = Expr::Not(left.clone());
-                let negated_right = Expr::Not(right.clone());
-                // NOT (A OR B) = NOT A AND NOT B: one impossible arm
-                // is enough to reject the entire conjunction.
-                can_skip_columns_verified(stats, &negated_left) ||
-                    can_skip_columns_verified(stats, &negated_right)
-            }
-            _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
-        },
-        _ => stats.iter().any(|(column, summary)| can_skip(summary, column, predicate)),
-    }
+    can_skip_columns_inner(stats, predicate, false)
 }
 
 #[cfg(test)]
@@ -432,6 +430,58 @@ mod compound_negation_pruning_regressions {
             compare("y", BinaryOp::Greater, 5),
         )));
         assert!(!can_skip_columns(&stats(), &possible));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_boolean_pruning_regressions {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn deeply_nested_boolean_trees_match_row_evaluation() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap(),
+            (10..20).map(|n| vec![Value::Integer(n)]).chain([vec![Value::Null]]).collect()
+        ).unwrap();
+        let summary = ColumnStatistics::from_batch(&batch, "x").unwrap();
+        let stats = std::collections::HashMap::from([("x".to_string(), summary)]);
+        let above = Expr::binary(
+            Expr::Column("x".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(10))
+        );
+        let below = Expr::binary(
+            Expr::Column("x".into()), BinaryOp::Less,
+            Expr::Literal(Value::Integer(10))
+        );
+        let mut impossible = below.clone();
+        for _ in 0..80 {
+            impossible = Expr::binary(impossible, BinaryOp::And, above.clone());
+        }
+        let predicates = vec![
+            impossible,
+            Expr::Not(Box::new(Expr::binary(above.clone(), BinaryOp::Or, below.clone()))),
+            Expr::Not(Box::new(Expr::Not(Box::new(below)))),
+            Expr::Not(Box::new(Expr::binary(above, BinaryOp::And,
+                Expr::Literal(Value::Boolean(false))))),
+        ];
+        for predicate in predicates {
+            let matches = (0..batch.num_rows()).any(|row|
+                predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true));
+            if can_skip_columns(&stats, &predicate) {
+                assert!(!matches, "pruning discarded a matching row: {predicate:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_literals_preserve_empty_metadata_shortcuts() {
+        let stats = std::collections::HashMap::new();
+        assert!(can_skip_columns(&stats, &Expr::Literal(Value::Boolean(false))));
+        assert!(can_skip_columns(&stats, &Expr::Not(Box::new(
+            Expr::Literal(Value::Boolean(true))))));
+        assert!(!can_skip_columns(&stats, &Expr::Not(Box::new(
+            Expr::Literal(Value::Boolean(false))))));
     }
 }
 

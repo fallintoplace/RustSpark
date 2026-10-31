@@ -84,6 +84,10 @@ pub struct RunMerger {
     // Indices of active runs, ordered as a stable min-heap by current key.
     heap: Vec<usize>,
     heap_ready: bool,
+    // The root is reloaded and reinserted at the start of the next append.
+    // This keeps I/O failures from discarding the row already emitted.
+    pending_refill: Option<usize>,
+    pending_error: Option<Error>,
     stopped: bool,
 }
 
@@ -110,7 +114,8 @@ impl RunMerger {
         }
         Ok(Self {
             runs, schema, keys: selected, output_batch_rows, control,
-            heap: Vec::new(), heap_ready: false, stopped: false
+            heap: Vec::new(), heap_ready: false,
+            pending_refill: None, pending_error: None, stopped: false
         })
     }
 
@@ -155,6 +160,15 @@ impl RunMerger {
             }
             self.heap_ready = true;
         }
+        if let Some(index) = self.pending_refill.take() {
+            debug_assert_eq!(self.heap.first().copied(), Some(index));
+            let selected = &mut self.runs[index];
+            selected.fill()?;
+            if selected.peek(self.keys[0].column).is_none() {
+                self.heap.swap_remove(0);
+            }
+            if !self.heap.is_empty() { self.sift_down(0); }
+        }
         let Some(&index) = self.heap.first() else { return Ok(AppendStatus::Exhausted); };
         let selected = &mut self.runs[index];
         let batch = selected.batch.as_ref()
@@ -180,11 +194,9 @@ impl RunMerger {
             dest.push(batch.column(column)?[selected.position].clone());
         }
         selected.position += 1;
-        selected.fill()?;
-        if selected.peek(self.keys[0].column).is_none() {
-            self.heap.swap_remove(0);
-        }
-        if !self.heap.is_empty() { self.sift_down(0); }
+        // Refill and rebalance on the next append, before any further row is
+        // copied. A corrupt later spill batch cannot hide a valid prefix.
+        self.pending_refill = Some(index);
         Ok(AppendStatus::Added)
     }
 }
@@ -194,6 +206,10 @@ impl Iterator for RunMerger {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         // Reserve common small batches without preallocating a full large output budget.
         let capacity = self.output_batch_rows.min(256);
         let mut columns: Vec<Vec<Value>> =
@@ -209,8 +225,14 @@ impl Iterator for RunMerger {
                     break;
                 }
                 Err(error) => {
-                    self.stopped = true;
-                    return Some(Err(error));
+                    if rows == 0 {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                    // Preserve successfully emitted rows and report the
+                    // terminal I/O, deadline, or cancellation error next.
+                    self.pending_error = Some(error);
+                    break;
                 }
             }
         }
@@ -426,5 +448,67 @@ mod external_merge_output_byte_budget_regressions {
         assert_eq!(values, (0..5).map(Value::Integer).collect::<Vec<_>>());
         drop(source);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod deferred_external_merge_error_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use super::super::spill::SpillWriter;
+    use std::{fs::{self, OpenOptions}, io::{BufWriter, Write}};
+
+    #[test]
+    fn corrupt_later_batch_preserves_valid_prefix_then_reports_io_error() {
+        let path = std::env::temp_dir().join(format!(
+            "native-merge-corrupt-{}-{}.rspill", std::process::id(),
+            std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        let writer = SpillWriter::new(
+            BufWriter::new(fs::File::create(&path).unwrap()), schema.clone(),
+        ).unwrap();
+        let mut writer = writer;
+        writer.write_batch(&batch).unwrap();
+        writer.finish().unwrap();
+        OpenOptions::new().append(true).open(&path).unwrap()
+            .write_all(&[0xff]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let mut merge = RunMerger::new(&[&path], schema, &keys, 2, 8,
+            QueryControl::default()).unwrap();
+        assert_eq!(merge.next().unwrap().unwrap().rows().unwrap(),
+            batch.rows().unwrap());
+        assert!(merge.next().unwrap().unwrap_err().to_string().contains("io"));
+        assert!(merge.next().is_none());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cancelled_merge_reports_error_after_partial_valid_output() {
+        let path = std::env::temp_dir().join(format!(
+            "native-merge-cancel-{}-{}.rspill", std::process::id(),
+            std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        let mut writer = SpillWriter::new(
+            BufWriter::new(fs::File::create(&path).unwrap()), schema.clone(),
+        ).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish().unwrap();
+        let control = QueryControl::default();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let mut merge = RunMerger::new(&[&path], schema, &keys, 2, 1,
+            control.clone()).unwrap();
+        assert_eq!(merge.next().unwrap().unwrap().num_rows(), 1);
+        control.cancel();
+        assert!(merge.next().unwrap().is_err());
+        assert!(merge.next().is_none());
+        fs::remove_file(path).unwrap();
     }
 }

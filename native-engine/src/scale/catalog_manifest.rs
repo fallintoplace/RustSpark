@@ -51,8 +51,13 @@ struct Column {
     nullable: bool,
 }
 
-fn encode_fields(schema: &Schema) -> Vec<Column> {
-    schema.fields().iter().map(|field| Column {
+fn encode_fields(schema: &Schema) -> Result<Vec<Column>> {
+    // The writer must obey the same column bounds as the loader.
+    // Otherwise save_atomic can publish metadata that load rejects.
+    if schema.is_empty() || schema.len() > MAX_COLUMNS {
+        return Err(Error::Schema("catalog manifest has invalid column count".into()));
+    }
+    Ok(schema.fields().iter().map(|field| Column {
         name: field.name.clone(),
         kind: match field.data_type {
             DataType::Boolean => "boolean",
@@ -61,7 +66,7 @@ fn encode_fields(schema: &Schema) -> Vec<Column> {
             DataType::Text => "text",
         }.into(),
         nullable: field.nullable,
-    }).collect()
+    }).collect())
 }
 
 fn decode_fields(columns: Vec<Column>) -> Result<Schema> {
@@ -102,16 +107,17 @@ impl Write for LimitedManifestWriter {
 }
 
 fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
-    if catalog.list().len() > MAX_TABLES {
+    let names = catalog.list();
+    if names.len() > MAX_TABLES {
         return Err(Error::Execution("catalog table count limit exceeded".into()));
     }
-    let mut tables = Vec::new();
-    for name in catalog.list() {
+    let mut tables = Vec::with_capacity(names.len());
+    for name in names {
         if let Some(parquet) = catalog.get_parquet(name)? {
             tables.push(Table::Parquet {
                 name: name.to_string(),
                 path: canonical_source(parquet.path())?,
-                fields: encode_fields(parquet.schema()),
+                fields: encode_fields(parquet.schema())?,
             });
         } else {
             let csv = catalog.get(name)?;
@@ -121,7 +127,7 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
             tables.push(Table::Csv {
                 name: name.to_string(),
                 path: canonical_source(csv.path())?,
-                fields: encode_fields(csv.schema()),
+                fields: encode_fields(csv.schema())?,
                 max_record_bytes: csv.max_record_bytes(),
             });
         }
@@ -257,5 +263,50 @@ mod limited_manifest_writer_tests {
         writer.write_all(&vec![b'x'; MAX_MANIFEST_BYTES as usize]).unwrap();
         assert!(writer.write_all(b"x").is_err());
         assert_eq!(writer.bytes.len(), MAX_MANIFEST_BYTES as usize);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_schema_bounds_regressions {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn oversized_schema_cannot_replace_a_valid_manifest() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-catalog-wide-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let csv = dir.join("source.csv");
+        let metadata = dir.join("catalog.json");
+        fs::write(&csv, b"id\n1\n").unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("valid", &csv,
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            1024,
+        ).unwrap();
+        save_atomic(&catalog, &metadata).unwrap();
+        let previous = fs::read(&metadata).unwrap();
+
+        let oversized = Schema::new((0..=MAX_COLUMNS)
+            .map(|index| Field::new(format!("column_{index}"), DataType::Integer, true))
+            .collect()).unwrap();
+        catalog.register_csv("wide", &csv, oversized, 1024).unwrap();
+        let error = save_atomic(&catalog, &metadata).unwrap_err();
+        assert!(error.to_string().contains("column count"));
+        assert_eq!(fs::read(&metadata).unwrap(), previous);
+        assert_eq!(load(&metadata).unwrap().list(), ["valid"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn encoder_accepts_limit_but_rejects_empty_and_excessive_fields() {
+        let schema = Schema::new((0..MAX_COLUMNS)
+            .map(|i| Field::new(format!("f{i}"), DataType::Text, true))
+            .collect()).unwrap();
+        assert_eq!(encode_fields(&schema).unwrap().len(), MAX_COLUMNS);
+        assert!(encode_fields(&Schema::new(vec![]).unwrap()).is_err());
     }
 }

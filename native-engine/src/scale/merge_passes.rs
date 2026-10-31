@@ -68,11 +68,11 @@ pub fn merge_to_fan_in(
             writer.finish()?;
             next_pass.push(path);
         }
-        // Once this pass has produced all its runs, older temporary runs
-        // are dead. Keep carried-through runs and remove only retired scratch.
-        // This bounds scratch space across arbitrarily many merge passes.
+        // Inputs to this pass are no longer required once every output run
+        // is complete. Reclaim both original sorted runs and scratch runs;
+        // carried-through singleton runs remain live in the next pass.
         let live: HashSet<&PathBuf> = next_pass.iter().collect();
-        for path in &result.scratch {
+        for path in &result.current {
             if !live.contains(path) {
                 std::fs::remove_file(path)?;
             }
@@ -199,6 +199,49 @@ mod retired_merge_scratch_tests {
         assert_eq!(rows.iter().flat_map(|b| b.rows().unwrap())
             .map(|row| row[0].clone()).collect::<Vec<_>>(),
             (0..128).map(Value::Integer).collect::<Vec<_>>());
+        drop(merged);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reclaim_source_runs_after_merge_tests {
+    use super::*;
+    use crate::{
+        batch::Batch, expr::Expr, scalar::Value,
+        schema::{DataType, Field}, scale::sorted_runs::write_sorted_runs,
+    };
+    use std::fs;
+
+    #[test]
+    fn releases_original_and_intermediate_files_before_final_merge() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-merge-all-gc-{}-{}", std::process::id(),
+            PASS_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let batch = Batch::from_rows(schema.clone(),
+            (0..21).rev().map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let source = write_sorted_runs([Ok(batch)], schema.clone(), &keys, &dir, 2,
+            &QueryControl::default()).unwrap();
+        let originals = source.files().to_vec();
+        assert_eq!(originals.len(), 11);
+        let merged = merge_to_fan_in(source, &dir, schema.clone(), &keys, 2, 2,
+            &QueryControl::default()).unwrap();
+        assert_eq!(merged.files().len(), 2);
+        assert!(originals.iter().all(|path| !path.exists()));
+        let live = fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().all(|path| merged.files().contains(path)));
+        let output = RunMerger::new(merged.files(), schema, &keys, 2, 3,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().flat_map(|batch| batch.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>(),
+            (0..21).map(Value::Integer).collect::<Vec<_>>());
         drop(merged);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir(dir).unwrap();

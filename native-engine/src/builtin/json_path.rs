@@ -62,6 +62,33 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
                         continue;
                     }
                 }
+                // Double-quoted JSONPath members use JSON string escapes,
+                // including \uXXXX and surrogate pairs. Decode only the
+                // escaped fallback; ordinary keys stay borrowed above.
+                if quote == '"' {
+                    let mut escaped = false;
+                    let mut close = None;
+                    for (offset, character) in rest[1..].char_indices() {
+                        if escaped {
+                            escaped = false;
+                        } else if character == '\\' {
+                            escaped = true;
+                        } else if character == '"' {
+                            close = Some(offset + 2);
+                            break;
+                        }
+                    }
+                    let end = close.ok_or_else(|| Error::Parse(
+                        "unterminated quoted JSON path key".into()))?;
+                    if !rest[end..].starts_with(']') {
+                        return Err(Error::Parse("unterminated quoted JSON path key".into()));
+                    }
+                    let key: String = serde_json::from_str(&rest[..end])
+                        .map_err(|_| Error::Parse("invalid JSON path string escape".into()))?;
+                    node = node.and_then(|value| value.get(key.as_str()));
+                    tail = &rest[end + 1..];
+                    continue;
+                }
                 let mut end = quote.len_utf8();
                 let mut escaped = false;
                 let mut closed = false;
@@ -167,5 +194,26 @@ mod json_output_budget_tests {
         let expected = value.to_string();
         assert_eq!(serialize_bounded(&value, expected.len()).unwrap(), expected);
         assert!(matches!(serialize_bounded(&value, expected.len() - 1), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod json_path_escaped_unicode_key_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_json_string_escapes_in_double_quoted_keys() {
+        let doc = parse(r#"{"root":{"a.b":1,"🙂":2,"line\nbreak":3,"x\"y":4}}"#).unwrap();
+        assert_eq!(lookup(Some(&doc), r#"$.root["a\u002eb"]"#).unwrap(),
+            Some(&serde_json::json!(1)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["\uD83D\uDE42"]"#).unwrap(),
+            Some(&serde_json::json!(2)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["line\nbreak"]"#).unwrap(),
+            Some(&serde_json::json!(3)));
+        assert_eq!(lookup(Some(&doc), r#"$.root["x\"y"]"#).unwrap(),
+            Some(&serde_json::json!(4)));
+        assert!(lookup(Some(&doc), r#"$.root["bad\q"]"#).is_err());
+        assert!(lookup(Some(&doc), r#"$.root["\uD83D"]"#).is_err());
+        assert!(lookup(Some(&doc), r#"$.root["a\u002eb""#).is_err());
     }
 }
