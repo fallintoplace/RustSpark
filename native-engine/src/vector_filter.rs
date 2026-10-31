@@ -199,6 +199,31 @@ fn fast_text_in_list<'a>(
     Ok(Some((batch.column(index)?, keys, *negated, has_null)))
 }
 
+/// A BOOLEAN domain has only two non-NULL values. Replace repeated
+/// literal comparisons with two membership flags for the whole batch.
+fn fast_boolean_in_list<'a>(
+    batch: &'a Batch, predicate: &Expr,
+) -> Result<Option<(&'a [Value], [bool; 2], bool, bool)>> {
+    let Expr::InList { needle, choices, negated } = predicate else {
+        return Ok(None);
+    };
+    let Expr::Column(name) = needle.as_ref() else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Boolean {
+        return Ok(None);
+    }
+    let mut matched = [false; 2];
+    let mut has_null = false;
+    for choice in choices {
+        match choice {
+            Expr::Literal(Value::Boolean(value)) => matched[usize::from(*value)] = true,
+            Expr::Literal(Value::Null) => has_null = true,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((batch.column(index)?, matched, *negated, has_null)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -211,7 +236,20 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         _ => {}
     }
     let mut selected = Vec::new();
-    if let Some((column, keys, negated, has_null)) =
+    if let Some((column, matched, negated, has_null)) =
+        fast_boolean_in_list(batch, predicate)? {
+        if negated && has_null {
+            return Ok(selected);
+        }
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Boolean(value) = value {
+                let member = matched[usize::from(*value)];
+                if if negated { !member } else { member } {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, keys, negated, has_null)) =
         fast_integer_in_list(batch, predicate)? {
         // NULL needles never satisfy WHERE. An unmatched NOT IN with any
         // NULL choice is also UNKNOWN, not TRUE.
@@ -817,5 +855,41 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod boolean_in_list_vector_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn all_boolean_choice_combinations_match_scalar_sql() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("flag", DataType::Boolean, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Boolean(true)],
+                 vec![Value::Boolean(false)], vec![Value::Boolean(true)]],
+        ).unwrap();
+        for choices in [
+            vec![], vec![Value::Null],
+            vec![Value::Boolean(false)],
+            vec![Value::Boolean(true), Value::Boolean(true)],
+            vec![Value::Boolean(false), Value::Boolean(true)],
+            vec![Value::Boolean(true), Value::Null],
+        ] {
+            for negated in [false, true] {
+                let predicate = Expr::InList {
+                    needle: Box::new(Expr::Column("flag".into())),
+                    choices: choices.iter().cloned().map(Expr::Literal).collect(),
+                    negated,
+                };
+                let expected = (0..input.num_rows()).filter(|&row|
+                    predicate.evaluate(&input, row).unwrap()
+                        .as_boolean().unwrap() == Some(true)
+                ).collect::<Vec<_>>();
+                assert_eq!(select_indices(&input, &predicate).unwrap(),
+                    expected, "choices={choices:?}, negated={negated}");
+            }
+        }
     }
 }
