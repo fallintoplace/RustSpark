@@ -68,10 +68,18 @@ impl CrossJoinStream {
 
     fn produce(&mut self) -> Result<Option<Batch>> {
         if self.right_rows.is_empty() { return Ok(None); }
-        let mut output = Vec::with_capacity(self.batch_rows.min(4096));
+        // Build column-major output once rather than allocating a Vec per row
+        // and transposing it again in Batch::from_rows.
+        let width = self.output_schema.len();
+        let capacity = self.batch_rows.min(256).min(
+            (MAX_OUTPUT_BATCH_BYTES / std::mem::size_of::<Value>().max(1) / width.max(1)).max(1)
+        );
+        let mut output: Vec<Vec<Value>> = (0..width)
+            .map(|_| Vec::with_capacity(capacity)).collect();
+        let mut output_rows = 0usize;
         let mut output_bytes = 0usize;
-        while output.len() < self.batch_rows {
-            if output.len() % 256 == 0 { self.control.check()?; }
+        while output_rows < self.batch_rows {
+            if output_rows % 256 == 0 { self.control.check()?; }
             if self.current_left.is_none() {
                 loop {
                     if let Some(batch) = &self.left_batch {
@@ -84,8 +92,10 @@ impl CrossJoinStream {
                         }
                     }
                     let Some(next) = self.left.next() else {
-                        if output.is_empty() { return Ok(None); }
-                        return Ok(Some(Batch::from_rows(self.output_schema.clone(), output)?));
+                        if output_rows == 0 { return Ok(None); }
+                        return Ok(Some(Batch::new_with_row_count(
+                            self.output_schema.clone(), output, output_rows,
+                        )?));
                     };
                     let batch = next?;
                     if batch.schema() != &self.left_schema {
@@ -101,20 +111,24 @@ impl CrossJoinStream {
             if next_bytes > MAX_OUTPUT_BATCH_BYTES {
                 return Err(Error::Execution("stream cross join output row byte budget exceeded".into()));
             }
-            if !output.is_empty() && output_bytes.saturating_add(next_bytes) > MAX_OUTPUT_BATCH_BYTES {
+            if output_rows != 0 && output_bytes.saturating_add(next_bytes) > MAX_OUTPUT_BATCH_BYTES {
                 break;
             }
             output_bytes += next_bytes;
-            let mut row = left.clone();
-            row.extend_from_slice(&self.right_rows[self.right_row]);
-            output.push(row);
+            for (column, value) in output.iter_mut()
+                .zip(left.iter().chain(self.right_rows[self.right_row].iter())) {
+                column.push(value.clone());
+            }
+            output_rows += 1;
             self.right_row += 1;
             if self.right_row == self.right_rows.len() {
                 self.current_left = None;
                 self.left_row += 1;
             }
         }
-        Ok(Some(Batch::from_rows(self.output_schema.clone(), output)?))
+        Ok(Some(Batch::new_with_row_count(
+            self.output_schema.clone(), output, output_rows,
+        )?))
     }
 }
 
@@ -190,6 +204,48 @@ mod cross_join_cached_left_footprint_tests {
         let actual = CrossJoinStream::new(Box::new([Ok(left)].into_iter()),
             Box::new([Ok(right)].into_iter()), schema.clone(), schema,
             3, QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), expected);
+    }
+}
+
+#[cfg(test)]
+mod column_major_cross_join_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn zero_width_cross_product_keeps_cardinality_without_row_vectors() {
+        let schema = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        let right = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
+        let results = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, 2, QueryControl::default()
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(results.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![2, 2, 2]);
+        assert!(results.iter().all(|batch| batch.schema().is_empty()));
+    }
+
+    #[test]
+    fn wide_nullable_rows_keep_column_order_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("t", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null, Value::Text("a".repeat(256))],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3), Value::Null],
+            vec![Value::Null, Value::Text("z".repeat(257))],
+        ]).unwrap();
+        let expected = join::cross_join(&left, &right).unwrap().rows().unwrap();
+        let actual = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, 3, QueryControl::default()
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(actual.iter().flat_map(|batch| batch.rows().unwrap())
             .collect::<Vec<_>>(), expected);
     }

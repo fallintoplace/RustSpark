@@ -59,11 +59,16 @@ pub fn optimize(plan: Plan) -> Plan {
                             (None, Some(inner)) => Some(inner),
                             (None, None) => None,
                         };
-                        return Plan::Limit {
-                            input: grandchild,
-                            offset: merged_offset,
-                            count: merged_count,
-                        };
+                        // Both input windows are valid, but composing their
+                        // offsets can make the merged window overflow.
+                        // Preserve the original operators in that case.
+                        if merged_count.is_none_or(|limit| merged_offset.checked_add(limit).is_some()) {
+                            return Plan::Limit {
+                                input: grandchild,
+                                offset: merged_offset,
+                                count: merged_count,
+                            };
+                        }
                     }
                 }
                 Plan::Limit {
@@ -170,6 +175,23 @@ mod tests {
             .limit(0, Some(1));
         assert_eq!(optimize(plan.clone()), plan);
     }
+    #[test]
+    fn nested_limit_merge_must_not_introduce_window_overflow() {
+        // Each LIMIT is valid on its own, and the inner one produces
+        // no rows. Combining them produces MAX + 1, which is invalid.
+        let plan = Plan::scan("sales")
+            .limit(usize::MAX - 1, None)
+            .limit(1, Some(1));
+        assert_eq!(optimize(plan.clone()), plan);
+
+        let mut catalog = Catalog::new();
+        catalog.register("sales", Batch::from_rows(
+            Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)]],
+        ).unwrap()).unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().num_rows(), 0);
+    }
+
     #[test]
     fn redundant_stable_sorts_are_removed() {
         let keys = vec![crate::sort::SortKey::ascending(Expr::Column("x".into()))];
