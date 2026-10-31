@@ -117,6 +117,28 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 }
             }
             Token::Number(number)
+        } else if character == '`' {
+            // Spark delimited identifiers preserve whitespace, punctuation and
+            // case; a doubled backtick represents a literal backtick.
+            let mut identifier = String::new();
+            let mut closed = false;
+            while let Some(next) = chars.next() {
+                if next == '`' {
+                    if chars.peek() == Some(&'`') {
+                        identifier.push('`');
+                        chars.next();
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    identifier.push(next);
+                }
+            }
+            if !closed || identifier.is_empty() {
+                return Err(Error::Parse("empty or unterminated backtick identifier".into()));
+            }
+            Token::Word(identifier)
         } else if character == '\'' || character == '"' {
             let mut value = String::new();
             let mut closed = false;
@@ -280,5 +302,42 @@ mod lexer_capacity_perf_tests {
         assert_eq!(tokens.first(), Some(&Token::Word("SELECT".into())));
         assert_eq!(tokens.last(), Some(&Token::Word("data".into())));
         assert!(tokens.len() > 500);
+    }
+}
+
+#[cfg(test)]
+mod spark_backtick_identifier_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_identifiers_preserve_special_characters_and_escaped_backticks() {
+        let tokens = tokenize("SELECT `order date`, `a``b`, `é🙂` FROM `some table`").unwrap();
+        assert_eq!(tokens[1], Token::Word("order date".into()));
+        assert_eq!(tokens[3], Token::Word("a`b".into()));
+        assert_eq!(tokens[5], Token::Word("é🙂".into()));
+        assert_eq!(tokens[6], Token::Word("FROM".into()));
+        assert_eq!(tokens[7], Token::Word("some table".into()));
+        for invalid in ["SELECT `unterminated", "SELECT `` FROM t", "SELECT `a`` FROM t"] {
+            assert!(tokenize(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn native_sql_resolves_delimited_column_names() {
+        use crate::{batch::Batch, catalog::Catalog, executor, scalar::Value,
+            schema::{DataType, Field, Schema}, sql};
+        let schema = Schema::new(vec![
+            Field::new("order date", DataType::Integer, false),
+            Field::new("a`b", DataType::Text, false),
+        ]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, vec![
+            vec![Value::Integer(42), Value::Text("quoted".into())],
+        ]).unwrap()).unwrap();
+        let result = executor::execute(
+            &sql::parse_sql("SELECT `order date`, `a``b` FROM t").unwrap(), &catalog
+        ).unwrap();
+        assert_eq!(result.rows().unwrap(),
+            vec![vec![Value::Integer(42), Value::Text("quoted".into())]]);
     }
 }
