@@ -40,8 +40,19 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(-1));
         }
     }
+    // ASCII edit distance operates directly on UTF-8 bytes. A byte is one
+    // scalar for ASCII, so no pair of char arrays is needed.
+    if first.is_ascii() && second.is_ascii() {
+        return distance_units(first.as_bytes(), second.as_bytes(), threshold);
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
+    distance_units(&a, &b, threshold)
+}
+
+fn distance_units<T: Eq + Copy>(
+    a: &[T], b: &[T], threshold: Option<usize>,
+) -> Result<Value> {
     // Removing identical edges does not change the edit distance.
     let mut prefix = 0;
     while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
@@ -252,5 +263,47 @@ mod levenshtein_threshold_preflight_tests {
             Value::Text("ab".into()),
             Value::Integer(1),
         ]).unwrap(), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod levenshtein_borrowed_ascii_tests {
+    use super::*;
+
+    fn distance(a: &str, b: &str, threshold: Option<i64>) -> Result<Value> {
+        let mut args = vec![Value::Text(a.into()), Value::Text(b.into())];
+        if let Some(threshold) = threshold { args.push(Value::Integer(threshold)); }
+        evaluate(&args)
+    }
+
+    #[test]
+    fn byte_slice_dp_matches_unicode_scalar_dp() {
+        for (a, b, expected) in [
+            ("kitten", "sitting", 3),
+            ("aaaaabc", "aaaaaxc", 1),
+            ("abc", "cab", 2),
+            ("abc", "abc", 0),
+            ("", "abc", 3),
+            ("a🙂b", "a🙂c", 1),
+            ("café", "cafe", 1),
+            ("é🙂é", "éXé", 1),
+        ] {
+            assert_eq!(distance(a, b, None).unwrap(), Value::Integer(expected));
+            assert_eq!(distance(a, b, Some(expected)).unwrap(),
+                Value::Integer(expected));
+            if expected > 0 {
+                assert_eq!(distance(a, b, Some(expected - 1)).unwrap(),
+                    Value::Integer(-1));
+            }
+        }
+    }
+
+    #[test]
+    fn huge_matching_ascii_edges_only_process_the_trimmed_middle() {
+        let prefix = "a".repeat(100_000);
+        let left = format!("{prefix}X{prefix}");
+        let right = format!("{prefix}Y{prefix}");
+        assert_eq!(distance(&left, &right, Some(1)).unwrap(), Value::Integer(1));
+        assert_eq!(distance(&left, &right, Some(0)).unwrap(), Value::Integer(-1));
     }
 }
