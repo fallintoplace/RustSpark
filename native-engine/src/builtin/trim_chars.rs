@@ -65,18 +65,19 @@ fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
 fn normalize_space(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     if input.is_ascii() {
-        let mut output = String::with_capacity(input.len());
+        let mut output = Vec::with_capacity(input.len());
         let mut pending = false;
         for &byte in input.as_bytes() {
             if byte.is_ascii_whitespace() {
                 pending = !output.is_empty();
             } else {
-                if pending { output.push(' '); }
+                if pending { output.push(b' '); }
                 pending = false;
-                output.push(char::from(byte));
+                output.push(byte);
             }
         }
-        return Ok(Value::Text(output));
+        return Ok(Value::Text(String::from_utf8(output)
+            .expect("normalizing ASCII bytes preserves UTF-8")));
     }
     let mut output = String::with_capacity(input.len());
     let mut pending = false;
@@ -231,5 +232,28 @@ mod mixed_unicode_trim_on_ascii_tests {
             Value::Text("hello".into()));
         assert_eq!(apply("🙂éahello界🙂", &trim_set, true, false),
             Value::Text("hello界🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_normalize_byte_output_regressions {
+    use super::*;
+
+    fn reference(text: &str) -> String {
+        text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn all_ascii_whitespace_and_long_fields_match_reference() {
+        for text in [
+            "", "  ", "abc", " a   b  ", "\t\r\n a\u{000B}b\u{000C}  c \t",
+            "\0  a \0", "a b c".repeat(100_000).as_str(),
+        ] {
+            let actual = normalize_space(&[Value::Text(text.into())]).unwrap();
+            assert_eq!(actual, Value::Text(reference(text)));
+        }
+        assert_eq!(normalize_space(&[Value::Text("é\u{00A0}界".into())]).unwrap(),
+            Value::Text("é 界".into()));
+        assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
     }
 }
