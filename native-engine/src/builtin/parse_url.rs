@@ -45,26 +45,39 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
         }
         None => without_query,
     };
-    let result = match part.to_ascii_uppercase().as_str() {
-        "PROTOCOL" => parsed.as_ref().map(|parsed| parsed.scheme().to_owned()),
-        "HOST" => parsed.as_ref().and_then(|parsed|
-            parsed.host_str().map(str::to_owned)),
-        "AUTHORITY" => find_authority(url).map(str::to_owned),
-        "USERINFO" => find_authority(url)
-            .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user.to_owned())),
-        "PATH" => Some(raw_path.to_owned()),
-        "QUERY" => if let Some(key) = key {
+    // Avoid allocating an uppercased component name for each input row.
+    let result = if part.eq_ignore_ascii_case("PROTOCOL") {
+        parsed.as_ref().map(|parsed| parsed.scheme().to_owned())
+    } else if part.eq_ignore_ascii_case("HOST") {
+        parsed.as_ref().and_then(|parsed| parsed.host_str().map(str::to_owned))
+    } else if part.eq_ignore_ascii_case("AUTHORITY") {
+        find_authority(url).map(str::to_owned)
+    } else if part.eq_ignore_ascii_case("USERINFO") {
+        find_authority(url)
+            .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user.to_owned()))
+    } else if part.eq_ignore_ascii_case("PATH") {
+        Some(raw_path.to_owned())
+    } else if part.eq_ignore_ascii_case("QUERY") {
+        if let Some(key) = key {
             query.and_then(|query| query.split('&').find_map(|param| {
                 let (name, value) = param.split_once('=')?;
                 (name == key).then(|| value.to_owned())
             }))
-        } else { query.map(str::to_owned) },
-        "REF" => fragment.map(str::to_owned),
-        "FILE" => Some(match query {
+        } else {
+            query.map(str::to_owned)
+        }
+    } else if part.eq_ignore_ascii_case("REF") {
+        fragment.map(str::to_owned)
+    } else if part.eq_ignore_ascii_case("FILE") {
+        Some(match query {
             Some(query) => format!("{raw_path}?{query}"),
             None => raw_path.to_owned(),
-        }),
-        other => return Err(Error::Type(format!("unsupported PARSE_URL component: {other}"))),
+        })
+    } else {
+        return Err(Error::Type(format!(
+            "unsupported PARSE_URL component: {}",
+            part.to_ascii_uppercase()
+        )));
     };
     Ok(result.map(Value::Text).unwrap_or(Value::Null))
 }
@@ -158,5 +171,22 @@ mod tests {
             vec![Value::Text("spark.apache.org".into()), Value::Text("1".into())],
             vec![Value::Null, Value::Null],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod case_insensitive_url_parts_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_case_components_keep_all_extractors_and_query_keys() {
+        let url = "https://u:p@example.com:443/path?q=1&Q=2#frag";
+        for part in ["protocol", "hOsT", "authority", "userInfo", "PaTh", "qUeRy", "rEf", "file"] {
+            assert_eq!(extract(url, part, None).unwrap(),
+                extract(url, &part.to_ascii_uppercase(), None).unwrap());
+        }
+        assert_eq!(extract(url, "query", Some("Q")).unwrap(), Value::Text("2".into()));
+        assert_eq!(extract(url, "QUERY", Some("q")).unwrap(), Value::Text("1".into()));
+        assert!(matches!(extract(url, "unsupported", None), Err(Error::Type(_))));
     }
 }

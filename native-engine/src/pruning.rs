@@ -21,6 +21,48 @@ fn trustworthy(stats: &ColumnStatistics) -> bool {
     }
 }
 
+/// Compare borrowed column bounds with a literal. Also handles inverted
+/// comparisons without constructing a temporary expression tree.
+fn can_skip_binary(
+    stats: &ColumnStatistics, column: &str, left: &Expr, op: BinaryOp, right: &Expr,
+) -> bool {
+    let (literal, op) = match (left, right) {
+        (Expr::Column(name), Expr::Literal(value)) if name.eq_ignore_ascii_case(column) => {
+            (value, op)
+        }
+        (Expr::Literal(value), Expr::Column(name)) if name.eq_ignore_ascii_case(column) => {
+            let reversed = match op {
+                BinaryOp::Less => BinaryOp::Greater,
+                BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                BinaryOp::Greater => BinaryOp::Less,
+                BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                other => other,
+            };
+            (value, reversed)
+        }
+        _ => return false,
+    };
+    if literal.is_null() || stats.rows == stats.nulls {
+        return true;
+    }
+    let (Some(min), Some(max)) = (&stats.min, &stats.max) else {
+        return false;
+    };
+    let compare = |value: &Value| value.sql_compare(literal).ok().flatten();
+    let (Some(low), Some(high)) = (compare(min), compare(max)) else {
+        return false;
+    };
+    match op {
+        BinaryOp::Equal => low == Ordering::Greater || high == Ordering::Less,
+        BinaryOp::NotEqual => low == Ordering::Equal && high == Ordering::Equal,
+        BinaryOp::Less => low != Ordering::Less,
+        BinaryOp::LessEqual => low == Ordering::Greater,
+        BinaryOp::Greater => high != Ordering::Greater,
+        BinaryOp::GreaterEqual => high == Ordering::Less,
+        _ => false,
+    }
+}
+
 pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> bool {
     if !trustworthy(stats) { return false; }
     if stats.rows == 0 {
@@ -77,9 +119,7 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
                     _ => None,
                 };
                 if let Some(op) = inverted {
-                    return can_skip(stats, column, &Expr::binary(
-                        *left.clone(), op, *right.clone(),
-                    ));
+                    return can_skip_binary(stats, column, left, op, right);
                 }
             }
             false
@@ -90,41 +130,7 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
         Expr::Binary { left, op: BinaryOp::Or, right } => {
             can_skip(stats, column, left) && can_skip(stats, column, right)
         }
-        Expr::Binary { left, op, right } => {
-            let (literal, op) = match (&**left, &**right) {
-                (Expr::Column(name), Expr::Literal(value)) if name.eq_ignore_ascii_case(column) => (value, *op),
-                (Expr::Literal(value), Expr::Column(name)) if name.eq_ignore_ascii_case(column) => {
-                    let reversed = match op {
-                        BinaryOp::Less => BinaryOp::Greater,
-                        BinaryOp::LessEqual => BinaryOp::GreaterEqual,
-                        BinaryOp::Greater => BinaryOp::Less,
-                        BinaryOp::GreaterEqual => BinaryOp::LessEqual,
-                        other => *other,
-                    };
-                    (value, reversed)
-                }
-                _ => return false,
-            };
-            if literal.is_null() || stats.rows == stats.nulls {
-                return true;
-            }
-            let (Some(min), Some(max)) = (&stats.min, &stats.max) else {
-                return false;
-            };
-            let compare = |value: &Value| value.sql_compare(literal).ok().flatten();
-            let (Some(low), Some(high)) = (compare(min), compare(max)) else {
-                return false;
-            };
-            match op {
-                BinaryOp::Equal => low == Ordering::Greater || high == Ordering::Less,
-                BinaryOp::NotEqual => low == Ordering::Equal && high == Ordering::Equal,
-                BinaryOp::Less => low != Ordering::Less,
-                BinaryOp::LessEqual => low == Ordering::Greater,
-                BinaryOp::Greater => high != Ordering::Greater,
-                BinaryOp::GreaterEqual => high == Ordering::Less,
-                _ => false,
-            }
-        }
+        Expr::Binary { left, op, right } => can_skip_binary(stats, column, left, *op, right),
         _ => false,
     }
 }
@@ -552,5 +558,66 @@ mod nested_partition_pruning_preflight_tests {
         );
         assert_eq!(can_skip_columns(&stats, &negated),
             can_skip_columns(&stats, &rewritten));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_negated_comparisons_tests {
+    use super::*;
+
+    #[test]
+    fn not_comparisons_match_their_direct_inverses() {
+        let stats = ColumnStatistics {
+            rows: 30,
+            nulls: 2,
+            min: Some(Value::Integer(10)),
+            max: Some(Value::Integer(20)),
+        };
+        for (op, inverse) in [
+            (BinaryOp::Equal, BinaryOp::NotEqual),
+            (BinaryOp::NotEqual, BinaryOp::Equal),
+            (BinaryOp::Less, BinaryOp::GreaterEqual),
+            (BinaryOp::LessEqual, BinaryOp::Greater),
+            (BinaryOp::Greater, BinaryOp::LessEqual),
+            (BinaryOp::GreaterEqual, BinaryOp::Less),
+        ] {
+            for value in [9, 10, 15, 20, 21] {
+                for reversed in [false, true] {
+                    let column = Expr::Column("value".into());
+                    let literal = Expr::Literal(Value::Integer(value));
+                    let original = if reversed {
+                        Expr::binary(literal.clone(), op, column.clone())
+                    } else {
+                        Expr::binary(column.clone(), op, literal.clone())
+                    };
+                    let inverted = if reversed {
+                        Expr::binary(literal, inverse, column)
+                    } else {
+                        Expr::binary(column, inverse, literal)
+                    };
+                    assert_eq!(
+                        can_skip(&stats, "value", &Expr::Not(Box::new(original))),
+                        can_skip(&stats, "value", &inverted),
+                        "operator={op:?} value={value} reversed={reversed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_columns_and_nullable_bounds_remain_conservative() {
+        let stats = ColumnStatistics {
+            rows: 10,
+            nulls: 10,
+            min: None,
+            max: None,
+        };
+        let comparison = Expr::binary(
+            Expr::Column("x".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(5)),
+        );
+        assert!(can_skip(&stats, "x", &Expr::Not(Box::new(comparison.clone()))));
+        assert!(!can_skip(&stats, "y", &Expr::Not(Box::new(comparison))));
     }
 }

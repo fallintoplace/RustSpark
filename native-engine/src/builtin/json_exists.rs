@@ -47,6 +47,16 @@ fn output(types: &[DataType]) -> Result<DataType> {
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(path) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if path == "$" {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        // Any well-formed root JSON value exists, including literal null.
+        // Validate its entire syntax without allocating its nested tree.
+        serde_json::from_str::<IgnoredAny>(text)
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Boolean(true));
+    }
     let doc = json_path::parse(text)?;
     Ok(Value::Boolean(json_path::lookup(Some(&doc), path)?.is_some()))
 }
@@ -146,5 +156,36 @@ mod streaming_json_array_membership_tests {
         assert!(contains("[1", "1").is_err());
         assert!(contains("{}", "1").unwrap_err().to_string().contains("requires an array"));
         assert!(contains("[]", "{bad json}").is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_root_json_exists_tests {
+    use super::*;
+
+    #[test]
+    fn root_json_exists_handles_large_documents_and_json_null() {
+        let large = format!(r#"{{"nested":[{}],"label":"é🙂"}}"#,
+            vec![r#"{"values":[1,2,3]}"#; 10_000].join(","));
+        for input in ["null", "true", "0", r#""é🙂""#, "[]", "{}"] {
+            assert_eq!(evaluate(&[Value::Text(input.into()),
+                Value::Text("$".into())]).unwrap(), Value::Boolean(true));
+        }
+        assert_eq!(evaluate(&[Value::Text(large),
+            Value::Text("$".into())]).unwrap(), Value::Boolean(true));
+        assert_eq!(evaluate(&[Value::Text("{}".into()),
+            Value::Text("$.missing".into())]).unwrap(), Value::Boolean(false));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("$".into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("{}".into()), Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn root_fast_path_rejects_invalid_json_and_trailing_tokens() {
+        for input in ["", "[1,2", "[1,INVALID]", "{\"a\":1} false"] {
+            assert!(evaluate(&[Value::Text(input.into()),
+                Value::Text("$".into())]).is_err(), "{input}");
+        }
+        assert!(matches!(evaluate(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1)),
+            Value::Text("$".into())]), Err(Error::Execution(_))));
     }
 }

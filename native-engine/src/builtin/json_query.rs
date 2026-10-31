@@ -1,5 +1,5 @@
 use super::{Function, json_path};
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
@@ -22,8 +22,16 @@ fn json_equal_type(types: &[DataType]) -> Result<DataType> {
 fn json_equal(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left == right {
+        // Equal source text still needs syntax validation, but not a JSON tree.
+        if left.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        serde_json::from_str::<serde::de::IgnoredAny>(left)
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Boolean(true));
+    }
     let left_doc = json_path::parse(left)?;
-    if left == right { return Ok(Value::Boolean(true)); }
     let right_doc = json_path::parse(right)?;
     Ok(Value::Boolean(left_doc == right_doc))
 }
@@ -77,5 +85,25 @@ mod identical_json_equality_tests {
             Value::Text("{invalid".into()), Value::Text("{invalid".into())
         ]).is_err());
         assert_eq!(json_equal(&[Value::Null, Value::Text("null".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod identical_json_stream_validation_tests {
+    use super::*;
+
+    #[test]
+    fn identical_documents_validate_without_building_a_value_tree() {
+        let document = format!("[{}]", vec![r#"{"nested":[1,null,{"é":"🙂"}]}"#; 12_000].join(","));
+        let value = Value::Text(document);
+        assert_eq!(json_equal(&[value.clone(), value]).unwrap(), Value::Boolean(true));
+
+        for invalid in ["{broken", r#"{"ok":1} false"#, "[1,,2]", r#""unterminated"#] {
+            assert!(matches!(json_equal(&[
+                Value::Text(invalid.into()), Value::Text(invalid.into()),
+            ]), Err(Error::Execution(_))), "{invalid}");
+        }
+        assert_eq!(json_equal(&[Value::Text(r#"{"a":1}"#.into()), Value::Text(r#"{ "a": 1 }"#.into())])
+            .unwrap(), Value::Boolean(true));
     }
 }
