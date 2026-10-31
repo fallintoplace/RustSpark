@@ -88,6 +88,8 @@ impl BloomFilter {
     /// Return one membership bit per input key in the original row order.
     /// A true bit means a possible match, never a confirmed exact match.
     pub fn probe_batch(&self, keys: &[Value]) -> Vec<bool> {
+        if !self.populated { return vec![false; keys.len()]; }
+        if self.occupied_bits == self.bits { return vec![true; keys.len()]; }
         keys.iter().map(|key| self.might_contain(key)).collect()
     }
 
@@ -466,5 +468,32 @@ mod saturated_filter_fast_path_tests {
         filter.intersect_with(&empty).unwrap();
         assert_eq!(filter.bits_set(), 0);
         assert!(!filter.might_contain(&Value::Integer(1)));
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_shortcut_regressions {
+    use super::*;
+
+    #[test]
+    fn saturated_filters_admit_every_probe_without_changing_occupancy() {
+        for bits in [1, 2, 63, 64, 65] {
+            let mut filter = BloomFilter::new(bits, 7).unwrap();
+            for n in 0..10_000 {
+                filter.insert(&Value::Integer(n));
+                if filter.bits_set() == bits { break; }
+            }
+            if filter.bits_set() != bits { continue; }
+            let unseen = Value::Text("new probe".into());
+            assert!(filter.might_contain(&unseen));
+            assert_eq!(filter.probe_batch(&[unseen.clone(), Value::Null]), vec![true, true]);
+            filter.insert(&unseen);
+            assert_eq!(filter.bits_set(), bits);
+            let mut other = BloomFilter::new(bits, 7).unwrap();
+            other.insert(&Value::Integer(123));
+            filter.intersect_with(&other).unwrap();
+            assert!(filter.might_contain(&Value::Integer(123)));
+            assert_eq!(filter.bits_set(), other.bits_set());
+        }
     }
 }
