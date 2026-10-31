@@ -74,30 +74,40 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("decoded BASE64 exceeds byte budget".into()));
     }
     let mut bytes = Vec::with_capacity(decoded_len);
-    let chunks = input.len() / 4;
-    for (index, group) in input.chunks_exact(4).enumerate() {
-        let padding = if group[2] == b'=' { 2 } else if group[3] == b'=' { 1 } else { 0 };
-        if (padding != 0 && index + 1 != chunks) || group[0] == b'=' || group[1] == b'=' ||
-            (padding == 2 && group[3] != b'=') {
+    // Only the final quartet may be padded. Decode all preceding full
+    // quartets with one path and no per-group last-element checks.
+    let full_len = input.len().saturating_sub(4);
+    let (full, tail) = input.split_at(full_len);
+    for group in full.chunks_exact(4) {
+        if group.contains(&b'=') {
             return Err(Error::Parse("invalid BASE64 padding".into()));
         }
         let a = digit(group[0])?;
         let b = digit(group[1])?;
-        let c = if padding >= 2 { 0 } else { digit(group[2])? };
-        let d = if padding >= 1 { 0 } else { digit(group[3])? };
+        let c = digit(group[2])?;
+        let d = digit(group[3])?;
+        bytes.extend_from_slice(&[
+            (a << 2) | (b >> 4),
+            (b << 4) | (c >> 2),
+            (c << 6) | d,
+        ]);
+    }
+    if !tail.is_empty() {
+        let padding = if tail[2] == b'=' { 2 } else if tail[3] == b'=' { 1 } else { 0 };
+        if tail[0] == b'=' || tail[1] == b'=' ||
+            (padding == 2 && tail[3] != b'=') {
+            return Err(Error::Parse("invalid BASE64 padding".into()));
+        }
+        let a = digit(tail[0])?;
+        let b = digit(tail[1])?;
+        let c = if padding >= 2 { 0 } else { digit(tail[2])? };
+        let d = if padding >= 1 { 0 } else { digit(tail[3])? };
         if (padding == 2 && (b & 15) != 0) || (padding == 1 && (c & 3) != 0) {
             return Err(Error::Parse("noncanonical BASE64 padding bits".into()));
         }
-        if padding == 0 {
-            bytes.extend_from_slice(&[
-                (a << 2) | (b >> 4),
-                (b << 4) | (c >> 2),
-                (c << 6) | d,
-            ]);
-        } else {
-            bytes.push((a << 2) | (b >> 4));
-            if padding == 1 { bytes.push((b << 4) | (c >> 2)); }
-        }
+        bytes.push((a << 2) | (b >> 4));
+        if padding < 2 { bytes.push((b << 4) | (c >> 2)); }
+        if padding == 0 { bytes.push((c << 6) | d); }
     }
     let decoded = String::from_utf8(bytes)
         .map_err(|_| Error::Type("UNBASE64_UTF8 decoded bytes are not UTF-8".into()))?;
@@ -206,5 +216,24 @@ mod full_quartet_decode_regressions {
         assert!(unbase64_utf8(&[Value::Text("YWJjZGVmZ=== ".into())]).is_err());
         assert!(unbase64_utf8(&[Value::Text("YWI=".into())]).is_ok());
         assert_eq!(unbase64_utf8(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bulk_base64_decode_tests {
+    use super::*;
+
+    #[test]
+    fn all_tail_lengths_and_long_unicode_round_trip() {
+        for repeat in 0..128 {
+            let original = Value::Text(format!("{}é🙂", "xyz".repeat(repeat)));
+            let encoded = base64(&[original.clone()]).unwrap();
+            assert_eq!(unbase64_utf8(&[encoded]).unwrap(), original);
+        }
+        for invalid in ["a===", "YWJj=AAA", "AA==AAAA", "Zm9=", "Zh=="] {
+            assert!(unbase64_utf8(&[Value::Text(invalid.into())]).is_err(), "{invalid}");
+        }
+        assert_eq!(unbase64_utf8(&[Value::Text(String::new())]).unwrap(),
+            Value::Text(String::new()));
     }
 }
