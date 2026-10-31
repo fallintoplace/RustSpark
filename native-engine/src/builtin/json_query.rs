@@ -103,7 +103,7 @@ mod identical_json_stream_validation_tests {
                 Value::Text(invalid.into()), Value::Text(invalid.into()),
             ]), Err(Error::Execution(_))), "{invalid}");
         }
-        assert_eq!(json_equal(&[Value::Text("0".into()), Value::Text("0.0".into())])
+        assert_eq!(json_equal(&[Value::Text(r#"{"a":1}"#.into()), Value::Text(r#"{ "a": 1 }"#.into())])
             .unwrap(), Value::Boolean(true));
     }
 }
