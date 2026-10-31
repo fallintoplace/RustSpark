@@ -104,13 +104,19 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
             parquet_tables=parquet_tables, json_tables=json_tables,
             named_params=named_params,
         )
-        try:
-            result = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE, text=True,
-                                    check=False, timeout=process_timeout)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
-        if result.returncode:
-            raise RuntimeError(result.stderr.strip() or "RustSpark query failed")
+        # Spool diagnostics to disk rather than retaining unbounded stderr
+        # in memory during an Arrow export that produces no stdout.
+        with tempfile.TemporaryFile() as error_log:
+            try:
+                result = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                        stderr=error_log, check=False,
+                                        timeout=process_timeout)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
+            if result.returncode:
+                error_log.seek(0, os.SEEK_END)
+                error_log.seek(max(0, error_log.tell() - 65_536))
+                detail = error_log.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "RustSpark query failed")
         with pa.memory_map(str(output), "r") as source:
             return pa.ipc.open_file(source).read_all().to_pandas()
