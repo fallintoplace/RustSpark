@@ -190,6 +190,19 @@ impl Iterator for DistinctOutput {
                     return None;
                 }
             };
+            if batch.schema().is_empty() && batch.num_rows() != 0 {
+                let empty_key = Vec::new();
+                if self.seen.contains_key(&empty_key) { continue; }
+                let next_total = self.retained_bytes.checked_add(64);
+                if self.seen.len() >= self.max_keys ||
+                    next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.stopped = true;
+                    return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
+                }
+                self.retained_bytes = next_total.expect("checked DISTINCT memory");
+                self.seen.insert(empty_key, ());
+                return Some(batch.slice_rows(0, 1));
+            }
             let mut selected = Vec::new();
             for row in 0..batch.num_rows() {
                 let key = match batch.row(row) {
@@ -927,5 +940,25 @@ mod direct_union_distinct_lowering_tests {
                 vec![Value::Integer(3)],
             ]);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod zero_width_stream_distinct_tests {
+    use super::*;
+    #[test]
+    fn returns_one_row_without_hashing_large_empty_keys() {
+        let schema = Schema::new(vec![]).unwrap();
+        let first = Batch::new_with_row_count(schema.clone(), vec![], 100_000).unwrap();
+        let second = Batch::new_with_row_count(schema.clone(), vec![], 200_000).unwrap();
+        let output = DistinctOutput::new(
+            Box::new([Ok(first), Ok(second)].into_iter()), QueryControl::default(), 1, 64)
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().map(Batch::num_rows).sum::<usize>(), 1);
+        let input = Batch::new_with_row_count(schema, vec![], 2).unwrap();
+        let mut limited = DistinctOutput::new(
+            Box::new([Ok(input)].into_iter()), QueryControl::default(), 1, 63);
+        assert!(limited.next().unwrap().is_err());
+        assert!(limited.next().is_none());
     }
 }
