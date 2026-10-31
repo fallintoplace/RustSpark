@@ -234,7 +234,7 @@ mod mixed_unicode_ascii_translation_regressions {
             ]).unwrap()
         };
         assert_eq!(translate("a1a", "🙂aé", "XYQ"), Value::Text("Y1Y".into()));
-        assert_eq!(translate("aba", "éab", "🙂Z"), Value::Text("Z".into()));
+        assert_eq!(translate("aba", "éab", "🙂Z"), Value::Text("ZZ".into()));
         assert_eq!(translate("aba", "🙂aa", "XYZ"), Value::Text("YbY".into()));
         assert_eq!(translate("ba", "éb", "🙂"), Value::Text("a".into()));
         assert_eq!(translate("foo", "é🙂", "ab"), Value::Text("foo".into()));
