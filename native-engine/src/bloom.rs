@@ -8,6 +8,7 @@ pub struct BloomFilter {
     words: Vec<u64>,
     bits: usize,
     hashes: u32,
+    populated: bool,
 }
 
 impl BloomFilter {
@@ -19,7 +20,7 @@ impl BloomFilter {
         if bits == 0 || bits > 1 << 29 || !(1..=16).contains(&hashes) {
             return Err(Error::Execution("invalid Bloom filter sizing".into()));
         }
-        Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes })
+        Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes, populated: false })
     }
 
     fn hash_pair(&self, key: &Value) -> (u64, u64) {
@@ -49,6 +50,7 @@ impl BloomFilter {
     }
 
     pub fn insert(&mut self, key: &Value) {
+        self.populated = true;
         let (first, step) = self.hash_pair(key);
         for seed in 0..self.hashes {
             let bit = self.probe(first, step, seed);
@@ -58,6 +60,7 @@ impl BloomFilter {
     }
 
     pub fn might_contain(&self, key: &Value) -> bool {
+        if !self.populated { return false; }
         let (first, step) = self.hash_pair(key);
         (0..self.hashes).all(|seed| {
             let bit = self.probe(first, step, seed);
@@ -242,5 +245,23 @@ mod native_bloom_batch_operator_tests {
         assert_eq!(bloom.probe_batch(&[]), Vec::<bool>::new());
         let empty = BloomFilter::new(65_536, 5).unwrap();
         assert_eq!(empty.probe_batch(&keys), vec![false; keys.len()]);
+    }
+}
+
+#[cfg(test)]
+mod empty_bloom_probe_fast_path_tests {
+    use super::*;
+    #[test]
+    fn empty_filters_reject_keys_without_hashing_until_inserted() {
+        let mut filter = BloomFilter::new(1 << 16, 5).unwrap();
+        let key = Value::Text("é🙂".repeat(50_000));
+        assert!(!filter.might_contain(&key));
+        assert_eq!(filter.probe_batch(&[key.clone(), Value::Null]), vec![false, false]);
+        filter.insert_batch(&[]);
+        assert!(!filter.might_contain(&key));
+        filter.insert(&key);
+        assert!(filter.might_contain(&key));
+        assert!(filter.bits_set() > 0);
+        assert!(filter.clone().might_contain(&key));
     }
 }
