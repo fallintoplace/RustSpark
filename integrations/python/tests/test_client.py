@@ -82,7 +82,7 @@ class RustSparkTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "process_timeout"):
                     client.query("SELECT 1", process_timeout=bad)
 
-    @patch("rustspark_local.subprocess.run", side_effect=subprocess.TimeoutExpired("rustspark", 3))
+    @patch("rustspark_local.run_bounded", side_effect=subprocess.TimeoutExpired("rustspark", 3))
     def test_deadline_is_reported(self, run):
         with self.assertRaisesRegex(RustSparkError, "process timeout"):
             RustSpark().query("SELECT 1", process_timeout=3)
@@ -175,7 +175,7 @@ class BoundedProcessCaptureTests(unittest.TestCase):
             [sys.executable, "-c", "print('ready')"],
             timeout=5, max_output_bytes=1024,
         )
-        self.assertEqual(output.stdout, "ready\\n")
+        self.assertEqual(output.stdout, "ready\n")
         self.assertEqual(output.returncode, 0)
         with self.assertRaisesRegex(ValueError, "limit"):
             run_bounded(
