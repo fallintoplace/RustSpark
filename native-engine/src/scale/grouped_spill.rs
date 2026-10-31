@@ -40,14 +40,15 @@ impl Drop for GroupFiles {
 
 const MAX_DISTINCT_KEYS_PER_GROUP: usize = 65_536;
 const MAX_DISTINCT_BYTES_PER_GROUP: usize = 16 * 1024 * 1024;
+const MAX_GROUP_KEY_STATE_BYTES: usize = 64 * 1024 * 1024;
 
 enum State {
     Count(i64),
     CountDistinct { keys: HashSet<Value>, bytes: usize },
     Sum(Option<Value>),
     SumDistinct { keys: HashSet<Value>, bytes: usize, total: Option<Value> },
-    Avg { sum: f64, count: i64 },
-    AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, count: i64 },
+    Avg { sum: f64, compensation: f64, count: i64 },
+    AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
 }
@@ -58,13 +59,13 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Sum(_) => Ok(State::Sum(None)),
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
-        AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
+        AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, compensation: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
         AggregateOp::SumDistinct(_) => Ok(State::SumDistinct {
             keys: HashSet::new(), bytes: 0, total: None,
         }),
         AggregateOp::AvgDistinct(_) => Ok(State::AvgDistinct {
-            keys: HashSet::new(), bytes: 0, sum: 0.0, count: 0,
+            keys: HashSet::new(), bytes: 0, sum: 0.0, compensation: 0.0, count: 0,
         }),
     }
 }
@@ -103,17 +104,29 @@ fn add_sum(total: &mut Option<Value>, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn add_avg(sum: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
+fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
     let number = match value {
         Value::Integer(number) => *number as f64,
         Value::Float(number) => *number,
         _ => return Err(Error::Type("AVG requires numeric values".into())),
     };
+    // Match in-memory AVG: retain the bits lost when adding values
+    // of very different magnitudes (Neumaier compensated summation).
     let next = *sum + number;
-    if !next.is_finite() { return Err(Error::Execution("AVG overflow".into())); }
+    let correction = if sum.abs() >= number.abs() {
+        (*sum - next) + number
+    } else {
+        (number - next) + *sum
+    };
+    let next_compensation = *compensation + correction;
+    if !next.is_finite() || !next_compensation.is_finite() ||
+        !(next + next_compensation).is_finite() {
+        return Err(Error::Execution("AVG overflow".into()));
+    }
     let next_count = count.checked_add(1)
         .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
     *sum = next;
+    *compensation = next_compensation;
     *count = next_count;
     Ok(())
 }
@@ -140,9 +153,12 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         State::SumDistinct { keys, bytes, total } => {
             if insert_distinct(keys, bytes, &value)? { add_sum(total, &value)?; }
         }
-        State::Avg { sum, count } => add_avg(sum, count, &value)?,
-        State::AvgDistinct { keys, bytes, sum, count } => {
-            if insert_distinct(keys, bytes, &value)? { add_avg(sum, count, &value)?; }
+        State::Avg { sum, compensation, count } =>
+            add_avg(sum, compensation, count, &value)?,
+        State::AvgDistinct { keys, bytes, sum, compensation, count } => {
+            if insert_distinct(keys, bytes, &value)? {
+                add_avg(sum, compensation, count, &value)?;
+            }
         }
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
@@ -189,14 +205,28 @@ fn aggregate_shard(
     items: &[AggregateItem], output: &Schema,
     max_groups: usize, io_rows: usize, control: &QueryControl,
 ) -> Result<Batch> {
+    aggregate_shard_with_budget(path, input, keys, items, output,
+        max_groups, io_rows, MAX_GROUP_KEY_STATE_BYTES, control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aggregate_shard_with_budget(
+    path: &Path, input: &Schema, keys: &[usize],
+    items: &[AggregateItem], output: &Schema,
+    max_groups: usize, io_rows: usize, max_key_state_bytes: usize,
+    control: &QueryControl,
+) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != input { return Err(Error::Schema("group shard schema mismatch".into())); }
     let mut groups: HashMap<Vec<Value>, Vec<State>> = HashMap::new();
+    let mut retained_key_state_bytes = 0usize;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
+        let key_columns = keys.iter().map(|&index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
-            let key = keys.iter().map(|&col| batch.value(row, col).cloned())
-                .collect::<Result<Vec<_>>>()?;
+            let key = key_columns.iter().map(|column| column[row].clone())
+                .collect::<Vec<_>>();
             let at_capacity = groups.len() >= max_groups;
             let states = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -204,9 +234,18 @@ fn aggregate_shard(
                     if at_capacity {
                         return Err(Error::Execution("group state count exceeds partition budget".into()));
                     }
+                    // The group-count cap alone is insufficient for wide text keys.
+                    // Charge unique keys and their fixed aggregate state once.
+                    let footprint = super::row_footprint::footprint(entry.key().iter())
+                        .saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
+                    let next_bytes = retained_key_state_bytes.checked_add(footprint)
+                        .filter(|total| *total <= max_key_state_bytes)
+                        .ok_or_else(|| Error::Execution(
+                            "group key state byte budget exceeded".into()))?;
                     let initial = items.iter()
                         .map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
+                    retained_key_state_bytes = next_bytes;
                     entry.insert(initial)
                 }
             };
@@ -220,11 +259,12 @@ fn aggregate_shard(
             key.push(match state {
                 State::Count(value) => Value::Integer(value),
                 State::CountDistinct { keys, .. } => Value::Integer(keys.len() as i64),
-                State::AvgDistinct { sum, count, .. } | State::Avg { sum, count } =>
+                State::AvgDistinct { sum, compensation, count, .. } |
+                State::Avg { sum, compensation, count } =>
                     if count == 0 {
                     Value::Null
                 } else {
-                    Value::Float(sum / count as f64)
+                    Value::Float((sum + compensation) / count as f64)
                 },
                 State::SumDistinct { total: v, .. } |
                 State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
@@ -267,6 +307,9 @@ where I: IntoIterator<Item = Result<Batch>>
         let batch = aggregate_shard(
             shard, &schema, &keys, items, &output_schema,
             max_groups_per_partition, io_batch_rows, control)?;
+        // A sparse hash exchange can have thousands of empty shards.
+        // No grouped rows exist for them, so skip schema-only output files.
+        if batch.num_rows() == 0 { continue; }
         let id = GROUP_ID.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!("rustspark-groups-{}-{id}.rspill", std::process::id()));
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
@@ -442,5 +485,175 @@ mod grouped_spill_window_output_tests {
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grouped_spill_key_state_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, io::BufWriter};
+
+    #[test]
+    fn unique_wide_keys_consume_budget_but_duplicates_do_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-group-state-budget-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("groups.rspill");
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let key = Value::Text("alpha".repeat(8));
+        let other = Value::Text("beta".repeat(8));
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![key.clone()], vec![key.clone()], vec![other.clone()],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(File::create(&path).unwrap()),
+            schema.clone()).unwrap();
+        writer.write_batch(&source).unwrap();
+        writer.finish().unwrap();
+        let items = [AggregateItem::new(AggregateOp::CountAll, "n")];
+        let output = output_schema(&schema, &[("k".into(), "k".into())], &items).unwrap();
+        let one_group_budget = super::super::row_footprint::footprint(
+            std::iter::once(&key)).saturating_add(std::mem::size_of::<State>());
+        let control = QueryControl::default();
+        let err = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
+            10, 3, one_group_budget, &control).unwrap_err();
+        assert!(err.to_string().contains("byte budget"));
+        let actual = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
+            10, 3, 8192, &control).unwrap().rows().unwrap();
+        assert_eq!(actual.len(), 2);
+        assert!(actual.contains(&vec![key, Value::Integer(2)]));
+        assert!(actual.contains(&vec![other, Value::Integer(1)]));
+        assert!(path.exists());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sparse_group_result_shards_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn writes_only_nonempty_group_results_for_sparse_partitions() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-groups-sparse-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("g", DataType::Integer, false),
+            Field::new("value", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(5), Value::Integer(7)],
+            vec![Value::Integer(5), Value::Integer(11)],
+        ]).unwrap();
+        let items = [AggregateItem::new(
+            AggregateOp::Sum(Expr::Column("value".into())), "total")];
+        let result = grouped_aggregate([Ok(batch)], schema.clone(),
+            &[("g".into(), "g".into())], &items,
+            &dir, 128, 10, 2, &QueryControl::default()).unwrap();
+        assert_eq!(result.paths().len(), 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let mut reader = SpillReader::new(BufReader::new(
+            File::open(&result.paths()[0]).unwrap()), 2).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(5), Value::Integer(18)]]);
+        assert!(reader.next_batch().unwrap().is_none());
+        drop(result);
+        let empty = grouped_aggregate(Vec::<Result<Batch>>::new(), schema,
+            &[("g".into(), "g".into())], &items, &dir, 128, 10, 2,
+            &QueryControl::default()).unwrap();
+        assert!(empty.paths().is_empty());
+        drop(empty);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod compensated_spill_average_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn cancellation_sensitive_averages_survive_partitioned_aggregation() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-avg-compensated-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("group_id", DataType::Integer, false),
+            Field::new("n", DataType::Float, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Float(1e16)],
+            vec![Value::Integer(1), Value::Float(1.0)],
+            vec![Value::Integer(1), Value::Float(-1e16)],
+            vec![Value::Integer(1), Value::Float(1.0)], // repeat DISTINCT value
+        ]).unwrap();
+        let items = [
+            AggregateItem::new(AggregateOp::Avg(Expr::Column("n".into())), "avg"),
+            AggregateItem::new(AggregateOp::AvgDistinct(Expr::Column("n".into())), "avg_unique"),
+        ];
+        let result = grouped_aggregate([Ok(batch)], schema,
+            &[("group_id".into(), "group_id".into())], &items,
+            &dir, 2, 10, 2, &QueryControl::default()).unwrap();
+        let mut rows = Vec::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(part) = reader.next_batch().unwrap() {
+                rows.extend(part.rows().unwrap());
+            }
+        }
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Value::Float(0.5));
+        assert_eq!(rows[0][2], Value::Float(1.0 / 3.0));
+        drop(result);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prebound_group_keys_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{collections::HashMap, fs, sync::atomic::{AtomicU64, Ordering}};
+    static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn nullable_groups_across_many_spill_batches_keep_exact_counts() {
+        let dir = std::env::temp_dir().join(format!("rustspark-prebound-groups-{}-{}",
+            std::process::id(), TEST_ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let mut expected = HashMap::<Value, i64>::new();
+        let rows = (0..2048_i64).map(|n| {
+            let key = if n % 17 == 0 { Value::Null } else { Value::Integer(n % 13) };
+            *expected.entry(key.clone()).or_default() += 1;
+            vec![key]
+        }).collect();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let result = grouped_aggregate([Ok(batch)], schema,
+            &[("k".into(), "k".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "n")],
+            &dir, 8, 64, 31, &QueryControl::default()).unwrap();
+        let mut actual = HashMap::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 31).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                for row in batch.rows().unwrap() {
+                    let Value::Integer(count) = &row[1] else { panic!("invalid count") };
+                    actual.insert(row[0].clone(), *count);
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+        drop(result);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

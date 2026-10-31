@@ -127,11 +127,13 @@ pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Res
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
     })?;
     let mut combined = budget.reserve(total)?;
-    let reservations = requests.iter().map(|&bytes| Reservation {
-        budget: budget.clone(), bytes,
-    }).collect();
-    // Transfer the already-charged capacity to independent drop guards.
-    combined.disarm();
+    // Transfer ownership incrementally. If collecting the guards unwinds,
+    // only the untransferred remainder stays with the parent reservation.
+    let mut reservations = Vec::with_capacity(requests.len());
+    for &bytes in requests {
+        reservations.push(combined.split_off(bytes)?);
+    }
+    debug_assert_eq!(combined.bytes(), 0);
     Ok(reservations)
 }
 
@@ -184,5 +186,29 @@ mod zero_scale_reservations_fast_path_tests {
         assert_eq!(budget.used(), 1);
         drop(empty);
         assert_eq!(budget.used(), 1);
+    }
+}
+
+#[cfg(test)]
+mod bulk_reservation_transfer_regressions {
+    use super::*;
+
+    #[test]
+    fn split_guards_keep_exact_budget_accounting_after_resize_and_drop() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let mut guards = reserve_many(&budget, &[0, 15, 25, 10]).unwrap();
+        assert_eq!(budget.used(), 50);
+        guards[1].resize(30).unwrap();
+        assert_eq!(budget.used(), 65);
+        let split = guards[2].split_off(5).unwrap();
+        assert_eq!(budget.used(), 65);
+        drop(split);
+        assert_eq!(budget.used(), 60);
+        drop(guards);
+        assert_eq!(budget.used(), 0);
+
+        assert!(reserve_many(&budget, &[40, 61]).is_err());
+        assert_eq!(budget.used(), 0);
+        assert!(reserve_many(&budget, &[]).unwrap().is_empty());
     }
 }
