@@ -11,13 +11,14 @@ use crate::{
 enum Step {
     Filter(Expr),
     Project(Vec<Selection>),
+    // LIMIT is stateful across incoming batches and must run at its position
+    // in the operator chain, not after every projection and filter.
+    Limit { skip: usize, remaining: Option<usize> },
 }
 
 pub struct Pipeline<I> {
     source: I,
     steps: Vec<Step>,
-    skip: usize,
-    remaining: Option<usize>,
     invalid_limit: bool,
     stopped: bool,
     guard: QueryGuard,
@@ -29,8 +30,6 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
         Self {
             source,
             steps: Vec::new(),
-            skip: 0,
-            remaining: None,
             invalid_limit: false,
             stopped: false,
             guard: QueryGuard::default(),
@@ -50,14 +49,7 @@ impl<I: Iterator<Item = Result<Batch>>> Pipeline<I> {
 
     pub fn with_limit(mut self, offset: usize, count: Option<usize>) -> Self {
         self.invalid_limit |= count.is_some_and(|rows| offset.checked_add(rows).is_none());
-        let previous = self.remaining;
-        let advance = offset.min(previous.unwrap_or(usize::MAX));
-        self.skip = self.skip.saturating_add(advance);
-        self.remaining = match (previous, count) {
-            (Some(existing), Some(current)) => Some(existing.saturating_sub(offset).min(current)),
-            (Some(existing), None) => Some(existing.saturating_sub(offset)),
-            (None, requested) => requested,
-        };
+        self.steps.push(Step::Limit { skip: offset, remaining: count });
         self
     }
 
@@ -79,10 +71,12 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
         if self.stopped { return None; }
         if self.invalid_limit {
             self.invalid_limit = false;
-            self.remaining = Some(0);
+            self.stopped = true;
             return Some(Err(crate::Error::Execution("LIMIT + OFFSET overflow".into())));
         }
-        if self.remaining == Some(0) {
+        if self.steps.iter().any(|step|
+            matches!(step, Step::Limit { remaining: Some(0), .. })) {
+            self.stopped = true;
             return None;
         }
         loop {
@@ -103,21 +97,23 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 }
                 // Respect operator order for aliases introduced by an earlier
                 // projection and referenced by a later filter.
-                for step in &self.steps {
+                for step in &mut self.steps {
                     batch = match step {
                         Step::Filter(predicate) => filter::filter(&batch, predicate)?,
                         Step::Project(selections) => project::project(&batch, selections)?,
+                        Step::Limit { skip, remaining } => {
+                            let start = (*skip).min(batch.num_rows());
+                            *skip -= start;
+                            let available = batch.num_rows() - start;
+                            let keep = remaining.map_or(available, |left| left.min(available));
+                            if let Some(left) = remaining.as_mut() { *left -= keep; }
+                            if start == 0 && keep == batch.num_rows() {
+                                batch
+                            } else {
+                                batch.slice_rows(start, start + keep)?
+                            }
+                        }
                     };
-                }
-                let start = self.skip.min(batch.num_rows());
-                self.skip -= start;
-                let available = batch.num_rows() - start;
-                let count = self.remaining.map_or(available, |remaining| remaining.min(available));
-                if let Some(remaining) = self.remaining.as_mut() {
-                    *remaining -= count;
-                }
-                if start != 0 || count != batch.num_rows() {
-                    batch = batch.slice_rows(start, start + count)?;
                 }
                 if let Some(metrics) = &self.metrics {
                     metrics.record_output(batch.num_rows() as u64)?;
@@ -125,10 +121,17 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for Pipeline<I> {
                 Ok(batch)
             })();
             match result {
-                Ok(batch) if batch.num_rows() == 0 && self.remaining != Some(0) => continue,
+                Ok(batch) if batch.num_rows() == 0 => {
+                    if self.steps.iter().any(|step|
+                        matches!(step, Step::Limit { remaining: Some(0), .. })) {
+                        self.stopped = true;
+                        return None;
+                    }
+                    continue;
+                }
                 Ok(batch) => return Some(Ok(batch)),
                 Err(error) => {
-                    self.remaining = Some(0);
+                    self.stopped = true;
                     return Some(Err(error));
                 }
             }
@@ -304,5 +307,66 @@ mod pipeline_operator_order_tests {
             .with_projection(vec![Selection::new(Expr::Column("y".into()), "z")])
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(output[0].schema().fields()[0].name, "z");
+    }
+}
+
+#[cfg(test)]
+mod limit_operator_order_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, scalar::Value, schema::{DataType, Field, Schema}};
+    use std::{cell::Cell, rc::Rc};
+
+    fn batch(start: i64) -> Batch {
+        Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (start..start + 4).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap()
+    }
+
+    #[test]
+    fn limit_before_filter_must_not_read_later_batches() {
+        let polls = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&polls);
+        let source = std::iter::repeat_with(move || {
+            let index = seen.get();
+            seen.set(index + 1);
+            Ok(batch(index as i64 * 4))
+        });
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(10)));
+        let output = Pipeline::new(source).with_limit(0, Some(3))
+            .with_filter(predicate).collect::<Result<Vec<_>>>().unwrap();
+        assert!(output.is_empty());
+        assert_eq!(polls.get(), 1, "upstream LIMIT must stop source polling");
+    }
+
+    #[test]
+    fn filter_before_limit_can_collect_from_subsequent_batches() {
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(4)));
+        let results = Pipeline::new([Ok(batch(0)), Ok(batch(4)), Ok(batch(8))].into_iter())
+            .with_filter(predicate).with_limit(1, Some(3))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(results.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), vec![
+                vec![Value::Integer(6)], vec![Value::Integer(7)],
+                vec![Value::Integer(8)],
+            ]);
+    }
+
+    #[test]
+    fn interleaved_limits_and_alias_filters_preserve_order() {
+        let predicate = Expr::binary(Expr::Column("renamed".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(2)));
+        let output = Pipeline::new([Ok(batch(0)), Ok(batch(4))].into_iter())
+            .with_limit(1, Some(5))
+            .with_projection(vec![Selection::new(Expr::Column("n".into()), "renamed")])
+            .with_filter(predicate)
+            .with_limit(1, Some(2))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.into_iter().flat_map(|part| part.rows().unwrap())
+            .collect::<Vec<_>>(), vec![
+                vec![Value::Integer(4)], vec![Value::Integer(5)]
+            ]);
     }
 }
