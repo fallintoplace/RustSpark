@@ -231,9 +231,9 @@ impl TaskScheduler {
     /// persistent worker-to-task index on every ordinary lease operation.
     pub fn reclaim_worker(&mut self, worker: u64) -> usize {
         let leased = self.tasks.iter().filter_map(|(&id, task)| {
-            match task.status {
-                TaskStatus::Leased { worker: owner, until, .. } if owner == worker =>
-                    Some((id, until)),
+            match &task.status {
+                TaskStatus::Leased { worker: owner, until, .. } if *owner == worker =>
+                    Some((id, *until)),
                 _ => None,
             }
         }).collect::<Vec<_>>();
