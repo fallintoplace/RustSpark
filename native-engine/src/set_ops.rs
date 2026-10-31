@@ -1,5 +1,5 @@
 //! Native SQL set operators with explicit schema compatibility checks.
-use std::{borrow::Cow, collections::{HashMap, HashSet}};
+use std::{borrow::Cow, collections::{HashMap, HashSet}, hash::{Hash, Hasher}};
 use crate::{
     batch::Batch, scalar::Value, schema::{DataType, Field, Schema}, Error, Result,
 };
@@ -51,14 +51,45 @@ pub fn align_set_inputs<'a>(
 
 const MAX_DISTINCT_SET_KEYS: usize = 1_000_000;
 
-fn bounded_right_keys(right: &Batch, max_keys: usize) -> Result<HashSet<Vec<crate::scalar::Value>>> {
+/// A multi-column set key borrowing validated batch buffers. Comparison and
+/// hashing normalize SQL NULLs, signed zero and NaN through Value equality.
+#[derive(Clone, Copy)]
+struct BorrowedSetRow<'a> {
+    columns: &'a [&'a [Value]],
+    row: usize,
+}
+
+impl Hash for BorrowedSetRow<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.columns.len().hash(state);
+        for column in self.columns { column[self.row].hash(state); }
+    }
+}
+
+impl PartialEq for BorrowedSetRow<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns.len() == other.columns.len() &&
+            self.columns.iter().zip(other.columns)
+                .all(|(left, right)| left[self.row] == right[other.row])
+    }
+}
+impl Eq for BorrowedSetRow<'_> {}
+
+fn borrowed_columns(batch: &Batch) -> Result<Vec<&[Value]>> {
+    (0..batch.schema().len())
+        .map(|index| batch.column(index)).collect()
+}
+
+fn bounded_right_keys<'a>(
+    columns: &'a [&'a [Value]], rows: usize, max_keys: usize,
+) -> Result<HashSet<BorrowedSetRow<'a>>> {
     let mut keys = HashSet::new();
-    for row in 0..right.num_rows() {
-        let value = right.row(row)?;
-        if keys.len() >= max_keys && !keys.contains(&value) {
+    for row in 0..rows {
+        let key = BorrowedSetRow { columns, row };
+        if keys.len() >= max_keys && !keys.contains(&key) {
             return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
         }
-        keys.insert(value);
+        keys.insert(key);
     }
     Ok(keys)
 }
@@ -83,16 +114,18 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
         }
         return left.take(&rows)?.relabel(schema);
     }
-    let right_rows = bounded_right_keys(&right, MAX_DISTINCT_SET_KEYS)?;
+    let left_columns = borrowed_columns(&left)?;
+    let right_columns = borrowed_columns(&right)?;
+    let right_rows = bounded_right_keys(&right_columns, right.num_rows(), MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
-    let mut rows = Vec::new();
-    for index in 0..left.num_rows() {
-        let row = left.row(index)?;
-        if right_rows.contains(&row) && emitted.insert(row.clone()) {
-            rows.push(row);
+    let mut selected = Vec::new();
+    for row in 0..left.num_rows() {
+        let key = BorrowedSetRow { columns: &left_columns, row };
+        if right_rows.contains(&key) && emitted.insert(key) {
+            selected.push(row);
         }
     }
-    Batch::from_rows(schema, rows)
+    left.take(&selected)?.relabel(schema)
 }
 
 pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
@@ -115,26 +148,28 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
         }
         return left.take(&rows)?.relabel(schema);
     }
-    let right_rows = bounded_right_keys(right, MAX_DISTINCT_SET_KEYS)?;
+    let left_columns = borrowed_columns(&left)?;
+    let right_columns = borrowed_columns(&right)?;
+    let right_rows = bounded_right_keys(&right_columns, right.num_rows(), MAX_DISTINCT_SET_KEYS)?;
     let mut emitted = HashSet::new();
-    let mut rows = Vec::new();
-    for index in 0..left.num_rows() {
-        let row = left.row(index)?;
-        if !right_rows.contains(&row) && emitted.insert(row.clone()) {
-            rows.push(row);
+    let mut selected = Vec::new();
+    for row in 0..left.num_rows() {
+        let key = BorrowedSetRow { columns: &left_columns, row };
+        if !right_rows.contains(&key) && emitted.insert(key) {
+            selected.push(row);
         }
     }
-    Batch::from_rows(schema, rows)
+    left.take(&selected)?.relabel(schema)
 }
 
-fn right_counts(
-    right: &Batch, max_distinct_keys: usize,
-) -> Result<HashMap<Vec<crate::scalar::Value>, usize>> {
-    let mut counts = HashMap::<Vec<crate::scalar::Value>, usize>::new();
-    for index in 0..right.num_rows() {
-        let row = right.row(index)?;
+fn right_counts<'a>(
+    columns: &'a [&'a [Value]], rows: usize, max_distinct_keys: usize,
+) -> Result<HashMap<BorrowedSetRow<'a>, usize>> {
+    let mut counts = HashMap::new();
+    for row in 0..rows {
+        let key = BorrowedSetRow { columns, row };
         let at_limit = counts.len() >= max_distinct_keys;
-        match counts.entry(row) {
+        match counts.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let next = entry.get().checked_add(1)
                     .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
@@ -175,18 +210,20 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
         }
         return left.take(&selected)?.relabel(schema);
     }
-    let mut counts = right_counts(&right, MAX_DISTINCT_SET_KEYS)?;
-    let mut rows = Vec::new();
-    for index in 0..left.num_rows() {
-        let row = left.row(index)?;
-        if let Some(remaining) = counts.get_mut(&row) {
+    let left_columns = borrowed_columns(&left)?;
+    let right_columns = borrowed_columns(&right)?;
+    let mut counts = right_counts(&right_columns, right.num_rows(), MAX_DISTINCT_SET_KEYS)?;
+    let mut selected = Vec::new();
+    for row in 0..left.num_rows() {
+        let key = BorrowedSetRow { columns: &left_columns, row };
+        if let Some(remaining) = counts.get_mut(&key) {
             if *remaining > 0 {
                 *remaining -= 1;
-                rows.push(row);
+                selected.push(row);
             }
         }
     }
-    Batch::from_rows(schema, rows)
+    left.take(&selected)?.relabel(schema)
 }
 
 /// Keep left occurrences after subtracting right row multiplicities.
@@ -214,19 +251,21 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
         }
         return left.take(&selected)?.relabel(schema);
     }
-    let mut counts = right_counts(right, MAX_DISTINCT_SET_KEYS)?;
-    let mut rows = Vec::new();
-    for index in 0..left.num_rows() {
-        let row = left.row(index)?;
-        if let Some(remaining) = counts.get_mut(&row) {
+    let left_columns = borrowed_columns(&left)?;
+    let right_columns = borrowed_columns(&right)?;
+    let mut counts = right_counts(&right_columns, right.num_rows(), MAX_DISTINCT_SET_KEYS)?;
+    let mut selected = Vec::new();
+    for row in 0..left.num_rows() {
+        let key = BorrowedSetRow { columns: &left_columns, row };
+        if let Some(remaining) = counts.get_mut(&key) {
             if *remaining > 0 {
                 *remaining -= 1;
                 continue;
             }
         }
-        rows.push(row);
+        selected.push(row);
     }
-    Batch::from_rows(schema, rows)
+    left.take(&selected)?.relabel(schema)
 }
 
 #[cfg(test)]
@@ -415,5 +454,83 @@ mod typed_empty_set_short_circuits_tests {
             Field::new("id", DataType::Text, false),
         ]).unwrap());
         assert!(intersect_distinct(&integers, &invalid).is_err());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_multicolumn_set_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn inputs() -> (Batch, Batch) {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("score", DataType::Float, true),
+        ]).unwrap();
+        let long = "é🙂".repeat(2048);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(long.clone()), Value::Float(-0.0)],
+            vec![Value::Null, Value::Float(f64::NAN)],
+            vec![Value::Text(long.clone()), Value::Float(0.0)],
+            vec![Value::Text("different".into()), Value::Null],
+            vec![Value::Null, Value::Float(f64::NAN)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text(long), Value::Float(0.0)],
+            vec![Value::Null, Value::Float(f64::NAN)],
+            vec![Value::Null, Value::Float(f64::NAN)],
+            vec![Value::Text("absent".into()), Value::Null],
+        ]).unwrap();
+        (left, right)
+    }
+
+    #[test]
+    fn distinct_sets_preserve_first_rows_and_sql_null_float_equality() {
+        let (left, right) = inputs();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().rows().unwrap(),
+            vec![left.row(0).unwrap(), left.row(1).unwrap()]);
+        assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(),
+            vec![left.row(3).unwrap()]);
+    }
+
+    #[test]
+    fn multiset_counts_consume_right_duplicates_in_left_order() {
+        let (left, right) = inputs();
+        assert_eq!(intersect_all(&left, &right).unwrap().rows().unwrap(),
+            vec![left.row(0).unwrap(), left.row(1).unwrap(), left.row(4).unwrap()]);
+        assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(),
+            vec![left.row(2).unwrap(), left.row(3).unwrap()]);
+    }
+
+    #[test]
+    fn borrowed_keys_enforce_cardinality_for_unique_not_duplicate_rows() {
+        let (left, _) = inputs();
+        let columns = borrowed_columns(&left).unwrap();
+        assert!(bounded_right_keys(&columns, 2, 1).is_err());
+        assert!(bounded_right_keys(&columns, 3, 2).is_ok());
+        assert!(right_counts(&columns, 2, 1).is_err());
+        assert!(right_counts(&columns, 3, 2).is_ok());
+    }
+
+    #[test]
+    fn numeric_widening_and_empty_inputs_preserve_set_contracts() {
+        let (left, _) = inputs();
+        let empty = Batch::empty(left.schema().clone());
+        assert!(intersect_all(&left, &empty).unwrap().rows().unwrap().is_empty());
+        assert_eq!(except_all(&left, &empty).unwrap(), left);
+        let a = Batch::from_rows(Schema::new(vec![
+            Field::new("name", DataType::Text, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Integer(2)],
+        ]).unwrap();
+        let b = Batch::from_rows(Schema::new(vec![
+            Field::new("tag", DataType::Text, false),
+            Field::new("n", DataType::Float, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Float(2.0)],
+        ]).unwrap();
+        assert_eq!(intersect_distinct(&a, &b).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("a".into()), Value::Float(2.0)]]);
     }
 }
