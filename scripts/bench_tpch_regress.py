@@ -72,6 +72,12 @@ def check_matching_environment(baseline, candidate):
             raise ValueError(f"TPC-H benchmark {field} differs between reports")
 
 
+def rounded_positive_ratio(value):
+    rounded = round(value, 4)
+    # Fixed decimal rounding must not turn a valid tiny speedup into zero.
+    return rounded if rounded > 0 else float(f"{value:.4g}")
+
+
 def compare(baseline, candidate, max_regression=0.20):
     max_regression = checked_regression_threshold(max_regression)
     check_matching_environment(baseline, candidate)
@@ -93,8 +99,8 @@ def compare(baseline, candidate, max_regression=0.20):
             "baseline_ms": old[number],
             "candidate_ms": new[number],
             "delta_ms": round(new[number] - old[number], 3),
-            "speedup": round(speedup, 4),
-            "ratio": round(ratio, 4),
+            "speedup": rounded_positive_ratio(speedup),
+            "ratio": rounded_positive_ratio(ratio),
             "regression": ratio > 1 + max_regression,
         })
     full_suite, suite_speedup = calculate_suite_speedup(old, new)
