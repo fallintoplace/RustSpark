@@ -72,7 +72,7 @@ pub fn cross_join_with_max_rows(
         }
         columns.push(output);
     }
-    Batch::new_with_row_count(schema, columns, count)
+    Batch::from_validated_columns(schema, columns, count)
 }
 
 pub fn hash_join(
@@ -503,7 +503,7 @@ impl<'a> PreparedHashJoin<'a> {
                 rows += 1;
             }
         }
-        Batch::new_with_row_count(self.output_schema.clone(), columns, rows)
+        Batch::from_validated_columns(self.output_schema.clone(), columns, rows)
     }
 }
 
@@ -788,5 +788,39 @@ mod columnar_outer_hash_join_regressions {
             assert_eq!(result.row(result.num_rows() - 1).unwrap(),
                 vec![Value::Null, Value::Integer(2)]);
         }
+    }
+}
+
+#[cfg(test)]
+mod validated_join_output_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn typed_cartesian_and_prepared_join_keep_zero_width_and_nullable_rows() {
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(empty_schema.clone(), vec![], 2).unwrap();
+        let b = Batch::new_with_row_count(empty_schema, vec![], 3).unwrap();
+        assert_eq!(cross_join(&a, &b).unwrap().num_rows(), 6);
+
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("界".repeat(512))],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("right".into())],
+        ]).unwrap();
+        let prepared = PreparedHashJoin::new(
+            left.schema().clone(), &right, "k", "k", JoinKind::Left
+        ).unwrap();
+        let result = prepared.probe(&left).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.row(1).unwrap(),
+            vec![Value::Null, Value::Null, Value::Null, Value::Null]);
+        assert_eq!(result, hash_join(&left, &right, "k", "k", JoinKind::Left).unwrap());
     }
 }
