@@ -29,10 +29,9 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
         }
         Err(error) => return Err(Error::Parse(format!("invalid URL: {error}"))),
     };
-    let suffix = if parsed.is_some() { url } else { url };
-    let (without_ref, fragment) = match suffix.split_once('#') {
+    let (without_ref, fragment) = match url.split_once('#') {
         Some((left, right)) => (left, Some(right)),
-        None => (suffix, None),
+        None => (url, None),
     };
     let (without_query, query) = match without_ref.split_once('?') {
         Some((left, right)) => (left, Some(right)),
