@@ -267,7 +267,10 @@ fn aggregate_shard_with_budget(
             }
         }
     }
-    let rows = groups.into_iter().map(|(mut key, states)| {
+    let row_count = groups.len();
+    let mut columns = (0..output.len())
+        .map(|_| Vec::with_capacity(row_count)).collect::<Vec<_>>();
+    for (mut key, states) in groups {
         for state in states {
             key.push(match state {
                 State::Count(value) => Value::Integer(value),
@@ -275,17 +278,22 @@ fn aggregate_shard_with_budget(
                 State::AvgDistinct { sum, compensation, count, .. } |
                 State::Avg { sum, compensation, count } =>
                     if count == 0 {
-                    Value::Null
-                } else {
-                    Value::Float((sum + compensation) / count as f64)
-                },
+                        Value::Null
+                    } else {
+                        Value::Float((sum + compensation) / count as f64)
+                    },
                 State::SumDistinct { total: v, .. } |
                 State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
             });
         }
-        key
-    }).collect();
-    Batch::from_rows(output.clone(), rows)
+        // Keys and finalized aggregate values already belong to this shard.
+        // Move them directly into the output columns, without allocating a
+        // second row-major collection and transposing it again.
+        for (column, value) in columns.iter_mut().zip(key) {
+            column.push(value);
+        }
+    }
+    Batch::new_with_row_count(output.clone(), columns, row_count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -731,5 +739,52 @@ mod grouped_spill_total_distinct_bytes_regressions {
         assert_eq!(keys_a.len(), 1);
         assert!(keys_b.is_empty());
         assert_eq!(retained, budget);
+    }
+}
+
+#[cfg(test)]
+mod columnar_grouped_shard_output_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use std::{fs, io::BufWriter};
+
+    #[test]
+    fn materializes_nullable_unicode_group_keys_and_multiple_aggregate_states() {
+        let path = std::env::temp_dir().join(format!(
+            "native-groups-columnar-{}-{}.rspill", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let input = Schema::new(vec![
+            Field::new("tag", DataType::Text, true),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(input.clone(), vec![
+            vec![Value::Text("東京".into()), Value::Integer(5)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("東京".into()), Value::Integer(7)],
+            vec![Value::Text("東京".into()), Value::Null],
+        ]).unwrap();
+        let items = vec![
+            AggregateItem { alias: "rows".into(), op: AggregateOp::CountAll },
+            AggregateItem { alias: "total".into(), op: AggregateOp::Sum(
+                Expr::Column("amount".into())) },
+        ];
+        let output = output_schema(&input, &[("tag".into(), "tag".into())], &items).unwrap();
+        let mut writer = SpillWriter::new(
+            BufWriter::new(File::create(&path).unwrap()), input.clone(),
+        ).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish().unwrap();
+        let actual = aggregate_shard(&path, &input, &[0], &items, &output, 10, 2,
+            &QueryControl::default()).unwrap();
+        let mut rows = actual.rows().unwrap();
+        rows.sort_by_key(|row| match &row[0] {
+            Value::Null => 0, Value::Text(_) => 1, _ => 2,
+        });
+        assert_eq!(rows, vec![
+            vec![Value::Null, Value::Integer(1), Value::Integer(2)],
+            vec![Value::Text("東京".into()), Value::Integer(3), Value::Integer(12)],
+        ]);
+        fs::remove_file(path).unwrap();
     }
 }
