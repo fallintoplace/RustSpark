@@ -29,8 +29,12 @@ def check_samples(entry):
 
 def variability_row(number, entry, threshold, max_relative_mad=None):
     samples = check_samples(entry)
-    mean = statistics.fmean(samples)
-    cv = statistics.pstdev(samples) / mean if mean else 0.0
+    # The sum of valid large samples can overflow f64 even when their
+    # coefficient of variation is zero. Normalize by the largest sample.
+    scale = max(samples)
+    normalized = [sample / scale for sample in samples]
+    mean = statistics.fmean(normalized)
+    cv = statistics.pstdev(normalized) / mean if mean else 0.0
     median = statistics.median(samples)
     mad = statistics.median(abs(x - median) for x in samples)
     relative_mad = mad / median
