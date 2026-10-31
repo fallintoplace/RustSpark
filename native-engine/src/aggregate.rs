@@ -304,12 +304,13 @@ fn group_key_state_bytes(key: &[Value], state_count: usize) -> Result<usize> {
         .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?)
         .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?;
     key.iter().try_fold(fixed, |used, value| {
+        let text_bytes = match value {
+            Value::Text(text) => text.len().checked_mul(2)
+                .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?,
+            _ => 0,
+        };
         let slot = std::mem::size_of::<Value>().checked_mul(2)
-            .and_then(|n| n.checked_add(match value {
-                Value::Text(text) => text.len().checked_mul(2)
-                    .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?,
-                _ => 0,
-            }))
+            .and_then(|n| n.checked_add(text_bytes))
             .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?;
         used.checked_add(slot)
             .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))
