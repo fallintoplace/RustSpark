@@ -110,24 +110,24 @@ class RequestFramingTests(unittest.TestCase):
             worker.start()
             try:
                 headers = (
-                    b"POST /v1/query/safe HTTP/1.1\\r\\n"
-                    b"Host: localhost\\r\\n"
-                    b"Authorization: Bearer test-secrettest-secrettest-secret\\r\\n"
-                    b"Content-Type: application/json\\r\\n"
+                    b"POST /v1/query/safe HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"Authorization: Bearer test-secrettest-secrettest-secret\r\n"
+                    b"Content-Type: application/json\r\n"
                 )
                 for framing in (
-                    b"Content-Length: 2\\r\\nContent-Length: 2\\r\\n",
-                    b"Content-Length: 2\\r\\nTransfer-Encoding: chunked\\r\\n",
-                    b"Transfer-Encoding: chunked\\r\\n",
-                    b"Content-Length: +2\\r\\n",
-                    b"Content-Length: 2, 2\\r\\n",
+                    b"Content-Length: 2\r\nContent-Length: 2\r\n",
+                    b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n",
+                    b"Transfer-Encoding: chunked\r\n",
+                    b"Content-Length: +2\r\n",
+                    b"Content-Length: 2, 2\r\n",
                 ):
                     with self.subTest(framing=framing), socket.create_connection(
                         server.server_address, timeout=2,
                     ) as connection:
                         connection.settimeout(2)
-                        connection.sendall(headers + framing + b"\\r\\n{}")
-                        response = connection.recv(4096).split(b"\\r\\n", 1)[0]
+                        connection.sendall(headers + framing + b"\r\n{}")
+                        response = connection.recv(4096).split(b"\r\n", 1)[0]
                         self.assertIn(b"400", response)
             finally:
                 server.shutdown()
