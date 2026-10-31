@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, BTreeSet, btree_map::Entry}, time::{Duration, Instant}};
+use std::{collections::{HashMap, BTreeSet, hash_map::Entry}, time::{Duration, Instant}};
 
 use crate::{Error, Result};
 
@@ -37,7 +37,9 @@ impl Task {
 }
 
 pub struct TaskScheduler {
-    tasks: BTreeMap<u64, Task>,
+    // Lookup by task ID is on the hot path of leasing, renewal and completion.
+    // The separate ordered ready/deadline sets keep deterministic scheduling.
+    tasks: HashMap<u64, Task>,
     // The queue and deadline index mirror the corresponding TaskStatus entries.
     ready: BTreeSet<u64>,
     deadlines: BTreeSet<(Instant, u64)>,
@@ -68,7 +70,9 @@ impl TaskScheduler {
         if max_tasks == 0 {
             return Err(Error::Execution("task admission limit must be positive".into()));
         }
-        let mut entries = BTreeMap::new();
+        let tasks = tasks.into_iter();
+        let initial_capacity = tasks.size_hint().0.min(max_tasks).min(4096);
+        let mut entries = HashMap::with_capacity(initial_capacity);
         for id in tasks {
             let at_limit = entries.len() >= max_tasks;
             match entries.entry(id) {
@@ -589,5 +593,40 @@ mod batched_native_scheduler_lease_tests {
         assert_eq!(scheduler.counts(), TaskCounts {
             queued: 0, leased: 4, done: 0, failed: 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod hash_index_scheduler_regressions {
+    use super::*;
+
+    #[test]
+    fn unordered_admission_keeps_sorted_claims_and_correct_lease_expiry() {
+        let ids = (0u64..10_000).rev().map(|id| id * 17);
+        let mut scheduler = TaskScheduler::new(ids, 2).unwrap();
+        let now = Instant::now();
+        let leased = scheduler.lease_many(7, now, Duration::from_secs(10), 512).unwrap();
+        assert_eq!(leased.len(), 512);
+        assert_eq!(leased[0].task, 0);
+        assert_eq!(leased[1].task, 17);
+        assert_eq!(leased[511].task, 511 * 17);
+        for lease in leased.iter().take(256) {
+            assert!(scheduler.finish_at(lease, true, now + Duration::from_secs(1)));
+        }
+        assert_eq!(scheduler.counts().done, 256);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(10)), 256);
+        assert_eq!(scheduler.counts().queued, 10_000 - 512 + 256);
+        assert_eq!(scheduler.status(0), Some(&TaskStatus::Done));
+        assert_eq!(scheduler.status(256 * 17), Some(&TaskStatus::Queued));
+        assert!(scheduler.cancel_task(256 * 17));
+        assert_eq!(scheduler.status(256 * 17), Some(&TaskStatus::Failed));
+    }
+
+    #[test]
+    fn duplicates_and_budget_rejection_remain_exact() {
+        assert!(TaskScheduler::with_task_limit([5, 1, 5], 2, 3).is_err());
+        assert!(TaskScheduler::with_task_limit([5, 1, 2], 2, 2).is_err());
+        let scheduler = TaskScheduler::with_task_limit([5, 1, 2], 2, 3).unwrap();
+        assert_eq!(scheduler.queued_tasks(10), vec![1, 2, 5]);
     }
 }
