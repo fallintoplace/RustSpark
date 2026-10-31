@@ -132,5 +132,46 @@ class NamedInputTextPathTests(unittest.TestCase):
         self.assertIn("events=events.json", build_command("SELECT 1", json_tables={"events": "events.json"}))
 
 
+
+class StreamDeadlineTests(unittest.TestCase):
+    def test_process_timeout_is_validated_before_spawning(self):
+        for value in (0, -1, True, float("inf"), float("nan"), "2"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "process_timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=value))
+
+    def test_watchdog_reports_timeout_after_killing_child_group(self):
+        class FakeProcess:
+            pid = 123456
+            stdout = io.BytesIO()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return -9
+
+        class ImmediateTimer:
+            def __init__(self, _timeout, callback):
+                self.callback = callback
+                self.daemon = False
+
+            def start(self):
+                self.callback()
+
+            def cancel(self):
+                pass
+
+        process = FakeProcess()
+        arrow = SimpleNamespace(ipc=SimpleNamespace(open_stream=lambda _stream: nullcontext([])))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", return_value=process
+        ), patch("stream.threading.Timer", ImmediateTimer), patch(
+            "stream.os.killpg"
+        ) as kill_group:
+            with self.assertRaisesRegex(TimeoutError, "process timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=0.01))
+            if os.name == "posix":
+                kill_group.assert_called()
+
 if __name__ == "__main__":
     unittest.main()
