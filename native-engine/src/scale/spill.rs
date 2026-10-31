@@ -37,6 +37,14 @@ fn read_bounded(input: &mut impl Read, bound: usize) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+// Account for every byte on the wire, not only the text payload.
+fn charge_batch_bytes(bytes_seen: &mut usize, count: usize) -> Result<()> {
+    *bytes_seen = bytes_seen.checked_add(count)
+        .filter(|total| *total <= MAX_BATCH_BYTES)
+        .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+    Ok(())
+}
+
 fn read_text_bounded(
     input: &mut impl Read, bytes_seen: &mut usize
 ) -> Result<String> {
@@ -44,7 +52,10 @@ fn read_text_bounded(
     if length > MAX_TEXT_BYTES {
         return Err(Error::Execution("spill text value exceeds byte limit".into()));
     }
-    let next = bytes_seen.checked_add(length)
+    // Include the four-byte length prefix before allocating the text.
+    let extra = length.checked_add(4)
+        .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+    let next = bytes_seen.checked_add(extra)
         .filter(|total| *total <= MAX_BATCH_BYTES)
         .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
     let mut buffer = vec![0; length];
@@ -87,6 +98,12 @@ impl<W: Write> SpillWriter<W> {
         Ok(Self { output, schema })
     }
 
+    // Continue a file whose schema header was already written and finalized.
+    // Only internal scratch-file owners may reopen an existing stream.
+    pub(crate) fn resume(output: W, schema: Schema) -> Self {
+        Self { output, schema }
+    }
+
     pub fn write_batch(&mut self, batch: &Batch) -> Result<()> {
         self.write_batch_range(batch, 0, batch.num_rows())
     }
@@ -98,21 +115,26 @@ impl<W: Write> SpillWriter<W> {
         if batch.schema() != &self.schema {
             return Err(Error::Schema("spill batch schema mismatch".into()));
         }
-        if (end - start).checked_mul(self.schema.len()).is_none_or(|cells| cells > MAX_CELLS) {
-            return Err(Error::Execution("spill batch exceeds cell limit".into()));
-        }
-        // Validate the complete payload before emitting the batch length.
-        // A failed write must not leave an incomplete batch in the spill stream.
-        let mut text_bytes = 0usize;
+        let cells = (end - start).checked_mul(self.schema.len())
+            .filter(|&cells| cells <= MAX_CELLS)
+            .ok_or_else(|| Error::Execution("spill batch exceeds cell limit".into()))?;
+        // Include the 4-byte row count and one tag per cell. Validate all
+        // fixed-width and text bytes before emitting any batch data.
+        let mut wire_bytes = 4usize.checked_add(cells)
+            .filter(|&bytes| bytes <= MAX_BATCH_BYTES)
+            .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
         for column in 0..self.schema.len() {
             for value in &batch.column(column)?[start..end] {
-                if let Value::Text(text) = value {
-                    if text.len() > MAX_TEXT_BYTES {
-                        return Err(Error::Execution("spill text value too long".into()));
+                match value {
+                    Value::Integer(_) | Value::Float(_) =>
+                        charge_batch_bytes(&mut wire_bytes, 8)?,
+                    Value::Text(text) => {
+                        if text.len() > MAX_TEXT_BYTES {
+                            return Err(Error::Execution("spill text value too long".into()));
+                        }
+                        charge_batch_bytes(&mut wire_bytes, text.len() + 4)?;
                     }
-                    text_bytes = text_bytes.checked_add(text.len())
-                        .filter(|bytes| *bytes <= MAX_BATCH_BYTES)
-                        .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
+                    Value::Null | Value::Boolean(_) => {}
                 }
             }
         }
@@ -229,11 +251,16 @@ impl<R: Read> SpillReader<R> {
         let mut remaining = [0u8; 3];
         self.input.read_exact(&mut remaining)?;
         let rows = u32::from_le_bytes([first[0], remaining[0], remaining[1], remaining[2]]) as usize;
-        if rows > self.max_rows_per_batch ||
-            rows.checked_mul(self.schema.len()).is_none_or(|cells| cells > MAX_CELLS) {
+        let cells = rows.checked_mul(self.schema.len())
+            .filter(|&cells| cells <= MAX_CELLS)
+            .ok_or_else(|| Error::Execution("spill batch exceeds configured limits".into()))?;
+        if rows > self.max_rows_per_batch {
             return Err(Error::Execution("spill batch exceeds configured limits".into()));
         }
-        let mut bytes_seen = 0usize;
+        // Reject the minimum encoded size before allocating column storage.
+        let mut bytes_seen = 4usize.checked_add(cells)
+            .filter(|&bytes| bytes <= MAX_BATCH_BYTES)
+            .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(rows)).collect::<Vec<_>>();
         for _ in 0..rows {
@@ -243,11 +270,13 @@ impl<R: Read> SpillReader<R> {
                     1 => Value::Boolean(false),
                     2 => Value::Boolean(true),
                     3 => {
+                        charge_batch_bytes(&mut bytes_seen, 8)?;
                         let mut b = [0; 8];
                         self.input.read_exact(&mut b)?;
                         Value::Integer(i64::from_le_bytes(b))
                     }
                     4 => {
+                        charge_batch_bytes(&mut bytes_seen, 8)?;
                         let mut b = [0; 8];
                         self.input.read_exact(&mut b)?;
                         Value::Float(f64::from_bits(u64::from_le_bytes(b)))
@@ -449,6 +478,46 @@ mod spill_header_preflight_atomicity_tests {
         let mut output = Vec::new();
         assert!(SpillWriter::new(&mut output, schema).is_err());
         assert!(output.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod complete_spill_wire_budget_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn text_prefix_and_scalar_bytes_count_toward_batch_budget() {
+        let mut bytes = MAX_BATCH_BYTES - 4;
+        assert!(charge_batch_bytes(&mut bytes, 8).is_err());
+        assert_eq!(bytes, MAX_BATCH_BYTES - 4);
+        charge_batch_bytes(&mut bytes, 4).unwrap();
+        assert_eq!(bytes, MAX_BATCH_BYTES);
+
+        let mut text = Vec::new();
+        text.extend_from_slice(&0u32.to_le_bytes());
+        let mut used = MAX_BATCH_BYTES - 3;
+        let error = read_text_bounded(&mut Cursor::new(text), &mut used).unwrap_err();
+        assert!(error.to_string().contains("spill batch exceeds byte limit"));
+        assert_eq!(used, MAX_BATCH_BYTES - 3);
+    }
+
+    #[test]
+    fn existing_spills_still_roundtrip_mixed_value_tags() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("f", DataType::Float, true),
+            Field::new("t", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3), Value::Float(2.5), Value::Text("é".into())],
+            vec![Value::Null, Value::Float(-0.0), Value::Null],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let wire = writer.finish().unwrap();
+        let mut reader = SpillReader::new(Cursor::new(wire), 3).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(batch));
     }
 }
 

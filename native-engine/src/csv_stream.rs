@@ -1,5 +1,7 @@
 use std::io::BufRead;
 
+const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
 use crate::{
     batch::Batch,
     scalar::Value,
@@ -112,6 +114,7 @@ pub struct CsvStream<R> {
     batch_rows: usize,
     exhausted: bool,
     pending_error: Option<Error>,
+    pending_row: Option<Vec<Value>>,
 }
 
 impl<R: BufRead> CsvStream<R> {
@@ -151,7 +154,7 @@ impl<R: BufRead> CsvStream<R> {
             Schema::new(names.into_iter()
                 .map(|name| Field::new(name, DataType::Text, true)).collect())?
         };
-        Ok(Self { records, schema, batch_rows, exhausted: false, pending_error: None })
+        Ok(Self { records, schema, batch_rows, exhausted: false, pending_error: None, pending_row: None })
     }
 
     pub fn schema(&self) -> &Schema {
@@ -159,23 +162,59 @@ impl<R: BufRead> CsvStream<R> {
     }
 }
 
-impl<R: BufRead> Iterator for CsvStream<R> {
-    type Item = Result<Batch>;
+impl<R: BufRead> CsvStream<R> {
+    fn read_row(&mut self) -> Result<Option<Vec<Value>>> {
+        let Some(fields) = self.records.record()? else { return Ok(None); };
+        if fields.len() != self.schema.len() {
+            return Err(Error::Parse("CSV row width differs from header".into()));
+        }
+        fields.into_iter().zip(self.schema.fields()).map(|(text, field)| {
+            if text.is_empty() { return Ok(Value::Null); }
+            match field.data_type {
+                DataType::Text => Ok(Value::Text(text)),
+                DataType::Boolean if text.eq_ignore_ascii_case("true") =>
+                    Ok(Value::Boolean(true)),
+                DataType::Boolean if text.eq_ignore_ascii_case("false") =>
+                    Ok(Value::Boolean(false)),
+                DataType::Boolean => Err(Error::Parse("invalid boolean in CSV stream".into())),
+                DataType::Integer => text.parse::<i64>().map(Value::Integer)
+                    .map_err(|_| Error::Parse("invalid integer in CSV stream".into())),
+                DataType::Float => {
+                    let value = text.parse::<f64>()
+                        .map_err(|_| Error::Parse("invalid float in CSV stream".into()))?;
+                    if !value.is_finite() {
+                        return Err(Error::Parse("nonfinite float in CSV stream".into()));
+                    }
+                    Ok(Value::Float(value))
+                }
+            }
+        }).collect::<Result<Vec<_>>>().map(Some)
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_with_byte_budget(&mut self, byte_budget: usize) -> Option<Result<Batch>> {
         if self.exhausted { return None; }
         if let Some(error) = self.pending_error.take() {
             self.exhausted = true;
             return Some(Err(error));
         }
-        // Avoid a large allocation when a short stream requests huge batches.
-        // Let row storage grow when a batch actually contains many records.
         let mut rows = Vec::with_capacity(self.batch_rows.min(1_024));
+        let mut used = 0usize;
+        let row_width = self.schema.len().saturating_mul(std::mem::size_of::<Value>());
         for _ in 0..self.batch_rows.min(65_536) {
-            match self.records.record() {
-                Ok(Some(fields)) => {
-                    if fields.len() != self.schema.len() {
-                        let error = Error::Parse("CSV row width differs from header".into());
+            let next = if let Some(row) = self.pending_row.take() {
+                Ok(Some(row))
+            } else {
+                self.read_row()
+            };
+            match next {
+                Ok(Some(row)) => {
+                    let row_bytes = row.iter().fold(row_width, |total, value|
+                        total.saturating_add(match value {
+                            Value::Text(text) => text.len(), _ => 0,
+                        })
+                    );
+                    if row_bytes > byte_budget {
+                        let error = Error::Execution("CSV row exceeds batch byte budget".into());
                         if rows.is_empty() {
                             self.exhausted = true;
                             return Some(Err(error));
@@ -183,46 +222,12 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                         self.pending_error = Some(error);
                         break;
                     }
-                    let converted = fields.into_iter().zip(self.schema.fields()).map(|(text, field)| {
-                        if text.is_empty() {
-                            return Ok(Value::Null);
-                        }
-                        let kind = field.data_type;
-                        match kind {
-                            DataType::Text => Ok(Value::Text(text)),
-                            DataType::Boolean => {
-                                if text.eq_ignore_ascii_case("true") {
-                                    Ok(Value::Boolean(true))
-                                } else if text.eq_ignore_ascii_case("false") {
-                                    Ok(Value::Boolean(false))
-                                } else {
-                                    Err(Error::Parse("invalid boolean in CSV stream".into()))
-                                }
-                            }
-                            DataType::Integer => text.parse::<i64>()
-                                .map(Value::Integer)
-                                .map_err(|_| Error::Parse("invalid integer in CSV stream".into())),
-                            DataType::Float => {
-                                let value = text.parse::<f64>()
-                                    .map_err(|_| Error::Parse("invalid float in CSV stream".into()))?;
-                                if !value.is_finite() {
-                                    return Err(Error::Parse("nonfinite float in CSV stream".into()));
-                                }
-                                Ok(Value::Float(value))
-                            }
-                        }
-                    }).collect::<Result<Vec<_>>>();
-                    match converted {
-                        Ok(row) => rows.push(row),
-                        Err(error) => {
-                            if rows.is_empty() {
-                                self.exhausted = true;
-                                return Some(Err(error));
-                            }
-                            self.pending_error = Some(error);
-                            break;
-                        }
+                    if !rows.is_empty() && used.saturating_add(row_bytes) > byte_budget {
+                        self.pending_row = Some(row);
+                        break;
                     }
+                    used += row_bytes;
+                    rows.push(row);
                 }
                 Ok(None) => {
                     self.exhausted = true;
@@ -238,15 +243,18 @@ impl<R: BufRead> Iterator for CsvStream<R> {
                 }
             }
         }
-        if rows.is_empty() {
-            None
-        } else {
-            let result = Batch::from_rows(self.schema.clone(), rows);
-            if result.is_err() {
-                self.exhausted = true;
-            }
-            Some(result)
-        }
+        if rows.is_empty() { return None; }
+        let result = Batch::from_rows(self.schema.clone(), rows);
+        if result.is_err() { self.exhausted = true; }
+        Some(result)
+    }
+}
+
+impl<R: BufRead> Iterator for CsvStream<R> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_byte_budget(MAX_BATCH_BYTES)
     }
 }
 
@@ -395,5 +403,36 @@ mod modest_initial_csv_batch_capacity_tests {
             std::io::Cursor::new(csv.into_bytes()), usize::MAX, 64,
         ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 1_025);
+    }
+}
+
+#[cfg(test)]
+mod csv_byte_budget_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn large_rows_split_before_exceeding_a_batch_byte_budget() {
+        let data = format!("payload\n{}\n{}\n{}\n",
+            "a".repeat(50), "b".repeat(50), "c".repeat(50));
+        let mut stream = CsvStream::new(Cursor::new(data), 100, 128).unwrap();
+        let per_row = std::mem::size_of::<Value>() + 50;
+        let budget = per_row * 2;
+        let first = stream.next_with_byte_budget(budget).unwrap().unwrap();
+        let second = stream.next_with_byte_budget(budget).unwrap().unwrap();
+        assert_eq!(first.num_rows(), 2);
+        assert_eq!(second.num_rows(), 1);
+        assert_eq!(second.row(0).unwrap(), vec![Value::Text("c".repeat(50))]);
+        assert!(stream.next_with_byte_budget(budget).is_none());
+    }
+
+    #[test]
+    fn oversized_row_is_terminal_but_prior_rows_are_preserved() {
+        let data = format!("text\na\n{}\n", "x".repeat(80));
+        let mut stream = CsvStream::new(Cursor::new(data), 100, 128).unwrap();
+        let budget = std::mem::size_of::<Value>() + 16;
+        assert_eq!(stream.next_with_byte_budget(budget).unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next_with_byte_budget(budget).unwrap().is_err());
+        assert!(stream.next_with_byte_budget(budget).is_none());
     }
 }

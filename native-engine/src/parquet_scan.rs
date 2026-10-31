@@ -215,7 +215,12 @@ pub struct LimitedParquetScan {
 
 pub fn scan_limited(path: impl AsRef<Path>, batch_size: usize, max_rows: usize) -> Result<LimitedParquetScan> {
     let read_rows = batch_size.min(max_rows.max(1));
-    Ok(LimitedParquetScan { inner: scan(path, read_rows)?, remaining: max_rows })
+    // Push the global row limit into the Parquet decoder. The wrapper still
+    // enforces its contract, but the reader need not decode the trailing pages.
+    Ok(LimitedParquetScan {
+        inner: scan_window(path, read_rows, 0, max_rows)?,
+        remaining: max_rows,
+    })
 }
 
 impl Iterator for LimitedParquetScan {
@@ -487,6 +492,49 @@ mod parquet_scan_terminal_decode_errors_tests {
         assert!(source.next().is_none());
         assert!(source.next().is_none());
         drop(source);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parquet_limited_row_pushdown_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use parquet::arrow::ArrowWriter;
+
+    #[test]
+    fn pushed_limit_matches_prefix_of_full_scan_for_all_batch_sizes() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-parquet-limit-pushdown-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema, (0..73).map(|i| vec![
+            Value::Integer(i),
+            if i % 7 == 0 { Value::Null } else { Value::Text(format!("row-{i}")) },
+        ]).collect()).unwrap();
+        let arrow = arrow_bridge::to_arrow(&source).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), arrow.schema(), None
+        ).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+
+        let full = scan(&path, 11).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        for batch_size in [1, 7, 17, 100] {
+            for limit in [0, 1, 6, 17, 32, 73, 120] {
+                let result = scan_limited(&path, batch_size, limit).unwrap()
+                    .collect::<Result<Vec<_>>>().unwrap()
+                    .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+                assert_eq!(result, full[..limit.min(full.len())]);
+            }
+        }
         std::fs::remove_file(path).unwrap();
     }
 }
