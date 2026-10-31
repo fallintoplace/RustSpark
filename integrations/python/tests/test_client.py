@@ -1,4 +1,9 @@
 import subprocess
+import sys
+import os
+import time
+
+from rustspark_local.subprocess_budget import run_bounded
 import unittest
 from unittest.mock import patch
 
@@ -6,7 +11,7 @@ from rustspark_local import RustSpark, RustSparkError
 
 
 class RustSparkTests(unittest.TestCase):
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_named_bindings_are_arguments_not_interpolated_sql(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, '[{"city":"a","n":2}]', "")
         client = RustSpark(binary="/opt/rustspark", database_dir="/tmp/warehouse")
@@ -24,19 +29,19 @@ class RustSparkTests(unittest.TestCase):
         self.assertEqual(command.count("--sql"), 1)
         self.assertNotIn("int64:2", command[command.index("--sql") + 1])
 
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_reports_cli_errors(self, run):
         run.return_value = subprocess.CompletedProcess([], 2, "", "SQL error: unknown table")
         with self.assertRaisesRegex(RustSparkError, "unknown table"):
             RustSpark().query("SELECT * FROM missing")
 
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_rejects_invalid_json(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, "not-json", "")
         with self.assertRaisesRegex(RustSparkError, "invalid JSON"):
             RustSpark().query("SELECT 1")
 
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_rejects_duplicate_keys_and_nonfinite_json(self, run):
         for output in ('[{"v":1,"v":2}]', '[{"v":NaN}]',
                        '[{"v":Infinity}]', '[{"v":1e999}]'):
@@ -77,13 +82,13 @@ class RustSparkTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "process_timeout"):
                     client.query("SELECT 1", process_timeout=bad)
 
-    @patch("rustspark_local.subprocess.run", side_effect=subprocess.TimeoutExpired("rustspark", 3))
+    @patch("rustspark_local.run_bounded", side_effect=subprocess.TimeoutExpired("rustspark", 3))
     def test_deadline_is_reported(self, run):
         with self.assertRaisesRegex(RustSparkError, "process timeout"):
             RustSpark().query("SELECT 1", process_timeout=3)
 
 
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_sql_file_query_does_not_interpolate_text(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
         client = RustSpark()
@@ -105,7 +110,7 @@ class RustSparkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RustSpark().query("SELECT 1", named_params={"valid_name": 12})
 
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_query_one_bounds_rows_and_rejects_multiple(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, '[{"id":1}]', "")
         client = RustSpark()
@@ -128,7 +133,7 @@ class RustSparkTests(unittest.TestCase):
 
 
 class DeterministicNamedParamsTests(unittest.TestCase):
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_parameter_order_is_stable_and_invalid_types_fail_early(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
         RustSpark().query("SELECT 1", named_params={"z": "int64:9", "a": "int64:1"})
@@ -140,7 +145,7 @@ class DeterministicNamedParamsTests(unittest.TestCase):
 
 
 class TypedParameterAdmissionTests(unittest.TestCase):
-    @patch("rustspark_local.subprocess.run")
+    @patch("rustspark_local.run_bounded")
     def test_bounded_parameter_payloads(self, run):
         client = RustSpark()
         with self.assertRaisesRegex(ValueError, "64"):
@@ -162,6 +167,46 @@ class TypedParameterAdmissionTests(unittest.TestCase):
         for path in ("", b"/tmp/events.json", 17):
             with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Named source paths"):
                 RustSpark().query("SELECT 1", json_tables={"events": path})
+
+
+class BoundedProcessCaptureTests(unittest.TestCase):
+    def test_stdout_stderr_limits_and_valid_output(self):
+        output = run_bounded(
+            [sys.executable, "-c", "print('ready')"],
+            timeout=5, max_output_bytes=1024,
+        )
+        self.assertEqual(output.stdout, "ready\n")
+        self.assertEqual(output.returncode, 0)
+        with self.assertRaisesRegex(ValueError, "limit"):
+            run_bounded(
+                [sys.executable, "-c", "print('x' * 200000)"],
+                timeout=5, max_output_bytes=1024,
+            )
+        with self.assertRaisesRegex(ValueError, "limit"):
+            run_bounded(
+                [sys.executable, "-c", "import sys; sys.stderr.write('x' * 200000)"],
+                timeout=5, max_output_bytes=1024, max_error_bytes=1024,
+            )
+
+    def test_deadline_kills_descendants_holding_stdout_open(self):
+        if os.name != "posix":
+            self.skipTest("requires POSIX process groups")
+        script = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('started',flush=True);time.sleep(6)"
+        )
+        start = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded([sys.executable, "-c", script],
+                        timeout=0.4, max_output_bytes=1024)
+        self.assertLess(time.monotonic() - start, 3.0)
+
+    def test_invalid_max_output_bytes_rejected_before_process(self):
+        for invalid in [0, -1, True, 1.5]:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "max_output_bytes"):
+                RustSpark().query("SELECT 1", max_output_bytes=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()
