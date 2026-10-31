@@ -29,6 +29,7 @@ export class RustSpark {
     csvTables, parquetTables, jsonTables,
     namedParams, sqlFile, maxRows, queryTimeout, processTimeoutMs,
     maxOutputBytes = 64 * 1024 * 1024,
+    unsafeIntegers = "error",
   } = {}) {
     const hasInlineSQL = typeof sql === "string" && sql.trim().length > 0;
     const hasSQLFile = sqlFile !== undefined;
@@ -90,7 +91,7 @@ export class RustSpark {
     }
     let rows;
     try {
-      rows = parseStrictJSON(result.stdout);
+      rows = parseStrictJSON(result.stdout, { unsafeIntegers });
     }
     catch { throw new RustSparkError("RustSpark returned invalid JSON"); }
     if (!Array.isArray(rows) || rows.some((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
