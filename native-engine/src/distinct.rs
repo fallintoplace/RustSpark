@@ -171,18 +171,22 @@ pub fn distinct_on_with_budget(
     let mut bytes = 0usize;
     let mut selected = Vec::new();
     if columns.len() == 1 {
-        // A one-column set avoids any tuple allocation or per-row row wrapper.
-        let mut seen = HashSet::<&crate::scalar::Value>::new();
+        // Probe each borrowed key once, including newly admitted values.
+        let mut seen = HashMap::<&crate::scalar::Value, ()>::new();
         for (row, value) in columns[0].iter().enumerate() {
-            if seen.contains(value) { continue; }
-            if seen.len() >= max_keys {
-                return Err(crate::Error::Execution("DISTINCT ON key budget exceeded".into()));
+            match seen.entry(value) {
+                Entry::Occupied(_) => {}
+                Entry::Vacant(entry) => {
+                    if selected.len() >= max_keys {
+                        return Err(crate::Error::Execution("DISTINCT ON key budget exceeded".into()));
+                    }
+                    bytes = bytes.checked_add(footprint(row)?)
+                        .filter(|&total| total <= max_bytes)
+                        .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget exceeded".into()))?;
+                    entry.insert(());
+                    selected.push(row);
+                }
             }
-            bytes = bytes.checked_add(footprint(row)?)
-                .filter(|&total| total <= max_bytes)
-                .ok_or_else(|| crate::Error::Execution("DISTINCT ON byte budget exceeded".into()))?;
-            seen.insert(value);
-            selected.push(row);
         }
     } else {
         let mut seen = HashMap::<BorrowedRow<'_>, ()>::new();
@@ -446,5 +450,33 @@ mod owned_distinct_gather_regressions {
         assert_eq!(distinct_owned(repeated.clone()).unwrap(),
             distinct(&repeated).unwrap());
         assert!(distinct_owned_with_budget(repeated, 0, 64).is_err());
+    }
+}
+
+#[cfg(test)]
+mod single_probe_distinct_on_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn keeps_first_nullable_text_key_and_preserves_budget_admission() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("🙂".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("🙂".into()), Value::Integer(3)],
+            vec![Value::Null, Value::Integer(4)],
+            vec![Value::Text("é".into()), Value::Integer(5)],
+        ]).unwrap();
+        let expected = input.take(&[0, 1, 4]).unwrap();
+        assert_eq!(distinct_on_with_budget(&input, &["key"], 3, usize::MAX).unwrap(), expected);
+        assert!(distinct_on_with_budget(&input, &["key"], 2, usize::MAX).is_err());
+        assert!(distinct_on_with_budget(&input, &["key"], 3, 0).is_err());
+        let only_duplicates = input.take(&[0, 2]).unwrap();
+        assert_eq!(distinct_on_with_budget(&only_duplicates, &["key"], 1, usize::MAX)
+            .unwrap().num_rows(), 1);
     }
 }

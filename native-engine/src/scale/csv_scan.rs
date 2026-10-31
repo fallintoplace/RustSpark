@@ -3,9 +3,38 @@ use std::{fs::File, io::{BufRead, BufReader}, path::Path};
 use crate::{
     csv::parse_records,
     scalar::Value,
-    schema::{DataType, Schema},
+    schema::{DataType, Field, Schema},
     Error, Result,
 };
+
+// Decode a borrowed CSV cell directly. Plain numeric fields never need an
+// intermediate String, while TEXT values still retain their own allocation.
+fn parse_cell(value: &str, field: &Field) -> Result<Value> {
+    if value.is_empty() {
+        if !field.nullable {
+            return Err(Error::Type(format!(
+                "NULL in required column {}", field.name
+            )));
+        }
+        return Ok(Value::Null);
+    }
+    match field.data_type {
+        DataType::Text => Ok(Value::Text(value.to_owned())),
+        DataType::Boolean => {
+            if value.eq_ignore_ascii_case("true") { Ok(Value::Boolean(true)) }
+            else if value.eq_ignore_ascii_case("false") { Ok(Value::Boolean(false)) }
+            else { Err(Error::Parse("invalid CSV boolean".into())) }
+        }
+        DataType::Integer => value.parse::<i64>().map(Value::Integer)
+            .map_err(|_| Error::Parse("invalid CSV integer".into())),
+        DataType::Float => value.parse::<f64>()
+            .map_err(|_| Error::Parse("invalid CSV float".into()))
+            .and_then(|number| {
+                if number.is_finite() { Ok(Value::Float(number)) }
+                else { Err(Error::Parse("nonfinite CSV float".into())) }
+            }),
+    }
+}
 
 pub struct CsvRows<R: BufRead> {
     reader: R,
@@ -122,42 +151,43 @@ impl<R: BufRead> CsvRows<R> {
     }
 
     fn parse_row(&self, text: &str) -> Result<Option<Vec<Value>>> {
+        // Keep the general parser's 64 MiB input guard even when the simple
+        // record path can decode without materializing parsed String fields.
+        if text.len() as u64 > 64 * 1024 * 1024 {
+            return Err(Error::Execution("CSV input exceeds 64 MiB limit".into()));
+        }
+        // An unquoted line can be split directly into borrowed &str cells.
+        // Numeric and boolean columns then parse without per-cell allocation
+        // or allocating an intermediate Vec<Vec<String>>.
+        if !text.as_bytes().iter().any(|&byte| byte == b'"' || byte == b'\r') {
+            let line = text.strip_suffix('\n').unwrap_or(text);
+            if line.is_empty() { return Ok(None); }
+            let mut parts = line.split(',');
+            let mut values = Vec::with_capacity(self.schema.len());
+            for field in self.schema.fields() {
+                let part = parts.next().ok_or_else(||
+                    Error::Parse("CSV row width differs from declared schema".into()))?;
+                values.push(parse_cell(part, field)?);
+            }
+            if parts.next().is_some() {
+                return Err(Error::Parse("CSV row width differs from declared schema".into()));
+            }
+            return Ok(Some(values));
+        }
+        // Quoted, multiline, and CR-terminated records retain the strict
+        // reference parser and its existing error behavior.
         let records = parse_records(text)?;
         if records.is_empty() { return Ok(None); }
         if records.len() != 1 || records[0].len() != self.schema.len() {
             return Err(Error::Parse("CSV row width differs from declared schema".into()));
         }
         let Some(row) = records.into_iter().next() else { return Ok(None); };
-        let values = row.into_iter().zip(self.schema.fields())
-            .map(|(value, field)| {
-                if value.is_empty() {
-                    if !field.nullable {
-                        return Err(Error::Type(format!(
-                            "NULL in required column {}", field.name
-                        )));
-                    }
-                    return Ok(Value::Null);
-                }
-                match field.data_type {
-                    DataType::Text => Ok(Value::Text(value)),
-                    DataType::Boolean => {
-                        if value.eq_ignore_ascii_case("true") { Ok(Value::Boolean(true)) }
-                        else if value.eq_ignore_ascii_case("false") { Ok(Value::Boolean(false)) }
-                        else { Err(Error::Parse("invalid CSV boolean".into())) }
-                    }
-                    DataType::Integer => value.parse::<i64>().map(Value::Integer)
-                        .map_err(|_| Error::Parse("invalid CSV integer".into())),
-                    DataType::Float => value.parse::<f64>()
-                        .map_err(|_| Error::Parse("invalid CSV float".into()))
-                        .and_then(|number| {
-                            if number.is_finite() { Ok(Value::Float(number)) }
-                            else { Err(Error::Parse("nonfinite CSV float".into())) }
-                        }),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Some(values))
+        row.iter().zip(self.schema.fields())
+            .map(|(value, field)| parse_cell(value, field))
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
     }
+
 }
 
 impl<R: BufRead> Iterator for CsvRows<R> {
@@ -192,6 +222,47 @@ pub fn open_csv(
     path: impl AsRef<Path>, schema: Schema, max_record_bytes: usize
 ) -> Result<CsvRows<BufReader<File>>> {
     CsvRows::new(BufReader::new(File::open(path)?), schema, max_record_bytes)
+}
+
+#[cfg(test)]
+mod direct_typed_csv_fields_tests {
+    use super::*;
+    use std::io::Cursor;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn decodes_many_plain_numeric_rows_and_preserves_quoted_fallback() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("ratio", DataType::Float, true),
+            Field::new("enabled", DataType::Boolean, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let mut csv = String::from("id,ratio,enabled,label\n");
+        for n in 0..2_048 {
+            csv.push_str(&format!("{n},2.5,true,word{n}\n"));
+        }
+        csv.push_str("2048,,false,\"quoted,field\"\n");
+        csv.push_str("2049,1.25,true,last\r\n");
+        let rows = CsvRows::new(Cursor::new(csv), schema.clone(), 64 * 1024)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 2050);
+        assert_eq!(rows[0], vec![Value::Integer(0), Value::Float(2.5),
+            Value::Boolean(true), Value::Text("word0".into())]);
+        assert_eq!(rows[2048], vec![Value::Integer(2048), Value::Null,
+            Value::Boolean(false), Value::Text("quoted,field".into())]);
+        assert_eq!(rows[2049], vec![Value::Integer(2049), Value::Float(1.25),
+            Value::Boolean(true), Value::Text("last".into())]);
+
+        let mut wrong_width = CsvRows::new(
+            Cursor::new("id,ratio,enabled,label\n1,2.5,true,extra,field\n"),
+            schema.clone(), 1024).unwrap();
+        assert!(wrong_width.next().unwrap().is_err());
+        let mut nonfinite = CsvRows::new(
+            Cursor::new("id,ratio,enabled,label\n1,inf,true,word\n"),
+            schema, 1024).unwrap();
+        assert!(nonfinite.next().unwrap().is_err());
+    }
 }
 
 #[cfg(test)]

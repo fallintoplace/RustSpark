@@ -46,30 +46,40 @@ pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<
     if partitions == 0 || partitions > 4096 || keys.is_empty() {
         return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
     }
-    let indices = keys.iter().map(|key| batch.schema().column(key))
-        .collect::<Result<Vec<_>>>()?;
+    // Preserve the no-work single-partition case, including the shared schema.
+    for key in keys { batch.schema().column(key)?; }
     if partitions == 1 {
-        // Every row hashes to partition zero. Keep the validated input batch
-        // directly instead of allocating key groups and hashing all rows.
         return Ok(vec![batch.clone()]);
     }
-    let columns = indices.iter().map(|&index| batch.column(index))
-        .collect::<Result<Vec<_>>>()?;
-    let mut groups = vec![Vec::new(); partitions];
-    let mask = partitions.is_power_of_two().then_some(partitions - 1);
-    for row in 0..batch.num_rows() {
-        let mut hasher = PartitionHasher::default();
-        for column in &columns {
-            column[row].hash(&mut hasher);
+    // The multi-batch path already hashes borrowed key slices and appends
+    // cells directly to destination columns. Reusing it avoids allocating
+    // one row-index vector per shard and gathering every column again.
+    partition_batches(std::slice::from_ref(batch), keys, partitions)
+}
+
+#[cfg(test)]
+mod borrowed_partition_direct_columns_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn borrowed_partition_agrees_with_owned_on_wide_nullable_keys() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let payload = "wide".repeat(4096);
+        let input = Batch::from_rows(schema, (0..67).map(|i| vec![
+            if i % 7 == 0 { Value::Null }
+            else { Value::Text(format!("k{}", i % 9)) },
+            Value::Text(format!("{i}-{payload}")),
+        ]).collect()).unwrap();
+        for fanout in [1, 2, 7, 64, 127, 4096] {
+            assert_eq!(partition(&input, &["key"], fanout).unwrap(),
+                partition_owned(input.clone(), &["key"], fanout).unwrap());
         }
-        let hash = hasher.finish();
-        let bucket = match mask {
-            Some(mask) => (hash as usize) & mask,
-            None => (hash % partitions as u64) as usize,
-        };
-        groups[bucket].push(row);
+        assert!(partition(&input, &["missing"], 1).is_err());
     }
-    groups.into_iter().map(|rows| batch.take(&rows)).collect()
 }
 
 #[cfg(test)]
