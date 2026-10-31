@@ -68,6 +68,35 @@ fn rewrite_order_aliases(expr: Expr, selections: &[Selection]) -> Expr {
     }
 }
 
+
+fn count_if_aggregate(predicate: Expr) -> AggregateOp {
+    AggregateOp::Count(Expr::Case {
+        branches: vec![(predicate, Expr::Literal(Value::Integer(1)))],
+        else_expr: Some(Box::new(Expr::Literal(Value::Null))),
+    })
+}
+
+/// Apply a SQL aggregate FILTER by turning nonmatching inputs into NULL.
+/// This preserves all existing native and spilled aggregate state machines.
+fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
+    let filtered = |value| Expr::Case {
+        branches: vec![(condition.clone(), value)],
+        else_expr: Some(Box::new(Expr::Literal(Value::Null))),
+    };
+    match op {
+        AggregateOp::CountAll =>
+            AggregateOp::Count(filtered(Expr::Literal(Value::Integer(1)))),
+        AggregateOp::Count(expr) => AggregateOp::Count(filtered(expr)),
+        AggregateOp::CountDistinct(expr) => AggregateOp::CountDistinct(filtered(expr)),
+        AggregateOp::Sum(expr) => AggregateOp::Sum(filtered(expr)),
+        AggregateOp::SumDistinct(expr) => AggregateOp::SumDistinct(filtered(expr)),
+        AggregateOp::Avg(expr) => AggregateOp::Avg(filtered(expr)),
+        AggregateOp::AvgDistinct(expr) => AggregateOp::AvgDistinct(filtered(expr)),
+        AggregateOp::Min(expr) => AggregateOp::Min(filtered(expr)),
+        AggregateOp::Max(expr) => AggregateOp::Max(filtered(expr)),
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -551,7 +580,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "SUM", "MIN", "MAX", "AVG"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -574,6 +603,7 @@ impl Parser {
                 match function.as_str() {
                     "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
+                    "COUNT_IF" => count_if_aggregate(expr),
                     "SUM" if distinct => AggregateOp::SumDistinct(expr),
                     "SUM" => AggregateOp::Sum(expr),
                     "AVG" if distinct => AggregateOp::AvgDistinct(expr),
@@ -584,6 +614,13 @@ impl Parser {
                 }
             };
             self.expect_symbol(')')?;
+            let op = if self.take_word("FILTER") {
+                self.expect_symbol('(')?;
+                self.expect_word("WHERE")?;
+                let predicate = self.expression(0)?;
+                self.expect_symbol(')')?;
+                filtered_aggregate(op, predicate)
+            } else { op };
             let alias = self.select_alias(function.to_ascii_lowercase())?;
             return Ok(SelectItem::Aggregate(AggregateItem::new(op, alias)));
         }
@@ -1115,7 +1152,7 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "SUM", "AVG", "MIN", "MAX", "__spark_count_star"]
+            ["COUNT", "COUNT_IF", "SUM", "AVG", "MIN", "MAX", "__spark_count_star"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
@@ -1127,6 +1164,7 @@ fn rewrite_having(
                 let argument = args.into_iter().next().expect("one checked argument");
                 match name.to_ascii_uppercase().as_str() {
                     "COUNT" => AggregateOp::Count(argument),
+                    "COUNT_IF" => count_if_aggregate(argument),
                     "SUM" => AggregateOp::Sum(argument),
                     "AVG" => AggregateOp::Avg(argument),
                     "MIN" => AggregateOp::Min(argument),
@@ -1791,6 +1829,89 @@ mod spark_inline_values_sql_tests {
         ] {
             let result = parse_sql(query).and_then(|plan| executor::execute(&plan, &cat));
             assert!(result.is_err(), "{query}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod spark_filtered_aggregations_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor, schema::{Field, Schema}};
+
+    fn sales() -> Catalog {
+        let schema = Schema::new(vec![
+            Field::new("city", DataType::Text, false),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("sales", Batch::from_rows(schema, vec![
+            vec![Value::Text("Berlin".into()), Value::Integer(2)],
+            vec![Value::Text("Berlin".into()), Value::Integer(3)],
+            vec![Value::Text("Berlin".into()), Value::Integer(3)],
+            vec![Value::Text("Berlin".into()), Value::Null],
+            vec![Value::Text("Paris".into()), Value::Integer(5)],
+            vec![Value::Text("Rome".into()), Value::Null],
+        ]).unwrap()).unwrap();
+        catalog
+    }
+
+    fn run(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&parse_sql(query).unwrap(), &sales()).unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn filters_grouped_aggregates_and_distinct_states() {
+        let rows = run("SELECT city, COUNT(*) FILTER (WHERE amount >= 3) AS cnt, \
+            COUNT_IF(amount >= 3) AS flagged, SUM(amount) FILTER (WHERE amount >= 3) AS sum, \
+            AVG(amount) FILTER (WHERE amount >= 3) AS avg, \
+            COUNT(DISTINCT amount) FILTER (WHERE amount >= 3) AS dc, \
+            SUM(DISTINCT amount) FILTER (WHERE amount >= 3) AS ds, \
+            AVG(DISTINCT amount) FILTER (WHERE amount >= 3) AS da \
+            FROM sales GROUP BY city ORDER BY city");
+        assert_eq!(rows, vec![
+            vec![Value::Text("Berlin".into()), Value::Integer(2), Value::Integer(2),
+                Value::Integer(6), Value::Float(3.0), Value::Integer(1),
+                Value::Integer(3), Value::Float(3.0)],
+            vec![Value::Text("Paris".into()), Value::Integer(1), Value::Integer(1),
+                Value::Integer(5), Value::Float(5.0), Value::Integer(1),
+                Value::Integer(5), Value::Float(5.0)],
+            vec![Value::Text("Rome".into()), Value::Integer(0), Value::Integer(0),
+                Value::Null, Value::Null, Value::Integer(0), Value::Null, Value::Null],
+        ]);
+    }
+
+    #[test]
+    fn filters_do_not_evaluate_excluded_values_and_use_three_valued_logic() {
+        let rows = run("SELECT COUNT(*) FILTER (WHERE amount IS NULL) AS missing, \
+            COUNT(amount) FILTER (WHERE amount IS NULL) AS nonnull_missing, \
+            COUNT_IF(amount > 3) AS positive, \
+            SUM(amount) FILTER (WHERE FALSE) AS empty_sum, \
+            MIN(amount) FILTER (WHERE amount > 10) AS min_missing, \
+            MAX(amount) FILTER (WHERE amount > 10) AS max_missing \
+            FROM sales");
+        assert_eq!(rows, vec![vec![Value::Integer(2), Value::Integer(0),
+            Value::Integer(1), Value::Null, Value::Null, Value::Null]]);
+    }
+
+    #[test]
+    fn having_count_if_reuses_hidden_aggregate_state() {
+        assert_eq!(run("SELECT city FROM sales GROUP BY city \
+            HAVING COUNT_IF(amount > 2) > 1"), vec![vec![Value::Text("Berlin".into())]]);
+        assert_eq!(run("SELECT COUNT_IF(NULL) AS n FROM sales"),
+            vec![vec![Value::Integer(0)]]);
+    }
+
+    #[test]
+    fn rejects_nonnumeric_sum_and_nonboolean_filter_conditions() {
+        let catalog = sales();
+        for query in [
+            "SELECT SUM(city) FILTER (WHERE TRUE) FROM sales",
+            "SELECT COUNT(*) FILTER (WHERE amount) FROM sales",
+            "SELECT COUNT_IF(amount) FROM sales",
+            "SELECT COUNT(*) FILTER (WHERE no_such_field > 1) FROM sales",
+        ] {
+            let plan = parse_sql(query).unwrap();
+            assert!(executor::execute(&plan, &catalog).is_err(), "{query}");
         }
     }
 }

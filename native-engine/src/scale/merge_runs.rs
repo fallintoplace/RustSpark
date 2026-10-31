@@ -12,6 +12,9 @@ use crate::{
 use super::{cancel::QueryControl, spill::SpillReader};
 
 const MAX_FAN_IN: usize = 64;
+const MAX_OUTPUT_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
+enum AppendStatus { Added, Full, Exhausted }
 
 struct InputRun {
     reader: SpillReader<BufReader<File>>,
@@ -140,7 +143,8 @@ impl RunMerger {
         }
     }
 
-    fn append_next(&mut self, output: &mut [Vec<Value>]) -> Result<bool> {
+    fn append_next(&mut self, output: &mut [Vec<Value>],
+        output_bytes: &mut usize, output_has_rows: bool) -> Result<AppendStatus> {
         self.control.check()?;
         if !self.heap_ready {
             for run in &mut self.runs { run.fill()?; }
@@ -151,10 +155,27 @@ impl RunMerger {
             }
             self.heap_ready = true;
         }
-        let Some(&index) = self.heap.first() else { return Ok(false); };
+        let Some(&index) = self.heap.first() else { return Ok(AppendStatus::Exhausted); };
         let selected = &mut self.runs[index];
         let batch = selected.batch.as_ref()
             .ok_or_else(|| Error::Execution("missing active external merge batch".into()))?;
+        // Count retained Value slots and text payloads before copying any
+        // row. A row that cannot fit by itself is an execution error.
+        let mut row_bytes = self.schema.len().saturating_mul(std::mem::size_of::<Value>());
+        for column in 0..self.schema.len() {
+            if let Value::Text(text) = &batch.column(column)?[selected.position] {
+                row_bytes = row_bytes.saturating_add(text.len());
+            }
+        }
+        if row_bytes > MAX_OUTPUT_BATCH_BYTES {
+            return Err(Error::Execution("external merge row exceeds output byte budget".into()));
+        }
+        if output_has_rows && output_bytes.saturating_add(row_bytes) > MAX_OUTPUT_BATCH_BYTES {
+            // Do not advance the heap or input cursor. The row will be
+            // emitted at the start of the following output batch.
+            return Ok(AppendStatus::Full);
+        }
+        *output_bytes = output_bytes.saturating_add(row_bytes);
         for (column, dest) in output.iter_mut().enumerate() {
             dest.push(batch.column(column)?[selected.position].clone());
         }
@@ -164,7 +185,7 @@ impl RunMerger {
             self.heap.swap_remove(0);
         }
         if !self.heap.is_empty() { self.sift_down(0); }
-        Ok(true)
+        Ok(AppendStatus::Added)
     }
 }
 
@@ -178,10 +199,12 @@ impl Iterator for RunMerger {
         let mut columns: Vec<Vec<Value>> =
             (0..self.schema.len()).map(|_| Vec::with_capacity(capacity)).collect();
         let mut rows = 0usize;
+        let mut output_bytes = 0usize;
         while rows < self.output_batch_rows {
-            match self.append_next(&mut columns) {
-                Ok(true) => rows += 1,
-                Ok(false) => {
+            match self.append_next(&mut columns, &mut output_bytes, rows != 0) {
+                Ok(AppendStatus::Added) => rows += 1,
+                Ok(AppendStatus::Full) => break,
+                Ok(AppendStatus::Exhausted) => {
                     self.stopped = true;
                     break;
                 }
@@ -369,6 +392,39 @@ mod columnar_spill_output_tests {
         assert!(merged.iter().all(|b| b.num_rows() <= 7));
         assert_eq!(merged.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>(), expected.rows().unwrap());
         drop(runs);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod external_merge_output_byte_budget_regressions {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::fs;
+
+    #[test]
+    fn large_payloads_split_batches_without_skipping_heap_rows() {
+        let dir = std::env::temp_dir().join(format!("native-merge-output-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..5).rev().map(|n| vec![
+            Value::Integer(n), Value::Text(format!("{n}{}", "x".repeat(4 * 1024 * 1024))),
+        ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let source = write_sorted_runs([Ok(input)], schema.clone(), &keys, &dir, 1,
+            &QueryControl::default()).unwrap();
+        let output = RunMerger::new(source.files(), schema, &keys, 1, 5,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 2]);
+        let values = output.iter().flat_map(|batch| batch.column(0).unwrap())
+            .cloned().collect::<Vec<_>>();
+        assert_eq!(values, (0..5).map(Value::Integer).collect::<Vec<_>>());
+        drop(source);
         fs::remove_dir(dir).unwrap();
     }
 }

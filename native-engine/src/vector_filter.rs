@@ -106,18 +106,29 @@ fn fast_integer_predicate<'a>(
 
 /// Fuse two comparisons on the same integer column into one vector scan.
 /// All other predicates retain the scalar SQL fallback.
-fn fast_integer_conjunction<'a>(
-    batch: &'a Batch, predicate: &'a Expr,
+fn fast_integer_pair<'a>(
+    batch: &'a Batch, predicate: &'a Expr, boolean_op: BinaryOp,
 ) -> Result<Option<(&'a [Value], (BinaryOp, i64), (BinaryOp, i64))>> {
-    let Expr::Binary { left, op: BinaryOp::And, right } = predicate else {
-        return Ok(None);
-    };
+    let Expr::Binary { left, op, right } = predicate else { return Ok(None); };
+    if *op != boolean_op { return Ok(None); }
     let Some((left_values, left_op, left_value)) =
         fast_integer_predicate(batch, left)? else { return Ok(None); };
     let Some((right_values, right_op, right_value)) =
         fast_integer_predicate(batch, right)? else { return Ok(None); };
     if !std::ptr::eq(left_values, right_values) { return Ok(None); }
     Ok(Some((left_values, (left_op, left_value), (right_op, right_value))))
+}
+
+fn fast_integer_conjunction<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], (BinaryOp, i64), (BinaryOp, i64))>> {
+    fast_integer_pair(batch, predicate, BinaryOp::And)
+}
+
+fn fast_integer_disjunction<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], (BinaryOp, i64), (BinaryOp, i64))>> {
+    fast_integer_pair(batch, predicate, BinaryOp::Or)
 }
 
 fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
@@ -155,6 +166,16 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
             if let Value::Integer(lhs) = value {
                 if integer_comparison(first_op, *lhs, first_rhs) == Some(true)
                     && integer_comparison(second_op, *lhs, second_rhs) == Some(true) {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
+        fast_integer_disjunction(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Integer(lhs) = value {
+                if integer_comparison(first_op, *lhs, first_rhs) == Some(true)
+                    || integer_comparison(second_op, *lhs, second_rhs) == Some(true) {
                     selected.push(row);
                 }
             }
@@ -523,5 +544,61 @@ mod fused_integer_predicate_regressions {
             predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
         ).collect::<Vec<_>>();
         assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+    }
+}
+
+#[cfg(test)]
+mod integer_disjunction_vector_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn fused_or_matches_sql_three_valued_logic_and_reversed_predicates() {
+        let schema = Schema::new(vec![
+            Field::new("x", DataType::Integer, true),
+            Field::new("y", DataType::Integer, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(-5), Value::Integer(2)],
+            vec![Value::Integer(0), Value::Integer(2)],
+            vec![Value::Integer(3), Value::Null],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Integer(7), Value::Integer(2)],
+            vec![Value::Integer(9), Value::Null],
+        ]).unwrap();
+        let low = Expr::binary(Expr::Column("x".into()), BinaryOp::Less,
+            Expr::Literal(Value::Integer(0)));
+        let high = Expr::binary(Expr::Literal(Value::Integer(7)), BinaryOp::LessEqual,
+            Expr::Column("x".into()));
+        let predicate = Expr::binary(low.clone(), BinaryOp::Or, high.clone());
+        assert!(fast_integer_disjunction(&batch, &predicate).unwrap().is_some());
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), vec![0, 4, 5]);
+        let expected = (0..batch.num_rows()).filter(|&i|
+            predicate.evaluate(&batch, i).unwrap().as_boolean().unwrap() == Some(true)
+        ).collect::<Vec<_>>();
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+
+        let other = Expr::binary(Expr::Column("y".into()), BinaryOp::Equal,
+            Expr::Literal(Value::Integer(2)));
+        let mixed = Expr::binary(low, BinaryOp::Or, other);
+        assert!(fast_integer_disjunction(&batch, &mixed).unwrap().is_none());
+        let expected = (0..batch.num_rows()).filter(|&i|
+            mixed.evaluate(&batch, i).unwrap().as_boolean().unwrap() == Some(true)
+        ).collect::<Vec<_>>();
+        assert_eq!(select_indices(&batch, &mixed).unwrap(), expected);
+    }
+
+    #[test]
+    fn null_only_disjunction_produces_no_matches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Null]]).unwrap();
+        let predicate = Expr::binary(
+            Expr::binary(Expr::Column("n".into()), BinaryOp::Equal,
+                Expr::Literal(Value::Integer(3))),
+            BinaryOp::Or,
+            Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+                Expr::Literal(Value::Integer(5))),
+        );
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), Vec::<usize>::new());
     }
 }

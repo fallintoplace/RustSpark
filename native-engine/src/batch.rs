@@ -100,6 +100,12 @@ impl Batch {
         Ok(Self { schema, ..self })
     }
 
+    /// Consume validated column vectors without cloning their scalar payloads.
+    /// Used by owned streaming operators that have already checked schemas.
+    pub(crate) fn into_columns(self) -> Vec<Vec<Value>> {
+        self.columns
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
@@ -157,6 +163,30 @@ impl Batch {
             output
         }).collect();
         Ok(Self { schema: self.schema.clone(), columns, rows: selected })
+    }
+
+    /// Gather monotonically increasing row indices from an owned batch.
+    /// Moving retained scalar values avoids duplicating heap-backed TEXT data.
+    pub(crate) fn take_sorted_owned(self, indices: &[usize]) -> Result<Self> {
+        if indices.last().is_some_and(|&index| index >= self.rows) ||
+            indices.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(Error::Execution("owned batch gather indices must be increasing and in bounds".into()));
+        }
+        let mut columns = Vec::with_capacity(self.columns.len());
+        for source in self.columns {
+            let mut values = Vec::with_capacity(indices.len());
+            let mut iter = source.into_iter();
+            let mut consumed = 0usize;
+            for &index in indices {
+                // Vec::IntoIter skips dropped values and moves only the cells
+                // needed by the output, without cloning String allocations.
+                let value = iter.nth(index - consumed).expect("validated row index");
+                values.push(value);
+                consumed = index + 1;
+            }
+            columns.push(values);
+        }
+        Ok(Self { schema: self.schema, columns, rows: indices.len() })
     }
 
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {

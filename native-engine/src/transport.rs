@@ -154,7 +154,14 @@ pub fn write_frames_limited(
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
     let mut header = [0u8; HEADER_BYTES];
-    if input.read(&mut header[..1])? == 0 { return Ok(None); }
+    loop {
+        match input.read(&mut header[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
     input.read_exact(&mut header[1..])?;
     if &header[..4] != MAGIC {
         return Err(Error::Parse("invalid exchange frame magic or version".into()));
@@ -234,10 +241,15 @@ impl<R: Read> Iterator for FrameReader<R> {
         if self.frames_seen >= self.max_frames {
             self.finished = true;
             let mut extra = [0u8; 1];
-            return match self.input.read(&mut extra) {
-                Ok(0) => None,
-                Ok(_) => Some(Err(Error::Execution("exchange stream frame count limit exceeded".into()))),
-                Err(error) => Some(Err(error.into())),
+            return loop {
+                match self.input.read(&mut extra) {
+                    Ok(0) => break None,
+                    Ok(_) => break Some(Err(Error::Execution(
+                        "exchange stream frame count limit exceeded".into(),
+                    ))),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => break Some(Err(error.into())),
+                }
             };
         }
         let remaining = self.max_total_bytes.saturating_sub(self.bytes_seen);
@@ -594,5 +606,48 @@ mod early_frame_count_rejection_tests {
             .unwrap().is_empty());
         assert!(read_frames_limited(&mut wire.as_slice(), 2, 2, 0)
             .unwrap_err().to_string().contains("frame count"));
+    }
+}
+
+#[cfg(test)]
+mod interrupted_exchange_reads_regressions {
+    use super::*;
+    use std::io::{self, Read};
+
+    struct InterruptOnce<'a> {
+        remaining: &'a [u8],
+        interrupted: bool,
+    }
+
+    impl Read for InterruptOnce<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.remaining.read(buf)
+        }
+    }
+
+    #[test]
+    fn a_transient_interrupt_does_not_abort_a_valid_frame() {
+        let frame = Frame { stage: 3, task: 7, attempt: 1, payload: vec![0, 1, 2, 3] };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &frame, 16).unwrap();
+        let mut interrupted = InterruptOnce { remaining: &bytes, interrupted: false };
+        assert_eq!(read_frame(&mut interrupted, 16).unwrap(), Some(frame));
+        assert!(read_frame(&mut interrupted, 16).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_transient_interrupt_does_not_mask_extra_frames() {
+        let interrupted = InterruptOnce { remaining: &[1u8], interrupted: false };
+        let mut reader = FrameReader::new(interrupted, 16, 16, 0);
+        assert!(matches!(reader.next(), Some(Err(Error::Execution(_)))));
+        assert!(reader.next().is_none());
+
+        let empty = InterruptOnce { remaining: &[], interrupted: false };
+        let mut reader = FrameReader::new(empty, 16, 16, 0);
+        assert!(reader.next().is_none());
     }
 }
