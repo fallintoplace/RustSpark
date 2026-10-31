@@ -135,6 +135,44 @@ pub fn hash_join(
             field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
     }
     let schema = Schema::new(fields)?;
+    if matches!(kind, JoinKind::Right | JoinKind::Full) {
+        // RIGHT/FULL previously assembled Vec<Value> for every joined row,
+        // then transposed all rows into columns. Reuse the prepared columnar
+        // probe and its matched-build bitmap instead.
+        let mut matched = vec![false; right.num_rows()];
+        let probe_kind = if kind == JoinKind::Right {
+            JoinKind::Inner
+        } else {
+            JoinKind::Left
+        };
+        let prepared = PreparedHashJoin::new(
+            left.schema().clone(), right, left_key, right_key, probe_kind,
+        )?;
+        let probe = prepared.probe_with_matches(left, Some(&mut matched))?
+            .into_widened_schema(schema.clone())?;
+        let mut count = probe.num_rows();
+        let mut columns = probe.into_columns();
+        let right_columns = (0..right.schema().len())
+            .map(|column| right.column(column)).collect::<Result<Vec<_>>>()?;
+        for (row, is_matched) in matched.iter().enumerate() {
+            if *is_matched { continue; }
+            if count >= MAX_JOIN_ROWS {
+                return Err(Error::Execution("join output exceeds safety limit".into()));
+            }
+            for column in &mut columns[..left.schema().len()] {
+                column.push(Value::Null);
+            }
+            for (output, input) in columns[left.schema().len()..]
+                .iter_mut().zip(&right_columns) {
+                output.push(input[row].clone());
+            }
+            count += 1;
+        }
+        // Both inputs and the prepared probe have already been validated.
+        // Newly appended values are either NULL in widened columns or
+        // existing typed values from the build side.
+        return Batch::from_validated_columns(schema, columns, count);
+    }
     if kind == JoinKind::Inner && (left.num_rows() == 0 || right.num_rows() == 0) {
         return Ok(Batch::empty(schema));
     }
@@ -689,5 +727,64 @@ mod preflight_join_cardinality_regressions {
         let left_join = PreparedHashJoin::new(left.schema().clone(), &right,
             "key", "key", JoinKind::Left).unwrap();
         assert_eq!(left_join.probe(&left).unwrap().num_rows(), 2_000);
+    }
+}
+
+#[cfg(test)]
+mod columnar_outer_join_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn right_and_full_keep_duplicate_matches_nulls_order_and_field_names() {
+        let left_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("left_payload", DataType::Text, false),
+        ]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("right_payload", DataType::Text, false),
+        ]).unwrap();
+        let left = Batch::from_rows(left_schema, vec![
+            vec![Value::Integer(1), Value::Text("L1".repeat(128))],
+            vec![Value::Integer(2), Value::Text("L2".into())],
+            vec![Value::Null, Value::Text("LN".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(right_schema, vec![
+            vec![Value::Integer(1), Value::Text("R1".into())],
+            vec![Value::Integer(1), Value::Text("R2".into())],
+            vec![Value::Integer(3), Value::Text("R3".into())],
+            vec![Value::Null, Value::Text("RN".into())],
+        ]).unwrap();
+
+        let full = hash_join(&left, &right, "id", "id", JoinKind::Full).unwrap();
+        let right_only = hash_join(&left, &right, "id", "id", JoinKind::Right).unwrap();
+        assert_eq!(full.num_rows(), 6);
+        assert_eq!(right_only.num_rows(), 4);
+        assert_eq!(full.schema().column("right_id").unwrap(), 2);
+        assert!(full.schema().fields().iter().all(|field| field.nullable));
+        assert_eq!(right_only.row(2).unwrap(), vec![
+            Value::Null, Value::Null, Value::Integer(3), Value::Text("R3".into())
+        ]);
+        assert_eq!(full.row(2).unwrap(), vec![
+            Value::Integer(2), Value::Text("L2".into()), Value::Null, Value::Null
+        ]);
+        assert_eq!(full.row(5).unwrap(), vec![
+            Value::Null, Value::Null, Value::Null, Value::Text("RN".into())
+        ]);
+    }
+
+    #[test]
+    fn empty_probe_or_build_still_returns_the_outer_rows() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let data = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(4)], vec![Value::Integer(5)]]).unwrap();
+        let empty = Batch::empty(schema);
+        let right = hash_join(&empty, &data, "id", "id", JoinKind::Right).unwrap();
+        let full = hash_join(&data, &empty, "id", "id", JoinKind::Full).unwrap();
+        assert_eq!(right.num_rows(), 2);
+        assert_eq!(right.row(0).unwrap(), vec![Value::Null, Value::Integer(4)]);
+        assert_eq!(full.num_rows(), 2);
+        assert_eq!(full.row(1).unwrap(), vec![Value::Integer(5), Value::Null]);
     }
 }
