@@ -82,11 +82,11 @@ export class RustSpark {
     if (maxRows !== undefined) args.push("--max-rows", String(maxRows));
     if (queryTimeout !== undefined) args.push("--query-timeout", String(queryTimeout));
 
-    return { args, maxOutputBytes, processTimeoutMs };
+    return { args, maxOutputBytes, processTimeoutMs, unsafeIntegers };
   }
 
   query(sql, options = {}) {
-    const { args, maxOutputBytes, processTimeoutMs } = this._command(sql, options);
+    const { args, maxOutputBytes, processTimeoutMs, unsafeIntegers } = this._command(sql, options);
     const result = this.runner(this.binary, args, {
       encoding: "utf8", shell: false, timeout: processTimeoutMs, maxBuffer: maxOutputBytes,
     });
@@ -109,7 +109,7 @@ export class RustSpark {
   // This API launches a real child process; the synchronous custom runner only
   // affects query() and queryOne().
   async *queryRows(sql, options = {}) {
-    const { args, maxOutputBytes, processTimeoutMs } = this._command(sql, options);
+    const { args, maxOutputBytes, processTimeoutMs, unsafeIntegers } = this._command(sql, options);
     const flag = args.indexOf("--stdout-format");
     args[flag + 1] = "json";
 
@@ -154,7 +154,7 @@ export class RustSpark {
     let segments = [];
     let segmentBytes = 0;
     const parseRow = () => {
-      const row = parseStrictJSON(Buffer.concat(segments, segmentBytes).toString("utf8"));
+      const row = parseStrictJSON(Buffer.concat(segments, segmentBytes).toString("utf8"), { unsafeIntegers });
       if (row === null || typeof row !== "object" || Array.isArray(row)) {
         throw new RustSparkError("RustSpark NDJSON row must be an object");
       }
