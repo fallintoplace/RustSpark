@@ -2,8 +2,15 @@ use std::hash::{Hash, Hasher};
 
 use crate::{batch::Batch, Error, Result};
 
-#[derive(Default)]
 pub(crate) struct PartitionHasher(u64);
+
+impl Default for PartitionHasher {
+    fn default() -> Self {
+        // FNV-1a's offset basis is the hash of an empty byte sequence.
+        // write(&[]) must be a no-op, not an implicit initializer.
+        Self(0xcbf29ce484222325)
+    }
+}
 
 impl Hasher for PartitionHasher {
     fn finish(&self) -> u64 {
@@ -11,9 +18,6 @@ impl Hasher for PartitionHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if self.0 == 0 {
-            self.0 = 0xcbf29ce484222325;
-        }
         for byte in bytes {
             self.0 ^= u64::from(*byte);
             self.0 = self.0.wrapping_mul(0x100000001b3);
@@ -375,5 +379,35 @@ mod borrowed_shuffle_column_sources_tests {
                 assert_eq!(output[shard].rows().unwrap(), expected);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod partition_hasher_state_regressions {
+    use super::PartitionHasher;
+    use std::hash::Hasher;
+
+    #[test]
+    fn empty_writes_are_noops_and_default_hashes_empty_input() {
+        let empty = PartitionHasher::default().finish();
+        assert_eq!(empty, 0xcbf29ce484222325);
+        let mut hasher = PartitionHasher::default();
+        hasher.write(&[]);
+        hasher.write(&[]);
+        assert_eq!(hasher.finish(), empty);
+    }
+
+    #[test]
+    fn hash_is_independent_of_write_boundaries() {
+        let value = b"native-shuffle-partition-key";
+        let mut whole = PartitionHasher::default();
+        whole.write(value);
+        let mut fragments = PartitionHasher::default();
+        fragments.write(&[]);
+        fragments.write(&value[..4]);
+        fragments.write(&value[4..15]);
+        fragments.write(&[]);
+        fragments.write(&value[15..]);
+        assert_eq!(fragments.finish(), whole.finish());
     }
 }
