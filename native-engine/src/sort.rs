@@ -86,6 +86,20 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
             _ => unreachable!("all sort keys are columns"),
         }).collect::<Result<Vec<_>>>()?;
         let mut indices: Vec<usize> = (start..end).collect();
+        if columns.len() == 1 {
+            let column = columns[0];
+            let key = &keys[0];
+            indices.sort_by(|&left, &right| {
+                match (&column[left], &column[right]) {
+                    (Value::Integer(a), Value::Integer(b)) => {
+                        let ordering = a.cmp(b);
+                        if key.descending { ordering.reverse() } else { ordering }
+                    }
+                    (a, b) => compare_values(a, b, key.descending, key.nulls_first),
+                }
+            });
+            return Ok(indices);
+        }
         indices.sort_by(|&left, &right| {
             for (column, key) in columns.iter().zip(keys) {
                 let cmp = compare_values(&column[left], &column[right],
@@ -96,13 +110,22 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         });
         return Ok(indices);
     }
-    let mut key_columns = Vec::with_capacity(keys.len());
+    // A mixed ORDER BY should not clone direct-column TEXT keys just because
+    // another key is computed. Borrow the input window and materialize only
+    // expression results, keeping both kinds of keys indexed from zero.
+    let mut key_columns: Vec<std::borrow::Cow<'_, [Value]>> =
+        Vec::with_capacity(keys.len());
     for key in keys {
-        let mut values = Vec::with_capacity(end - start);
-        for row in start..end {
-            values.push(key.expression.evaluate(batch, row)?);
+        if let Expr::Column(name) = &key.expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            key_columns.push(std::borrow::Cow::Borrowed(&column[start..end]));
+        } else {
+            let mut values = Vec::with_capacity(end - start);
+            for row in start..end {
+                values.push(key.expression.evaluate(batch, row)?);
+            }
+            key_columns.push(std::borrow::Cow::Owned(values));
         }
-        key_columns.push(values);
     }
     let mut indices: Vec<usize> = (0..end - start).collect();
     indices.sort_by(|&left, &right| {
@@ -116,6 +139,39 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
     });
     for index in &mut indices { *index += start; }
     Ok(indices)
+}
+
+#[cfg(test)]
+mod mixed_key_borrowed_sort_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_and_direct_text_keys_sort_a_nonzero_window() {
+        let payload = "p".repeat(32 * 1024);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(9), Value::Text(format!("z{payload}"))],
+            vec![Value::Integer(2), Value::Text(format!("z{payload}"))],
+            vec![Value::Integer(1), Value::Text(format!("x{payload}"))],
+            vec![Value::Integer(2), Value::Text(format!("a{payload}"))],
+            vec![Value::Integer(0), Value::Text(format!("m{payload}"))],
+        ]).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)))),
+            SortKey::ascending(Expr::Column("label".into())),
+        ];
+        let output = sort_range(&batch, &keys, 1, 4).unwrap();
+        assert_eq!(output.column(0).unwrap(), &[
+            Value::Integer(1), Value::Integer(2), Value::Integer(2),
+        ]);
+        assert_eq!(output.column(1).unwrap()[1],
+            Value::Text(format!("a{payload}")));
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +416,40 @@ mod owned_sort_permutation_regressions {
         assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), sort(&batch, &keys).unwrap());
         assert!(sort_owned(Batch::empty(schema),
             &[SortKey::ascending(Expr::Column("missing".into()))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod single_integer_key_sort_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn preserves_stable_ties_null_positions_and_descending_order() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("position", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(2), Value::Integer(0)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(2), Value::Integer(3)],
+            vec![Value::Null, Value::Integer(4)],
+            vec![Value::Integer(-2), Value::Integer(5)],
+        ]).unwrap();
+        for (descending, nulls_first) in [
+            (false, true), (true, true), (false, false), (true, false),
+        ] {
+            let keys = [SortKey {
+                expression: Expr::Column("key".into()), descending, nulls_first,
+            }];
+            let mut expected = batch.rows().unwrap();
+            expected.sort_by(|a, b| {
+                compare_values(&a[0], &b[0], descending, nulls_first)
+            });
+            let result = sort(&batch, &keys).unwrap();
+            assert_eq!(result.rows().unwrap(), expected);
+            assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), result);
+        }
     }
 }

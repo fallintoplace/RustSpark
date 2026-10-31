@@ -57,6 +57,7 @@ impl BloomFilter {
 
     pub fn insert(&mut self, key: &Value) {
         self.populated = true;
+        if self.occupied_bits == self.bits { return; }
         let (first, step) = self.hash_pair(key);
         for seed in 0..self.hashes {
             let bit = self.probe(first, step, seed);
@@ -70,6 +71,7 @@ impl BloomFilter {
 
     pub fn might_contain(&self, key: &Value) -> bool {
         if !self.populated { return false; }
+        if self.occupied_bits == self.bits { return true; }
         let (first, step) = self.hash_pair(key);
         (0..self.hashes).all(|seed| {
             let bit = self.probe(first, step, seed);
@@ -86,6 +88,8 @@ impl BloomFilter {
     /// Return one membership bit per input key in the original row order.
     /// A true bit means a possible match, never a confirmed exact match.
     pub fn probe_batch(&self, keys: &[Value]) -> Vec<bool> {
+        if !self.populated { return vec![false; keys.len()]; }
+        if self.occupied_bits == self.bits { return vec![true; keys.len()]; }
         keys.iter().map(|key| self.might_contain(key)).collect()
     }
 
@@ -436,6 +440,60 @@ mod empty_bloom_set_operation_shortcuts {
             assert_eq!(combined.bits_set(), 0);
             combined.insert(&Value::Integer(51));
             assert!(combined.might_contain(&Value::Integer(51)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod saturated_filter_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn fully_occupied_filters_accept_all_probes_and_preserve_accounting() {
+        let mut filter = BloomFilter::new(1, 8).unwrap();
+        assert!(!filter.might_contain(&Value::Null));
+        filter.insert(&Value::Integer(1));
+        assert_eq!(filter.bits_set(), 1);
+        for key in [
+            Value::Integer(-1234),
+            Value::Text("large-key".repeat(1024)),
+            Value::Null,
+            Value::Float(123.5),
+        ] {
+            assert!(filter.might_contain(&key));
+            filter.insert(&key);
+            assert_eq!(filter.bits_set(), 1);
+        }
+        let empty = BloomFilter::new(1, 8).unwrap();
+        filter.intersect_with(&empty).unwrap();
+        assert_eq!(filter.bits_set(), 0);
+        assert!(!filter.might_contain(&Value::Integer(1)));
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_shortcut_regressions {
+    use super::*;
+
+    #[test]
+    fn saturated_filters_admit_every_probe_without_changing_occupancy() {
+        for bits in [1, 2, 63, 64, 65] {
+            let mut filter = BloomFilter::new(bits, 7).unwrap();
+            for n in 0..10_000 {
+                filter.insert(&Value::Integer(n));
+                if filter.bits_set() == bits { break; }
+            }
+            if filter.bits_set() != bits { continue; }
+            let unseen = Value::Text("new probe".into());
+            assert!(filter.might_contain(&unseen));
+            assert_eq!(filter.probe_batch(&[unseen.clone(), Value::Null]), vec![true, true]);
+            filter.insert(&unseen);
+            assert_eq!(filter.bits_set(), bits);
+            let mut other = BloomFilter::new(bits, 7).unwrap();
+            other.insert(&Value::Integer(123));
+            filter.intersect_with(&other).unwrap();
+            assert!(filter.might_contain(&Value::Integer(123)));
+            assert_eq!(filter.bits_set(), other.bits_set());
         }
     }
 }
