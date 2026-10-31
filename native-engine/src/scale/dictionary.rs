@@ -142,6 +142,21 @@ impl DictionaryColumn {
         if left.dictionary.len() > max_distinct || left.encoded_string_bytes > max_dictionary_bytes {
             return Err(Error::Execution("left dictionary exceeds merge budget".into()));
         }
+        // Shuffle partitions often retain the same dictionary across batches.
+        // Equal tables have identical codes, so no hash map or remapping is needed.
+        if left.dictionary == right.dictionary {
+            if right.indices.iter().flatten().any(|&code| code as usize >= right.dictionary.len()) {
+                return Err(Error::Execution("invalid dictionary remap code".into()));
+            }
+            let mut indices = Vec::with_capacity(row_count);
+            indices.extend_from_slice(&left.indices);
+            indices.extend_from_slice(&right.indices);
+            return Ok(Self {
+                dictionary: left.dictionary.clone(),
+                indices,
+                encoded_string_bytes: left.encoded_string_bytes,
+            });
+        }
         let mut dictionary = left.dictionary.clone();
         let mut seen: HashMap<&str, u32> = left.dictionary.iter().enumerate()
             .map(|(index, text)| (text.as_str(), index as u32)).collect();
@@ -294,5 +309,31 @@ mod checked_dictionary_decode_tests {
         for (index, value) in decoded.iter().enumerate() {
             assert_eq!(value, &dictionary.value(index).unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod identical_dictionary_merge_perf_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn equal_tables_reuse_codes_without_losing_nulls_or_budgets() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Text("key".repeat(512))], vec![Value::Null],
+            vec![Value::Text("value".into())],
+        ]).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&source, "key", 2, 4096, 3).unwrap();
+        let merged = DictionaryColumn::concatenate(&dictionary, &dictionary, 2, 4096, 6).unwrap();
+        let mut expected = dictionary.decode().unwrap();
+        expected.extend(dictionary.decode().unwrap());
+        assert_eq!(merged.decode().unwrap(), expected);
+        assert_eq!(merged.dictionary(), dictionary.dictionary());
+        assert_eq!(merged.encoded_string_bytes(), dictionary.encoded_string_bytes());
+        assert!(DictionaryColumn::concatenate(&dictionary, &dictionary, 2, 4096, 5).is_err());
+        let mut corrupted = dictionary.clone();
+        corrupted.indices[0] = Some(300);
+        assert!(DictionaryColumn::concatenate(&dictionary, &corrupted, 2, 4096, 6).is_err());
     }
 }

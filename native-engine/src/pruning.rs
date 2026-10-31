@@ -6,7 +6,23 @@ use crate::{
     statistics::ColumnStatistics,
 };
 
+/// Corrupt or internally contradictory bounds cannot prove any predicate false.
+fn trustworthy(stats: &ColumnStatistics) -> bool {
+    if stats.nulls > stats.rows {
+        return false;
+    }
+    match (&stats.min, &stats.max) {
+        (None, None) => true,
+        (Some(min), Some(max)) => {
+            stats.rows != 0 &&
+                min.sql_compare(max).ok().flatten().is_some_and(|order| order != Ordering::Greater)
+        }
+        _ => false,
+    }
+}
+
 pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> bool {
+    if !trustworthy(stats) { return false; }
     if stats.rows == 0 {
         return true;
     }
@@ -164,6 +180,10 @@ pub fn can_skip_columns(
             if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
         return true;
     }
+    // Never make a skip decision from internally inconsistent summaries.
+    if stats.values().any(|summary| !trustworthy(summary)) {
+        return false;
+    }
     // Inconsistent metadata is not proof that any row can be skipped.
     if let Some(first) = stats.values().next() {
         if stats.values().any(|column| column.rows != first.rows) {
@@ -292,5 +312,42 @@ mod null_safe_statistics_pruning_tests {
         assert!(!can_skip(&all_null, "n", &condition(Value::Null, true)));
         assert!(can_skip(&all_null, "n", &condition(Value::Integer(5), true)));
         assert!(can_skip(&same, "n", &condition(Value::Null, true)));
+    }
+}
+
+#[cfg(test)]
+mod corrupt_column_bounds_pruning_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_statistics_do_not_discard_matching_rows() {
+        let equal = Expr::binary(Expr::Column("x".into()),
+            BinaryOp::Equal, Expr::Literal(Value::Integer(15)));
+        let reversed = ColumnStatistics {
+            rows: 10, nulls: 0,
+            min: Some(Value::Integer(20)), max: Some(Value::Integer(10)),
+        };
+        assert!(!can_skip(&reversed, "x", &equal));
+        assert!(!can_skip_columns(&std::collections::HashMap::from([
+            ("x".into(), reversed),
+        ]), &equal));
+
+        let invalid_nulls = ColumnStatistics {
+            rows: 0, nulls: 1, min: None, max: None,
+        };
+        assert!(!can_skip(&invalid_nulls, "x", &equal));
+        let missing_bound = ColumnStatistics {
+            rows: 10, nulls: 0, min: Some(Value::Integer(20)), max: None,
+        };
+        assert!(!can_skip(&missing_bound, "x", &equal));
+
+        let trusted = ColumnStatistics {
+            rows: 10, nulls: 0,
+            min: Some(Value::Integer(20)), max: Some(Value::Integer(30)),
+        };
+        assert!(can_skip(&trusted, "x", &equal));
+        assert!(can_skip_columns(&std::collections::HashMap::from([
+            ("x".into(), trusted),
+        ]), &equal));
     }
 }

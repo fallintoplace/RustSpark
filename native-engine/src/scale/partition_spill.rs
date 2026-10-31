@@ -1,5 +1,6 @@
 //! Disk-backed hash exchange for columnar batch iterators.
 use std::{
+    collections::VecDeque,
     fs::{File, OpenOptions},
     hash::{Hash, Hasher},
     io::BufWriter,
@@ -10,6 +11,7 @@ use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
 use super::{cancel::QueryControl, spill::SpillWriter};
 
 static PARTITION_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_OPEN_SHARDS: usize = 64;
 
 pub struct PartitionFiles {
     paths: Vec<PathBuf>,
@@ -28,8 +30,11 @@ impl Drop for PartitionFiles {
 }
 
 pub struct PartitionWriter {
-    owned: Option<PartitionFiles>,
+    // Close buffered output handles before cleanup removes the owned files.
     writers: Option<Vec<Option<SpillWriter<BufWriter<File>>>>>,
+    owned: Option<PartitionFiles>,
+    open_order: VecDeque<usize>,
+    initialized: Vec<bool>,
     key_columns: Vec<usize>,
     batch_rows: usize,
 }
@@ -61,17 +66,45 @@ fn bucket_bound(columns: &[&[Value]], row: usize, count: usize) -> usize {
     }
 }
 
+// Keep a bounded LRU of open writers. Reopening an initialized shard appends
+// batches without emitting a second spill header into the same file.
+fn ensure_open(
+    writers: &mut [Option<SpillWriter<BufWriter<File>>>],
+    order: &mut VecDeque<usize>, initialized: &mut [bool],
+    paths: &[PathBuf], schema: &Schema, index: usize,
+) -> Result<()> {
+    if writers[index].is_none() {
+        if order.len() == MAX_OPEN_SHARDS {
+            let victim = order.pop_front().expect("open writer order nonempty");
+            writers[victim].take().expect("evicted writer exists").finish()?;
+        }
+        let writer = if initialized[index] {
+            let file = OpenOptions::new().append(true).open(&paths[index])?;
+            SpillWriter::resume(BufWriter::new(file), schema.clone())
+        } else {
+            let file = OpenOptions::new().write(true).create_new(true).open(&paths[index])?;
+            let writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
+            initialized[index] = true;
+            writer
+        };
+        writers[index] = Some(writer);
+    } else {
+        let position = order.iter().position(|&active| active == index)
+            .expect("open writer must be in LRU order");
+        order.remove(position);
+    }
+    order.push_back(index);
+    Ok(())
+}
+
 fn write_shard(
     writers: &mut [Option<SpillWriter<BufWriter<File>>>],
+    order: &mut VecDeque<usize>, initialized: &mut [bool],
     paths: &[PathBuf], schema: &Schema, index: usize,
     batch: &Batch, rows: &[usize],
 ) -> Result<()> {
-    let slot = &mut writers[index];
-    if slot.is_none() {
-        let file = OpenOptions::new().write(true).create_new(true).open(&paths[index])?;
-        *slot = Some(SpillWriter::new(BufWriter::new(file), schema.clone())?);
-    }
-    slot.as_mut().expect("shard writer initialized").write_batch(&batch.take(rows)?)
+    ensure_open(writers, order, initialized, paths, schema, index)?;
+    writers[index].as_mut().expect("shard writer initialized").write_batch(&batch.take(rows)?)
 }
 
 impl PartitionWriter {
@@ -94,7 +127,11 @@ impl PartitionWriter {
         // Only touched shards need file handles while writing. Empty shards
         // receive a valid schema-only spill file when finish() is called.
         let writers = std::iter::repeat_with(|| None).take(count).collect();
-        Ok(Self { owned: Some(owned), writers: Some(writers), key_columns, batch_rows })
+        Ok(Self {
+            writers: Some(writers), owned: Some(owned),
+            open_order: VecDeque::new(), initialized: vec![false; count],
+            key_columns, batch_rows,
+        })
     }
 
     pub fn write_batch(&mut self, batch: &Batch, control: &QueryControl) -> Result<()> {
@@ -105,12 +142,9 @@ impl PartitionWriter {
             // Every row belongs to the only shard. Avoid per-row hashing,
             // selection indices, and cloning values through Batch::take.
             control.check()?;
+            ensure_open(writers, &mut self.open_order, &mut self.initialized,
+                &owned.paths, &owned.schema, 0)?;
             let slot = &mut writers[0];
-            if slot.is_none() {
-                let file = OpenOptions::new().write(true).create_new(true)
-                    .open(&owned.paths[0])?;
-                *slot = Some(SpillWriter::new(BufWriter::new(file), owned.schema.clone())?);
-            }
             let mut start = 0;
             while start < batch.num_rows() {
                 control.check()?;
@@ -135,7 +169,8 @@ impl PartitionWriter {
                     sparse.entry(index).or_default().push(row);
                 }
                 for (index, rows) in sparse {
-                    write_shard(writers, &owned.paths, &owned.schema, index, batch, &rows)?;
+                    write_shard(writers, &mut self.open_order, &mut self.initialized,
+                        &owned.paths, &owned.schema, index, batch, &rows)?;
                 }
             } else {
                 let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
@@ -146,7 +181,8 @@ impl PartitionWriter {
                 }
                 for (index, rows) in groups.iter().enumerate() {
                     if !rows.is_empty() {
-                        write_shard(writers, &owned.paths, &owned.schema, index, batch, rows)?;
+                        write_shard(writers, &mut self.open_order, &mut self.initialized,
+                            &owned.paths, &owned.schema, index, batch, rows)?;
                     }
                 }
             }
@@ -162,9 +198,9 @@ impl PartitionWriter {
         for (index, writer) in self.writers.take().unwrap_or_default().into_iter().enumerate() {
             if let Some(writer) = writer {
                 writer.finish()?;
-            } else {
+            } else if !self.initialized[index] {
                 // Readers expect one schema-checked file per partition,
-                // including untouched partitions.
+                // including untouched partitions. Already closed shards exist.
                 let file = OpenOptions::new().write(true).create_new(true)
                     .open(&owned.paths[index])?;
                 SpillWriter::new(BufWriter::new(file), owned.schema.clone())?.finish()?;
@@ -430,6 +466,46 @@ mod empty_partition_bucket_tests {
         let batch = Batch::from_rows(schema, vec![vec![Value::Integer(7)]]).unwrap();
         assert!(bucket(&batch, 0, &[0], 0).is_err());
         assert_eq!(bucket(&batch, 0, &[0], 1).unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod bounded_open_partition_writer_tests {
+    use super::*;
+    use crate::{hash_partition, scalar::Value, schema::{DataType, Field}, scale::spill::SpillReader};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn evicted_shards_append_without_duplicate_headers_or_lost_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-shard-lru-{}-{}", std::process::id(),
+            PARTITION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..2048)
+            .map(|key| vec![Value::Integer(key)]).collect()).unwrap();
+        let mut writer = PartitionWriter::new(&dir, schema, &["key"], 128, 37).unwrap();
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        assert!(writer.open_order.len() <= MAX_OPEN_SHARDS);
+        assert!(writer.initialized.iter().filter(|&&present| present).count() > MAX_OPEN_SHARDS);
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        assert!(writer.open_order.len() <= MAX_OPEN_SHARDS);
+        let files = writer.finish().unwrap();
+        let expected = hash_partition::partition(&batch, &["key"], 128).unwrap();
+        for (path, partition) in files.paths().iter().zip(expected.iter()) {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 37).unwrap();
+            let mut actual = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                actual.extend(batch.rows().unwrap());
+            }
+            let expected_rows = partition.rows().unwrap();
+            assert_eq!(actual, expected_rows.iter().chain(expected_rows.iter())
+                .cloned().collect::<Vec<_>>());
+        }
+        drop(files);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(&dir).unwrap();
     }
 }
 
