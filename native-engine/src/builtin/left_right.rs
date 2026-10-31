@@ -24,6 +24,9 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
     let result = if count == 0 {
         ""
+    } else if count >= text.len() {
+        // There cannot be more Unicode characters than UTF-8 bytes.
+        text
     } else if text.is_ascii() {
         if from_right {
             &text[text.len().saturating_sub(count)..]
@@ -112,7 +115,9 @@ mod utf8_left_right_perf_tests {
             Value::Text("a🙂東".into()));
         assert_eq!(right(&[input.clone(), Value::Integer(2)]).unwrap(),
             Value::Text("京é".into()));
-        assert_eq!(right(&[input.clone(), Value::Integer(9999)]).unwrap(), input);
+        assert_eq!(right(&[input.clone(), Value::Integer(9999)]).unwrap(), input.clone());
+        assert_eq!(left(&[input.clone(), Value::Integer(i64::MAX)]).unwrap(), input.clone());
+        assert_eq!(right(&[input.clone(), Value::Integer(99)]).unwrap(), input);
         assert_eq!(left(&[Value::Text("abc".into()), Value::Integer(0)]).unwrap(),
             Value::Text("".into()));
     }
