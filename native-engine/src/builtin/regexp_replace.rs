@@ -23,7 +23,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
         let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        if offset >= text.len() { text.len() } else {
+            text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        }
     } else { 0 };
     let compiled = regex_support::compile(pattern)?;
     let suffix = &text[start..];
@@ -117,5 +119,18 @@ mod bounded_incremental_regex_replace_tests {
             Value::Text("-".into())]).unwrap(), Value::Text("-a-b-".into()));
         assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Text("z".into()),
             Value::Text("x".into())]).unwrap(), Value::Text("abc".into()));
+    }
+}
+
+#[cfg(test)]
+mod regexp_replace_impossible_position_tests {
+    use super::*;
+    #[test]
+    fn large_unicode_positions_return_input_without_scanning() {
+        let input = Value::Text("é🙂a".into());
+        assert_eq!(evaluate(&[input.clone(), Value::Text("a".into()),
+            Value::Text("x".into()), Value::Integer(i64::MAX)]).unwrap(), input);
+        assert!(evaluate(&[Value::Text("abc".into()), Value::Text("(".into()),
+            Value::Text("x".into()), Value::Integer(i64::MAX)]).is_err());
     }
 }
