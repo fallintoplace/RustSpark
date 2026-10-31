@@ -81,7 +81,7 @@ impl<R: BufRead> CsvRows<R> {
         if records.len() != 1 || records[0].len() != self.schema.len() {
             return Err(Error::Parse("CSV row width differs from declared schema".into()));
         }
-        let row = records.into_iter().next().unwrap();
+        let Some(row) = records.into_iter().next() else { return Ok(None); };
         let values = row.into_iter().zip(self.schema.fields())
             .map(|(value, field)| {
                 if value.is_empty() { return Ok(Value::Null); }
