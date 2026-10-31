@@ -14,17 +14,25 @@ use crate::{
 
 const MAX_CSV_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CSV_ROWS: usize = 1_000_000;
+// Keep a single CSV record from allocating millions of tiny String objects.
+// The native spill format supports at most 4096 fields as well.
+const MAX_CSV_COLUMNS: usize = 4096;
 
-fn finish_field(row: &mut Vec<String>, field: &mut String) {
+fn finish_field(row: &mut Vec<String>, field: &mut String) -> Result<()> {
+    if row.len() >= MAX_CSV_COLUMNS {
+        return Err(Error::Execution("CSV column count exceeds 4096 limit".into()));
+    }
     row.push(std::mem::take(field));
+    Ok(())
 }
 
-fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String) {
+fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String) -> Result<()> {
     if row.is_empty() && field.is_empty() {
-        return;
+        return Ok(());
     }
-    finish_field(row, field);
+    finish_field(row, field)?;
     records.push(std::mem::take(row));
+    Ok(())
 }
 
 /// CSV reader for small local datasets. Supports UTF-8, CRLF, escaped quotes,
@@ -42,7 +50,14 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
     if !input.as_bytes().iter().any(|&byte| byte == b'"' || byte == b'\r') {
         let mut records = Vec::new();
         for line in input.split('\n').filter(|line| !line.is_empty()) {
-            records.push(line.split(',').map(str::to_owned).collect());
+            // Stop at the first impossible column before allocating all
+            // fields from an otherwise byte-bounded but extremely wide line.
+            let fields = line.split(',').take(MAX_CSV_COLUMNS + 1)
+                .map(str::to_owned).collect::<Vec<_>>();
+            if fields.len() > MAX_CSV_COLUMNS {
+                return Err(Error::Execution("CSV column count exceeds 4096 limit".into()));
+            }
+            records.push(fields);
             if records.len() > max_records {
                 return Err(Error::Execution("CSV row count limit exceeded".into()));
             }
@@ -78,14 +93,14 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
             }
             State::AfterQuote | State::Start | State::Unquoted => match character {
                 ',' => {
-                    finish_field(&mut row, &mut field);
+                    finish_field(&mut row, &mut field)?;
                     state = State::Start;
                 }
                 '\n' | '\r' => {
                     if character == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    finish_record(&mut records, &mut row, &mut field);
+                    finish_record(&mut records, &mut row, &mut field)?;
                     if records.len() > max_records {
                         return Err(Error::Execution("CSV row count limit exceeded".into()));
                     }
@@ -107,7 +122,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
         return Err(Error::Parse("unterminated CSV quote".into()));
     }
     if !row.is_empty() || !field.is_empty() || state == State::AfterQuote {
-        finish_record(&mut records, &mut row, &mut field);
+        finish_record(&mut records, &mut row, &mut field)?;
     }
     if records.len() > max_records {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
@@ -467,5 +482,26 @@ mod fast_multiline_csv_regressions {
         assert!(parse_records_with_limit("a,b", 0).is_err());
         assert!(parse_records_with_limit("\n\n", 0).unwrap().is_empty());
         assert!(parse_records_with_limit("a,b\r\n1,2\r\n3,4\r\n", 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wide_csv_field_admission_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_oversized_plain_and_quoted_records_at_field_limit() {
+        let boundary = std::iter::repeat_n("x", MAX_CSV_COLUMNS)
+            .collect::<Vec<_>>().join(",");
+        let accepted = parse_records(&boundary).unwrap();
+        assert_eq!(accepted[0].len(), MAX_CSV_COLUMNS);
+        assert!(parse_records(&format!("{boundary},extra")).is_err());
+        assert!(parse_records(&format!("{boundary},")).is_err());
+
+        let quoted = format!("\"x\",{}", std::iter::repeat_n("y", MAX_CSV_COLUMNS)
+            .collect::<Vec<_>>().join(","));
+        assert!(parse_records(&quoted).is_err());
+        assert!(parse_records(&format!("\"x\",{}", std::iter::repeat_n("y", MAX_CSV_COLUMNS - 1)
+            .collect::<Vec<_>>().join(","))).is_ok());
     }
 }
