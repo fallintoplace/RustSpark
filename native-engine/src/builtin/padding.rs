@@ -41,8 +41,17 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if !left { result.push_str(text); }
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
+    } else if pad.is_ascii() {
+        // For multi-character ASCII patterns, copy whole runs using
+        // push_str rather than decoding and appending each scalar.
+        let padding = target - size;
+        let full_runs = padding / pad.len();
+        for _ in 0..full_runs {
+            result.push_str(pad);
+        }
+        result.push_str(&pad[..padding % pad.len()]);
     } else {
-        // Cycle the borrowed pattern instead of allocating a character vector.
+        // Unicode patterns still cycle scalar values, not UTF-8 bytes.
         for character in pad.chars().cycle().take(target - size) {
             result.push(character);
         }
@@ -137,5 +146,42 @@ mod ascii_padding_capacity_estimate_tests {
             Value::Text("xyz".into())]).unwrap(), Value::Text("xyzxyza".into()));
         assert_eq!(rpad(&[Value::Text("é".into()), Value::Integer(4),
             Value::Text("🙂x".into())]).unwrap(), Value::Text("é🙂x🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_padding_run_copy_tests {
+    use super::*;
+
+    fn run(text: &str, width: i64, pad: &str, left: bool) -> Result<Value> {
+        let args = [
+            Value::Text(text.into()), Value::Integer(width), Value::Text(pad.into()),
+        ];
+        if left { lpad(&args) } else { rpad(&args) }
+    }
+
+    #[test]
+    fn whole_and_partial_ascii_patterns_keep_exact_char_counts() {
+        assert_eq!(run("X", 10, "abc", true).unwrap(),
+            Value::Text("abcabcabcX".into()));
+        assert_eq!(run("X", 9, "abc", false).unwrap(),
+            Value::Text("Xabcabcab".into()));
+        assert_eq!(run("🙂", 8, "ab", true).unwrap(),
+            Value::Text("abababa🙂".into()));
+        assert_eq!(run("X", 3, "abcd", false).unwrap(),
+            Value::Text("Xab".into()));
+        assert_eq!(run("🙂", 4, "é界", false).unwrap(),
+            Value::Text("🙂é界é".into()));
+    }
+
+    #[test]
+    fn long_ascii_pattern_appends_are_bounded_by_target_length() {
+        let pattern = "0123456789abcdef";
+        let result = run("end", 999_999, pattern, true).unwrap();
+        let Value::Text(value) = result else { panic!("text result expected") };
+        assert_eq!(value.len(), 999_999);
+        assert!(value.ends_with("end"));
+        assert!(value.starts_with(pattern));
+        assert!(run("X", 1_000_001, "ab", true).is_err());
     }
 }
