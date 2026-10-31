@@ -245,9 +245,10 @@ mod ascii_normalize_byte_output_regressions {
 
     #[test]
     fn all_ascii_whitespace_and_long_fields_match_reference() {
+        let long = "a b c".repeat(100_000);
         for text in [
             "", "  ", "abc", " a   b  ", "\t\r\n a\u{000B}b\u{000C}  c \t",
-            "\0  a \0", "a b c".repeat(100_000).as_str(),
+            "\0  a \0", long.as_str(),
         ] {
             let actual = normalize_space(&[Value::Text(text.into())]).unwrap();
             assert_eq!(actual, Value::Text(reference(text)));
