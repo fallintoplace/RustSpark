@@ -60,7 +60,9 @@ pub fn concat(
             output.extend(values);
         }
     }
-    Batch::new_with_row_count(schema.clone(), columns, total)
+    // All inputs were validated Batch instances with exactly this schema.
+    // Preserve the shape check without scanning their scalar values again.
+    Batch::from_validated_columns(schema.clone(), columns, total)
 }
 
 #[cfg(test)]
@@ -257,5 +259,31 @@ mod owned_concat_move_regressions {
         let right = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
         assert_eq!(concat(&schema, [left.clone(), right.clone()], 5).unwrap().num_rows(), 5);
         assert!(concat(&schema, [left, right], 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod validated_owned_concatenation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn many_nullable_text_chunks_move_values_and_keep_row_budget() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let inputs = (0..73).map(|n| Batch::from_rows(schema.clone(), vec![vec![
+            if n % 13 == 0 { Value::Null } else { Value::Text(format!("{n}-{}", "x".repeat(1024))) },
+            Value::Integer(n),
+        ]]).unwrap()).collect::<Vec<_>>();
+        let expected = inputs.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
+        let combined = concat(&schema, inputs.clone(), 73).unwrap();
+        assert_eq!(combined.rows().unwrap(), expected);
+        assert!(concat(&schema, inputs, 72).is_err());
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let parts = (0..19).map(|_| Batch::new_with_row_count(
+            empty_schema.clone(), vec![], 7).unwrap()).collect::<Vec<_>>();
+        assert_eq!(concat(&empty_schema, parts, 133).unwrap().num_rows(), 133);
     }
 }

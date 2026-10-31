@@ -37,13 +37,19 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let mut result = String::with_capacity(4);
     result.push(first.to_ascii_uppercase());
     let mut last = soundex_digit(first);
-    if text.is_ascii() {
-        for &byte in text.as_bytes().iter().skip(1) {
-            append_soundex(&mut result, &mut last, char::from(byte));
-            if result.len() >= 4 { break; }
-        }
-    } else {
-        for ch in characters {
+    // Do not scan the entire input with is_ascii() when the four-byte code
+    // can be resolved from a small leading prefix.
+    let bytes = text.as_bytes();
+    let mut next = first.len_utf8();
+    while next < bytes.len() && bytes[next].is_ascii() {
+        append_soundex(&mut result, &mut last, char::from(bytes[next]));
+        next += 1;
+        if result.len() >= 4 { break; }
+    }
+    // next always points to a UTF-8 boundary because the consumed prefix
+    // contains only ASCII bytes.
+    if result.len() < 4 {
+        for ch in text[next..].chars() {
             append_soundex(&mut result, &mut last, ch);
             if result.len() >= 4 { break; }
         }
@@ -87,5 +93,41 @@ mod ascii_soundex_byte_perf_tests {
             }.into()));
         }
         assert_eq!(evaluate(&[Value::Text("Émile".into())]).unwrap(), Value::Text("Émile".into()));
+    }
+}
+
+#[cfg(test)]
+mod soundex_ascii_prefix_early_exit_tests {
+    use super::*;
+
+    fn reference(text: &str) -> String {
+        let mut chars = text.chars();
+        let first = chars.next().unwrap();
+        let mut result = String::with_capacity(4);
+        result.push(first.to_ascii_uppercase());
+        let mut last = soundex_digit(first);
+        for ch in chars {
+            append_soundex(&mut result, &mut last, ch);
+            if result.len() == 4 { break; }
+        }
+        while result.len() < 4 { result.push('0'); }
+        result
+    }
+
+    #[test]
+    fn ascii_prefix_and_unicode_fallback_match_character_iteration() {
+        for input in [
+            "Robert", "Rupert", "Ashcraft", "Pfister", "BHF", "BAF",
+            "a1b2c3", "R🙂obert", "AéB", "A\u{0301}B", "QWWQQ",
+        ] {
+            assert_eq!(
+                evaluate(&[Value::Text(input.into())]).unwrap(),
+                Value::Text(reference(input))
+            );
+        }
+        let input = format!("Robert{}", "H".repeat(200_000));
+        assert_eq!(evaluate(&[Value::Text(input)]).unwrap(),
+            Value::Text("R163".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }

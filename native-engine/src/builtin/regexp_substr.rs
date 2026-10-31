@@ -7,6 +7,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
+    if pattern == "." {
+        // The default regex dot matches one Unicode scalar other than LF.
+        return Ok(text.chars().find(|&ch| ch != '\n')
+            .map_or(Value::Null, |ch| Value::Text(ch.to_string())));
+    }
     if pattern.len() <= 4096 && pattern.bytes().all(|byte|
         byte.is_ascii_alphanumeric() || byte == b'_') {
         return Ok(text.find(pattern)
@@ -60,5 +65,25 @@ mod literal_regex_substr_tests {
             let args = [Value::Text(text.into()), Value::Text(pattern.into())];
             assert_eq!(evaluate(&args).unwrap(), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod dot_pattern_substring_tests {
+    use super::*;
+
+    #[test]
+    fn first_non_newline_scalar_matches_regex() {
+        let re = regex_support::compile(".").unwrap();
+        for text in ["", "\n", "\n\n", "\n🙂tail", "é\n🙂", "\r\nx", "東京"] {
+            let expected = re.find(text)
+                .map_or(Value::Null, |matched| Value::Text(matched.as_str().into()));
+            assert_eq!(
+                evaluate(&[Value::Text(text.into()), Value::Text(".".into())]).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
+            Value::Null);
     }
 }

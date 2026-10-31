@@ -10,7 +10,6 @@ use std::{
 use crate::{
     aggregate::{AggregateItem, AggregateOp},
     batch::Batch,
-    expr::Expr,
     scalar::Value,
     schema::{DataType, Field, Schema},
     Error, Result,
@@ -19,6 +18,9 @@ use super::{
     cancel::QueryControl, partition_spill::PartitionWriter,
     spill::{SpillReader, SpillWriter},
 };
+
+#[cfg(test)]
+use crate::expr::Expr;
 
 static GROUP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -731,9 +733,9 @@ mod grouped_spill_total_distinct_bytes_regressions {
         let items = [AggregateItem::new(AggregateOp::CountDistinct(
             Expr::Column("v".into())), "n")];
         let output = output_schema(&schema, &[("k".into(), "k".into())], &items).unwrap();
-        let fixed = super::super::row_footprint::footprint([&Value::Integer(1)])
+        let fixed = super::super::row_footprint::footprint([&Value::Integer(1)].into_iter())
             + std::mem::size_of::<State>();
-        let each = super::super::row_footprint::footprint([&first]);
+        let each = super::super::row_footprint::footprint([&first].into_iter());
         let control = QueryControl::default();
         let error = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
             10, 3, fixed + each * 2 - 1, &control).unwrap_err();
@@ -752,7 +754,7 @@ mod grouped_spill_total_distinct_bytes_regressions {
         let mut keys_b = HashSet::new();
         let mut bytes_b = 0;
         let value = Value::Text("shared".repeat(20));
-        let budget = super::super::row_footprint::footprint([&value]);
+        let budget = super::super::row_footprint::footprint([&value].into_iter());
         let mut retained = 0;
         assert!(insert_distinct(&mut keys_a, &mut bytes_a, &value, &mut retained, budget).unwrap());
         assert!(!insert_distinct(&mut keys_a, &mut bytes_a, &value, &mut retained, budget).unwrap());

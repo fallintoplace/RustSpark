@@ -10,7 +10,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
     let Some(count) = super::integer(&args[2])? else { return Ok(Value::Null) };
     if count == 0 || delimiter.is_empty() { return Ok(Value::Text(String::new())); }
-    if count.unsigned_abs() > u64::try_from(text.len()).unwrap_or(u64::MAX) {
+    // Matches do not overlap, so each one consumes at least delimiter.len() bytes.
+    // Skip scanning if the requested occurrence cannot exist.
+    let max_matches = text.len() / delimiter.len();
+    if count.unsigned_abs() > u64::try_from(max_matches).unwrap_or(u64::MAX) {
         return Ok(Value::Text(text.to_owned()));
     }
     if count == 1 {
@@ -125,5 +128,42 @@ mod single_byte_split_count_fast_path_tests {
         assert_eq!(f("é,🙂,東京", ","), Value::Integer(3));
         assert_eq!(f("é🙂é", "é"), Value::Integer(3));
         assert_eq!(f("hello", ","), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod impossible_multibyte_delimiter_tests {
+    use super::*;
+
+    #[test]
+    fn skips_counts_above_the_nonoverlapping_occurrence_bound() {
+        let delimiter = "é".repeat(10_000);
+        let source = format!("{delimiter}x{delimiter}");
+        for count in [3, -3, i64::MIN, i64::MAX] {
+            assert_eq!(
+                evaluate(&[
+                    Value::Text(source.clone()),
+                    Value::Text(delimiter.clone()),
+                    Value::Integer(count),
+                ]).unwrap(),
+                Value::Text(source.clone())
+            );
+        }
+        assert_eq!(
+            evaluate(&[
+                Value::Text(source.clone()),
+                Value::Text(delimiter.clone()),
+                Value::Integer(2),
+            ]).unwrap(),
+            Value::Text(format!("{delimiter}x"))
+        );
+        assert_eq!(
+            evaluate(&[
+                Value::Text(source),
+                Value::Text(delimiter),
+                Value::Integer(-1),
+            ]).unwrap(),
+            Value::Text(String::new())
+        );
     }
 }

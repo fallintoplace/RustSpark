@@ -199,7 +199,9 @@ impl Iterator for SetStream {
                         Err(error) => return Err(error),
                     }
                 }
-                Batch::new_with_row_count(self.output_schema.clone(), output, selected)
+                // Rows come from typed input batches. The only conversion is
+                // INTEGER to FLOAT, and the output nullability is widened.
+                Batch::from_validated_columns(self.output_schema.clone(), output, selected)
             })();
             match result {
                 Ok(batch) if batch.num_rows() == 0 => {
@@ -400,5 +402,35 @@ mod intersect_distinct_right_key_reuse_regressions {
         ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(result.into_iter().flat_map(|b| b.rows().unwrap())
             .collect::<Vec<_>>(), vec![vec![Value::Null], vec![Value::Integer(1)]]);
+    }
+}
+
+#[cfg(test)]
+mod trusted_set_output_regressions {
+    use super::*;
+    #[test]
+    fn numeric_coercion_and_null_bag_counts_keep_output_types() {
+        let left_schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, true)
+        ]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("k", DataType::Float, true)
+        ]).unwrap();
+        let left = Batch::from_rows(left_schema.clone(), vec![
+            vec![Value::Integer(2)], vec![Value::Null], vec![Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(right_schema.clone(), vec![
+            vec![Value::Float(2.0)], vec![Value::Null],
+        ]).unwrap();
+        let output = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            left_schema, right_schema, SetMode::IntersectAll,
+            QueryControl::default(), 100, 100_000
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().flat_map(|b| b.rows().unwrap())
+            .collect::<Vec<_>>(), vec![
+                vec![Value::Float(2.0)], vec![Value::Null],
+            ]);
+        assert_eq!(output[0].schema().fields()[0].data_type, DataType::Float);
     }
 }

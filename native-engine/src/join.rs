@@ -90,6 +90,40 @@ pub fn hash_join(
     let left_keys = left.column(left_column)?;
     let right_keys = right.column(right_column)?;
     if left.num_rows() > 0 && right.num_rows() > 0
+        && matches!(kind, JoinKind::Right | JoinKind::Full) {
+        // RIGHT and FULL joins can use the same columnar hash probe as
+        // INNER and LEFT. Track matched build rows, then emit the unmatched
+        // right suffix without allocating one Vec per joined output row.
+        let probe_kind = if kind == JoinKind::Right { JoinKind::Inner } else { JoinKind::Left };
+        let prepared = PreparedHashJoin::new(
+            left.schema().clone(), right, left_key, right_key, probe_kind,
+        )?;
+        let mut matched_right = vec![false; right.num_rows()];
+        let probed = prepared.probe_with_matches(left, Some(&mut matched_right))?;
+        let schema = hash_join(
+            &Batch::empty(left.schema().clone()),
+            &Batch::empty(right.schema().clone()),
+            left_key, right_key, kind,
+        )?.schema().clone();
+        let mut count = probed.num_rows();
+        let mut columns = probed.into_columns();
+        for (right_row, matched) in matched_right.into_iter().enumerate() {
+            if matched { continue; }
+            if count >= MAX_JOIN_ROWS {
+                return Err(Error::Execution("join output exceeds safety limit".into()));
+            }
+            for destination in columns.iter_mut().take(left.schema().len()) {
+                destination.push(Value::Null);
+            }
+            for (index, destination) in columns.iter_mut()
+                .skip(left.schema().len()).enumerate() {
+                destination.push(right.value(right_row, index)?.clone());
+            }
+            count += 1;
+        }
+        return Batch::from_validated_columns(schema, columns, count);
+    }
+    if left.num_rows() > 0 && right.num_rows() > 0
         && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti) {
         // Prepared joins build columnar output directly instead of allocating
         // a row vector for every match. Empty inputs keep the schema-only path.
@@ -689,5 +723,70 @@ mod preflight_join_cardinality_regressions {
         let left_join = PreparedHashJoin::new(left.schema().clone(), &right,
             "key", "key", JoinKind::Left).unwrap();
         assert_eq!(left_join.probe(&left).unwrap().num_rows(), 2_000);
+    }
+}
+
+
+#[cfg(test)]
+mod columnar_outer_hash_join_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn build(rows: Vec<(Value, Value)>) -> Batch {
+        Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), rows.into_iter().map(|(id, text)| vec![id, text]).collect()).unwrap()
+    }
+
+    #[test]
+    fn right_and_full_matches_include_duplicate_null_and_unmatched_keys() {
+        let long = "🙂".repeat(2048);
+        let left = build(vec![
+            (Value::Integer(2), Value::Text(long.clone())),
+            (Value::Null, Value::Text("null-left".into())),
+            (Value::Integer(2), Value::Text("left-duplicate".into())),
+            (Value::Integer(4), Value::Null),
+        ]);
+        let right = build(vec![
+            (Value::Integer(2), Value::Text("right-a".into())),
+            (Value::Integer(3), Value::Text("right-b".into())),
+            (Value::Integer(2), Value::Text("right-c".into())),
+            (Value::Null, Value::Text("null-right".into())),
+        ]);
+        let right_join = hash_join(&left, &right, "id", "id", JoinKind::Right).unwrap();
+        assert_eq!(right_join.num_rows(), 6);
+        assert_eq!(right_join.rows().unwrap(), vec![
+            vec![Value::Integer(2), Value::Text(long.clone()), Value::Integer(2), Value::Text("right-a".into())],
+            vec![Value::Integer(2), Value::Text(long), Value::Integer(2), Value::Text("right-c".into())],
+            vec![Value::Integer(2), Value::Text("left-duplicate".into()), Value::Integer(2), Value::Text("right-a".into())],
+            vec![Value::Integer(2), Value::Text("left-duplicate".into()), Value::Integer(2), Value::Text("right-c".into())],
+            vec![Value::Null, Value::Null, Value::Integer(3), Value::Text("right-b".into())],
+            vec![Value::Null, Value::Null, Value::Null, Value::Text("null-right".into())],
+        ]);
+        let full = hash_join(&left, &right, "id", "id", JoinKind::Full).unwrap();
+        assert_eq!(full.num_rows(), 8);
+        assert_eq!(full.row(2).unwrap(), vec![
+            Value::Null, Value::Text("null-left".into()), Value::Null, Value::Null,
+        ]);
+        assert_eq!(full.row(5).unwrap(), vec![
+            Value::Integer(4), Value::Null, Value::Null, Value::Null,
+        ]);
+        assert_eq!(full.row(6).unwrap(), right_join.row(4).unwrap());
+        assert_eq!(full.row(7).unwrap(), right_join.row(5).unwrap());
+    }
+
+    #[test]
+    fn outer_join_widens_nullability_for_nonnullable_source_fields() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![vec![Value::Integer(1)]]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![Value::Integer(2)]]).unwrap();
+        for kind in [JoinKind::Right, JoinKind::Full] {
+            let result = hash_join(&left, &right, "key", "key", kind).unwrap();
+            assert!(result.schema().field(0).unwrap().nullable);
+            assert_eq!(result.schema().field(1).unwrap().name, "right_key");
+            assert_eq!(result.row(result.num_rows() - 1).unwrap(),
+                vec![Value::Null, Value::Integer(2)]);
+        }
     }
 }

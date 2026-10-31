@@ -175,7 +175,13 @@ impl PartialGroupSum {
             Field::new("row_count", DataType::Integer, false),
             Field::new("sum", DataType::Integer, true),
         ])?;
-        let mut rows = Vec::with_capacity(self.groups.len());
+        let rows = self.groups.len();
+        // Retained keys are already typed native values. Move their strings
+        // into final output columns instead of allocating a row vector for
+        // every group and transposing it during Batch::from_rows.
+        let mut keys = Vec::with_capacity(rows);
+        let mut counts = Vec::with_capacity(rows);
+        let mut sums = Vec::with_capacity(rows);
         for (key, state) in self.groups {
             let sum = if state.has_value {
                 Value::Integer(i64::try_from(state.sum)
@@ -183,9 +189,11 @@ impl PartialGroupSum {
             } else {
                 Value::Null
             };
-            rows.push(vec![key, Value::Integer(state.rows), sum]);
+            keys.push(key);
+            counts.push(Value::Integer(state.rows));
+            sums.push(sum);
         }
-        Batch::from_rows(schema, rows)
+        Batch::from_validated_columns(schema, vec![keys, counts, sums], rows)
     }
 }
 
@@ -354,5 +362,50 @@ mod partial_group_key_byte_budget_regressions {
         assert!(left.merge(right).is_err());
         assert_eq!(left.groups.len(), original.len());
         assert!(left.failed);
+    }
+}
+
+#[cfg(test)]
+mod columnar_partial_finalization_tests {
+    use super::*;
+
+    #[test]
+    fn wide_group_keys_keep_counts_nulls_and_sum_values() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, true),
+            Field::new("v", DataType::Integer, true),
+        ]).unwrap();
+        let wide = "🙂é".repeat(4096);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(wide.clone()), Value::Integer(7)],
+            vec![Value::Text(wide.clone()), Value::Integer(5)],
+            vec![Value::Null, Value::Null],
+            vec![Value::Text("other".into()), Value::Null],
+        ]).unwrap();
+        let mut partial = PartialGroupSum::new("k", "v", 16);
+        partial.update(&batch).unwrap();
+        let result = partial.finish().unwrap();
+        let rows = result.rows().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.contains(&vec![
+            Value::Text(wide), Value::Integer(2), Value::Integer(12),
+        ]));
+        assert!(rows.contains(&vec![Value::Null, Value::Integer(1), Value::Null]));
+        assert!(rows.contains(&vec![
+            Value::Text("other".into()), Value::Integer(1), Value::Null,
+        ]));
+    }
+
+    #[test]
+    fn empty_group_map_keeps_typed_output_schema() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, false),
+            Field::new("v", DataType::Integer, true),
+        ]).unwrap();
+        let mut partial = PartialGroupSum::new("k", "v", 16);
+        partial.update(&Batch::empty(schema)).unwrap();
+        let result = partial.finish().unwrap();
+        assert_eq!(result.num_rows(), 0);
+        assert_eq!(result.schema().len(), 3);
     }
 }

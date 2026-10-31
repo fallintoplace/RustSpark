@@ -205,6 +205,23 @@ impl Batch {
         Ok(Self { schema: self.schema, columns, rows: indices.len() })
     }
 
+    /// Append a validated source row to owned column builders without making
+    /// a temporary row Vec. Used by multiway external sort merging.
+    pub(crate) fn append_row_to_columns(
+        &self, row: usize, output: &mut [Vec<Value>],
+    ) -> Result<()> {
+        if row >= self.rows {
+            return Err(Error::Execution(format!("row index out of bounds: {row}")));
+        }
+        if output.len() != self.columns.len() {
+            return Err(Error::Schema("row append column count mismatch".into()));
+        }
+        for (target, source) in output.iter_mut().zip(&self.columns) {
+            target.push(source[row].clone());
+        }
+        Ok(())
+    }
+
     pub fn rows(&self) -> Result<Vec<Vec<Value>>> {
         let mut rows = (0..self.rows)
             .map(|_| Vec::with_capacity(self.columns.len()))

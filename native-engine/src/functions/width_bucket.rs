@@ -10,8 +10,14 @@ pub(super) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
     Ok(DataType::Integer)
 }
 pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
-    let values = args.iter().map(|arg| arg.evaluate(batch, row))
-        .collect::<Result<Vec<_>>>()?;
+    // WIDTH_BUCKET has exactly four arguments. Keep evaluated scalars on the
+    // stack instead of allocating a Vec for every input row.
+    let values = [
+        args[0].evaluate(batch, row)?,
+        args[1].evaluate(batch, row)?,
+        args[2].evaluate(batch, row)?,
+        args[3].evaluate(batch, row)?,
+    ];
     if values.iter().any(Value::is_null) { return Ok(Value::Null); }
     let buckets = match values[3] {
         Value::Integer(n) if (1..=1_000_000).contains(&n) => n,
@@ -96,5 +102,32 @@ mod exact_integer_bucket_sql_tests {
         assert_eq!(run(i64::MAX - 1, i64::MAX - 2, i64::MAX), Value::Integer(2));
         assert_eq!(run(i64::MAX, i64::MAX - 2, i64::MAX), Value::Integer(3));
         assert_eq!(run(i64::MAX - 1, i64::MAX, i64::MAX - 2), Value::Integer(2));
+    }
+}
+
+#[cfg(test)]
+mod stack_argument_evaluation_tests {
+    use super::*;
+
+    #[test]
+    fn integer_float_null_and_invalid_buckets_keep_sql_behavior() {
+        let batch = Batch::empty(Schema::new(vec![]).unwrap());
+        let run = |values: [Value; 4]| {
+            let arguments = values.into_iter().map(Expr::Literal).collect::<Vec<_>>();
+            eval(&arguments, &batch, 0)
+        };
+        assert_eq!(run([Value::Integer(5), Value::Integer(0),
+            Value::Integer(10), Value::Integer(5)]).unwrap(), Value::Integer(3));
+        assert_eq!(run([Value::Integer(5), Value::Integer(10),
+            Value::Integer(0), Value::Integer(5)]).unwrap(), Value::Integer(3));
+        assert_eq!(run([Value::Float(2.5), Value::Float(0.0),
+            Value::Float(10.0), Value::Integer(5)]).unwrap(), Value::Integer(2));
+        assert_eq!(run([Value::Null, Value::Integer(0),
+            Value::Integer(10), Value::Integer(5)]).unwrap(), Value::Null);
+        assert!(run([Value::Integer(5), Value::Integer(0),
+            Value::Integer(10), Value::Integer(0)]).is_err());
+        assert_eq!(run([Value::Integer(i64::MAX - 1),
+            Value::Integer(i64::MAX - 2), Value::Integer(i64::MAX),
+            Value::Integer(2)]).unwrap(), Value::Integer(2));
     }
 }
