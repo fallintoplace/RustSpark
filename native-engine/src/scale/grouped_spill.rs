@@ -72,7 +72,8 @@ fn new_state(op: &AggregateOp) -> Result<State> {
 
 /// Distinct state is bounded by both key count and estimated memory bytes.
 fn insert_distinct(
-    keys: &mut HashSet<Value>, bytes: &mut usize, value: &Value
+    keys: &mut HashSet<Value>, bytes: &mut usize, value: &Value,
+    retained_bytes: &mut usize, max_retained_bytes: usize,
 ) -> Result<bool> {
     if keys.contains(value) { return Ok(false); }
     if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
@@ -82,8 +83,14 @@ fn insert_distinct(
     let next = bytes.checked_add(footprint)
         .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
         .ok_or_else(|| Error::Execution("spill DISTINCT byte limit exceeded".into()))?;
+    // Per-group limits do not bound total distinct state across thousands
+    // of groups. Share the shard's existing key/state admission budget.
+    let total = retained_bytes.checked_add(footprint)
+        .filter(|size| *size <= max_retained_bytes)
+        .ok_or_else(|| Error::Execution("spill DISTINCT partition byte budget exceeded".into()))?;
     keys.insert(value.clone());
     *bytes = next;
+    *retained_bytes = total;
     Ok(true)
 }
 
@@ -131,7 +138,10 @@ fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value
     Ok(())
 }
 
-fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
+fn add_to_state(
+    state: &mut State, op: &AggregateOp, batch: &Batch, row: usize,
+    retained_bytes: &mut usize, max_retained_bytes: usize,
+) -> Result<()> {
     let value = match op {
         AggregateOp::CountAll => Value::Integer(1),
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
@@ -147,16 +157,18 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
                 .ok_or_else(|| Error::Execution("COUNT overflow".into()))?;
         }
         State::CountDistinct { keys, bytes } => {
-            insert_distinct(keys, bytes, &value)?;
+            insert_distinct(keys, bytes, &value, retained_bytes, max_retained_bytes)?;
         }
         State::Sum(total) => add_sum(total, &value)?,
         State::SumDistinct { keys, bytes, total } => {
-            if insert_distinct(keys, bytes, &value)? { add_sum(total, &value)?; }
+            if insert_distinct(keys, bytes, &value, retained_bytes, max_retained_bytes)? {
+                add_sum(total, &value)?;
+            }
         }
         State::Avg { sum, compensation, count } =>
             add_avg(sum, compensation, count, &value)?,
         State::AvgDistinct { keys, bytes, sum, compensation, count } => {
-            if insert_distinct(keys, bytes, &value)? {
+            if insert_distinct(keys, bytes, &value, retained_bytes, max_retained_bytes)? {
                 add_avg(sum, compensation, count, &value)?;
             }
         }
@@ -250,7 +262,8 @@ fn aggregate_shard_with_budget(
                 }
             };
             for (state, item) in states.iter_mut().zip(items) {
-                add_to_state(state, &item.op, &batch, row)?;
+                add_to_state(state, &item.op, &batch, row,
+                    &mut retained_key_state_bytes, max_key_state_bytes)?;
             }
         }
     }
@@ -655,5 +668,68 @@ mod prebound_group_keys_perf_tests {
         assert_eq!(actual, expected);
         drop(result);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grouped_spill_total_distinct_bytes_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, io::BufWriter};
+
+    #[test]
+    fn distinct_values_share_partition_budget_and_repeats_cost_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-distinct-partition-limit-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("input.rspill");
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Integer, false),
+            Field::new("v", DataType::Text, false),
+        ]).unwrap();
+        let first = Value::Text("first".repeat(10));
+        let second = Value::Text("other".repeat(10));
+        let mk = |value| vec![Value::Integer(1), value];
+        let mut writer = SpillWriter::new(
+            BufWriter::new(File::create(&path).unwrap()), schema.clone(),
+        ).unwrap();
+        writer.write_batch(&Batch::from_rows(schema.clone(), vec![
+            mk(first.clone()), mk(first.clone()), mk(second.clone()),
+        ]).unwrap()).unwrap();
+        writer.finish().unwrap();
+        let items = [AggregateItem::new(AggregateOp::CountDistinct(
+            Expr::Column("v".into())), "n")];
+        let output = output_schema(&schema, &[("k".into(), "k".into())], &items).unwrap();
+        let fixed = super::super::row_footprint::footprint([&Value::Integer(1)])
+            + std::mem::size_of::<State>();
+        let each = super::super::row_footprint::footprint([&first]);
+        let control = QueryControl::default();
+        let error = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
+            10, 3, fixed + each * 2 - 1, &control).unwrap_err();
+        assert!(error.to_string().contains("partition byte budget"));
+        let rows = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
+            10, 3, fixed + each * 2, &control).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(2)]]);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn multiple_groups_cannot_each_exhaust_the_full_partition_budget() {
+        let mut keys_a = HashSet::new();
+        let mut bytes_a = 0;
+        let mut keys_b = HashSet::new();
+        let mut bytes_b = 0;
+        let value = Value::Text("shared".repeat(20));
+        let budget = super::super::row_footprint::footprint([&value]);
+        let mut retained = 0;
+        assert!(insert_distinct(&mut keys_a, &mut bytes_a, &value, &mut retained, budget).unwrap());
+        assert!(!insert_distinct(&mut keys_a, &mut bytes_a, &value, &mut retained, budget).unwrap());
+        assert!(insert_distinct(&mut keys_b, &mut bytes_b, &value, &mut retained, budget).is_err());
+        assert_eq!(keys_a.len(), 1);
+        assert!(keys_b.is_empty());
+        assert_eq!(retained, budget);
     }
 }
