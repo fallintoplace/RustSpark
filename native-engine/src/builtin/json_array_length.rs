@@ -75,6 +75,19 @@ fn json_size_type(types: &[DataType]) -> Result<DataType> {
 }
 fn json_size(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    if text.trim_start().starts_with('[') {
+        // JSON_SIZE of a root array needs its element count, not a full
+        // serde_json::Value tree. Validate the entire document as we count.
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let count = RootArrayLength::deserialize(&mut deserializer)
+            .and_then(|result| deserializer.end().map(|()| result.0))
+            .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+        return Ok(Value::Integer(i64::try_from(count)
+            .map_err(|_| Error::Execution("JSON_SIZE overflow".into()))?));
+    }
     let doc = json_path::parse(text)?;
     let count = match doc {
         serde_json::Value::Array(items) => items.len(),
@@ -154,5 +167,41 @@ mod root_array_streaming_length_tests {
         assert_eq!(length(r#"{"nested":[1,2,3]}"#, Some("$.nested")).unwrap(),
             Value::Integer(3));
         assert_eq!(length("null", None).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streaming_root_json_size_tests {
+    use super::*;
+
+    #[test]
+    fn large_root_arrays_match_nested_and_scalar_size_rules() {
+        let items = (0..10_000).map(|index| format!(
+            r#"{{"id":{index},"value":[null,true,"é🙂"]}}"#
+        )).collect::<Vec<_>>().join(",");
+        let document = format!("  \n[{items}] \t");
+        assert_eq!(json_size(&[Value::Text(document)]).unwrap(),
+            Value::Integer(10_000));
+        for (document, expected) in [
+            ("[]", 0), ("[{},[],null,42]", 4),
+            (r#"{"a":[1,2],"b":false}"#, 2), ("null", 0),
+            ("false", 1), ("42", 1),
+        ] {
+            assert_eq!(json_size(&[Value::Text(document.into())]).unwrap(),
+                Value::Integer(expected));
+        }
+        assert_eq!(json_size(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn malformed_suffix_and_oversized_input_still_fail() {
+        for invalid in ["[1,2", "[1,,2]", "[1] trailing", "[1] [2]"] {
+            assert!(json_size(&[Value::Text(invalid.into())]).is_err(),
+                "{invalid}");
+        }
+        assert!(matches!(
+            json_size(&[Value::Text(format!("[{}]", " ".repeat(16 * 1024 * 1024)))]),
+            Err(Error::Execution(_))
+        ));
     }
 }
