@@ -56,6 +56,11 @@ class GatewayTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_result_rows(invalid)
 
+    def test_excessively_nested_request_is_invalid(self):
+        deep = b'{"params":' + b"[" * 2000 + b"0" + b"]" * 2000 + b"}"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            validate_params(deep)
+
     def test_only_safe_regular_templates_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
             queries = Path(directory)
@@ -68,6 +73,11 @@ class GatewayTests(unittest.TestCase):
 
 
 class InvalidBackendJSONTests(unittest.TestCase):
+    def test_excessively_nested_backend_rows_are_invalid(self):
+        deep = '[{"value":' + "[" * 2000 + "0" + "]" * 2000 + "}]"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            parse_result_rows(deep)
+
     def test_rejects_nonfinite_numbers_and_duplicate_result_keys(self):
         for payload in ('[{"n":NaN}]', '[{"n":Infinity}]', '[{"n":1e999}]',
                         '[{"id":1,"id":2}]', '[{"nested":{"x":1,"x":2}}]'):
