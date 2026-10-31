@@ -66,6 +66,54 @@ fn bucket_bound(columns: &[&[Value]], row: usize, count: usize) -> usize {
     }
 }
 
+const MAX_SPILL_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SPILL_CELLS: usize = 4_000_000;
+
+// The spill format stores one tag per cell, eight bytes per number,
+// and a four-byte length before each TEXT payload.
+fn row_wire_bytes(batch: &Batch, row: usize) -> Result<usize> {
+    let mut bytes = batch.schema().len();
+    for column in 0..batch.schema().len() {
+        let extra = match batch.value(row, column)? {
+            Value::Text(text) => text.len().checked_add(4),
+            Value::Integer(_) | Value::Float(_) => Some(8),
+            Value::Null | Value::Boolean(_) => Some(0),
+        }.ok_or_else(|| Error::Execution("partition spill wire byte overflow".into()))?;
+        bytes = bytes.checked_add(extra)
+            .ok_or_else(|| Error::Execution("partition spill wire byte overflow".into()))?;
+    }
+    Ok(bytes)
+}
+
+/// Visit wire-budgeted row windows. Row-index selection and contiguous
+/// ranges share this logic without allocating extra gathered batches.
+fn write_bounded_windows(
+    batch: &Batch, rows: usize, row_at: impl Fn(usize) -> usize,
+    max_bytes: usize, mut emit: impl FnMut(usize, usize) -> Result<()>,
+) -> Result<()> {
+    let max_rows = MAX_SPILL_CELLS / batch.schema().len().max(1);
+    if max_bytes < 4 || max_rows == 0 {
+        return Err(Error::Execution("partition spill batch budget too small".into()));
+    }
+    let mut start = 0usize;
+    while start < rows {
+        let mut end = start;
+        let mut bytes = 4usize;
+        while end < rows && end - start < max_rows {
+            let next = row_wire_bytes(batch, row_at(end))?;
+            if next > max_bytes - 4 {
+                return Err(Error::Execution("partition spill row exceeds wire byte limit".into()));
+            }
+            if next > max_bytes - bytes { break; }
+            bytes += next;
+            end += 1;
+        }
+        emit(start, end)?;
+        start = end;
+    }
+    Ok(())
+}
+
 // Keep a bounded LRU of open writers. Reopening an initialized shard appends
 // batches without emitting a second spill header into the same file.
 fn ensure_open(
@@ -107,7 +155,10 @@ fn write_shard(
     batch: &Batch, rows: &[usize],
 ) -> Result<()> {
     ensure_open(writers, order, initialized, paths, schema, index)?;
-    writers[index].as_mut().expect("shard writer initialized").write_batch_indices(batch, rows)
+    let writer = writers[index].as_mut().expect("shard writer initialized");
+    write_bounded_windows(batch, rows.len(), |position| rows[position],
+        MAX_SPILL_WIRE_BYTES, |start, end|
+            writer.write_batch_indices(batch, &rows[start..end]))
 }
 
 impl PartitionWriter {
@@ -152,8 +203,10 @@ impl PartitionWriter {
             while start < batch.num_rows() {
                 control.check()?;
                 let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
-                slot.as_mut().expect("single shard writer initialized")
-                    .write_batch_range(batch, start, end)?;
+                let writer = slot.as_mut().expect("single shard writer initialized");
+                write_bounded_windows(batch, end - start, |offset| start + offset,
+                    MAX_SPILL_WIRE_BYTES, |from, to|
+                        writer.write_batch_range(batch, start + from, start + to))?;
                 start = end;
             }
             return Ok(());
@@ -606,5 +659,47 @@ mod repeated_shard_lru_tests {
         }
         writers[0].take().unwrap().finish().unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod partition_wire_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::io::Cursor;
+    use super::super::spill::SpillReader;
+
+    #[test]
+    fn wire_budget_splits_borrowed_ranges_and_indexed_shards() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..4)
+            .map(|n| vec![Value::Text(format!("{n}{}", "x".repeat(17)))])
+            .collect()).unwrap();
+        for selected in [vec![0usize, 1, 2, 3], vec![3usize, 1, 1, 0]] {
+            let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+            let mut windows = Vec::new();
+            write_bounded_windows(&batch, selected.len(), |i| selected[i],
+                40, |start, end| {
+                    windows.push(end - start);
+                    writer.write_batch_indices(&batch, &selected[start..end])
+                }).unwrap();
+            assert_eq!(windows, vec![1, 1, 1, 1]);
+            let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 4).unwrap();
+            let mut actual = Vec::new();
+            while let Some(next) = reader.next_batch().unwrap() {
+                actual.extend(next.rows().unwrap());
+            }
+            assert_eq!(actual, selected.iter().map(|&i| batch.row(i).unwrap()).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn one_row_larger_than_the_wire_budget_is_rejected_without_writing() {
+        let schema = Schema::new(vec![Field::new("t", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Text("a".repeat(64))]]).unwrap();
+        let mut emitted = false;
+        assert!(write_bounded_windows(&batch, 1, |i| i, 40,
+            |_, _| { emitted = true; Ok(()) }).is_err());
+        assert!(!emitted);
     }
 }
