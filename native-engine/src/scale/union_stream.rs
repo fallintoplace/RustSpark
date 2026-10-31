@@ -231,20 +231,28 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
                     break;
                 }
-                let footprint = super::row_footprint::footprint(
+                // Reject certainly oversized keys before cloning. Input
+                // STRING capacity can be much larger than the new clone's.
+                let minimum = super::row_footprint::minimum_cloned_footprint(
                     columns.iter().map(|column| &column[row])
                 );
-                let Some(next_total) = self.retained_bytes.checked_add(footprint)
-                    .filter(|&bytes| bytes <= self.max_bytes) else {
+                if self.retained_bytes.checked_add(minimum)
+                    .is_none_or(|bytes| bytes > self.max_bytes) {
                     self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
                     break;
-                };
+                }
                 let key = match batch.row(row) {
                     Ok(key) => key,
                     Err(error) => {
                         self.pending_error = Some(error);
                         break;
                     }
+                };
+                let footprint = super::row_footprint::footprint(key.iter());
+                let Some(next_total) = self.retained_bytes.checked_add(footprint)
+                    .filter(|&bytes| bytes <= self.max_bytes) else {
+                    self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
+                    break;
                 };
                 self.retained_bytes = next_total;
                 self.unique_keys += 1;
@@ -625,5 +633,28 @@ mod union_narrow_nullability_regression {
         );
         assert_eq!(accepted.next().unwrap().unwrap().row(0).unwrap(),
             vec![Value::Float(2.0)]);
+    }
+}
+
+
+#[cfg(test)]
+mod compact_retained_union_key_accounting {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn union_distinct_charges_cloned_key_not_source_reserved_capacity() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, false)]).unwrap();
+        let mut source = String::with_capacity(16 * 1024);
+        source.push_str("key");
+        let batch = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text(source)]]).unwrap();
+        let mut distinct = UnionDistinctStream::new(
+            std::iter::once(Ok(batch)), std::iter::empty(),
+            schema, QueryControl::default(), 1, 128).unwrap();
+        assert_eq!(distinct.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("key".into())]]);
+        assert_eq!(distinct.retained_bytes, 64 + std::mem::size_of::<Value>() + 3);
+        assert!(distinct.next().is_none());
     }
 }
