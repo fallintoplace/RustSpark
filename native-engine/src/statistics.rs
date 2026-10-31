@@ -108,6 +108,32 @@ impl ColumnStatistics {
                     else if seen_false { Some(Value::Boolean(false)) } else { None },
             });
         }
+        if batch.schema().field(column)?.data_type == DataType::Text {
+            // Track borrowed byte-lexicographic extrema and clone the two
+            // retained strings once, instead of allocating whenever an
+            // incoming value becomes the current min or max.
+            let rows = u64::try_from(values.len())
+                .map_err(|_| Error::Execution("statistics row count overflow".into()))?;
+            let mut nulls = 0u64;
+            let mut min: Option<&str> = None;
+            let mut max: Option<&str> = None;
+            for value in values {
+                match value {
+                    Value::Null => nulls += 1,
+                    Value::Text(text) => {
+                        let text = text.as_str();
+                        if min.is_none_or(|old| text < old) { min = Some(text); }
+                        if max.is_none_or(|old| text > old) { max = Some(text); }
+                    }
+                    _ => unreachable!("native batch schema was validated"),
+                }
+            }
+            return Ok(Self {
+                rows, nulls,
+                min: min.map(|value| Value::Text(value.to_owned())),
+                max: max.map(|value| Value::Text(value.to_owned())),
+            });
+        }
         let mut stats = Self::default();
         for value in values { stats.observe(value)?; }
         Ok(stats)
@@ -436,5 +462,32 @@ mod boolean_vector_statistics_regressions {
         assert_eq!(merged, ColumnStatistics::from_batch(&all, "flag").unwrap());
         assert_eq!(merged.min, Some(Value::Boolean(false)));
         assert_eq!(merged.max, Some(Value::Boolean(true)));
+    }
+}
+
+#[cfg(test)]
+mod borrowed_text_statistics_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn text_extrema_match_scalar_observation_across_nulls_and_unicode() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        for input in [
+            vec![],
+            vec![Value::Null, Value::Null],
+            vec![
+                Value::Text("middle".into()), Value::Text("é".into()),
+                Value::Text("a".into()), Value::Text("🙂".into()),
+                Value::Null, Value::Text("a".into()),
+            ],
+            (0..1000).map(|n| Value::Text(format!("{:04}-{}", 999-n, "x".repeat(512)))).collect(),
+        ] {
+            let batch = Batch::from_rows(schema.clone(),
+                input.iter().cloned().map(|value| vec![value]).collect()).unwrap();
+            let mut reference = ColumnStatistics::default();
+            for value in &input { reference.observe(value).unwrap(); }
+            assert_eq!(ColumnStatistics::from_batch(&batch, "label").unwrap(), reference);
+        }
     }
 }
