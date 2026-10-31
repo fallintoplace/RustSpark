@@ -40,20 +40,27 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(-1));
         }
     }
+    // Shared edges do not participate in edit distance. Trim them as
+    // borrowed UTF-8 slices before allocating dynamic-programming vectors.
+    // This matters when strings share a huge common prefix and suffix.
+    let mut prefix_bytes = 0usize;
+    for (left, right) in first.chars().zip(second.chars()) {
+        if left != right { break; }
+        prefix_bytes += left.len_utf8();
+    }
+    let (first, second) = (&first[prefix_bytes..], &second[prefix_bytes..]);
+    let mut suffix_bytes = 0usize;
+    for (left, right) in first.chars().rev().zip(second.chars().rev()) {
+        if left != right { break; }
+        suffix_bytes += left.len_utf8();
+    }
+    let (first, second) = (
+        &first[..first.len() - suffix_bytes],
+        &second[..second.len() - suffix_bytes],
+    );
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
-    // Removing identical edges does not change the edit distance.
-    let mut prefix = 0;
-    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
-        prefix += 1;
-    }
-    let (mut a_end, mut b_end) = (a.len(), b.len());
-    while a_end > prefix && b_end > prefix && a[a_end - 1] == b[b_end - 1] {
-        a_end -= 1;
-        b_end -= 1;
-    }
-    let a = &a[prefix..a_end];
-    let b = &b[prefix..b_end];
+    let (a, b) = (a.as_slice(), b.as_slice());
     if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
@@ -252,5 +259,34 @@ mod levenshtein_threshold_preflight_tests {
             Value::Text("ab".into()),
             Value::Integer(1),
         ]).unwrap(), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod shared_unicode_edge_streaming_tests {
+    use super::*;
+
+    #[test]
+    fn long_shared_unicode_edges_do_not_expand_dp_work() {
+        let edge = "é🙂界".repeat(60_000);
+        let left = Value::Text(format!("{edge}x{edge}"));
+        let right = Value::Text(format!("{edge}y{edge}"));
+        assert_eq!(evaluate(&[left.clone(), right.clone()]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[left, right, Value::Integer(1)]).unwrap(), Value::Integer(1));
+    }
+
+    #[test]
+    fn shared_edges_are_trimmed_on_unicode_scalar_boundaries() {
+        for (left, right, expected) in [
+            ("🧡a🚀", "🧡b🚀", 1),
+            ("ééhello🌙", "ééhell🌙", 1),
+            ("🙂a🙂", "🙂abc🙂", 2),
+            ("abc", "abc🌟", 1),
+            ("🌟abc", "abc", 1),
+        ] {
+            assert_eq!(evaluate(&[
+                Value::Text(left.into()), Value::Text(right.into())
+            ]).unwrap(), Value::Integer(expected));
+        }
     }
 }
