@@ -55,5 +55,5 @@ test("validates large escaped text without decoding it during the pre-scan", () 
   } finally {
     JSON.parse = originalParse;
   }
-  assert.throws(() => parseStrictJSON('[{"name":"broken\\\\uZ"}]'), SyntaxError);
+  assert.throws(() => parseStrictJSON(String.raw`[{"name":"broken\uZ"}]`), SyntaxError);
 });
