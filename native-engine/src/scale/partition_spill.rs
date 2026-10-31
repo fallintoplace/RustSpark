@@ -82,7 +82,7 @@ fn ensure_open(
             let file = OpenOptions::new().append(true).open(&paths[index])?;
             SpillWriter::resume(BufWriter::new(file), schema.clone())
         } else {
-            let file = OpenOptions::new().write(true).create_new(true).open(&paths[index])?;
+            let file = super::private_files::create_private(&paths[index])?;
             let writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
             initialized[index] = true;
             writer
@@ -212,8 +212,7 @@ impl PartitionWriter {
             } else if !self.initialized[index] {
                 // Readers expect one schema-checked file per partition,
                 // including untouched partitions. Already closed shards exist.
-                let file = OpenOptions::new().write(true).create_new(true)
-                    .open(&owned.paths[index])?;
+                let file = super::private_files::create_private(&owned.paths[index])?;
                 SpillWriter::new(BufWriter::new(file), owned.schema.clone())?.finish()?;
             }
         }
