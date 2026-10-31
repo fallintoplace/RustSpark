@@ -230,16 +230,17 @@ mod literal_regex_single_pass_tests {
     }
 
     #[test]
-    fn accepts_exact_budget_and_rejects_one_byte_expansion() {
-        let limit = 16 * 1024 * 1024;
-        let base = "a".repeat(limit - 1);
-        assert_eq!(evaluate(&[
-            Value::Text(base.clone()), Value::Text("a".into()),
-            Value::Text("a".into())
-        ]).unwrap(), Value::Text(base));
+    fn accepts_exact_budget_and_rejects_overflow() {
+        let block = "z".repeat(1024 * 1024);
+        let accepted = evaluate(&[
+            Value::Text("a".repeat(16)), Value::Text("a".into()),
+            Value::Text(block.clone()),
+        ]).unwrap();
+        let Value::Text(accepted) = accepted else { unreachable!() };
+        assert_eq!(accepted.len(), 16 * 1024 * 1024);
         assert!(matches!(evaluate(&[
-            Value::Text("a".repeat(limit)), Value::Text("a".into()),
-            Value::Text("aa".into())
+            Value::Text("a".repeat(17)), Value::Text("a".into()),
+            Value::Text(block),
         ]), Err(Error::Execution(_))));
     }
 
