@@ -42,7 +42,10 @@ pub fn align_set_inputs<'a>(
             }).collect::<Vec<_>>();
             columns.push(values);
         }
-        Ok(Cow::Owned(Batch::new_with_row_count(
+        // The input already passed its original schema. The only permitted
+        // conversion above is INTEGER -> FLOAT, so all output cells match
+        // the widened schema without another row-by-row validation pass.
+        Ok(Cow::Owned(Batch::from_validated_columns(
             schema.clone(), columns, batch.num_rows(),
         )?))
     };
@@ -305,8 +308,9 @@ mod bounded_right_set_key_regression {
             vec![Value::Integer(1)], vec![Value::Integer(1)],
             vec![Value::Integer(2)],
         ]).unwrap();
-        assert!(bounded_right_keys(&right, 1).is_err());
-        assert_eq!(bounded_right_keys(&right, 2).unwrap().len(), 2);
+        let columns = borrowed_columns(&right).unwrap();
+        assert!(bounded_right_keys(&columns, right.num_rows(), 1).is_err());
+        assert_eq!(bounded_right_keys(&columns, right.num_rows(), 2).unwrap().len(), 2);
         let left = Batch::from_rows(schema, vec![vec![Value::Integer(2)]]).unwrap();
         assert_eq!(intersect_distinct(&left, &right).unwrap().row(0).unwrap(),
             vec![Value::Integer(2)]);
@@ -365,10 +369,12 @@ mod bounded_multiset_state_tests {
             vec![Value::Null], vec![Value::Null],
             vec![Value::Integer(2)],
         ]).unwrap();
-        assert!(right_counts(&right, 2).is_err());
-        let counts = right_counts(&right, 3).unwrap();
+        let columns = borrowed_columns(&right).unwrap();
+        assert!(right_counts(&columns, right.num_rows(), 2).is_err());
+        let counts = right_counts(&columns, right.num_rows(), 3).unwrap();
         assert_eq!(counts.len(), 3);
-        assert_eq!(counts[&vec![Value::Null]], 2);
+        let null_key = BorrowedSetRow { columns: &columns, row: 2 };
+        assert_eq!(counts[&null_key], 2);
         let left = Batch::from_rows(schema, vec![
             vec![Value::Null], vec![Value::Integer(1)], vec![Value::Integer(1)],
         ]).unwrap();
@@ -532,5 +538,62 @@ mod borrowed_multicolumn_set_regressions {
         ]).unwrap();
         assert_eq!(intersect_distinct(&a, &b).unwrap().rows().unwrap(),
             vec![vec![Value::Text("a".into()), Value::Float(2.0)]]);
+    }
+}
+
+
+#[cfg(test)]
+mod numeric_set_alignment_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn mixed_integer_float_sets_share_aligned_keys_and_preserve_nulls() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("one".into())],
+            vec![Value::Integer(2), Value::Text("two".into())],
+            vec![Value::Integer(2), Value::Text("two".into())],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("other", DataType::Float, true),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Float(2.0), Value::Text("two".into())],
+            vec![Value::Float(1.0), Value::Text("one".into())],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let (aligned_left, aligned_right, schema) = align_set_inputs(&left, &right).unwrap();
+        assert!(matches!(&aligned_left, Cow::Owned(_)));
+        assert!(matches!(&aligned_right, Cow::Borrowed(_)));
+        assert_eq!(schema.fields()[0].data_type, DataType::Float);
+        assert_eq!(aligned_left.value(0, 0).unwrap(), &Value::Float(1.0));
+        assert_eq!(intersect_all(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Float(1.0), Value::Text("one".into())],
+            vec![Value::Float(2.0), Value::Text("two".into())],
+            vec![Value::Null, Value::Null],
+        ]);
+        assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Float(2.0), Value::Text("two".into())],
+        ]);
+        assert_eq!(except_distinct(&left, &right).unwrap().num_rows(), 0);
+    }
+
+    #[test]
+    fn nullable_widening_retains_all_rows_for_large_numeric_inputs() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), (0..1024).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Float, true),
+        ]).unwrap(), (0..1024).map(|n| vec![Value::Float(n as f64)]).collect()).unwrap();
+        let (a, b, schema) = align_set_inputs(&left, &right).unwrap();
+        assert_eq!(a.num_rows(), 1024);
+        assert_eq!(b.num_rows(), 1024);
+        assert_eq!(schema.fields()[0].data_type, DataType::Float);
+        assert_eq!(intersect_distinct(&left, &right).unwrap().num_rows(), 1024);
     }
 }

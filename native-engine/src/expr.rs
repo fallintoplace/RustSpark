@@ -468,7 +468,7 @@ mod tests {
     use super::*;
     use crate::{schema::Field, schema::Schema};
 
-    fn batch() -> Batch {
+    pub(super) fn batch() -> Batch {
         Batch::from_rows(
             Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap(),
             vec![vec![Value::Null], vec![Value::Integer(4)]],
@@ -502,6 +502,7 @@ mod tests {
 #[cfg(test)]
 mod short_circuit_feature_tests {
     use super::*;
+    use super::tests::batch;
 
     #[test]
     fn decisive_boolean_skips_invalid_right_operand() {
@@ -615,7 +616,7 @@ mod like_expression_type_validation_tests {
             Field::new("s", DataType::Text, true),
             Field::new("n", DataType::Integer, false),
         ]).unwrap();
-        let like = |value, pattern, escape| Expr::Like {
+        let like = |value: Expr, pattern: Expr, escape: Option<Expr>| Expr::Like {
             value: Box::new(value), pattern: Box::new(pattern),
             escape: escape.map(Box::new),
         };
