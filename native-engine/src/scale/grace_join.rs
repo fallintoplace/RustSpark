@@ -1,7 +1,7 @@
 //! Disk-partitioned equijoins. The build side is bounded per partition.
 use std::{
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter},
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -16,6 +16,48 @@ use super::{
 
 static JOIN_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_BUILD_BYTES: usize = 128 * 1024 * 1024;
+
+const MAX_OUTPUT_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_OUTPUT_CELLS: usize = 4_000_000;
+
+/// Slice joined output at both the spill format's row/cell and byte
+/// boundaries. This avoids failing a large TEXT join after probing succeeds.
+fn write_join_batches<W: Write>(
+    writer: &mut SpillWriter<W>, batch: &Batch,
+    max_rows: usize, max_wire_bytes: usize,
+) -> Result<()> {
+    let max_rows = max_rows.min(MAX_OUTPUT_CELLS / batch.schema().len().max(1));
+    if max_rows == 0 || max_wire_bytes < 4 {
+        return Err(Error::Execution("join output spill budget too small".into()));
+    }
+    let mut start = 0usize;
+    while start < batch.num_rows() {
+        let mut end = start;
+        let mut wire_bytes = 4usize;
+        while end < batch.num_rows() && end - start < max_rows {
+            let mut row_bytes = batch.schema().len();
+            for column in 0..batch.schema().len() {
+                let extra = match batch.value(end, column)? {
+                    Value::Text(value) => value.len().checked_add(4),
+                    Value::Integer(_) | Value::Float(_) => Some(8),
+                    Value::Null | Value::Boolean(_) => Some(0),
+                }.ok_or_else(|| Error::Execution("join spill row byte overflow".into()))?;
+                row_bytes = row_bytes.checked_add(extra)
+                    .ok_or_else(|| Error::Execution("join spill row byte overflow".into()))?;
+            }
+            if row_bytes > max_wire_bytes - 4 {
+                return Err(Error::Execution("join spill row exceeds byte limit".into()));
+            }
+            if row_bytes > max_wire_bytes - wire_bytes { break; }
+            wire_bytes += row_bytes;
+            end += 1;
+        }
+        writer.write_batch_range(batch, start, end)?;
+        start = end;
+    }
+    Ok(())
+}
+
 
 pub struct JoinFiles {
     paths: Vec<PathBuf>,
@@ -175,12 +217,9 @@ where L: IntoIterator<Item = Result<Batch>>,
                 let joined = if outer_build {
                     joined.into_widened_schema(result_schema.clone())?
                 } else { joined };
-                let mut out_start = 0;
-                while out_start < joined.num_rows() {
-                    let out_end = out_start.saturating_add(io_batch_rows).min(joined.num_rows());
-                    writer.write_batch_range(&joined, out_start, out_end)?;
-                    out_start = out_end;
-                }
+                write_join_batches(
+                    &mut writer, &joined, io_batch_rows, MAX_OUTPUT_WIRE_BYTES,
+                )?;
             }
         }
         if outer_build {
@@ -207,14 +246,19 @@ where L: IntoIterator<Item = Result<Batch>>,
                         let batch = Batch::from_validated_columns(
                             result_schema.clone(), std::mem::take(&mut columns), rows,
                         )?;
-                        writer.write_batch(&batch)?;
+                        write_join_batches(
+                            &mut writer, &batch, io_batch_rows, MAX_OUTPUT_WIRE_BYTES,
+                        )?;
                         columns = (0..result_schema.len()).map(|_| Vec::new()).collect();
                         rows = 0;
                     }
                 }
             }
             if rows != 0 {
-                writer.write_batch(&Batch::from_validated_columns(result_schema.clone(), columns, rows)?)?;
+                let batch = Batch::from_validated_columns(result_schema.clone(), columns, rows)?;
+                write_join_batches(
+                    &mut writer, &batch, io_batch_rows, MAX_OUTPUT_WIRE_BYTES,
+                )?;
             }
         }
         writer.finish()?;
@@ -544,5 +588,47 @@ mod owned_grace_build_admission_tests {
         assert!(load_build_bounded(&path, &schema, 3, 2, 5_000,
             &QueryControl::default()).is_err());
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grace_join_wire_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::io::Cursor;
+
+    #[test]
+    fn large_text_output_splits_without_changing_order_or_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("left", DataType::Text, true),
+            Field::new("right", DataType::Integer, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("a".repeat(20)), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("b".repeat(20)), Value::Integer(3)],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        write_join_batches(&mut writer, &batch, 10, 40).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
+        let first = reader.next_batch().unwrap().unwrap();
+        let second = reader.next_batch().unwrap().unwrap();
+        let third = reader.next_batch().unwrap().unwrap();
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(second.num_rows(), 1);
+        assert_eq!(third.num_rows(), 1);
+        assert_eq!([first.rows().unwrap(), second.rows().unwrap(), third.rows().unwrap()].concat(),
+            batch.rows().unwrap());
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_one_row_over_wire_budget() {
+        let schema = Schema::new(vec![Field::new("t", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text("x".repeat(100))]]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        assert!(matches!(write_join_batches(&mut writer, &batch, 10, 40),
+            Err(Error::Execution(_))));
     }
 }
