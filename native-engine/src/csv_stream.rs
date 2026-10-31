@@ -101,6 +101,24 @@ impl<R: BufRead> Records<R> {
                     continue;
                 }
             }
+            // Quoted fields may contain commas, line breaks and UTF-8.
+            // Only a quote changes the parser state, so copy the whole
+            // available run instead of dispatching one byte at a time.
+            if self.pending.is_none() && state == State::Quoted && self.cursor < self.filled {
+                let available = &self.buffer[self.cursor..self.filled];
+                let plain = available.iter().position(|&byte| byte == b'"')
+                    .unwrap_or(available.len());
+                if plain != 0 {
+                    if size.saturating_add(plain) > self.max_record_bytes {
+                        return Err(Error::Execution("CSV record exceeds configured byte limit".into()));
+                    }
+                    field.extend_from_slice(&available[..plain]);
+                    self.cursor += plain;
+                    size += plain;
+                    seen = true;
+                    continue;
+                }
+            }
             let byte = match self.byte()? {
                 Some(byte) => byte,
                 None => {
@@ -601,6 +619,38 @@ mod column_direct_csv_batch_tests {
             let rows = batches.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
             assert_eq!(rows, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod quoted_record_bulk_copy_regression {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn quoted_runs_preserve_escaped_quotes_unicode_and_multiline_boundaries() {
+        let prefix = "x".repeat(READ_CHUNK_BYTES * 2 + 3);
+        let suffix = "é".repeat(READ_CHUNK_BYTES / 2 + 1);
+        let csv = format!("text\r\n\"{prefix}\"\"{suffix}\r\nend\"\r\n");
+        let mut input = CsvStream::new(Cursor::new(csv), 2, 64 * 1024).unwrap();
+        let output = input.next().unwrap().unwrap();
+        assert_eq!(output.num_rows(), 1);
+        assert_eq!(
+            output.value(0, 0).unwrap(),
+            &Value::Text(format!("{prefix}\"{suffix}\r\nend"))
+        );
+        assert!(input.next().is_none());
+    }
+
+    #[test]
+    fn quoted_run_still_enforces_raw_record_byte_limit() {
+        let csv = format!("text\n\"{}\"\n", "x".repeat(READ_CHUNK_BYTES + 5));
+        let mut input = CsvStream::new(Cursor::new(csv), 1, 32 * 1024).unwrap();
+        assert!(input.next().unwrap().is_ok());
+        let mut limited = CsvStream::new(Cursor::new(
+            format!("text\n\"{}\"\n", "x".repeat(READ_CHUNK_BYTES + 5))
+        ), 1, READ_CHUNK_BYTES).unwrap();
+        assert!(limited.next().unwrap().is_err());
     }
 }
 
