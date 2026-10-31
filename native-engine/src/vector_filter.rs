@@ -148,6 +148,32 @@ fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
     Ok(Some((batch.column(index)?, select_null, nullable)))
 }
 
+/// Prebuild an integer literal IN-list once per input batch. Scalar IN
+/// evaluates every choice for every row, which is quadratic in row and list
+/// counts. Mixed numeric types and computed choices keep the SQL fallback.
+fn fast_integer_in_list<'a>(
+    batch: &'a Batch, predicate: &Expr,
+) -> Result<Option<(&'a [Value], std::collections::HashSet<i64>, bool, bool)>> {
+    let Expr::InList { needle, choices, negated } = predicate else {
+        return Ok(None);
+    };
+    let Expr::Column(name) = needle.as_ref() else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Integer {
+        return Ok(None);
+    }
+    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut has_null = false;
+    for choice in choices {
+        match choice {
+            Expr::Literal(Value::Integer(value)) => { keys.insert(*value); },
+            Expr::Literal(Value::Null) => has_null = true,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((batch.column(index)?, keys, *negated, has_null)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -160,7 +186,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         _ => {}
     }
     let mut selected = Vec::new();
-    if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
+    if let Some((column, keys, negated, has_null)) =
+        fast_integer_in_list(batch, predicate)? {
+        // NULL needles never satisfy WHERE. An unmatched NOT IN with any
+        // NULL choice is also UNKNOWN, not TRUE.
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Integer(value) = value {
+                let matched = keys.contains(value);
+                if if negated { !has_null && !matched } else { matched } {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
         fast_integer_conjunction(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Integer(lhs) = value {
@@ -600,5 +638,48 @@ mod integer_disjunction_vector_regressions {
                 Expr::Literal(Value::Integer(5))),
         );
         assert_eq!(select_indices(&batch, &predicate).unwrap(), Vec::<usize>::new());
+    }
+}
+
+#[cfg(test)]
+mod hashed_integer_in_list_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    fn assert_matches_scalar(batch: &Batch, predicate: Expr) {
+        let expected = (0..batch.num_rows())
+            .filter(|&row| predicate.evaluate(batch, row).unwrap().as_boolean().unwrap() == Some(true))
+            .collect::<Vec<_>>();
+        assert_eq!(select_indices(batch, &predicate).unwrap(), expected);
+    }
+
+    #[test]
+    fn large_in_lists_match_scalar_sql_for_nulls_duplicates_and_not_in() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema,
+            (0..500).map(|n| vec![if n % 13 == 0 {
+                Value::Null
+            } else { Value::Integer(n % 257) }]).collect()
+        ).unwrap();
+        let choices = (0..500).map(|n| Expr::Literal(Value::Integer(n % 131)))
+            .chain([Expr::Literal(Value::Integer(5)), Expr::Literal(Value::Null)])
+            .collect::<Vec<_>>();
+        for negated in [false, true] {
+            assert_matches_scalar(&batch, Expr::InList {
+                needle: Box::new(Expr::Column("id".into())),
+                choices: choices.clone(), negated
+            });
+        }
+        assert_matches_scalar(&batch, Expr::InList {
+            needle: Box::new(Expr::Column("id".into())),
+            choices: vec![], negated: true
+        });
+        assert_matches_scalar(&batch, Expr::InList {
+            needle: Box::new(Expr::Column("id".into())),
+            choices: vec![
+                Expr::Literal(Value::Integer(2)),
+                Expr::Literal(Value::Float(3.0)),
+            ], negated: false
+        });
     }
 }
