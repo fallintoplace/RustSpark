@@ -185,6 +185,19 @@ func TestDecodeRowsRejectsDuplicateJSONKeysAtEveryDepth(t *testing.T) {
     }
 }
 
+func TestDecodeRowsBoundsJSONNesting(t *testing.T) {
+    valid := `[{"nested":` + strings.Repeat("[", maxJSONNestingDepth-2) +
+        `0` + strings.Repeat("]", maxJSONNestingDepth-2) + `}]`
+    if _, err := decodeRows(strings.NewReader(valid)); err != nil {
+        t.Fatalf("rejected JSON within nesting bound: %v", err)
+    }
+    invalid := `[{"nested":` + strings.Repeat("[", maxJSONNestingDepth) +
+        `0` + strings.Repeat("]", maxJSONNestingDepth) + `}]`
+    if _, err := decodeRows(strings.NewReader(invalid)); err == nil || !strings.Contains(err.Error(), "nesting limit") {
+        t.Fatalf("expected nesting limit error, got %v", err)
+    }
+}
+
 func TestDecodeRowsRejectsNonfiniteJSONExponents(t *testing.T) {
     for _, raw := range []string{
         `[{"value":1e999}]`,
