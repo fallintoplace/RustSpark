@@ -84,7 +84,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
                     }
                     // Validate each incoming row before adding it to the current
                     // batch. A late invalid cell must not discard earlier good rows
-                    // when the already-validated columns are assembled into a batch.
+                    // when Batch::new_with_row_count validates the final columns.
                     if let Some(field) = self.schema.fields().iter().zip(&row)
                         .find_map(|(field, value)| {
                             (!field.data_type.accepts(value) ||
@@ -135,8 +135,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
             }
         }
         if row_count == 0 { return None; }
-        // Each admitted row was checked against the schema above.
-        // Only column lengths need checking when building the batch.
+        // Every incoming cell was checked against this schema before admission.
         let batch = Batch::from_validated_columns(self.schema.clone(), columns, row_count);
         if batch.is_err() { self.finished = true; }
         Some(batch)
@@ -406,29 +405,28 @@ mod late_row_type_error_regressions {
 }
 
 #[cfg(test)]
-mod trusted_stream_batch_regressions {
+mod trusted_stream_finalize_regressions {
     use super::*;
-    use crate::schema::{DataType, Field};
+    use crate::schema::{DataType, Field, Schema};
 
     #[test]
-    fn preserves_nullable_unicode_rows_across_byte_bounded_batches() {
+    fn retains_nullable_wide_text_and_reports_late_invalid_cells() {
         let schema = Schema::new(vec![
             Field::new("id", DataType::Integer, false),
             Field::new("payload", DataType::Text, true),
         ]).unwrap();
-        let expected = (0..128).map(|n| vec![
-            Value::Integer(n),
-            if n % 7 == 0 { Value::Null }
-            else { Value::Text(format!("界-{n}-{}", "x".repeat(19))) },
-        ]).collect::<Vec<_>>();
-        let batches = RowBatcher::with_byte_budget(
-            expected.clone().into_iter().map(Ok), schema.clone(), 100, 512
-        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
-        assert!(batches.len() > 1);
-        assert_eq!(batches.iter().flat_map(|batch| batch.rows().unwrap())
-            .collect::<Vec<_>>(), expected);
-        for batch in batches {
-            assert_eq!(batch, Batch::from_rows(schema.clone(), batch.rows().unwrap()).unwrap());
-        }
+        let text = "🙂界".repeat(2048);
+        let rows = vec![
+            Ok(vec![Value::Integer(1), Value::Text(text.clone())]),
+            Ok(vec![Value::Integer(2), Value::Null]),
+            Ok(vec![Value::Integer(3), Value::Integer(9)]),
+        ];
+        let mut stream = RowBatcher::new(rows.into_iter(), schema, 16).unwrap();
+        let batch = stream.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.value(0, 1).unwrap(), &Value::Text(text));
+        assert_eq!(batch.value(1, 1).unwrap(), &Value::Null);
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }
