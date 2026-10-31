@@ -130,7 +130,7 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         if (p95 + 0.01 < median
                 or not math.isclose(p95, measured_p95, rel_tol=0, abs_tol=0.01)):
             raise ValueError(f"Query {number} p95 is inconsistent with timing samples")
-        if not math.isclose(statistics.median(samples), median, abs_tol=0.01):
+        if not math.isclose(statistics.median(samples), median, rel_tol=0, abs_tol=0.01):
             raise ValueError(f"Query {number} median is inconsistent with timing samples")
         if (type(reference.get("expected_rows")) is not int
                 or type(reference.get("actual_rows")) is not int

@@ -29,6 +29,11 @@ class SuiteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid timing samples"):
             suite.summarize(data)
 
+    def test_even_large_finite_samples_match_reported_median(self):
+        entries = [{"id": 1, "status": "ok", "median_ms": 1e308,
+                    "samples_ms": [1e308, 1e308]}]
+        self.assertEqual(suite.checked_medians(entries), [1e308])
+
     def test_missing_or_failed_queries_are_rejected(self):
         data = report()
         data["results"].pop()
@@ -49,6 +54,17 @@ class SuiteTests(unittest.TestCase):
         data = report()
         data["results"][0]["id"] = True
         with self.assertRaisesRegex(ValueError, "query ID"):
+            suite.summarize(data)
+
+    def test_large_finite_summaries_preserve_valid_percentages(self):
+        data = report()
+        for row in data["results"]:
+            row["median_ms"] = 5e306
+        result = suite.summarize(data)
+        self.assertAlmostEqual(result["top_three_latency_percent"], round(3 / 22 * 100, 2))
+        for row in data["results"]:
+            row["median_ms"] = 1e308
+        with self.assertRaisesRegex(ValueError, "latency sum"):
             suite.summarize(data)
 
     def test_hotspot_share_uses_sum_of_all_twenty_two_queries(self):

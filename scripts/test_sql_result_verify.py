@@ -68,6 +68,13 @@ class SqlResultVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "queries_attempted"):
             sql_result_verify.verify_reports(actual, report(1, 2))
 
+    def test_load_report_rejects_overflowing_json_exponents(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "report.json"
+            path.write_text('{"results":[],"duration_ms":1e999}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Non-finite JSON number"):
+                sql_result_verify.load_report(path)
+
     def test_load_report_rejects_duplicate_json_keys(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "report.json"

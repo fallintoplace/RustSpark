@@ -86,6 +86,12 @@ class RegressionTests(unittest.TestCase):
             with self.subTest(baseline=baseline), self.assertRaisesRegex(ValueError, "ratio"):
                 regress.compare(report((1, baseline)), report((1, candidate)))
 
+    def test_rounding_never_erases_small_positive_ratios(self):
+        faster = regress.compare(report((1, 1.0)), report((1, 0.000001)))
+        self.assertEqual(faster["results"][0]["ratio"], 0.000001)
+        slower = regress.compare(report((1, 0.000001)), report((1, 1.0)))
+        self.assertEqual(slower["results"][0]["speedup"], 0.000001)
+
     def test_reports_absolute_latency_delta_and_speedup(self):
         result = regress.compare(report((1, 20.0)), report((1, 5.0)))
         row = result["results"][0]

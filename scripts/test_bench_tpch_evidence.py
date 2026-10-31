@@ -85,6 +85,15 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inconsistent"):
             evidence.qualify(manifest, benchmark, verification)
 
+    def test_large_medians_cannot_hide_absolute_errors(self):
+        manifest, benchmark, verification = fixtures()
+        entry = benchmark["results"][0]
+        entry["samples_ms"] = [1e12] * 3
+        entry["median_ms"] = 1e12 - 1
+        entry["p95_ms"] = 1e12
+        with self.assertRaisesRegex(ValueError, "median is inconsistent"):
+            evidence.qualify(manifest, benchmark, verification)
+
     def test_unrepresentable_timing_values_fail_with_validation_errors(self):
         with self.assertRaisesRegex(ValueError, "positive finite"):
             evidence.checked_number(10**500, "Timing")

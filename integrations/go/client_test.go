@@ -184,3 +184,34 @@ func TestDecodeRowsRejectsDuplicateJSONKeysAtEveryDepth(t *testing.T) {
         t.Fatalf("numeric precision was not retained: %#v", rows[0]["n"])
     }
 }
+
+func TestDecodeRowsBoundsJSONNesting(t *testing.T) {
+    valid := `[{"nested":` + strings.Repeat("[", maxJSONNestingDepth-2) +
+        `0` + strings.Repeat("]", maxJSONNestingDepth-2) + `}]`
+    if _, err := decodeRows(strings.NewReader(valid)); err != nil {
+        t.Fatalf("rejected JSON within nesting bound: %v", err)
+    }
+    invalid := `[{"nested":` + strings.Repeat("[", maxJSONNestingDepth) +
+        `0` + strings.Repeat("]", maxJSONNestingDepth) + `}]`
+    if _, err := decodeRows(strings.NewReader(invalid)); err == nil || !strings.Contains(err.Error(), "nesting limit") {
+        t.Fatalf("expected nesting limit error, got %v", err)
+    }
+}
+
+func TestDecodeRowsRejectsNonfiniteJSONExponents(t *testing.T) {
+    for _, raw := range []string{
+        `[{"value":1e999}]`,
+        `[{"value":-1e999}]`,
+        `[{"value":{"nested":1e999}}]`,
+    } {
+        if _, err := decodeRows(strings.NewReader(raw)); err == nil ||
+            !strings.Contains(err.Error(), "nonfinite") {
+            t.Fatalf("expected exponent error for %q, got %v", raw, err)
+        }
+    }
+    rows, err := decodeRows(strings.NewReader(`[{"value":1e308,"id":9007199254740993}]`))
+    if err != nil { t.Fatal(err) }
+    if rows[0]["id"].(json.Number).String() != "9007199254740993" {
+        t.Fatalf("lost large integer precision: %#v", rows[0]["id"])
+    }
+}
