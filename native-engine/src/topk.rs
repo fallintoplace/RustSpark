@@ -816,7 +816,7 @@ mod owned_topk_payload_regressions {
         assert_eq!(moved_original.num_rows(), 3);
 
         let computed = [SortKey::ascending(Expr::binary(
-            Expr::Column("score".into()), BinaryOp::Plus,
+            Expr::Column("score".into()), BinaryOp::Add,
             Expr::Literal(Value::Integer(1)),
         ))];
         assert_eq!(top_k_owned(input.clone(), &computed, 3).unwrap(),
@@ -824,7 +824,10 @@ mod owned_topk_payload_regressions {
         let all = top_k_owned(input.clone(), &direct, 100).unwrap();
         assert_eq!(all, top_k(&input, &direct, 100).unwrap());
         let moved_input = top_k_owned(input, &direct, 3).unwrap();
-        assert_eq!(match moved_input.value(0, 1).unwrap() {
+        // ASC puts NULL first; the first score=1 row follows it.
+        assert_eq!(moved_input.value(0, 0).unwrap(), &Value::Null);
+        assert_eq!(moved_input.value(1, 0).unwrap(), &Value::Integer(1));
+        assert_eq!(match moved_input.value(1, 1).unwrap() {
             Value::Text(value) => value.as_ptr(), _ => unreachable!(),
         }, ptr);
     }
