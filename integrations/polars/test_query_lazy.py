@@ -64,12 +64,11 @@ class PolarsCommandTests(unittest.TestCase):
                     pass
         fake_pl = SimpleNamespace(scan_ipc=lambda path: "lazy frame")
         with patch.dict(sys.modules, {"polars": fake_pl}), \
-             patch("query_lazy.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+             patch("query_lazy._run_export") as run:
+            run.return_value = 0
             with rustspark_lazy_frame("SELECT 1", process_timeout=3) as frame:
                 self.assertEqual(frame, "lazy frame")
             self.assertEqual(run.call_args.kwargs["timeout"], 3)
-            self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
             self.assertNotEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
             run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
             with self.assertRaisesRegex(RuntimeError, "process timeout"):
@@ -91,17 +90,44 @@ class PolarsCommandTests(unittest.TestCase):
 class BoundedPolarsErrorTests(unittest.TestCase):
     def test_failed_native_query_reports_bounded_stderr_tail(self):
         def backend_failure(command, *, stderr, **kwargs):
-            self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
             stderr.write(b"noisy log" * 20_000 + b"\\nFINAL QUERY ERROR")
-            return subprocess.CompletedProcess(command, 1)
+            return 1
 
         with patch.dict(sys.modules, {"polars": SimpleNamespace()}), patch(
-            "query_lazy.subprocess.run", side_effect=backend_failure
+            "query_lazy._run_export", side_effect=backend_failure
         ):
             with self.assertRaisesRegex(RuntimeError, "FINAL QUERY ERROR") as raised:
                 with rustspark_lazy_frame("SELECT 1"):
                     pass
         self.assertNotIn("noisy log" * 8_000, str(raised.exception))
+
+
+class PolarsProcessGroupTimeoutTests(unittest.TestCase):
+    @unittest.skipUnless(__import__("os").name == "posix", "requires POSIX process groups")
+    def test_timeout_kills_descendants_before_reaping_parent(self):
+        with patch("query_lazy.subprocess.Popen") as spawn, \
+             patch("query_lazy.os.killpg") as kill_group:
+            process = spawn.return_value.__enter__.return_value
+            process.pid = 12345
+            process.wait.side_effect = [
+                subprocess.TimeoutExpired(["rustspark"], 2), -9,
+            ]
+            with self.assertRaises(subprocess.TimeoutExpired):
+                from query_lazy import _run_export
+                _run_export(["rustspark"], stderr=subprocess.DEVNULL, timeout=2)
+            kill_group.assert_called_once_with(process.pid, __import__("signal").SIGKILL)
+            self.assertEqual(process.wait.call_count, 2)
+            self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+
+    def test_success_preserves_output_status(self):
+        with patch("query_lazy.subprocess.Popen") as spawn:
+            process = spawn.return_value.__enter__.return_value
+            process.wait.return_value = 7
+            from query_lazy import _run_export
+            self.assertEqual(_run_export(
+                ["rustspark"], stderr=subprocess.DEVNULL, timeout=1,
+            ), 7)
+            self.assertEqual(process.wait.call_args.kwargs["timeout"], 1)
 
 
 if __name__ == "__main__":
