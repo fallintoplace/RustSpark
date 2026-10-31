@@ -174,6 +174,31 @@ fn fast_integer_in_list<'a>(
     Ok(Some((batch.column(index)?, keys, *negated, has_null)))
 }
 
+/// Resolve constant TEXT IN lists once and compare borrowed column values.
+/// NULL choices make unmatched NOT IN rows UNKNOWN, not TRUE.
+fn fast_text_in_list<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], std::collections::HashSet<&'a str>, bool, bool)>> {
+    let Expr::InList { needle, choices, negated } = predicate else {
+        return Ok(None);
+    };
+    let Expr::Column(name) = needle.as_ref() else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Text {
+        return Ok(None);
+    }
+    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut has_null = false;
+    for choice in choices {
+        match choice {
+            Expr::Literal(Value::Text(value)) => { keys.insert(value.as_str()); },
+            Expr::Literal(Value::Null) => has_null = true,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((batch.column(index)?, keys, *negated, has_null)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -193,6 +218,16 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if let Value::Integer(value) = value {
                 let matched = keys.contains(value);
+                if if negated { !has_null && !matched } else { matched } {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, keys, negated, has_null)) =
+        fast_text_in_list(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Text(text) = value {
+                let matched = keys.contains(text.as_str());
                 if if negated { !has_null && !matched } else { matched } {
                     selected.push(row);
                 }
@@ -681,5 +716,61 @@ mod hashed_integer_in_list_regressions {
                 Expr::Literal(Value::Float(3.0)),
             ], negated: false
         });
+    }
+}
+
+#[cfg(test)]
+mod text_in_list_fast_path_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn matches_scalar_sql_for_nullable_unicode_long_and_duplicate_literals() {
+        let large = "é🙂東京".repeat(1024);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("city", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text(large.clone())],
+            vec![Value::Text("Berlin".into())],
+            vec![Value::Null],
+            vec![Value::Text("東京".into())],
+            vec![Value::Text(large.clone())],
+            vec![Value::Text("".into())],
+        ]).unwrap();
+        for negated in [false, true] {
+            for null_choice in [false, true] {
+                let mut choices = vec![
+                    Expr::Literal(Value::Text(large.clone())),
+                    Expr::Literal(Value::Text("東京".into())),
+                    Expr::Literal(Value::Text(large.clone())),
+                ];
+                if null_choice { choices.push(Expr::Literal(Value::Null)); }
+                let predicate = Expr::InList {
+                    needle: Box::new(Expr::Column("city".into())),
+                    choices, negated,
+                };
+                let expected = (0..batch.num_rows()).filter(|&row| {
+                    predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+                }).collect::<Vec<_>>();
+                assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn falls_back_for_computed_members_and_rejects_incorrect_column_names() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("text", DataType::Text, false),
+        ]).unwrap(), vec![vec![Value::Text("abc".into())]]).unwrap();
+        let computed = Expr::InList {
+            needle: Box::new(Expr::Column("text".into())),
+            choices: vec![Expr::Column("text".into())], negated: false,
+        };
+        assert_eq!(select_indices(&batch, &computed).unwrap(), vec![0]);
+        let missing = Expr::InList {
+            needle: Box::new(Expr::Column("missing".into())),
+            choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
+        };
+        assert!(select_indices(&batch, &missing).is_err());
     }
 }
