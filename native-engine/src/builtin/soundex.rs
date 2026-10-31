@@ -27,7 +27,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let mut characters = text.chars();
     let Some(first) = characters.next() else { return Ok(Value::Text(String::new())); };
-    if !first.is_ascii_alphabetic() { return Ok(Value::Text(text.to_string())); }
+    if !first.is_ascii_alphabetic() {
+        // Non-letter prefixes return the whole input, not the four-byte code.
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("SOUNDEX output exceeds native 16 MiB budget".into()));
+        }
+        return Ok(Value::Text(text.to_owned()));
+    }
     let mut result = String::with_capacity(4);
     result.push(first.to_ascii_uppercase());
     let mut last = soundex_digit(first);
@@ -59,6 +65,9 @@ mod tests {
         assert_eq!(evaluate(&[Value::Text("Rupert".into())]).unwrap(), Value::Text("R163".into()));
         assert_eq!(evaluate(&[Value::Text("Ashcraft".into())]).unwrap(), Value::Text("A261".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("🙂abc".into())]).unwrap(),
+            Value::Text("🙂abc".into()));
+        assert!(evaluate(&[Value::Text(format!("🙂{}", "x".repeat(16 * 1024 * 1024)))]).is_err());
     }
 }
 
