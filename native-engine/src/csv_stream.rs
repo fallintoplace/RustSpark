@@ -19,6 +19,17 @@ enum State {
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
+// The CSV decoder transfers its Vec allocation into String without shrinking.
+// Charge the allocation retained by an output batch, not just visible bytes.
+fn retained_row_bytes(row: &[Value], row_width: usize) -> usize {
+    row.iter().fold(row_width, |total, value| {
+        total.saturating_add(match value {
+            Value::Text(text) => text.capacity(),
+            _ => 0,
+        })
+    })
+}
+
 struct Records<R> {
     input: R,
     max_record_bytes: usize,
@@ -279,11 +290,7 @@ impl<R: BufRead> CsvStream<R> {
             };
             match next {
                 Ok(true) => {
-                    let row_bytes = row.iter().fold(row_width, |total, value|
-                        total.saturating_add(match value {
-                            Value::Text(text) => text.len(), _ => 0,
-                        })
-                    );
+                    let row_bytes = retained_row_bytes(&row, row_width);
                     if row_bytes > byte_budget {
                         let error = Error::Execution("CSV row exceeds batch byte budget".into());
                         if row_count == 0 {
@@ -644,5 +651,43 @@ mod quoted_record_bulk_copy_regression {
             format!("text\n\"{}\"\n", "x".repeat(READ_CHUNK_BYTES + 5))
         ), 1, READ_CHUNK_BYTES).unwrap();
         assert!(limited.next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod csv_retained_capacity_budget_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn charges_text_capacity_even_when_logical_payload_is_tiny() {
+        let mut text = String::with_capacity(4096);
+        text.push('x');
+        let base = std::mem::size_of::<Value>();
+        let row = [Value::Text(text)];
+        assert_eq!(retained_row_bytes(&row, base), base + 4096);
+        assert_eq!(row[0], Value::Text("x".into()));
+    }
+
+    #[test]
+    fn parser_uses_actual_retained_field_allocations_for_batch_admission() {
+        let csv = "payload\n\"abcdefghijk\"\n\"mnopqrstuvw\"\n";
+        let mut records = Records {
+            input: Cursor::new(csv), max_record_bytes: 1024,
+            pending: None, skip_lf: false, buffer: [0; READ_CHUNK_BYTES],
+            cursor: 0, filled: 0,
+        };
+        records.record().unwrap().unwrap();
+        let first = records.record().unwrap().unwrap().pop().unwrap();
+        let second = records.record().unwrap().unwrap().pop().unwrap();
+        let row_width = std::mem::size_of::<Value>();
+        let actual = retained_row_bytes(&[Value::Text(first)], row_width)
+            + retained_row_bytes(&[Value::Text(second)], row_width);
+        let visible = 2 * (row_width + 11);
+        assert!(actual > visible);
+        let mut stream = CsvStream::new(Cursor::new(csv), 10, 1024).unwrap();
+        let batches = std::iter::from_fn(|| stream.next_with_byte_budget(visible))
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [1, 1]);
     }
 }
