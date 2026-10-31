@@ -59,22 +59,28 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         // SQL UNION coercion is positional. Only integer-to-double
                         // promotion is supported by native set schemas.
                         (|| -> Result<Batch> {
+                            let rows = batch.num_rows();
+                            let source_types = batch.schema().fields().iter()
+                                .map(|field| field.data_type).collect::<Vec<_>>();
                             let mut columns = Vec::with_capacity(self.schema.len());
-                            for (index, source_field) in batch.schema().fields().iter().enumerate() {
-                                let values = batch.column(index)?;
-                                if source_field.data_type == crate::schema::DataType::Integer &&
-                                   self.schema.field(index)?.data_type == crate::schema::DataType::Float {
-                                    columns.push(values.iter().map(|value| match value {
-                                        crate::scalar::Value::Integer(value) =>
-                                            crate::scalar::Value::Float(*value as f64),
+                            // Move unchanged column vectors and TEXT payloads
+                            // directly into the UNION result. Only promoted
+                            // INTEGER columns need new numeric values.
+                            for (index, (source_type, values)) in source_types.into_iter()
+                                .zip(batch.into_columns()).enumerate() {
+                                if source_type == crate::schema::DataType::Integer &&
+                                    self.schema.field(index)?.data_type == crate::schema::DataType::Float {
+                                    columns.push(values.into_iter().map(|value| match value {
+                                        crate::scalar::Value::Integer(number) =>
+                                            crate::scalar::Value::Float(number as f64),
                                         crate::scalar::Value::Null => crate::scalar::Value::Null,
                                         _ => unreachable!("validated integer input batch"),
                                     }).collect());
                                 } else {
-                                    columns.push(values.to_vec());
+                                    columns.push(values);
                                 }
                             }
-                            Batch::new_with_row_count(self.schema.clone(), columns, batch.num_rows())
+                            Batch::new_with_row_count(self.schema.clone(), columns, rows)
                         })()
                     } else {
                         batch.relabel(self.schema.clone())
@@ -462,5 +468,41 @@ mod union_stream_numeric_coercion_tests {
             std::iter::empty(), output, QueryControl::default());
         assert!(union.next().unwrap().is_err());
         assert!(union.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod owned_union_numeric_widening_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn widening_one_column_moves_other_columns_without_losing_nulls_or_text() {
+        let source_schema = Schema::new(vec![
+            Field::new("numeric", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let result_schema = Schema::new(vec![
+            Field::new("numeric", DataType::Float, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let wide = "é🙂".repeat(10_000);
+        let input = Batch::from_rows(source_schema.clone(), vec![
+            vec![Value::Integer(42), Value::Text(wide.clone())],
+            vec![Value::Null, Value::Null],
+            vec![Value::Integer(-7), Value::Text("last".into())],
+        ]).unwrap();
+        let mut stream = UnionAllStream::new(
+            [Ok(input)].into_iter(), std::iter::empty(),
+            result_schema.clone(), QueryControl::default(),
+        );
+        let output = stream.next().unwrap().unwrap();
+        assert_eq!(output.schema(), &result_schema);
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Float(42.0), Value::Text(wide)],
+            vec![Value::Null, Value::Null],
+            vec![Value::Float(-7.0), Value::Text("last".into())],
+        ]);
+        assert!(stream.next().is_none());
     }
 }
