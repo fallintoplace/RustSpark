@@ -1111,7 +1111,7 @@ mod borrowed_stream_distinct_probe_regressions {
             QueryControl::default(), 2, 4096);
         output.seen.insert(fingerprint, vec![vec![Value::Integer(99)]]);
         output.unique_keys = 1;
-        output.retained_bytes = super::row_footprint::footprint([&Value::Integer(99)]);
+        output.retained_bytes = super::super::row_footprint::footprint([&Value::Integer(99)].into_iter());
         let row = output.next().unwrap().unwrap();
         assert_eq!(row.rows().unwrap(), vec![vec![Value::Integer(42)]]);
         assert_eq!(output.unique_keys, 2);

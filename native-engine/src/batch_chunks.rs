@@ -104,6 +104,7 @@ mod tests {
 #[cfg(test)]
 mod zero_column_concat_consolidation_tests {
     use super::*;
+    use crate::schema::Schema;
     #[test]
     fn concatenation_preserves_zero_column_rows() {
         let schema = Schema::new(vec![]).unwrap();
