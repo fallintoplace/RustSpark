@@ -84,11 +84,28 @@ impl DictionaryColumn {
         }
         // Fail before allocating any decoded strings when a compact column
         // expands past its caller's budget.
-        for id in self.indices.iter().flatten() {
-            let text = self.lookup_code(*id)?;
-            used = used.checked_add(text.len())
+        if self.dictionary.len() == 1 {
+            // Repetitive columns can account for expansion with one multiply.
+            // Validate codes even in this fast path.
+            let mut count = 0usize;
+            for &id in self.indices.iter().flatten() {
+                if id != 0 {
+                    return Err(Error::Execution("invalid dictionary code".into()));
+                }
+                count += 1;
+            }
+            let expanded = count.checked_mul(self.dictionary[0].len())
+                .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+            used = used.checked_add(expanded)
                 .filter(|bytes| *bytes <= max_bytes)
                 .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+        } else {
+            for id in self.indices.iter().flatten() {
+                let text = self.lookup_code(*id)?;
+                used = used.checked_add(text.len())
+                    .filter(|bytes| *bytes <= max_bytes)
+                    .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+            }
         }
         let mut rows = Vec::with_capacity(self.indices.len());
         for code in &self.indices {
@@ -427,5 +444,30 @@ mod lazy_dictionary_subset_merge_regressions {
         let mut right = make("alpha");
         right.indices[0] = Some(42);
         assert!(DictionaryColumn::concatenate(&left, &right, 10, 100, 10).is_err());
+    }
+}
+
+#[cfg(test)]
+mod single_key_decode_accounting_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn single_key_fast_path_respects_exact_budget_and_invalid_codes() {
+        let schema = Schema::new(vec![Field::new("event", DataType::Text, true)]).unwrap();
+        let values = (0..100).map(|i| if i % 5 == 0 {
+            vec![Value::Null]
+        } else {
+            vec![Value::Text("event-tag".into())]
+        }).collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema, values).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&batch, "event", 1, 32, 100).unwrap();
+        let required = 100 * std::mem::size_of::<Value>() + 80 * "event-tag".len();
+        assert!(dictionary.decode_with_budget(required - 1).is_err());
+        assert_eq!(dictionary.decode_with_budget(required).unwrap().len(), 100);
+
+        let mut corrupted = dictionary.clone();
+        corrupted.indices[2] = Some(15);
+        assert!(corrupted.decode_with_budget(required + 100).is_err());
     }
 }
