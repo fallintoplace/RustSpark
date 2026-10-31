@@ -53,7 +53,7 @@ class TemplatesTests(unittest.TestCase):
                 parse_query_rows(text)
 
     def test_deeply_nested_json_result_has_a_bounded_failure(self):
-        deep = '[{"v":' + "[" * 2000 + "0" + "]" * 2000 + "}]"
+        deep = '[{"v":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
         with self.assertRaisesRegex(ValueError, "nesting limit"):
             parse_query_rows(deep)
 
