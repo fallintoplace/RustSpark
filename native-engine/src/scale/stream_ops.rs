@@ -78,7 +78,7 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for ProjectStream<I> {
                 self.stopped = true;
                 return None;
             };
-            match next.and_then(|batch| project::project(&batch, &self.selections)) {
+            match next.and_then(|batch| project::project_owned(batch, &self.selections)) {
                 Ok(batch) if batch.num_rows() == 0 => continue,
                 Ok(batch) => return Some(Ok(batch)),
                 Err(error) => {
