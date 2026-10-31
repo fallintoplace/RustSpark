@@ -7,6 +7,8 @@ import math
 import os
 import re
 import subprocess
+
+from .subprocess_budget import run_bounded
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -61,6 +63,7 @@ class RustSpark:
         max_rows: int | None = None,
         query_timeout: int | None = None,
         process_timeout: float | None = None,
+        max_output_bytes: int = 64 * 1024 * 1024,
     ) -> list[dict[str, Any]]:
         """Execute SQL and return JSON rows. Use max_rows to bound returned data.
 
@@ -89,6 +92,9 @@ class RustSpark:
             or not math.isfinite(process_timeout) or process_timeout <= 0
         ):
             raise ValueError("process_timeout must be finite and positive")
+
+        if type(max_output_bytes) is not int or max_output_bytes <= 0:
+            raise ValueError("max_output_bytes must be a positive integer")
 
         command = [os.fspath(self.binary)]
         if sql_file is None:
@@ -122,7 +128,7 @@ class RustSpark:
         for name in sorted(params):
             typed_value = params[name]
             if (not isinstance(typed_value, str)
-                or ":" not in typed_value or len(typed_value) > 8192):
+                or ":" not in typed_value or len(typed_value.encode("utf-8")) > 8192):
                 raise ValueError(f"Use bounded type:value for parameter {name!r}")
             command.extend(["--named-param", f"{name}={typed_value}"])
         if max_rows is not None:
@@ -131,12 +137,13 @@ class RustSpark:
             command.extend(["--query-timeout", str(query_timeout)])
 
         try:
-            completed = subprocess.run(
-                command, check=False, capture_output=True, text=True,
-                encoding="utf-8", timeout=process_timeout,
+            completed = run_bounded(
+                command, timeout=process_timeout, max_output_bytes=max_output_bytes,
             )
         except subprocess.TimeoutExpired as exc:
             raise RustSparkError(f"RustSpark exceeded process timeout: {process_timeout}s") from exc
+        except ValueError as exc:
+            raise RustSparkError(f"RustSpark output admission failed: {exc}") from exc
         except OSError as exc:
             raise RustSparkError(f"Unable to start RustSpark: {exc}") from exc
         if completed.returncode:
@@ -147,7 +154,7 @@ class RustSpark:
                 completed.stdout, object_pairs_hook=_unique_json_keys,
                 parse_constant=_reject_nonfinite, parse_float=_finite_json_float,
             )
-        except (json.JSONDecodeError, ValueError) as exc:
+        except (json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise RustSparkError("RustSpark returned invalid JSON") from exc
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise RustSparkError("RustSpark returned an unexpected JSON result shape")

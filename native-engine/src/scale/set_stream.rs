@@ -151,15 +151,31 @@ impl SetStream {
                 if self.right_counts.contains_key(row) || self.emitted.contains(row) {
                     false
                 } else {
-                    let bytes = super::row_footprint::footprint(row.iter());
-                    let next = self.retained_bytes.checked_add(bytes)
-                        .filter(|total| *total <= self.max_bytes);
-                    if self.emitted.len().saturating_add(self.right_counts.len()) >= self.max_keys ||
-                        next.is_none() {
+                    if self.emitted.len().saturating_add(self.right_counts.len()) >= self.max_keys {
                         return Err(Error::Execution("stream set memory budget exceeded".into()));
                     }
-                    self.retained_bytes = next.expect("checked set budget");
-                    self.emitted.insert(row.to_vec());
+                    // The retained key is a clone. Input TEXT capacity can
+                    // be much larger than the clone's allocation. First
+                    // reject impossible values without cloning the row.
+                    let minimum = row.iter().fold(
+                        64usize.saturating_add(row.len().saturating_mul(
+                            std::mem::size_of::<Value>())),
+                        |bytes, value| match value {
+                            Value::Text(text) => bytes.saturating_add(text.len()),
+                            _ => bytes,
+                        },
+                    );
+                    if self.retained_bytes.checked_add(minimum)
+                        .is_none_or(|total| total > self.max_bytes) {
+                        return Err(Error::Execution("stream set memory budget exceeded".into()));
+                    }
+                    let key = row.to_vec();
+                    let bytes = super::row_footprint::footprint(key.iter());
+                    let next = self.retained_bytes.checked_add(bytes)
+                        .filter(|total| *total <= self.max_bytes)
+                        .ok_or_else(|| Error::Execution("stream set memory budget exceeded".into()))?;
+                    self.retained_bytes = next;
+                    self.emitted.insert(key);
                     true
                 }
             }
@@ -175,6 +191,19 @@ impl Iterator for SetStream {
         if let Some(error) = self.pending_error.take() {
             self.stopped = true;
             return Some(Err(error));
+        }
+        // An empty INTERSECT build side cannot match any left row. For
+        // INTERSECT DISTINCT, removing admitted keys also lets us stop as
+        // soon as every possible distinct result has been emitted.
+        // Avoid scanning expensive remaining left partitions in either case.
+        if matches!(self.mode, SetMode::IntersectDistinct | SetMode::IntersectAll)
+            && self.right_counts.is_empty()
+        {
+            self.stopped = true;
+            return match self.control.check() {
+                Ok(()) => None,
+                Err(error) => Some(Err(error)),
+            };
         }
         loop {
             if let Err(error) = self.control.check() {
@@ -550,5 +579,94 @@ mod intersect_distinct_retained_allocation_tests {
         );
         assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
         assert_eq!(stream.retained_bytes, remaining);
+    }
+}
+
+#[cfg(test)]
+mod exhausted_intersect_short_circuit_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn empty_right_input_never_polls_left_for_either_intersection_mode() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        for mode in [SetMode::IntersectDistinct, SetMode::IntersectAll] {
+            let left: BatchStream = Box::new([
+                Err(Error::Execution("unreachable left source".into())),
+            ].into_iter());
+            let right: BatchStream = Box::new(std::iter::empty());
+            let mut stream = SetStream::new(
+                left, right, schema.clone(), schema.clone(), mode,
+                QueryControl::default(), 100, 4096,
+            ).unwrap();
+            assert!(stream.next().is_none());
+            assert!(stream.next().is_none());
+        }
+    }
+
+    #[test]
+    fn intersect_distinct_stops_when_last_build_key_is_emitted() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let value = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(17)],
+        ]).unwrap();
+        let left: BatchStream = Box::new([
+            Ok(value.clone()),
+            Err(Error::Execution("unreachable after all keys matched".into())),
+        ].into_iter());
+        let right: BatchStream = Box::new([Ok(value)].into_iter());
+        let mut stream = SetStream::new(
+            left, right, schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 100, 4096,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(17)]);
+        assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod except_distinct_compact_key_admission_tests {
+    use super::*;
+
+    #[test]
+    fn overallocated_left_text_does_not_exhaust_hash_set_key_budget() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let mut text = String::with_capacity(16_384);
+        text.push_str("small");
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(text)],
+            vec![Value::Text("small".into())],
+            vec![Value::Text("second".into())],
+        ]).unwrap();
+        let stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new(std::iter::empty()), schema.clone(), schema,
+            SetMode::ExceptDistinct, QueryControl::default(), 2, 256,
+        ).unwrap();
+        let rows = stream.collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Text("small".into())],
+            vec![Value::Text("second".into())],
+        ]);
+    }
+
+    #[test]
+    fn oversized_real_key_still_errors_after_valid_prefix() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("good".into())],
+            vec![Value::Text("x".repeat(2048))],
+        ]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new(std::iter::empty()), schema.clone(), schema,
+            SetMode::ExceptDistinct, QueryControl::default(), 2, 256,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("good".into())]]);
+        assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
+        assert!(stream.next().is_none());
     }
 }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import re
 from pathlib import Path
 import subprocess
@@ -96,21 +97,33 @@ def iter_arrow_batches(
     )
     # Spool stderr to disk so verbose diagnostics cannot block the Arrow stream.
     with tempfile.TemporaryFile() as error_log:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log)
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=error_log,
+            start_new_session=(os.name == "posix"),
+        )
+        completed = False
         try:
             assert process.stdout is not None
             with pa.ipc.open_stream(process.stdout) as reader:
                 for batch in reader:
                     yield batch
             status = process.wait()
+            completed = True
             if status:
                 error_log.seek(0, os.SEEK_END)
                 error_log.seek(max(0, error_log.tell() - 8192))
                 stderr = error_log.read().decode("utf-8", errors="replace").strip()
                 raise RuntimeError(stderr or f"RustSpark exited with status {status}")
         finally:
-            if process.poll() is None:
-                process.terminate()
+            if not completed:
+                # Stop descendants that inherited stdout if iteration ends early.
+                if os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                elif process.poll() is None:
+                    process.terminate()
             if process.stdout:
                 process.stdout.close()
             try:
