@@ -497,10 +497,10 @@ mod grouped_spill_key_state_budget_tests {
             std::iter::once(&key)).saturating_add(std::mem::size_of::<State>());
         let control = QueryControl::default();
         let err = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
-            10, 2, one_group_budget, &control).unwrap_err();
+            10, 3, one_group_budget, &control).unwrap_err();
         assert!(err.to_string().contains("byte budget"));
         let actual = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
-            10, 2, 8192, &control).unwrap().rows().unwrap();
+            10, 3, 8192, &control).unwrap().rows().unwrap();
         assert_eq!(actual.len(), 2);
         assert!(actual.contains(&vec![key, Value::Integer(2)]));
         assert!(actual.contains(&vec![other, Value::Integer(1)]));
