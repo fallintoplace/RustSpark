@@ -135,7 +135,7 @@ fn execute_inner(
             if let Plan::Scan { table } = input.as_ref() {
                 limit::limit(catalog.get(table)?, *offset, *count)?
             } else {
-                limit::limit(&descend(input)?, *offset, *count)?
+                limit::limit_owned(descend(input)?, *offset, *count)?
             }
         },
         Plan::Distinct { input } => {
@@ -402,5 +402,38 @@ mod catalog_distinct_borrow_tests {
                 ..ExecutionOptions::default() }).unwrap();
         assert_eq!(result.rows().unwrap(),
             vec![vec![Value::Null], vec![Value::Integer(7)]]);
+    }
+}
+
+#[cfg(test)]
+mod owned_intermediate_limit_execution_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn slices_filtered_long_text_and_preserves_limits_and_errors() {
+        let mut catalog = Catalog::new();
+        let large = "é🙂".repeat(4096);
+        catalog.register("t", Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Text(large.clone())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("last".into())],
+        ]).unwrap()).unwrap();
+        let filtered = Plan::scan("t").filter(Expr::binary(
+            Expr::Column("id".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(1)),
+        ));
+        let source = execute(&filtered, &catalog).unwrap();
+        for (offset, count) in [(0, Some(2)), (1, Some(2)),
+            (10, Some(3)), (0, Some(0)), (2, None)] {
+            let expected = limit::limit(&source, offset, count).unwrap();
+            assert_eq!(execute(&filtered.clone().limit(offset, count), &catalog).unwrap(),
+                expected);
+        }
+        assert!(execute(&filtered.limit(usize::MAX, Some(1)), &catalog).is_err());
     }
 }
