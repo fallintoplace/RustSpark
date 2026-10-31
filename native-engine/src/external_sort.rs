@@ -1,5 +1,5 @@
 //! External merge sort over Arrow IPC runs, independent from DataFusion.
-use std::{borrow::Cow, cmp::Ordering, path::Path};
+use std::{cmp::Ordering, path::Path, sync::OnceLock};
 
 use crate::{
     batch::Batch,
@@ -14,6 +14,9 @@ struct Run {
     reader: SpillReader,
     batch: Option<Batch>,
     position: usize,
+    // Cache each computed expression only after a comparator needs it.
+    // A consumed row clears the cells before the next comparison.
+    computed: Vec<OnceLock<Result<crate::scalar::Value>>>,
 }
 
 // Resolve direct column references once per sort, not on every tournament
@@ -69,7 +72,11 @@ pub fn external_sort(
             let spill = spill_ipc::spill(spill_dir.as_ref(), schema, &[sorted])?;
             let mut reader = spill.read()?;
             let first = reader.next().transpose()?;
-            runs.push(Run { _spill: spill, reader, batch: first, position: 0 });
+            runs.push(Run {
+                _spill: spill, reader, batch: first, position: 0,
+                computed: std::iter::repeat_with(OnceLock::new)
+                    .take(bound_keys.len()).collect(),
+            });
         }
     }
     // Build a fallible tournament tree once, then update only the path
@@ -89,16 +96,20 @@ pub fn external_sort(
 fn compare_runs(left: &Run, right: &Run, keys: &[BoundSortKey]) -> Result<Ordering> {
     let a = left.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
     let b = right.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
-    for key in keys {
-        let x: Cow<'_, crate::scalar::Value> = match key.column {
-            Some(index) => Cow::Borrowed(a.value(left.position, index)?),
-            None => Cow::Owned(key.key.expression.evaluate(a, left.position)?),
+    for (index, key) in keys.iter().enumerate() {
+        let x = match key.column {
+            Some(column) => a.value(left.position, column)?,
+            None => left.computed[index]
+                .get_or_init(|| key.key.expression.evaluate(a, left.position))
+                .as_ref().map_err(Clone::clone)?,
         };
-        let y: Cow<'_, crate::scalar::Value> = match key.column {
-            Some(index) => Cow::Borrowed(b.value(right.position, index)?),
-            None => Cow::Owned(key.key.expression.evaluate(b, right.position)?),
+        let y = match key.column {
+            Some(column) => b.value(right.position, column)?,
+            None => right.computed[index]
+                .get_or_init(|| key.key.expression.evaluate(b, right.position))
+                .as_ref().map_err(Clone::clone)?,
         };
-        let order = crate::sort::compare_values(&x, &y, key.key.descending, key.key.nulls_first);
+        let order = crate::sort::compare_values(x, y, key.key.descending, key.key.nulls_first);
         if order != Ordering::Equal { return Ok(order); }
     }
     Ok(Ordering::Equal)
@@ -202,6 +213,8 @@ impl Iterator for ExternalSort {
                     }
                 }
             }
+            // This run's position has moved. Never reuse previous row keys.
+            for cached in &mut run.computed { cached.take(); }
             if let Err(error) = self.winners.update(selected, &self.runs, &self.keys) {
                 self.pending_error = Some(error);
                 break;
@@ -423,7 +436,10 @@ mod deferred_external_sort_error_tests {
             let spill = spill_ipc::spill(std::env::temp_dir(), &schema, &[batch]).unwrap();
             let mut reader = spill.read().unwrap();
             let first = reader.next().unwrap().unwrap();
-            runs.push(Run { _spill: spill, reader, batch: Some(first), position: 0 });
+            runs.push(Run {
+                _spill: spill, reader, batch: Some(first), position: 0,
+                computed: std::iter::repeat_with(OnceLock::new).take(1).collect(),
+            });
         }
         let keys = vec![BoundSortKey {
             key: SortKey::ascending(Expr::binary(
@@ -443,6 +459,39 @@ mod deferred_external_sort_error_tests {
         ]);
         assert!(merge.next().unwrap().is_err());
         assert!(merge.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod lazy_external_sort_expression_cache_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_keys_match_stable_full_sort_across_many_runs_and_batches() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, false),
+        ]).unwrap();
+        let batches = (0..8).map(|partition| {
+            Batch::from_rows(schema.clone(), (0..9).map(|row| {
+                let id = ((partition * 37 + row * 17) % 31) as i64;
+                vec![Value::Integer(id), Value::Text(format!("{partition}:{row}"))]
+            }).collect()).unwrap()
+        }).collect::<Vec<_>>();
+        let keys = [
+            SortKey::ascending(Expr::binary(
+                Expr::Column("id".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)),
+            )),
+            SortKey::ascending(Expr::Column("label".into())),
+        ];
+        let combined = crate::batch_chunks::concatenate(&batches).unwrap();
+        let expected = sort::sort(&combined, &keys).unwrap().rows().unwrap();
+        let output = external_sort(batches, &schema, &keys, std::env::temp_dir(), 3, 7)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap().into_iter()
+            .flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(output, expected);
     }
 }
 
