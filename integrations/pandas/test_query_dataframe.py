@@ -59,6 +59,15 @@ class DataFrameCommandTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 build_command("SELECT 1", Path("out.arrow"), **options)
 
+    def test_named_parameter_byte_limit_uses_utf8(self):
+        accepted = "utf8:" + "é" * 4093
+        command = build_command("SELECT $payload", Path("out.arrow"),
+                                named_params={"payload": accepted})
+        self.assertIn("payload=" + accepted, command)
+        with self.assertRaisesRegex(ValueError, "bounded typed"):
+            build_command("SELECT $payload", Path("out.arrow"),
+                          named_params={"payload": "utf8:" + "é" * 4094})
+
     def test_process_timeout_bounds_entire_arrow_export(self):
         for invalid in (0, -1, True, float("nan"), float("inf")):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
