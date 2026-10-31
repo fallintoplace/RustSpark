@@ -26,8 +26,8 @@ fn finish_field(row: &mut Vec<String>, field: &mut String) -> Result<()> {
     Ok(())
 }
 
-fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String) -> Result<()> {
-    if row.is_empty() && field.is_empty() {
+fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String, quoted_empty: bool) -> Result<()> {
+    if row.is_empty() && field.is_empty() && !quoted_empty {
         return Ok(());
     }
     finish_field(row, field)?;
@@ -100,7 +100,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
                     if character == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    finish_record(&mut records, &mut row, &mut field)?;
+                    finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote)?;
                     if records.len() > max_records {
                         return Err(Error::Execution("CSV row count limit exceeded".into()));
                     }
@@ -122,7 +122,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
         return Err(Error::Parse("unterminated CSV quote".into()));
     }
     if !row.is_empty() || !field.is_empty() || state == State::AfterQuote {
-        finish_record(&mut records, &mut row, &mut field)?;
+        finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote)?;
     }
     if records.len() > max_records {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
@@ -503,5 +503,29 @@ mod wide_csv_field_admission_tests {
         assert!(parse_records(&quoted).is_err());
         assert!(parse_records(&format!("\"x\",{}", std::iter::repeat_n("y", MAX_CSV_COLUMNS - 1)
             .collect::<Vec<_>>().join(","))).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod quoted_empty_csv_record_regressions {
+    use super::*;
+
+    #[test]
+    fn explicitly_quoted_empty_records_are_not_blank_lines() {
+        assert_eq!(parse_records("\"\"\r\n\n").unwrap(), vec![vec![String::new()]]);
+        assert_eq!(parse_records("\"\"\n").unwrap(), vec![vec![String::new()]]);
+        assert_eq!(parse_records("\"\"").unwrap(), vec![vec![String::new()]]);
+        assert!(parse_records("\r\n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_quoted_data_cells_preserve_row_count_and_inferred_type() {
+        let batch = from_csv_str("amount\n\"\"\n7\n").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.schema().field(0).unwrap().data_type, DataType::Integer);
+        assert_eq!(batch.rows().unwrap(), vec![
+            vec![Value::Null],
+            vec![Value::Integer(7)],
+        ]);
     }
 }
