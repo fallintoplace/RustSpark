@@ -10,6 +10,8 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
         let Some(characters) = super::string(&args[1])? else { return Ok(Value::Null); };
         Some(characters)
     } else { None };
+    // Empty input needs no character-set lookup, but validate the optional argument first.
+    if text.is_empty() { return Ok(Value::Text(String::new())); }
     // Explicit empty trim sets cannot match any character.
     if characters == Some("") {
         return Ok(Value::Text(text.to_owned()));
@@ -174,5 +176,22 @@ mod normalize_ascii_whitespace_tests {
         assert_eq!(text.split_whitespace().count(), 6000);
         assert!(text.starts_with("a b c a b c"));
         assert_eq!(normalize_space(&[Value::Text("a\u{00a0} b".into())]).unwrap(), Value::Text("a b".into()));
+    }
+}
+
+#[cfg(test)]
+mod trim_empty_text_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn empty_text_skips_large_character_lookup_and_keeps_nulls() {
+        let chars = Value::Text("αβγδεζηθικλμνξοπρστυφχψω".repeat(2000));
+        assert_eq!(btrim(&[Value::Text(String::new()), chars.clone()]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(ltrim(&[Value::Text(String::new()), chars.clone()]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(rtrim(&[Value::Text(String::new()), chars]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(btrim(&[Value::Text(String::new()), Value::Null]).unwrap(), Value::Null);
     }
 }
