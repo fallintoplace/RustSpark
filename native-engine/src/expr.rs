@@ -307,7 +307,42 @@ fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
                 other => LikePiece::Literal(other),
             }
         };
+        // Adjacent '%' tokens accept exactly the same strings as one '%'.
+        // Collapsing them also keeps LIKE work proportional to the effective pattern.
+        if matches!(next, LikePiece::Many) &&
+            matches!(pieces.last(), Some(LikePiece::Many)) {
+            continue;
+        }
         pieces.push(next);
+    }
+    // Most analytical LIKE predicates are exact, prefix, suffix or contains
+    // matches. Handle these without materializing the text as Unicode scalars
+    // or running the full dynamic-programming matcher.
+    let literal = |parts: &[LikePiece]| -> Option<String> {
+        parts.iter().map(|piece| match piece {
+            LikePiece::Literal(ch) => Some(*ch),
+            _ => None,
+        }).collect()
+    };
+    if pieces.len() == 1 && matches!(pieces[0], LikePiece::Many) {
+        return Ok(true);
+    }
+    if pieces.len() > 1 && matches!(pieces.last(), Some(LikePiece::Many)) {
+        if let Some(prefix) = literal(&pieces[..pieces.len() - 1]) {
+            return Ok(input.starts_with(&prefix));
+        }
+    }
+    if pieces.len() > 1 && matches!(pieces.first(), Some(LikePiece::Many)) {
+        if let Some(suffix) = literal(&pieces[1..]) {
+            return Ok(input.ends_with(&suffix));
+        }
+    }
+    if pieces.len() > 2 &&
+        matches!(pieces.first(), Some(LikePiece::Many)) &&
+        matches!(pieces.last(), Some(LikePiece::Many)) {
+        if let Some(needle) = literal(&pieces[1..pieces.len() - 1]) {
+            return Ok(input.contains(&needle));
+        }
     }
     if pieces.iter().all(|piece| matches!(piece, LikePiece::Literal(_))) {
         return Ok(input.chars().eq(pieces.iter().map(|piece| match piece {
@@ -736,5 +771,38 @@ mod cast_expression_planning_validation_tests {
             assert_eq!(make(Expr::Column("s".into())).output_type(&schema).unwrap(),
                 DataType::Integer);
         }
+    }
+}
+
+#[cfg(test)]
+mod like_anchored_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_and_contains_patterns_match_unicode_and_escapes() {
+        for (text, pattern, expected) in [
+            ("naïve café ☕", "naïve%", true),
+            ("naïve café ☕", "naive%", false),
+            ("naïve café ☕", "%café ☕", true),
+            ("naïve café ☕", "%cafe", false),
+            ("naïve café ☕", "%café%", true),
+            ("naïve café ☕", "%tea%", false),
+            ("a%b", r"a\%%", true),
+            ("a%b", r"a\%c%", false),
+            ("anything", "%%%%", true),
+            ("", "%%%%", true),
+            ("", "%a%", false),
+        ] {
+            assert_eq!(sql_like(text, pattern).unwrap(), expected, "{text:?} LIKE {pattern:?}");
+        }
+    }
+
+    #[test]
+    fn redundant_wildcards_do_not_trigger_the_dp_work_limit() {
+        let text = "🎯".repeat(10_000);
+        let pattern = format!("%{}%", "%".repeat(5_000));
+        assert!(sql_like(&text, &pattern).unwrap());
+        assert!(sql_like_escape("a_b", r"a!_%", '!').unwrap());
+        assert!(sql_like_escape("a_b", "a!", '!').is_err());
     }
 }
