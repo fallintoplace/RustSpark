@@ -102,6 +102,9 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.is_empty() {
+        return Batch::new_with_row_count(schema, vec![], 1);
+    }
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
         for value in right.column(0)? {
@@ -136,6 +139,9 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.is_empty() {
+        return Batch::new_with_row_count(schema, vec![], usize::from(right.num_rows() == 0));
+    }
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
         for value in right.column(0)? {
@@ -195,6 +201,9 @@ pub fn intersect_all(left: &Batch, right: &Batch) -> Result<Batch> {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.is_empty() {
+        return Batch::new_with_row_count(schema, vec![], left.num_rows().min(right.num_rows()));
+    }
     if schema.len() == 1 {
         let mut counts = HashMap::<&Value, usize>::new();
         for value in right.column(0)? {
@@ -235,6 +244,9 @@ pub fn except_all(left: &Batch, right: &Batch) -> Result<Batch> {
         return Ok(Batch::empty(compatible_schema(left, right)?));
     }
     let (left, right, schema) = align_set_inputs(left, right)?;
+    if schema.is_empty() {
+        return Batch::new_with_row_count(schema, vec![], left.num_rows().saturating_sub(right.num_rows()));
+    }
     if schema.len() == 1 {
         let mut counts = HashMap::<&Value, usize>::new();
         for value in right.column(0)? {
@@ -595,5 +607,35 @@ mod numeric_set_alignment_fast_path_tests {
         assert_eq!(b.num_rows(), 1024);
         assert_eq!(schema.fields()[0].data_type, DataType::Float);
         assert_eq!(intersect_distinct(&left, &right).unwrap().num_rows(), 1024);
+    }
+}
+
+#[cfg(test)]
+mod empty_key_set_multiplicity_regressions {
+    use super::*;
+    use crate::schema::Schema;
+
+    #[test]
+    fn zero_width_rows_are_one_key_with_distinct_or_all_multiplicity() {
+        let schema = Schema::new(vec![]).unwrap();
+        let mk = |rows| Batch::new_with_row_count(schema.clone(), vec![], rows).unwrap();
+        let left = mk(5);
+        let right = mk(3);
+        assert_eq!(intersect_distinct(&left, &right).unwrap().num_rows(), 1);
+        assert_eq!(except_distinct(&left, &right).unwrap().num_rows(), 0);
+        assert_eq!(intersect_all(&left, &right).unwrap().num_rows(), 3);
+        assert_eq!(except_all(&left, &right).unwrap().num_rows(), 2);
+        assert_eq!(intersect_all(&mk(1), &mk(10)).unwrap().num_rows(), 1);
+        assert_eq!(except_distinct(&left, &mk(0)).unwrap().num_rows(), 1);
+        assert_eq!(except_all(&left, &mk(0)).unwrap().num_rows(), 5);
+        assert_eq!(intersect_distinct(&left, &mk(0)).unwrap().num_rows(), 0);
+        for output in [
+            intersect_distinct(&left, &right).unwrap(),
+            except_distinct(&left, &right).unwrap(),
+            intersect_all(&left, &right).unwrap(),
+            except_all(&left, &right).unwrap(),
+        ] {
+            assert!(output.schema().is_empty());
+        }
     }
 }

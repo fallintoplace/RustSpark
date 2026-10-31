@@ -326,6 +326,9 @@ impl Batch {
         if start == 0 && end == self.rows {
             return Ok(self);
         }
+        if start == end {
+            return Ok(Self::empty(self.schema));
+        }
         let columns = self.columns.into_iter().map(|source| {
             source.into_iter().skip(start).take(end - start).collect()
         }).collect();
@@ -593,5 +596,27 @@ mod owned_row_permutation_regressions {
         assert_eq!(batch.clone().permute_rows_owned(&[0, 1]).unwrap(), batch);
         let width0 = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
         assert_eq!(width0.permute_rows_owned(&[2, 0, 1]).unwrap().num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod owned_empty_slice_fast_path_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn empty_windows_preserve_schema_and_zero_width_rows() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("payload".repeat(5000))], vec![Value::Null],
+        ]).unwrap();
+        for index in 0..=batch.num_rows() {
+            let empty = batch.clone().slice_rows_owned(index, index).unwrap();
+            assert_eq!(empty.num_rows(), 0);
+            assert_eq!(empty.schema(), &schema);
+            assert!(empty.column(0).unwrap().is_empty());
+        }
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 10).unwrap();
+        assert_eq!(zero.slice_rows_owned(5, 5).unwrap().num_rows(), 0);
     }
 }
