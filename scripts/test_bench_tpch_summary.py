@@ -29,6 +29,11 @@ class SuiteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid timing samples"):
             suite.summarize(data)
 
+    def test_even_large_finite_samples_match_reported_median(self):
+        entries = [{"id": 1, "status": "ok", "median_ms": 1e308,
+                    "samples_ms": [1e308, 1e308]}]
+        self.assertEqual(suite.checked_medians(entries), [1e308])
+
     def test_missing_or_failed_queries_are_rejected(self):
         data = report()
         data["results"].pop()
