@@ -77,9 +77,13 @@ impl SetStream {
                 let at_limit = right_counts.len() >= max_keys;
                 match right_counts.entry(values) {
                     Entry::Occupied(mut entry) => {
-                        let next = entry.get().checked_add(1)
-                            .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
-                        *entry.get_mut() = next;
+                        // DISTINCT only needs membership. Counting repeated
+                        // right rows adds work without changing its result.
+                        if matches!(mode, SetMode::IntersectAll | SetMode::ExceptAll) {
+                            let next = entry.get().checked_add(1)
+                                .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+                            *entry.get_mut() = next;
+                        }
                     }
                     Entry::Vacant(entry) => {
                         let bytes = super::row_footprint::footprint(entry.key().iter());
@@ -220,5 +224,47 @@ mod tests {
         assert_eq!(output.field(0).unwrap().data_type, DataType::Float);
         assert_eq!(set_schema(&integer, &Schema::new(vec![Field::new("v",
             DataType::Text, true)]).unwrap()).is_err(), true);
+    }
+}
+
+#[cfg(test)]
+mod duplicate_heavy_distinct_set_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_modes_keep_membership_without_counting_duplicates() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            std::iter::repeat_n(vec![Value::Integer(7)], 4096).collect()).unwrap();
+        for mode in [SetMode::IntersectDistinct, SetMode::ExceptDistinct] {
+            let left = Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(7)],
+                vec![Value::Integer(9)],
+                vec![Value::Integer(7)],
+            ]).unwrap();
+            let stream = SetStream::new(
+                Box::new([Ok(left)].into_iter()),
+                Box::new([Ok(right.clone())].into_iter()),
+                schema.clone(), schema.clone(), mode,
+                QueryControl::default(), 2, 4096,
+            ).unwrap();
+            assert_eq!(stream.right_counts.get(&vec![Value::Integer(7)]), Some(&1));
+            let actual = stream.collect::<Result<Vec<_>>>().unwrap().iter()
+                .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+            let expected = if mode == SetMode::IntersectDistinct {
+                vec![vec![Value::Integer(7)]]
+            } else {
+                vec![vec![Value::Integer(9)]]
+            };
+            assert_eq!(actual, expected);
+        }
+        let left = Batch::empty(schema.clone());
+        let all = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectAll,
+            QueryControl::default(), 2, 4096,
+        ).unwrap();
+        assert_eq!(all.right_counts.get(&vec![Value::Integer(7)]), Some(&4096));
     }
 }
