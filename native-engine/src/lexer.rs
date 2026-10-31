@@ -164,14 +164,15 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 Token::Word(value)
             }
         } else if character == '|' {
-            if chars.peek() != Some(&'|') {
-                return Err(Error::Parse("expected || concatenation operator".into()));
+            if chars.peek() == Some(&'|') {
+                chars.next();
+                Token::Operator("||".into())
+            } else {
+                Token::Operator("|".into())
             }
-            let _ = chars.next();
-            Token::Operator("||".into())
         } else if matches!(character, ',' | '(' | ')' | '*' | ';') {
             Token::Symbol(character)
-        } else if matches!(character, '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!') {
+        } else if matches!(character, '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '^' | '~') {
             let mut operator = character.to_string();
             if let Some(next) = chars.peek() {
                 if matches!((character, *next), ('<', '=') | ('>', '=') | ('<', '>') | ('!', '=') | ('=', '=')) {
@@ -182,8 +183,11 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     }
                 }
             }
-            if operator == "!" {
-                return Err(Error::Parse("unexpected ! operator".into()));
+            if character == '>' && chars.peek() == Some(&'>') {
+                operator.push(chars.next().expect("peeked shift operator"));
+                if chars.peek() == Some(&'>') {
+                    operator.push(chars.next().expect("peeked unsigned shift"));
+                }
             }
             Token::Operator(operator)
         } else {
