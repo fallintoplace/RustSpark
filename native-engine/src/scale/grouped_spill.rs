@@ -46,8 +46,8 @@ enum State {
     CountDistinct { keys: HashSet<Value>, bytes: usize },
     Sum(Option<Value>),
     SumDistinct { keys: HashSet<Value>, bytes: usize, total: Option<Value> },
-    Avg { sum: f64, count: i64 },
-    AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, count: i64 },
+    Avg { sum: f64, compensation: f64, count: i64 },
+    AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
 }
@@ -58,13 +58,13 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Sum(_) => Ok(State::Sum(None)),
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
-        AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, count: 0 }),
+        AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, compensation: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
         AggregateOp::SumDistinct(_) => Ok(State::SumDistinct {
             keys: HashSet::new(), bytes: 0, total: None,
         }),
         AggregateOp::AvgDistinct(_) => Ok(State::AvgDistinct {
-            keys: HashSet::new(), bytes: 0, sum: 0.0, count: 0,
+            keys: HashSet::new(), bytes: 0, sum: 0.0, compensation: 0.0, count: 0,
         }),
     }
 }
@@ -103,17 +103,29 @@ fn add_sum(total: &mut Option<Value>, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn add_avg(sum: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
+fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
     let number = match value {
         Value::Integer(number) => *number as f64,
         Value::Float(number) => *number,
         _ => return Err(Error::Type("AVG requires numeric values".into())),
     };
+    // Match in-memory AVG: retain the bits lost when adding values
+    // of very different magnitudes (Neumaier compensated summation).
     let next = *sum + number;
-    if !next.is_finite() { return Err(Error::Execution("AVG overflow".into())); }
+    let correction = if sum.abs() >= number.abs() {
+        (*sum - next) + number
+    } else {
+        (number - next) + *sum
+    };
+    let next_compensation = *compensation + correction;
+    if !next.is_finite() || !next_compensation.is_finite() ||
+        !(next + next_compensation).is_finite() {
+        return Err(Error::Execution("AVG overflow".into()));
+    }
     let next_count = count.checked_add(1)
         .ok_or_else(|| Error::Execution("AVG count overflow".into()))?;
     *sum = next;
+    *compensation = next_compensation;
     *count = next_count;
     Ok(())
 }
@@ -140,9 +152,12 @@ fn add_to_state(state: &mut State, op: &AggregateOp, batch: &Batch, row: usize) 
         State::SumDistinct { keys, bytes, total } => {
             if insert_distinct(keys, bytes, &value)? { add_sum(total, &value)?; }
         }
-        State::Avg { sum, count } => add_avg(sum, count, &value)?,
-        State::AvgDistinct { keys, bytes, sum, count } => {
-            if insert_distinct(keys, bytes, &value)? { add_avg(sum, count, &value)?; }
+        State::Avg { sum, compensation, count } =>
+            add_avg(sum, compensation, count, &value)?,
+        State::AvgDistinct { keys, bytes, sum, compensation, count } => {
+            if insert_distinct(keys, bytes, &value)? {
+                add_avg(sum, compensation, count, &value)?;
+            }
         }
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
@@ -220,11 +235,12 @@ fn aggregate_shard(
             key.push(match state {
                 State::Count(value) => Value::Integer(value),
                 State::CountDistinct { keys, .. } => Value::Integer(keys.len() as i64),
-                State::AvgDistinct { sum, count, .. } | State::Avg { sum, count } =>
+                State::AvgDistinct { sum, compensation, count, .. } |
+                State::Avg { sum, compensation, count } =>
                     if count == 0 {
                     Value::Null
                 } else {
-                    Value::Float(sum / count as f64)
+                    Value::Float((sum + compensation) / count as f64)
                 },
                 State::SumDistinct { total: v, .. } |
                 State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
@@ -441,6 +457,51 @@ mod grouped_spill_window_output_tests {
         assert_eq!(rows.len(), 11);
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod compensated_spill_average_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn cancellation_sensitive_averages_survive_partitioned_aggregation() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-avg-compensated-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("group_id", DataType::Integer, false),
+            Field::new("n", DataType::Float, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Float(1e16)],
+            vec![Value::Integer(1), Value::Float(1.0)],
+            vec![Value::Integer(1), Value::Float(-1e16)],
+            vec![Value::Integer(1), Value::Float(1.0)], // repeat DISTINCT value
+        ]).unwrap();
+        let items = [
+            AggregateItem::new(AggregateOp::Avg(Expr::Column("n".into())), "avg"),
+            AggregateItem::new(AggregateOp::AvgDistinct(Expr::Column("n".into())), "avg_unique"),
+        ];
+        let result = grouped_aggregate([Ok(batch)], schema,
+            &[("group_id".into(), "group_id".into())], &items,
+            &dir, 2, 10, 2, &QueryControl::default()).unwrap();
+        let mut rows = Vec::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(part) = reader.next_batch().unwrap() {
+                rows.extend(part.rows().unwrap());
+            }
+        }
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Value::Float(0.5));
+        assert_eq!(rows[0][2], Value::Float(1.0 / 3.0));
+        drop(result);
         fs::remove_dir(dir).unwrap();
     }
 }
