@@ -134,6 +134,17 @@ fn execute_inner(
             // A LIMIT over a scan must not materialize and budget the whole input.
             if let Plan::Scan { table } = input.as_ref() {
                 limit::limit(catalog.get(table)?, *offset, *count)?
+            } else if let Plan::Project { input: source, selections } = input.as_ref() {
+                if let Plan::Scan { table } = source.as_ref() {
+                    match project::project_columns_window(
+                        catalog.get(table)?, selections, *offset, *count,
+                    )? {
+                        Some(output) => output,
+                        None => limit::limit_owned(descend(input)?, *offset, *count)?,
+                    }
+                } else {
+                    limit::limit_owned(descend(input)?, *offset, *count)?
+                }
             } else {
                 limit::limit_owned(descend(input)?, *offset, *count)?
             }
@@ -512,5 +523,51 @@ mod owned_intermediate_limit_execution_tests {
                 expected);
         }
         assert!(execute(&filtered.limit(usize::MAX, Some(1)), &catalog).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod projected_scan_limit_budget_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, project::Selection, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn projects_only_requested_columns_in_bounded_direct_scans() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let data = Batch::from_rows(schema, (0..100).map(|id| vec![
+            Value::Integer(id), Value::Text("🙂".repeat(1024)),
+        ]).collect()).unwrap();
+        catalog.register("large", data).unwrap();
+        let plan = Plan::Project { input: Box::new(Plan::scan("large")),
+            selections: vec![Selection::new(Expr::Column("id".into()), "key")] }
+            .limit(12, Some(2));
+        let options = ExecutionOptions { max_output_rows: 2, ..ExecutionOptions::default() };
+        let output = execute_with_options(&plan, &catalog, options).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Integer(12)], vec![Value::Integer(13)]
+        ]);
+        assert_eq!(output.schema().field(0).unwrap().name, "key");
+    }
+
+    #[test]
+    fn computed_projection_keeps_full_evaluation_errors() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("t", Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(0)],
+        ]).unwrap()).unwrap();
+        let plan = Plan::Project {
+            input: Box::new(Plan::scan("t")),
+            selections: vec![Selection::new(
+                Expr::binary(Expr::Literal(Value::Integer(4)), BinaryOp::Divide,
+                    Expr::Column("n".into())), "quotient")],
+        }.limit(0, Some(1));
+        assert!(execute(&plan, &catalog).is_err());
     }
 }
