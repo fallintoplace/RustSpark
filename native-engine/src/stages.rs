@@ -133,7 +133,7 @@ impl StageGraph {
                 return Err(Error::Execution("native stage graph exceeds safety limits".into()));
             }
             let (kind, inputs) = match plan {
-                Plan::Scan { .. } | Plan::Values { .. } => (StageKind::Scan, vec![]),
+                Plan::OneRow | Plan::Scan { .. } | Plan::Values { .. } => (StageKind::Scan, vec![]),
                 Plan::Filter { input, .. } =>
                     (StageKind::Filter, vec![visit(input, stages, depth + 1)?]),
                 Plan::Project { input, .. } =>

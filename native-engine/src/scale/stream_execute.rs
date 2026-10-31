@@ -268,6 +268,7 @@ fn infer(
     let child = |plan: &Plan| infer(plan, catalog, depth + 1, max_depth);
     match plan {
         Plan::Values { batch } => Ok(batch.schema().clone()),
+        Plan::OneRow => Schema::new(vec![]),
         Plan::Scan { table } => Ok(catalog.schema(table)?.clone()),
         Plan::Filter { input, predicate } => {
             let schema = child(input)?;
@@ -394,7 +395,7 @@ fn validate_plan_nodes(plan: &Plan) -> Result<()> {
             ));
         }
         match node {
-            Plan::Scan { .. } | Plan::Values { .. } => {}
+            Plan::OneRow | Plan::Scan { .. } | Plan::Values { .. } => {}
             Plan::Filter { input, .. } |
             Plan::Project { input, .. } |
             Plan::Aggregate { input, .. } |
@@ -434,6 +435,9 @@ fn lower(
     let child = |plan: &Plan| lower(plan, catalog, options, control, depth + 1);
     match plan {
         Plan::Values { batch } => Ok(Box::new(std::iter::once(Ok(batch.clone())))),
+        Plan::OneRow => Ok(Box::new(std::iter::once(Ok(
+            Batch::new_with_row_count(Schema::new(vec![])?, vec![], 1)?
+        )))),
         Plan::Scan { table } => {
             if let Some(parquet) = catalog.get_parquet(table)? {
                 return Ok(Box::new(parquet.open(options.batch_rows)?));

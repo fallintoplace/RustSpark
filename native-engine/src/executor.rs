@@ -2,7 +2,7 @@ use crate::{
     aggregate, catalog::Catalog, distinct, filter, join, limit,
     plan::Plan, project, sort, union, set_ops,
     cancel::QueryGuard,
-    batch::Batch, Error, Result,
+    batch::Batch, schema::Schema, Error, Result,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -46,7 +46,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
             return Err(Error::Execution("query plan exceeds maximum depth".into()));
         }
         match node {
-            Plan::Scan { .. } | Plan::Values { .. } => {}
+            Plan::OneRow | Plan::Scan { .. } | Plan::Values { .. } => {}
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
@@ -96,6 +96,7 @@ fn execute_inner(
     let descend = |child: &Plan| execute_inner(child, catalog, options, depth + 1, guard);
     let batch = match plan {
         Plan::Values { batch } => batch.clone(),
+        Plan::OneRow => Batch::new_with_row_count(Schema::new(vec![])?, vec![], 1)?,
         Plan::Scan { table } => catalog.get(table)?.clone(),
         Plan::Filter { input, predicate } => {
             if let Plan::Scan { table } = input.as_ref() {
