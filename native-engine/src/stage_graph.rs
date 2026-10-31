@@ -163,6 +163,18 @@ impl StageGraph {
     ) -> Vec<(u64, usize)> {
         let mut tasks = Vec::with_capacity(max_tasks.min(1024));
         if max_tasks == 0 { return tasks; }
+        if running.is_empty() {
+            // Initial dispatch has no exclusions. Fill windows by range,
+            // avoiding one hash-table probe per partition.
+            for &index in &self.order_indices {
+                let stage = &self.stages[index];
+                if !Self::dependency_ready(stage, completed) { continue; }
+                let take = stage.partitions.min(max_tasks - tasks.len());
+                tasks.extend((0..take).map(|partition| (stage.id, partition)));
+                if tasks.len() == max_tasks { return tasks; }
+            }
+            return tasks;
+        }
         for &index in &self.order_indices {
             let stage = &self.stages[index];
             if !Self::dependency_ready(stage, completed) {
@@ -464,5 +476,30 @@ mod precomputed_critical_path_order_regressions {
             assert_eq!(graph.ready_by_critical_path(&HashSet::from([10, 20])),
                 [30, 40, 60, 70]);
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_running_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn empty_running_windows_keep_topology_and_limits() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 8, dependencies: vec![3], partitions: 3 },
+            Stage { id: 3, dependencies: vec![], partitions: 7 },
+            Stage { id: 5, dependencies: vec![], partitions: 2 },
+        ]).unwrap();
+        let completed = HashSet::new();
+        let running = HashSet::new();
+        for bound in [0, 1, 3, 7, 9, 100] {
+            assert_eq!(graph.ready_tasks_excluding(&completed, &running, bound),
+                graph.ready_tasks(&completed, bound));
+        }
+        let pending = graph.ready_tasks(&completed, 100);
+        assert_eq!(pending.len(), 9);
+        assert!(pending.iter().all(|(id, _)| *id != 8));
+        let completed = HashSet::from([3]);
+        assert_eq!(graph.ready_tasks(&completed, 100).len(), 5);
     }
 }

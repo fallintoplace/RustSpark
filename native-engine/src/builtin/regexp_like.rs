@@ -11,9 +11,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Boolean(true)); }
+    if pattern == ".*" { return Ok(Value::Boolean(true)); }
     if pattern == "." {
         // A non-newline UTF-8 byte implies a non-newline Unicode scalar.
         return Ok(Value::Boolean(text.bytes().any(|byte| byte != b'\n')));
+    }
+    // Anchored identifier literals only need a prefix check.
+    if let Some(prefix) = pattern.strip_prefix('^') {
+        if prefix.len() <= 4095 && prefix.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || byte == b'_') {
+            return Ok(Value::Boolean(text.starts_with(prefix)));
+        }
     }
     // Plain ASCII identifiers have no regex metacharacters.
     if pattern.len() <= 4096 && pattern.bytes().all(|byte|
@@ -120,5 +128,44 @@ mod dot_pattern_like_tests {
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod anchored_literal_regex_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_prefixes_agree_with_regex_engine() {
+        for text in ["", "foo", "foobar", "xfoo", "\nfoo", "foo\nbar", "éfoo", "foo🙂"] {
+            for pattern in ["^", "^foo", "^foo_bar", "^FOO", "^1", "^f.o", "^foo$", "(?m)^foo"] {
+                let actual = evaluate(&[Value::Text(text.into()), Value::Text(pattern.into())])
+                    .unwrap();
+                let expected = Value::Boolean(regex_support::compile(pattern)
+                    .unwrap().is_match(text));
+                assert_eq!(actual, expected, "pattern={pattern:?} text={text:?}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod dot_star_regexp_like_regressions {
+    use super::*;
+
+    #[test]
+    fn always_matches_a_bounded_nonnull_input_like_the_regex_engine() {
+        let regex = regex_support::compile(".*").unwrap();
+        for text in ["", "\n", "\n\n", "é🙂", "a\nb", "東京", "\r\n"] {
+            assert_eq!(evaluate(&[
+                Value::Text(text.into()), Value::Text(".*".into()),
+            ]).unwrap(), Value::Boolean(regex.is_match(text)));
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".*".into())]).unwrap(),
+            Value::Null);
+        assert!(evaluate(&[
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
+            Value::Text(".*".into()),
+        ]).is_err());
     }
 }

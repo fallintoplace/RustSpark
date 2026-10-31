@@ -51,9 +51,19 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         }
         result.push_str(&pad[..padding % pad.len()]);
     } else {
-        // Unicode patterns still cycle scalar values, not UTF-8 bytes.
-        for character in pad.chars().cycle().take(target - size) {
-            result.push(character);
+        // Repeat whole UTF-8 patterns instead of pushing every Unicode
+        // scalar individually. The final partial run ends on a char boundary.
+        let pattern_chars = pad.chars().count();
+        let padding = target - size;
+        let complete = padding / pattern_chars;
+        for _ in 0..complete {
+            result.push_str(pad);
+        }
+        let remainder = padding % pattern_chars;
+        if remainder != 0 {
+            let end = pad.char_indices().nth(remainder)
+                .expect("partial pattern has an interior UTF-8 boundary").0;
+            result.push_str(&pad[..end]);
         }
     }
     if left { result.push_str(text); }
@@ -183,5 +193,37 @@ mod ascii_padding_run_copy_tests {
         assert!(value.ends_with("end"));
         assert!(value.starts_with(pattern));
         assert!(run("X", 1_000_001, "ab", true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod unicode_padding_run_regressions {
+    use super::*;
+
+    #[test]
+    fn bulk_unicode_patterns_match_character_cycle() {
+        let source = "中";
+        let pattern = "é🙂界";
+        for target in [0, 1, 2, 3, 4, 5, 7, 10, 32, 255] {
+            let extra = target.saturating_sub(1usize);
+            let padding: String = pattern.chars().cycle().take(extra).collect();
+            let left = format!("{padding}{source}");
+            let right = format!("{source}{padding}");
+            let args = [
+                Value::Text(source.into()),
+                Value::Integer(target as i64),
+                Value::Text(pattern.into()),
+            ];
+            assert_eq!(lpad(&args).unwrap(), Value::Text(left));
+            assert_eq!(rpad(&args).unwrap(), Value::Text(right));
+        }
+        let large = [
+            Value::Text("é".into()),
+            Value::Integer(10_001),
+            Value::Text("🙂界".into()),
+        ];
+        let Value::Text(result) = rpad(&large).unwrap() else { panic!("text"); };
+        assert_eq!(result.chars().count(), 10_001);
+        assert!(result.starts_with("é🙂界🙂界"));
     }
 }

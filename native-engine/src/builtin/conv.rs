@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
@@ -27,9 +26,27 @@ fn encode(mut value: u64, base: u64, negative: bool) -> String {
         .expect("CONV emits only ASCII digits").to_owned()
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
-    let source: Cow<'_, str> = match &args[0] {
-        Value::Text(text) => Cow::Borrowed(text),
-        Value::Integer(n) => Cow::Owned(n.to_string()),
+    // BIGINT inputs must retain their decimal-text parsing semantics even
+    // when from_base differs from 10. Store those digits on the stack.
+    let mut decimal = [0_u8; 20];
+    let source: &str = match &args[0] {
+        Value::Text(text) => text,
+        Value::Integer(n) => {
+            let mut magnitude = n.unsigned_abs();
+            let mut start = decimal.len();
+            loop {
+                start -= 1;
+                decimal[start] = b'0' + (magnitude % 10) as u8;
+                magnitude /= 10;
+                if magnitude == 0 { break; }
+            }
+            if *n < 0 {
+                start -= 1;
+                decimal[start] = b'-';
+            }
+            std::str::from_utf8(&decimal[start..])
+                .expect("integer digits are ASCII")
+        }
         Value::Null => return Ok(Value::Null),
         _ => return Err(Error::Type("CONV requires text or integer input".into())),
     };
@@ -89,5 +106,31 @@ mod borrowed_conv_text_tests {
         assert_eq!(evaluate(&[Value::Integer(-10), Value::Integer(16), Value::Integer(-10)]).unwrap(),
             Value::Text("-16".into()));
         assert_eq!(evaluate(&[Value::Text("not-a-number".into()), Value::Integer(10), Value::Integer(16)]).is_err(), true);
+    }
+}
+
+#[cfg(test)]
+mod integer_stack_decimal_conv_regressions {
+    use super::*;
+
+    #[test]
+    fn all_integer_boundaries_match_decimal_text_source_in_every_base() {
+        for number in [i64::MIN, -1_234_567, -10, -1, 0, 1, 10, 1_234_567, i64::MAX] {
+            for from in [2, 8, 10, 16, 36] {
+                for to in [-36, -10, 2, 16] {
+                    let source = [Value::Text(number.to_string()),
+                        Value::Integer(from), Value::Integer(to)];
+                    let integer = [Value::Integer(number),
+                        Value::Integer(from), Value::Integer(to)];
+                    let expected = evaluate(&source);
+                    let actual = evaluate(&integer);
+                    match (expected, actual) {
+                        (Ok(expected), Ok(actual)) => assert_eq!(actual, expected),
+                        (Err(_), Err(_)) => {},
+                        mismatch => panic!("CONV integer disagrees with text: {mismatch:?}"),
+                    }
+                }
+            }
+        }
     }
 }

@@ -56,12 +56,23 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         first_end -= left.len_utf8();
         second_end -= right.len_utf8();
     }
-    let a = first[..first_end].chars().collect::<Vec<_>>();
-    let b = second[..second_end].chars().collect::<Vec<_>>();
-    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
+    // ASCII-only middle spans can use borrowed UTF-8 bytes directly.
+    let first = &first[..first_end];
+    let second = &second[..second_end];
+    if first.is_ascii() && second.is_ascii() {
+        return distance_units(first.as_bytes(), second.as_bytes(), threshold);
+    }
+    let a = first.chars().collect::<Vec<_>>();
+    let b = second.chars().collect::<Vec<_>>();
+    distance_units(&a, &b, threshold)
+}
+
+fn distance_units<T: Eq + Copy>(
+    a: &[T], b: &[T], threshold: Option<usize>,
+) -> Result<Value> {    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
-    let (longer, shorter) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
+    let (longer, shorter) = if a.len() >= b.len() { (a, b) } else { (b, a) };
     if shorter.is_empty() {
         let distance = longer.len();
         return Ok(Value::Integer(if threshold.is_some_and(|limit| distance > limit) { -1 }
@@ -71,6 +82,54 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         limit.saturating_mul(2).saturating_add(1).min(shorter.len()));
     if longer.len().checked_mul(band_width).is_none_or(|cells| cells > 2_000_000) {
         return Err(Error::Execution("LEVENSHTEIN exceeds native edit-distance work budget".into()));
+    }
+    if let Some(limit) = threshold {
+        // The thresholded dynamic program needs only the diagonals within
+        // edit distance 'limit'. Keep two narrow windows rather than two
+        // full-width rows, which waste O(shorter.len()) memory for small limits.
+        let outside = limit.saturating_add(1);
+        let width = limit.saturating_mul(2).saturating_add(1)
+            .min(shorter.len().saturating_add(1));
+        let mut previous = vec![outside; width];
+        let mut current = vec![outside; width];
+        let mut previous_start = 0usize;
+        let mut previous_end = shorter.len().min(limit);
+        for column in 0..=previous_end {
+            previous[column] = column;
+        }
+        for (index, from) in longer.iter().enumerate() {
+            let row = index + 1;
+            let start = row.saturating_sub(limit);
+            let end = row.saturating_add(limit).min(shorter.len());
+            let mut row_min = outside;
+            for column in start..=end {
+                let distance = if column == 0 {
+                    row.min(outside)
+                } else {
+                    let insert = if column > start {
+                        current[column - start - 1].saturating_add(1)
+                    } else { outside };
+                    let delete = if (previous_start..=previous_end).contains(&column) {
+                        previous[column - previous_start].saturating_add(1)
+                    } else { outside };
+                    let replace = if (previous_start..=previous_end).contains(&(column - 1)) {
+                        previous[column - 1 - previous_start]
+                            .saturating_add(usize::from(*from != shorter[column - 1]))
+                    } else { outside };
+                    insert.min(delete).min(replace).min(outside)
+                };
+                current[column - start] = distance;
+                row_min = row_min.min(distance);
+            }
+            if row_min > limit { return Ok(Value::Integer(-1)); }
+            std::mem::swap(&mut previous, &mut current);
+            previous_start = start;
+            previous_end = end;
+        }
+        let distance = previous[shorter.len() - previous_start];
+        if distance > limit { return Ok(Value::Integer(-1)); }
+        return i64::try_from(distance).map(Value::Integer)
+            .map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()));
     }
     let limit = threshold.unwrap_or(usize::MAX);
     let outside = limit.saturating_add(1);
@@ -306,5 +365,85 @@ mod shared_unicode_edge_streaming_tests {
                 Value::Text(left.into()), Value::Text(right.into())
             ]).unwrap(), Value::Integer(expected));
         }
+    }
+}
+
+#[cfg(test)]
+mod levenshtein_borrowed_ascii_tests {
+    use super::*;
+
+    fn distance(a: &str, b: &str, threshold: Option<i64>) -> Result<Value> {
+        let mut args = vec![Value::Text(a.into()), Value::Text(b.into())];
+        if let Some(threshold) = threshold { args.push(Value::Integer(threshold)); }
+        evaluate(&args)
+    }
+
+    #[test]
+    fn byte_slice_dp_matches_unicode_scalar_dp() {
+        for (a, b, expected) in [
+            ("kitten", "sitting", 3),
+            ("aaaaabc", "aaaaaxc", 1),
+            ("abc", "cab", 2),
+            ("abc", "abc", 0),
+            ("", "abc", 3),
+            ("a🙂b", "a🙂c", 1),
+            ("café", "cafe", 1),
+            ("é🙂é", "éXé", 1),
+        ] {
+            assert_eq!(distance(a, b, None).unwrap(), Value::Integer(expected));
+            assert_eq!(distance(a, b, Some(expected)).unwrap(),
+                Value::Integer(expected));
+            if expected > 0 {
+                assert_eq!(distance(a, b, Some(expected - 1)).unwrap(),
+                    Value::Integer(-1));
+            }
+        }
+    }
+
+    #[test]
+    fn huge_matching_ascii_edges_only_process_the_trimmed_middle() {
+        let prefix = "a".repeat(100_000);
+        let left = format!("{prefix}X{prefix}");
+        let right = format!("{prefix}Y{prefix}");
+        assert_eq!(distance(&left, &right, Some(1)).unwrap(), Value::Integer(1));
+        assert_eq!(distance(&left, &right, Some(0)).unwrap(), Value::Integer(-1));
+    }
+}
+
+#[cfg(test)]
+mod narrow_banded_levenshtein_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_unicode_distances_match_unbounded_reference() {
+        let samples = ["", "a", "b", "ab", "ba", "aaa", "aab", "界a",
+            "a界", "界🙂", "🙂界", "kitten", "sitting"];
+        for first in samples {
+            for second in samples {
+                let exact = evaluate(&[
+                    Value::Text(first.into()), Value::Text(second.into())
+                ]).unwrap();
+                let Value::Integer(distance) = exact else { panic!("distance expected"); };
+                for limit in 0..=5 {
+                    let actual = evaluate(&[
+                        Value::Text(first.into()), Value::Text(second.into()),
+                        Value::Integer(limit),
+                    ]).unwrap();
+                    assert_eq!(actual, Value::Integer(
+                        if distance <= limit { distance } else { -1 }
+                    ), "first={first:?} second={second:?} limit={limit}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_shifted_strings_fit_in_tiny_edit_band() {
+        let left = Value::Text("ab".repeat(20_000));
+        let right = Value::Text("ba".repeat(20_000));
+        assert_eq!(evaluate(&[left.clone(), right.clone(), Value::Integer(2)]).unwrap(),
+            Value::Integer(2));
+        assert_eq!(evaluate(&[left, right, Value::Integer(1)]).unwrap(),
+            Value::Integer(-1));
     }
 }

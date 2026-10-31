@@ -10,15 +10,24 @@ fn output(types: &[DataType]) -> Result<DataType> {
     }
 }
 
-fn lower_hex<B: AsRef<[u8]>>(digest: B) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let bytes = digest.as_ref();
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 15)]));
+const LOWER_HEX_PAIRS: [[u8; 2]; 256] = {
+    let digits = b"0123456789abcdef";
+    let mut pairs = [[0_u8; 2]; 256];
+    let mut index = 0;
+    while index < 256 {
+        pairs[index] = [digits[index >> 4], digits[index & 15]];
+        index += 1;
     }
-    output
+    pairs
+};
+
+fn lower_hex<B: AsRef<[u8]>>(digest: B) -> String {
+    let bytes = digest.as_ref();
+    let mut output = Vec::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.extend_from_slice(&LOWER_HEX_PAIRS[usize::from(byte)]);
+    }
+    String::from_utf8(output).expect("hex pairs contain only ASCII")
 }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
@@ -77,5 +86,32 @@ mod tests {
             vec![Value::Text("529bc3b07127ecb7e53a4dcf1991d9152c24537d919178022b2c42657f79a26b".into())],
             vec![Value::Null],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod sha2_hex_pair_encoding_regressions {
+    use super::*;
+
+    #[test]
+    fn all_digest_widths_match_reference_character_formatting() {
+        let source = "é🙂row".repeat(257);
+        for bits in [224, 256, 384, 512] {
+            let digest = match bits {
+                224 => Sha224::digest(source.as_bytes()).to_vec(),
+                256 => Sha256::digest(source.as_bytes()).to_vec(),
+                384 => Sha384::digest(source.as_bytes()).to_vec(),
+                512 => Sha512::digest(source.as_bytes()).to_vec(),
+                _ => unreachable!(),
+            };
+            let expected = digest.iter().map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(lower_hex(&digest), expected);
+            assert_eq!(evaluate(&[Value::Text(source.clone()), Value::Integer(bits)]).unwrap(),
+                Value::Text(expected));
+        }
+        assert_eq!(evaluate(&[Value::Text("abc".into()), Value::Integer(0)]).unwrap(),
+            evaluate(&[Value::Text("abc".into()), Value::Integer(256)]).unwrap());
+        assert_eq!(evaluate(&[Value::Null, Value::Integer(256)]).unwrap(), Value::Null);
     }
 }
