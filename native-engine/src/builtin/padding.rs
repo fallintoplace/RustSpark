@@ -23,7 +23,7 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         value
     } else { " " };
     let ascii = text.is_ascii();
-    let size = if ascii { text.len() } else { text.chars().count() };
+    let size = super::char_length::character_count(text);
     if size >= target {
         if ascii { return Ok(Value::Text(text[..target].to_owned())); }
         return Ok(Value::Text(text.chars().take(target).collect()));
