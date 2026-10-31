@@ -15,7 +15,8 @@ fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
 pub struct RowBatcher<I> {
     input: I,
     schema: Schema,
-    batch_rows: usize,
+    row_width: usize,
+    row_limit: usize,
     pending_error: Option<Error>,
     pending_row: Option<Vec<Value>>,
     max_batch_bytes: usize,
@@ -37,8 +38,11 @@ where I: Iterator<Item = Result<Vec<Value>>>
         if batch_rows == 0 || max_batch_bytes == 0 || minimum > max_batch_bytes {
             return Err(Error::Execution("invalid row batch size or byte budget".into()));
         }
+        let row_width = minimum.max(1);
+        let row_limit = batch_rows.min(65_536)
+            .min((max_batch_bytes / row_width).max(1));
         Ok(Self {
-            input, schema, batch_rows, pending_error: None,
+            input, schema, row_width, row_limit, pending_error: None,
             pending_row: None, max_batch_bytes, finished: false,
         })
     }
@@ -56,10 +60,8 @@ where I: Iterator<Item = Result<Vec<Value>>>
             return Some(Err(error));
         }
 
-        let row_width = self.schema.len().saturating_mul(std::mem::size_of::<Value>())
-            .max(1);
-        let limit = self.batch_rows.min(65_536)
-            .min((self.max_batch_bytes / row_width).max(1));
+        let row_width = self.row_width;
+        let limit = self.row_limit;
         let mut retained_bytes = 0usize;
         // Exact or bounded iterators often have far fewer rows remaining than
         // the requested batch size. Avoid reserving tens of thousands of slots
@@ -428,5 +430,32 @@ mod trusted_stream_finalize_regressions {
         assert_eq!(batch.value(1, 1).unwrap(), &Value::Null);
         assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod precomputed_row_batch_limits_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn repeated_batches_keep_exact_row_and_byte_boundaries() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, false)]).unwrap();
+        let width = std::mem::size_of::<Value>();
+        let batches = RowBatcher::with_byte_budget(
+            (0..10).map(|i| Ok(vec![Value::Integer(i)])),
+            schema.clone(), 100, 3 * width,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [3, 3, 3, 1]);
+        assert_eq!(batches.last().unwrap().row(0).unwrap(), vec![Value::Integer(9)]);
+
+        let zero_width = Schema::new(vec![]).unwrap();
+        let parts = RowBatcher::with_byte_budget(
+            (0..3).map(|_| Ok(vec![])), zero_width, 10, 1,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(parts.iter().map(Batch::num_rows).collect::<Vec<_>>(), [1, 1, 1]);
+        assert!(RowBatcher::with_byte_budget(
+            std::iter::empty(), schema, 10, width - 1,
+        ).is_err());
     }
 }
