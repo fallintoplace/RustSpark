@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 fn normalized_name(name: &str) -> Cow<'_, str> {
     if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
@@ -50,8 +50,10 @@ impl Field {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schema {
-    fields: Vec<Field>,
-    indices: HashMap<String, usize>,
+    // Schemas are immutable after construction and are cloned for most batches.
+    // Share metadata instead of copying every field name and lookup entry.
+    fields: Arc<[Field]>,
+    indices: Arc<HashMap<String, usize>>,
 }
 
 impl Schema {
@@ -65,11 +67,11 @@ impl Schema {
                 return Err(Error::Schema(format!("duplicate column: {}", field.name)));
             }
         }
-        Ok(Self { fields, indices })
+        Ok(Self { fields: fields.into(), indices: Arc::new(indices) })
     }
 
     pub fn fields(&self) -> &[Field] {
-        &self.fields
+        self.fields.as_ref()
     }
 
     pub fn len(&self) -> usize {
@@ -164,5 +166,25 @@ mod column_index_perf_tests {
             Field::new("ID", DataType::Integer, true),
             Field::new("id", DataType::Integer, true),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shared_schema_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn batch_schema_clones_share_immutable_metadata() {
+        let schema = Schema::new((0..1024)
+            .map(|i| Field::new(format!("LongColumnName_{i}"), DataType::Text, true))
+            .collect()).unwrap();
+        let copy = schema.clone();
+        assert!(Arc::ptr_eq(&schema.fields, &copy.fields));
+        assert!(Arc::ptr_eq(&schema.indices, &copy.indices));
+        assert_eq!(schema, copy);
+        for i in [0, 1, 37, 1023] {
+            assert_eq!(copy.column(&format!("LONGCOLUMNNAME_{i}")).unwrap(), i);
+        }
+        assert!(copy.column("missing").is_err());
     }
 }
