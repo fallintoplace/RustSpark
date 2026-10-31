@@ -82,12 +82,18 @@ def compare(baseline, candidate, max_regression=0.20):
     comparisons = []
     for number in sorted(old):
         ratio = new[number] / old[number]
+        speedup = old[number] / new[number]
+        # Valid finite timings can still overflow a floating-point ratio.
+        # Never emit Infinity or a rounded-to-zero ratio as benchmark evidence.
+        if (not math.isfinite(ratio) or ratio <= 0
+                or not math.isfinite(speedup) or speedup <= 0):
+            raise ValueError(f"Query {number} latency ratio exceeds floating-point range")
         comparisons.append({
             "id": number,
             "baseline_ms": old[number],
             "candidate_ms": new[number],
             "delta_ms": round(new[number] - old[number], 3),
-            "speedup": round(old[number] / new[number], 4),
+            "speedup": round(speedup, 4),
             "ratio": round(ratio, 4),
             "regression": ratio > 1 + max_regression,
         })
