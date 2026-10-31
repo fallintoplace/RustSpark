@@ -159,6 +159,11 @@ func decodeUniqueValue(decoder *json.Decoder, depth int) (any, error) {
     }
     token, err := decoder.Token()
     if err != nil { return nil, err }
+    if number, ok := token.(json.Number); ok && strings.ContainsAny(string(number), ".eE") {
+        if _, err := strconv.ParseFloat(string(number), 64); err != nil {
+            return nil, fmt.Errorf("nonfinite RustSpark JSON number %q: %w", number, err)
+        }
+    }
     delim, isDelim := token.(json.Delim)
     if !isDelim { return token, nil }
     switch delim {
