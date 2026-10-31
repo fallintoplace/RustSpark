@@ -64,6 +64,8 @@ class PolarsCommandTests(unittest.TestCase):
             with rustspark_lazy_frame("SELECT 1", process_timeout=3) as frame:
                 self.assertEqual(frame, "lazy frame")
             self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
             run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
             with self.assertRaisesRegex(RuntimeError, "process timeout"):
                 with rustspark_lazy_frame("SELECT 1", process_timeout=3):
