@@ -260,8 +260,9 @@ class StreamingPythonQueryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "fake-rustspark"
             script.write_text(
-                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"id\\\":9223372036854775807}' "
-                "'{\\\"id\\\":2}'\\n",
+                """#!/bin/sh
+printf '%s\\n' '{"id":9223372036854775807}' '{"id":2}'
+""",
                 encoding="utf-8",
             )
             script.chmod(0o700)
@@ -276,14 +277,18 @@ class StreamingPythonQueryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "fake-rustspark"
             script.write_text(
-                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"x\\\":1,\\\"x\\\":2}'\\n",
+                """#!/bin/sh
+printf '%s\\n' '{"x":1,"x":2}'
+""",
                 encoding="utf-8",
             )
             script.chmod(0o700)
             with self.assertRaisesRegex(RustSparkError, "Invalid"):
                 list(RustSpark(binary=str(script)).iter_rows("SELECT 1"))
             script.write_text(
-                "#!/bin/sh\\nprintf '%s\\\\n' '{\\\"x\\\":123456789}'\\n",
+                """#!/bin/sh
+printf '%s\\n' '{"x":123456789}'
+""",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(RustSparkError, "max_row_bytes"):
