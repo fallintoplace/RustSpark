@@ -71,6 +71,18 @@ class DuplicateResultKeysTests(unittest.TestCase):
 
 
 class BoundedMcpBackendTests(unittest.TestCase):
+    def test_rejects_nonfinite_or_noninteger_budgets_before_spawn(self):
+        from bounded_backend import run_bounded
+        import sys
+
+        command = [sys.executable, "-c", "print('ok')"]
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0, -1, True, "1"):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded(command, timeout=timeout, max_bytes=100)
+        for max_bytes in (float("nan"), float("inf"), 0, -1, True, 1.5, "100"):
+            with self.subTest(max_bytes=max_bytes), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded(command, timeout=1, max_bytes=max_bytes)
+
     def test_output_is_bounded_without_buffering_unlimited_backend_data(self):
         import subprocess
         import sys
