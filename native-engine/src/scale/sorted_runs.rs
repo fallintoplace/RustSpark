@@ -58,7 +58,8 @@ fn flush_pending_run(
     let input = crate::batch_utils::concat(
         schema, std::mem::take(pending), max_rows_per_run,
     )?;
-    let sorted = sort::sort_range(&input, keys, 0, input.num_rows())?;
+    // Move validated row payloads through the sort instead of cloning TEXT values.
+    let sorted = sort::sort_owned(input, keys)?;
     *pending_rows = 0;
     let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
     let filename = format!("rustspark-sort-{}-{id}.rspill", std::process::id());
