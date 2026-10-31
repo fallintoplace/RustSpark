@@ -130,6 +130,15 @@ impl BloomFilter {
         if self.bits != other.bits || self.hashes != other.hashes {
             return Err(Error::Execution("cannot merge incompatible Bloom filters".into()));
         }
+        // An unpopulated filter has no set bits. Avoid visiting large
+        // bitsets for the common case of an empty build-side partition.
+        if !other.populated { return Ok(()); }
+        if !self.populated {
+            self.words.copy_from_slice(&other.words);
+            self.occupied_bits = other.occupied_bits;
+            self.populated = true;
+            return Ok(());
+        }
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
             let before = *destination;
             *destination |= *source;
@@ -167,6 +176,13 @@ impl BloomFilter {
     pub fn intersect_with(&mut self, other: &Self) -> Result<()> {
         if self.bits != other.bits || self.hashes != other.hashes {
             return Err(Error::Execution("cannot intersect incompatible Bloom filters".into()));
+        }
+        if !self.populated { return Ok(()); }
+        if !other.populated {
+            self.words.fill(0);
+            self.occupied_bits = 0;
+            self.populated = false;
+            return Ok(());
         }
         for (destination, source) in self.words.iter_mut().zip(&other.words) {
             let before = *destination;
@@ -390,6 +406,36 @@ mod single_hash_double_probing_tests {
         assert_eq!(step & 1, 1);
         for seed in 0..7 {
             assert!(filter.probe(first, step, seed) < 65_536);
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_bloom_set_operation_shortcuts {
+    use super::*;
+
+    #[test]
+    fn empty_merges_match_reference_across_large_and_tail_bitsets() {
+        for bits in [65usize, 65_536, 1 << 20] {
+            let mut full = BloomFilter::new(bits, 7).unwrap();
+            let empty = BloomFilter::new(bits, 7).unwrap();
+            for n in 0..100 { full.insert(&Value::Integer(n)); }
+            let expected = full.clone();
+            full.union_with(&empty).unwrap();
+            assert_eq!(full.words, expected.words);
+            assert_eq!(full.bits_set(), expected.bits_set());
+            let mut combined = empty.clone();
+            combined.union_with(&full).unwrap();
+            assert_eq!(combined.words, full.words);
+            assert_eq!(combined.bits_set(), full.bits_set());
+            assert!(combined.might_contain(&Value::Integer(50)));
+            combined.intersect_with(&empty).unwrap();
+            assert_eq!(combined.bits_set(), 0);
+            assert!(!combined.might_contain(&Value::Integer(50)));
+            combined.intersect_with(&full).unwrap();
+            assert_eq!(combined.bits_set(), 0);
+            combined.insert(&Value::Integer(51));
+            assert!(combined.might_contain(&Value::Integer(51)));
         }
     }
 }
