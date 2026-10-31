@@ -38,8 +38,11 @@ fn decode_hex_digit(byte: u8) -> Result<u8> {
 
 fn unhex_utf8(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    if text.len() % 2 != 0 || text.len() > MAX_INPUT_BYTES * 2 {
-        return Err(Error::Parse("UNHEX_UTF8 requires bounded even-length hexadecimal text".into()));
+    if text.len() > MAX_INPUT_BYTES * 2 {
+        return Err(Error::Execution("UNHEX_UTF8 input exceeds byte budget".into()));
+    }
+    if text.len() % 2 != 0 {
+        return Err(Error::Parse("UNHEX_UTF8 requires even-length hexadecimal text".into()));
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);
     for pair in text.as_bytes().chunks_exact(2) {
@@ -117,6 +120,10 @@ mod try_unhex_utf8_extension_tests {
         assert_eq!(try_unhex_utf8(&[Value::Text("FF".into())]).unwrap(), Value::Null);
         assert_eq!(try_unhex_utf8(&[Value::Text("GG".into())]).unwrap(), Value::Null);
         assert_eq!(try_unhex_utf8(&[Value::Null]).unwrap(), Value::Null);
+        assert!(matches!(
+            try_unhex_utf8(&[Value::Text("00".repeat(MAX_INPUT_BYTES + 1))]),
+            Err(Error::Execution(_)),
+        ));
     }
 }
 
