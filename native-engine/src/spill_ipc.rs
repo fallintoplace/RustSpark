@@ -33,7 +33,7 @@ impl SpillFile {
         Ok(SpillReader {
             inner,
             failed: false,
-            owner: Arc::clone(&self.owner),
+            _owner: Arc::clone(&self.owner),
         })
     }
 }
@@ -42,7 +42,7 @@ pub struct SpillReader {
     // Drop the open file before the last ownership token can delete it.
     inner: FileReader<File>,
     failed: bool,
-    owner: Arc<SpillPath>,
+    _owner: Arc<SpillPath>,
 }
 
 impl Iterator for SpillReader {
