@@ -7,9 +7,10 @@ import os
 import time
 import socket
 import threading
+import urllib.request
 from http.server import HTTPServer
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler, BoundedThreadingHTTPServer
 
 
 class GatewayTests(unittest.TestCase):
@@ -173,3 +174,61 @@ class RequestFramingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BoundedGatewayConcurrencyTests(unittest.TestCase):
+    def test_slow_partial_body_does_not_block_health_and_times_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queries = Path(directory)
+            (queries / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            handler = make_handler(
+                secret="secret-token-" * 3, queries=queries, database=queries,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+                read_timeout=0.3,
+            )
+            server = BoundedThreadingHTTPServer(("127.0.0.1", 0), handler, max_clients=2)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(server.server_address, timeout=2) as connection:
+                    connection.settimeout(2)
+                    connection.sendall(
+                        b"POST /v1/query/safe HTTP/1.1\r\nHost: localhost\r\n"
+                        b"Authorization: Bearer " + b"secret-token-" * 3 +
+                        b"\r\nContent-Type: application/json\r\n"
+                        b"Content-Length: 100\r\n\r\n{}"
+                    )
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{server.server_port}/healthz", timeout=2,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                    self.assertIn(b"408", connection.recv(4096).split(b"\r\n", 1)[0])
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+    def test_connection_limit_returns_503_without_starting_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queries = Path(directory)
+            (queries / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            handler = make_handler(
+                secret="secret-token-" * 3, queries=queries, database=queries,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+                read_timeout=1.0,
+            )
+            server = BoundedThreadingHTTPServer(("127.0.0.1", 0), handler, max_clients=1)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(server.server_address, timeout=2) as slow:
+                    slow.sendall(b"POST /v1/query/safe HTTP/1.1\r\nHost: localhost\r\n")
+                    # Wait until the slow request occupies the only worker.
+                    time.sleep(0.1)
+                    with socket.create_connection(server.server_address, timeout=2) as other:
+                        other.settimeout(2)
+                        other.sendall(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                        self.assertIn(b"503", other.recv(4096).split(b"\r\n", 1)[0])
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
