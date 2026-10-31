@@ -144,6 +144,18 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     return Some(Err(error));
                 }
             };
+            // All zero-column rows are the same key. Keep just the first row,
+            // with the same 64-byte key footprint and admission checks.
+            if batch.schema().is_empty() {
+                if self.unique_keys != 0 { continue; }
+                if self.max_keys == 0 || self.max_bytes < 64 {
+                    self.stopped = true;
+                    return Some(Err(Error::Execution("UNION DISTINCT memory budget exceeded".into())));
+                }
+                self.unique_keys = 1;
+                self.retained_bytes = 64;
+                return Some(batch.slice_rows(0, 1));
+            }
             // Probe hash buckets using references to column values. Only first
             // occurrences are materialized as owned keys.
             let columns = match (0..batch.schema().len())
@@ -354,5 +366,26 @@ mod union_borrowed_row_probe_perf_tests {
             schema, QueryControl::default(), 3, 32 * 1024).unwrap()
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(output.into_iter().flat_map(|b| b.rows().unwrap()).count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod zero_column_stream_union_fast_path_tests {
+    use super::*;
+    #[test]
+    fn emits_one_zero_width_row_across_large_stream_batches() {
+        let schema = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 100_000).unwrap();
+        let right = Batch::new_with_row_count(schema.clone(), vec![], 200_000).unwrap();
+        let output = UnionDistinctStream::new(
+            [Ok(left)].into_iter(), [Ok(right)].into_iter(),
+            schema.clone(), QueryControl::default(), 1, 64).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(output.iter().map(Batch::num_rows).sum::<usize>(), 1);
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        let mut limited = UnionDistinctStream::new([Ok(left)].into_iter(),
+            std::iter::empty(), schema, QueryControl::default(), 1, 63).unwrap();
+        assert!(limited.next().unwrap().is_err());
+        assert!(limited.next().is_none());
     }
 }
