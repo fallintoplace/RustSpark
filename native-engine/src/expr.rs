@@ -45,6 +45,19 @@ pub enum Expr {
     InList { needle: Box<Expr>, choices: Vec<Expr>, negated: bool },
 }
 
+// Borrow scalar operands whose original lifetimes cover this row evaluation.
+fn borrowed_like_operand<'a>(
+    expr: &'a Expr, batch: &'a Batch, row: usize,
+) -> Result<Cow<'a, Value>> {
+    match expr {
+        Expr::Column(name) => Ok(Cow::Borrowed(
+            batch.value(row, batch.schema().column(name)?)?
+        )),
+        Expr::Literal(value) => Ok(Cow::Borrowed(value)),
+        expr => Ok(Cow::Owned(expr.evaluate(batch, row)?)),
+    }
+}
+
 impl Expr {
     pub fn binary(left: Self, op: BinaryOp, right: Self) -> Self {
         Self::Binary {
@@ -235,20 +248,11 @@ impl Expr {
             Self::Like { value, pattern, escape } => {
                 // LIKE only reads its operands. Avoid cloning long input TEXT,
                 // patterns and ESCAPE literals for every row.
-                let borrowed = |expr: &Expr| -> Result<Cow<'_, Value>> {
-                    match expr {
-                        Expr::Column(name) => Ok(Cow::Borrowed(
-                            batch.value(row, batch.schema().column(name)?)?
-                        )),
-                        Expr::Literal(value) => Ok(Cow::Borrowed(value)),
-                        expr => Ok(Cow::Owned(expr.evaluate(batch, row)?)),
-                    }
-                };
-                let value = borrowed(value)?;
-                let pattern = borrowed(pattern)?;
+                let value = borrowed_like_operand(value, batch, row)?;
+                let pattern = borrowed_like_operand(pattern, batch, row)?;
                 let escaped = match escape {
                     None => Cow::Owned(Value::Text("\\".into())),
-                    Some(expr) => borrowed(expr)?,
+                    Some(expr) => borrowed_like_operand(expr, batch, row)?,
                 };
                 match (value.as_ref(), pattern.as_ref(), escaped.as_ref()) {
                     (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) =>
