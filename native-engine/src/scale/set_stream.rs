@@ -149,15 +149,31 @@ impl SetStream {
                 if self.right_counts.contains_key(row) || self.emitted.contains(row) {
                     false
                 } else {
-                    let bytes = super::row_footprint::footprint(row.iter());
-                    let next = self.retained_bytes.checked_add(bytes)
-                        .filter(|total| *total <= self.max_bytes);
-                    if self.emitted.len().saturating_add(self.right_counts.len()) >= self.max_keys ||
-                        next.is_none() {
+                    if self.emitted.len().saturating_add(self.right_counts.len()) >= self.max_keys {
                         return Err(Error::Execution("stream set memory budget exceeded".into()));
                     }
-                    self.retained_bytes = next.expect("checked set budget");
-                    self.emitted.insert(row.to_vec());
+                    // The retained key is a clone. Input TEXT capacity can
+                    // be much larger than the clone's allocation. First
+                    // reject impossible values without cloning the row.
+                    let minimum = row.iter().fold(
+                        64usize.saturating_add(row.len().saturating_mul(
+                            std::mem::size_of::<Value>())),
+                        |bytes, value| match value {
+                            Value::Text(text) => bytes.saturating_add(text.len()),
+                            _ => bytes,
+                        },
+                    );
+                    if self.retained_bytes.checked_add(minimum)
+                        .is_none_or(|total| total > self.max_bytes) {
+                        return Err(Error::Execution("stream set memory budget exceeded".into()));
+                    }
+                    let key = row.to_vec();
+                    let bytes = super::row_footprint::footprint(key.iter());
+                    let next = self.retained_bytes.checked_add(bytes)
+                        .filter(|total| *total <= self.max_bytes)
+                        .ok_or_else(|| Error::Execution("stream set memory budget exceeded".into()))?;
+                    self.retained_bytes = next;
+                    self.emitted.insert(key);
                     true
                 }
             }
@@ -546,6 +562,53 @@ mod exhausted_intersect_short_circuit_regressions {
             QueryControl::default(), 100, 4096,
         ).unwrap();
         assert_eq!(stream.next().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(17)]);
+        assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod except_distinct_compact_key_admission_tests {
+    use super::*;
+
+    #[test]
+    fn overallocated_left_text_does_not_exhaust_hash_set_key_budget() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let mut text = String::with_capacity(16_384);
+        text.push_str("small");
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(text)],
+            vec![Value::Text("small".into())],
+            vec![Value::Text("second".into())],
+        ]).unwrap();
+        let stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new(std::iter::empty()), schema.clone(), schema,
+            SetMode::ExceptDistinct, QueryControl::default(), 2, 256,
+        ).unwrap();
+        let rows = stream.collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Text("small".into())],
+            vec![Value::Text("second".into())],
+        ]);
+    }
+
+    #[test]
+    fn oversized_real_key_still_errors_after_valid_prefix() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("good".into())],
+            vec![Value::Text("x".repeat(2048))],
+        ]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new(std::iter::empty()), schema.clone(), schema,
+            SetMode::ExceptDistinct, QueryControl::default(), 2, 256,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("good".into())]]);
+        assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
         assert!(stream.next().is_none());
     }
 }

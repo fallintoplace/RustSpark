@@ -159,6 +159,11 @@ impl DictionaryColumn {
         if left.dictionary.len() > max_distinct || left.encoded_string_bytes > max_dictionary_bytes {
             return Err(Error::Execution("left dictionary exceeds merge budget".into()));
         }
+        // The left indices are copied unchanged in both merge paths. Validate
+        // them before publishing an invalid combined dictionary.
+        if left.indices.iter().flatten().any(|&code| code as usize >= left.dictionary.len()) {
+            return Err(Error::Execution("invalid left dictionary code".into()));
+        }
         // Shuffle partitions often retain the same dictionary across batches.
         // Equal tables have identical codes, so no hash map, remapping, or
         // copying of potentially large immutable strings is needed.
@@ -469,5 +474,31 @@ mod single_key_decode_accounting_tests {
         let mut corrupted = dictionary.clone();
         corrupted.indices[2] = Some(15);
         assert!(corrupted.decode_with_budget(required + 100).is_err());
+    }
+}
+
+#[cfg(test)]
+mod invalid_left_dictionary_merge_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn rejects_corrupt_left_codes_in_shared_and_remapped_tables() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let build = |text: &str| {
+            DictionaryColumn::from_batch(&Batch::from_rows(
+                schema.clone(), vec![vec![Value::Text(text.into())]],
+            ).unwrap(), "text", 8, 4096, 8).unwrap()
+        };
+        let mut corrupted = build("left");
+        corrupted.indices[0] = Some(17);
+        let same = build("left");
+        let different = build("right");
+        assert!(DictionaryColumn::concatenate(&corrupted, &same, 8, 4096, 8).is_err());
+        assert!(DictionaryColumn::concatenate(&corrupted, &different, 8, 4096, 8).is_err());
+        let merged = DictionaryColumn::concatenate(&same, &different, 8, 4096, 8).unwrap();
+        assert_eq!(merged.decode().unwrap(), vec![
+            Value::Text("left".into()), Value::Text("right".into())
+        ]);
     }
 }

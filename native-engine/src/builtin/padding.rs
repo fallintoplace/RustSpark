@@ -204,7 +204,7 @@ mod unicode_padding_run_regressions {
     fn bulk_unicode_patterns_match_character_cycle() {
         let source = "中";
         let pattern = "é🙂界";
-        for target in [0, 1, 2, 3, 4, 5, 7, 10, 32, 255] {
+        for target in [0usize, 1, 2, 3, 4, 5, 7, 10, 32, 255] {
             let extra = target.saturating_sub(1usize);
             let padding: String = pattern.chars().cycle().take(extra).collect();
             let left = format!("{padding}{source}");
