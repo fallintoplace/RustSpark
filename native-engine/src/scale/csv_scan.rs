@@ -84,7 +84,14 @@ impl<R: BufRead> CsvRows<R> {
         let Some(row) = records.into_iter().next() else { return Ok(None); };
         let values = row.into_iter().zip(self.schema.fields())
             .map(|(value, field)| {
-                if value.is_empty() { return Ok(Value::Null); }
+                if value.is_empty() {
+                    if !field.nullable {
+                        return Err(Error::Type(format!(
+                            "NULL in required column {}", field.name
+                        )));
+                    }
+                    return Ok(Value::Null);
+                }
                 match field.data_type {
                     DataType::Text => Ok(Value::Text(value)),
                     DataType::Boolean => {
@@ -225,5 +232,32 @@ mod crlf_fast_scan_tests {
         let rows = CsvRows::new(Cursor::new("id\r1\r2\r"), schema, 16).unwrap()
             .collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod streamed_required_csv_column_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::io::Cursor;
+
+    #[test]
+    fn direct_csv_row_stream_rejects_missing_required_values() {
+        let required = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, false),
+        ]).unwrap();
+        for input in ["id,note\n1,\n", "id,note\n,hello\n"] {
+            let mut stream = CsvRows::new(Cursor::new(input), required.clone(), 128).unwrap();
+            assert!(stream.next().unwrap().unwrap_err().to_string().contains("required"));
+            assert!(stream.next().is_none());
+        }
+        let nullable = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap();
+        let values = CsvRows::new(Cursor::new("id,note\n1,\n"), nullable, 128)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(values, vec![vec![Value::Integer(1), Value::Null]]);
     }
 }

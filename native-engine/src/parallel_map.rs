@@ -1,6 +1,6 @@
 //! Bounded worker execution for independent native partitions.
 use std::{panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Mutex, atomic::{AtomicBool, Ordering}}};
+    sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}}};
 use crate::{batch::Batch, Error, Result};
 
 const MAX_OS_WORKERS: usize = 256;
@@ -30,8 +30,10 @@ where
     }
     let tasks = Mutex::new(input.into_iter().enumerate());
     let failed = AtomicBool::new(false);
-    let output: Mutex<Vec<Option<Result<Batch>>>> =
-        Mutex::new(std::iter::repeat_with(|| None).take(count).collect());
+    // Each task has a unique index, so results can be published without a
+    // contended global output mutex.
+    let output: Vec<OnceLock<Result<Batch>>> =
+        std::iter::repeat_with(OnceLock::new).take(count).collect();
     std::thread::scope(|scope| {
         for _ in 0..worker_count(count, max_workers) {
             let tasks = &tasks;
@@ -45,19 +47,18 @@ where
                 let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                     .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
                 if result.is_err() { failed.store(true, Ordering::Release); }
-                output.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(result);
+                let _ = output[index].set(result);
             });
         }
     });
-    let output = output.into_inner().unwrap_or_else(|e| e.into_inner());
     // A cancelled task may precede the failed task in input order.
     // Return the actual operator error instead of a missing-result error.
-    if let Some(error) = output.iter().filter_map(Option::as_ref)
+    if let Some(error) = output.iter().filter_map(OnceLock::get)
         .find_map(|result| result.as_ref().err()) {
         return Err(error.clone());
     }
     output.into_iter()
-        .map(|result| result.unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
+        .map(|slot| slot.into_inner().unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
         .collect()
 }
 
@@ -215,5 +216,34 @@ mod native_cancellable_parallel_worker_tests {
             Ok(batch)
         });
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod contention_free_result_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn many_partitions_publish_exactly_once_in_input_order() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let input = (0..1024).map(|i| {
+            Batch::from_rows(
+                crate::schema::Schema::new(vec![crate::schema::Field::new(
+                    "id", crate::schema::DataType::Integer, false
+                )]).unwrap(),
+                vec![vec![crate::scalar::Value::Integer(i)]],
+            ).unwrap()
+        }).collect();
+        let result = map_partitions(input, 32, move |batch| {
+            called.fetch_add(1, Ordering::Relaxed);
+            Ok(batch)
+        }).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1024);
+        assert_eq!(result.len(), 1024);
+        for (i, batch) in result.iter().enumerate() {
+            assert_eq!(batch.value(0, 0).unwrap(), &crate::scalar::Value::Integer(i as i64));
+        }
     }
 }

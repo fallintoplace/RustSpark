@@ -63,6 +63,7 @@ impl SetStream {
     ) -> Result<Self> {
         let output_schema = set_schema(&left_schema, &right_schema)?;
         let mut right_counts: HashMap<Vec<Value>, usize> = HashMap::new();
+        let track_multiplicity = matches!(mode, SetMode::IntersectAll | SetMode::ExceptAll);
         let mut retained_bytes = 0usize;
         // Bounded materialization of right-hand distinct keys, not its row count.
         for batch in right {
@@ -77,9 +78,13 @@ impl SetStream {
                 let at_limit = right_counts.len() >= max_keys;
                 match right_counts.entry(values) {
                     Entry::Occupied(mut entry) => {
-                        let next = entry.get().checked_add(1)
-                            .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
-                        *entry.get_mut() = next;
+                        // DISTINCT modes need membership only. Repeated right-side
+                        // keys do not require a counter update or overflow check.
+                        if track_multiplicity {
+                            let next = entry.get().checked_add(1)
+                                .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
+                            *entry.get_mut() = next;
+                        }
                     }
                     Entry::Vacant(entry) => {
                         let bytes = super::row_footprint::footprint(entry.key().iter());
@@ -227,6 +232,35 @@ mod tests {
         assert_eq!(output.field(0).unwrap().data_type, DataType::Float);
         assert_eq!(set_schema(&integer, &Schema::new(vec![Field::new("v",
             DataType::Text, true)]).unwrap()).is_err(), true);
+    }
+}
+
+#[cfg(test)]
+mod distinct_right_membership_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_right_keys_use_membership_without_changing_sql_set_results() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            std::iter::repeat_n(vec![Value::Integer(1)], 10_000)
+                .chain(std::iter::once(vec![Value::Null])).collect()).unwrap();
+        let run = |mode| SetStream::new(
+            Box::new([Ok(left.clone())].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            schema.clone(), schema.clone(), mode,
+            QueryControl::default(), 10, 4096,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(run(SetMode::IntersectDistinct),
+            vec![vec![Value::Integer(1)], vec![Value::Null]]);
+        assert_eq!(run(SetMode::ExceptDistinct), vec![vec![Value::Integer(2)]]);
+        assert_eq!(run(SetMode::IntersectAll),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(1)], vec![Value::Null]]);
     }
 }
 

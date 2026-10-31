@@ -82,6 +82,11 @@ impl ColumnStatistics {
     }
 
     pub fn merge(&mut self, other: &Self) -> Result<()> {
+        // Combined counters can appear valid even when one input summary
+        // reports more NULLs than rows. Reject it before changing state.
+        if self.nulls > self.rows || other.nulls > other.rows {
+            return Err(Error::Execution("invalid NULL count".into()));
+        }
         let rows = self.rows.checked_add(other.rows)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
         let nulls = self.nulls.checked_add(other.nulls)
@@ -282,5 +287,30 @@ mod merged_batch_stats_fast_path_tests {
             expected.merge(&ColumnStatistics::from_batch(batch, "x").unwrap()).unwrap();
         }
         assert_eq!(ColumnStatistics::from_batches(&batches, "x").unwrap(), expected);
+    }
+}
+
+#[cfg(test)]
+mod invalid_input_summary_regressions {
+    use super::*;
+
+    #[test]
+    fn merge_rejects_invalid_individual_null_counts_without_mutation() {
+        let original = ColumnStatistics {
+            rows: 100, nulls: 0,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(9)),
+        };
+        let invalid = ColumnStatistics {
+            rows: 1, nulls: 2,
+            min: None, max: None,
+        };
+        let mut left = original.clone();
+        assert!(left.merge(&invalid).is_err());
+        assert_eq!(left, original);
+        // The aggregate NULL count would otherwise be <= the aggregate
+        // row count, concealing the impossible input summary.
+        let mut malformed = invalid.clone();
+        assert!(malformed.merge(&original).is_err());
+        assert_eq!(malformed, invalid);
     }
 }

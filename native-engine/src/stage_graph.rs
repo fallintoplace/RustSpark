@@ -15,6 +15,7 @@ pub struct StageGraph {
     order: Vec<u64>,
     order_indices: Vec<usize>,
     longest_chain: usize,
+    remaining_depth: HashMap<u64, usize>,
 }
 
 impl StageGraph {
@@ -43,9 +44,15 @@ impl StageGraph {
         let mut indegree = vec![0usize; stages.len()];
         let mut successors = vec![Vec::new(); stages.len()];
         for (position, stage) in stages.iter().enumerate() {
-            let mut seen = HashSet::new();
+            // Most distributed plans have unary stages or binary joins.
+            // Avoid a HashSet allocation for those common fan-ins.
+            if stage.dependencies.len() == 2 &&
+                stage.dependencies[0] == stage.dependencies[1] {
+                return Err(Error::Execution("duplicate stage dependency".into()));
+            }
+            let mut seen = (stage.dependencies.len() > 2).then(HashSet::new);
             for dep in &stage.dependencies {
-                if !seen.insert(*dep) {
+                if seen.as_mut().is_some_and(|keys| !keys.insert(*dep)) {
                     return Err(Error::Execution("duplicate stage dependency".into()));
                 }
                 let source = *index.get(dep)
@@ -78,7 +85,19 @@ impl StageGraph {
             return Err(Error::Execution("execution stage graph contains a cycle".into()));
         }
         let longest_chain = depth.into_iter().max().unwrap_or(0);
-        Ok(Self { stages, order, order_indices, longest_chain })
+        // Compute downstream chain lengths once while successor links are available.
+        // Scheduling repeatedly reads these priorities without rebuilding the graph.
+        let mut depth_to_leaf = vec![1usize; stages.len()];
+        for &position in order_indices.iter().rev() {
+            for &child in &successors[position] {
+                depth_to_leaf[position] = depth_to_leaf[position]
+                    .max(depth_to_leaf[child] + 1);
+            }
+        }
+        let remaining_depth = stages.iter().enumerate()
+            .map(|(position, stage)| (stage.id, depth_to_leaf[position]))
+            .collect();
+        Ok(Self { stages, order, order_indices, longest_chain, remaining_depth })
     }
 
     pub fn topological_order(&self) -> &[u64] {
@@ -102,23 +121,8 @@ impl StageGraph {
 
     /// Dependency-ready stages ordered by longest remaining downstream chain.
     pub fn ready_by_critical_path(&self, completed: &HashSet<u64>) -> Vec<u64> {
-        let mut successors = HashMap::<u64, Vec<u64>>::new();
-        for stage in &self.stages {
-            for &dependency in &stage.dependencies {
-                successors.entry(dependency).or_default().push(stage.id);
-            }
-        }
-        let mut depth = HashMap::<u64, usize>::new();
-        for &index in self.order_indices.iter().rev() {
-            let stage = &self.stages[index];
-            let children = successors.get(&stage.id)
-                .into_iter().flat_map(|children| children.iter());
-            let max_child = children.filter_map(|id| depth.get(id).copied())
-                .max().unwrap_or(0);
-            depth.insert(stage.id, max_child + 1);
-        }
         let mut ready = self.ready(completed);
-        ready.sort_by_key(|id| (std::cmp::Reverse(depth[id]), *id));
+        ready.sort_by_key(|id| (std::cmp::Reverse(self.remaining_depth[id]), *id));
         ready
     }
 
@@ -338,5 +342,56 @@ mod bounded_stage_partition_tasks_tests {
             (4, 0), (9, 0), (9, 1), (9, 2)
         ]);
         assert!(graph.ready_tasks(&HashSet::from([2, 4, 9]), 8).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod narrow_stage_dependencies_tests {
+    use super::*;
+
+    #[test]
+    fn long_unary_chain_is_valid_and_topologically_stable() {
+        let stages = (0..4096_u64).map(|id| Stage {
+            id, partitions: 1,
+            dependencies: if id == 0 { vec![] } else { vec![id - 1] },
+        }).collect();
+        let graph = StageGraph::new(stages).unwrap();
+        assert_eq!(graph.longest_dependency_chain(), 4096);
+        assert_eq!(graph.topological_order().len(), 4096);
+        assert_eq!(graph.ready(&HashSet::new()), vec![0]);
+    }
+
+    #[test]
+    fn binary_and_wide_duplicate_dependencies_are_rejected() {
+        for duplicates in [vec![0, 0], vec![0, 1, 0]] {
+            let mut stages = vec![
+                Stage { id: 0, dependencies: vec![], partitions: 1 },
+                Stage { id: 1, dependencies: vec![], partitions: 1 },
+            ];
+            stages.push(Stage { id: 2, dependencies: duplicates, partitions: 1 });
+            assert!(StageGraph::new(stages).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod cached_critical_path_priorities_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_scheduler_polls_keep_deepest_path_and_stable_ties() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 8, dependencies: vec![5], partitions: 1 },
+            Stage { id: 5, dependencies: vec![3], partitions: 1 },
+            Stage { id: 3, dependencies: vec![1], partitions: 1 },
+            Stage { id: 1, dependencies: vec![], partitions: 1 },
+            Stage { id: 2, dependencies: vec![], partitions: 1 },
+            Stage { id: 6, dependencies: vec![2], partitions: 1 },
+        ]).unwrap();
+        for _ in 0..32 {
+            assert_eq!(graph.ready_by_critical_path(&HashSet::new()), [1, 2]);
+            assert_eq!(graph.ready_by_critical_path(&HashSet::from([1, 2])), [3, 6]);
+            assert_eq!(graph.ready_by_critical_path(&HashSet::from([1, 2, 3])), [5, 6]);
+        }
     }
 }
