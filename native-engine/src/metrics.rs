@@ -23,7 +23,7 @@ pub struct Snapshot {
 
 fn charge(counter: &AtomicU64, amount: u64) -> Result<()> {
     if amount == 0 { return Ok(()); }
-    counter.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+    counter.try_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
         current.checked_add(amount)
     }).map_err(|_| Error::Execution("native query metric overflow".into()))?;
     Ok(())

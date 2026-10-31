@@ -2,6 +2,16 @@ use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 const MAX_INPUT_BYTES: usize = 1_000_000;
 const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+// Two output bytes per input byte, computed at compile time.
+const HEX_PAIRS: [[u8; 2]; 256] = {
+    let mut pairs = [[0; 2]; 256];
+    let mut index = 0;
+    while index < pairs.len() {
+        pairs[index] = [DIGITS[index >> 4], DIGITS[index & 15]];
+        index += 1;
+    }
+    pairs
+};
 
 fn hex_type(types: &[DataType]) -> Result<DataType> {
     if matches!(types[0], DataType::Text | DataType::Integer) { Ok(DataType::Text) }
@@ -20,17 +30,14 @@ fn hex(args: &[Value]) -> Result<Value> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::Execution("HEX input exceeds byte limit".into()));
     }
-    // Each input byte emits exactly two ASCII digits. Append both bytes
-    // together and validate the resulting UTF-8 buffer only once.
+    // Append both hexadecimal digits in one bulk copy, without converting
+    // bytes to char or performing two UTF-8 pushes for each input byte.
     let mut output = Vec::with_capacity(input.len() * 2);
     for &byte in input {
-        output.extend_from_slice(&[
-            DIGITS[(byte >> 4) as usize],
-            DIGITS[(byte & 15) as usize],
-        ]);
+        output.extend_from_slice(&HEX_PAIRS[usize::from(byte)]);
     }
     Ok(Value::Text(String::from_utf8(output)
-        .expect("HEX alphabet always contains valid ASCII")))
+        .expect("HEX pairs contain only ASCII bytes")))
 }
 fn decode_hex_digit(byte: u8) -> Result<u8> {
     match byte {
@@ -142,6 +149,32 @@ mod hex_direct_string_tests {
             Value::Text("C3A9F09F9982".into()));
         assert_eq!(hex(&[Value::Text(String::new())]).unwrap(),
             Value::Text(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod hex_pair_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn every_ascii_value_round_trips_and_uses_uppercase_pairs() {
+        let input = (0u8..=127).map(char::from).collect::<String>();
+        let expected = (0u8..=127)
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>();
+        let encoded = hex(&[Value::Text(input.clone())]).unwrap();
+        assert_eq!(encoded, Value::Text(expected));
+        assert_eq!(unhex_utf8(&[encoded]).unwrap(), Value::Text(input));
+    }
+
+    #[test]
+    fn large_unicode_payload_maintains_byte_count_and_decode_semantics() {
+        let source = Value::Text("é🙂界a".repeat(10_000));
+        let encoded = hex(&[source.clone()]).unwrap();
+        let Value::Text(ref encoded_text) = encoded else { unreachable!() };
+        assert_eq!(encoded_text.len(), 10_000 * "é🙂界a".len() * 2);
+        assert_eq!(unhex_utf8(&[encoded]).unwrap(), source);
+        assert_eq!(hex(&[Value::Null]).unwrap(), Value::Null);
     }
 }
 

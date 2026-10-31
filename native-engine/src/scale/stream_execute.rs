@@ -1,7 +1,7 @@
 //! Streaming physical execution of the supported native logical-plan subset.
 use std::{cell::RefCell, collections::HashMap, fs::File, hash::{Hash, Hasher}, io::BufReader, path::PathBuf};
 use crate::{
-    aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
+    aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join, plan::Plan,
     project::Selection, scalar::Value,
     schema::{DataType, Field, Schema}, Error, Result,
 };
@@ -408,9 +408,6 @@ fn infer(
                 }).collect::<Result<Vec<_>>>()?;
             Schema::new(fields)
         }
-        _ => Err(Error::Unsupported(
-            "streaming schema inference is unavailable for this operator".into(),
-        )),
     }?;
     cache.schemas.borrow_mut().insert(plan as *const Plan, schema.clone());
     Ok(schema)
@@ -496,8 +493,8 @@ fn lower(
                 unreachable!("checked UNION ALL plan");
             };
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            let left = lower(left, catalog, options, control, depth + 2)?;
-            let right = lower(right, catalog, options, control, depth + 2)?;
+            let left = lower(left, catalog, options, control, depth + 2, cache)?;
+            let right = lower(right, catalog, options, control, depth + 2, cache)?;
             Ok(Box::new(UnionDistinctStream::new(
                 left, right, schema, control.clone(),
                 MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
@@ -602,9 +599,6 @@ fn lower(
                 child(left)?, child(right)?, schema, control.clone()
             )))
         }
-        _ => Err(Error::Unsupported(
-            "operator has no streaming physical implementation yet".into()
-        )),
     }
 }
 
@@ -1117,7 +1111,7 @@ mod borrowed_stream_distinct_probe_regressions {
             QueryControl::default(), 2, 4096);
         output.seen.insert(fingerprint, vec![vec![Value::Integer(99)]]);
         output.unique_keys = 1;
-        output.retained_bytes = super::row_footprint::footprint([&Value::Integer(99)]);
+        output.retained_bytes = super::super::row_footprint::footprint([&Value::Integer(99)].into_iter());
         let row = output.next().unwrap().unwrap();
         assert_eq!(row.rows().unwrap(), vec![vec![Value::Integer(42)]]);
         assert_eq!(output.unique_keys, 2);
