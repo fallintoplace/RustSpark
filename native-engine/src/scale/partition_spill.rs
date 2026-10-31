@@ -104,7 +104,7 @@ fn write_shard(
     batch: &Batch, rows: &[usize],
 ) -> Result<()> {
     ensure_open(writers, order, initialized, paths, schema, index)?;
-    writers[index].as_mut().expect("shard writer initialized").write_batch(&batch.take(rows)?)
+    writers[index].as_mut().expect("shard writer initialized").write_batch_indices(batch, rows)
 }
 
 impl PartitionWriter {
