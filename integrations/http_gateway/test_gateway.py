@@ -78,6 +78,15 @@ class InvalidBackendJSONTests(unittest.TestCase):
 
 
 class BoundedBackendTests(unittest.TestCase):
+    def test_rejects_invalid_resource_limits_without_starting_backend(self):
+        command = [sys.executable, "-c", "print('ok')"]
+        for timeout in (float("nan"), float("inf"), float("-inf"), -1, 0, True, "10"):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded_backend(command, timeout=timeout, max_bytes=1024)
+        for size in (float("nan"), float("inf"), -1, 0, True, 1.5, "1024"):
+            with self.subTest(max_bytes=size), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded_backend(command, timeout=5, max_bytes=size)
+
     def test_backend_output_budget_and_timeout(self):
         valid = run_bounded_backend(
             [sys.executable, "-c", "print('ok')"], timeout=5, max_bytes=32

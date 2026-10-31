@@ -104,7 +104,8 @@ def _kill_backend_group(process: subprocess.Popen) -> None:
 def run_bounded_backend(command: list[str], timeout: float,
                         max_bytes: int = MAX_BACKEND_OUTPUT_BYTES) -> subprocess.CompletedProcess:
     """Drain stdout with a hard memory limit. Discard backend diagnostics."""
-    if timeout <= 0 or max_bytes <= 0:
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or timeout <= 0 or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("Invalid query execution budget")
     output = bytearray()
     exceeded = threading.Event()
