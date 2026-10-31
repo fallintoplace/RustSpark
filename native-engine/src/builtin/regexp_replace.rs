@@ -23,7 +23,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
         let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        // No UTF-8 string contains more characters than bytes.
+        // The number of Unicode scalars cannot exceed the byte length.
         if offset >= text.len() {
             text.len()
         } else if text.is_ascii() {
