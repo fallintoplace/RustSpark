@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, btree_map::Entry}, time::{Duration, Instant}};
 
 use crate::{Error, Result};
 
@@ -66,13 +66,15 @@ impl TaskScheduler {
         }
         let mut entries = BTreeMap::new();
         for id in tasks {
-            if entries.len() >= max_tasks {
-                return Err(Error::Execution("native task admission limit exceeded".into()));
-            }
-            if entries.insert(id, Task {
-                attempts: 0, status: TaskStatus::Queued,
-            }).is_some() {
-                return Err(Error::Execution("duplicate task ID".into()));
+            let at_limit = entries.len() >= max_tasks;
+            match entries.entry(id) {
+                Entry::Occupied(_) => return Err(Error::Execution("duplicate task ID".into())),
+                Entry::Vacant(entry) => {
+                    if at_limit {
+                        return Err(Error::Execution("native task admission limit exceeded".into()));
+                    }
+                    entry.insert(Task { attempts: 0, status: TaskStatus::Queued });
+                }
             }
         }
         Ok(Self { tasks: entries, max_attempts })
@@ -384,5 +386,18 @@ mod native_scheduler_admission_limit_tests {
         assert_eq!(queue.counts().queued, 2);
         assert_eq!(queue.lease(9, Instant::now(), Duration::from_secs(5))
             .unwrap().unwrap().task, 1);
+    }
+}
+
+#[cfg(test)]
+mod scheduler_duplicate_admission_diagnostics_tests {
+    use super::*;
+    #[test]
+    fn duplicate_identifiers_keep_their_error_at_the_task_limit() {
+        let duplicate = TaskScheduler::with_task_limit([10, 10], 2, 1).err().unwrap();
+        assert!(duplicate.to_string().contains("duplicate task ID"));
+        let full = TaskScheduler::with_task_limit([10, 11], 2, 1).err().unwrap();
+        assert!(full.to_string().contains("admission limit"));
+        assert_eq!(TaskScheduler::with_task_limit([10], 2, 1).unwrap().counts().queued, 1);
     }
 }
