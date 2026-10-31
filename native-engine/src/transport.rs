@@ -121,8 +121,30 @@ pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> 
     header[24..CHECKSUM_OFFSET].copy_from_slice(&len.to_le_bytes());
     let frame_checksum = checksum_parts(&header[..CHECKSUM_OFFSET], &frame.payload);
     header[CHECKSUM_OFFSET..].copy_from_slice(&frame_checksum.to_le_bytes());
-    output.write_all(&header)?;
-    output.write_all(&frame.payload)?;
+    // Send the fixed header and payload in one vectored write when the
+    // transport supports scatter/gather I/O. Retain write_all semantics for
+    // short writes, interruptions and writers using the default fallback.
+    let mut remaining_header: &[u8] = &header;
+    let mut remaining_payload: &[u8] = &frame.payload;
+    while !remaining_header.is_empty() || !remaining_payload.is_empty() {
+        let buffers = [
+            std::io::IoSlice::new(remaining_header),
+            std::io::IoSlice::new(remaining_payload),
+        ];
+        let written = match output.write_vectored(&buffers) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+            Ok(written) => written,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let header_bytes = remaining_header.len();
+        if written >= header_bytes {
+            remaining_header = &[];
+            remaining_payload = &remaining_payload[written - header_bytes..];
+        } else {
+            remaining_header = &remaining_header[written..];
+        }
+    }
     Ok(())
 }
 
@@ -649,5 +671,73 @@ mod interrupted_exchange_reads_regressions {
         let empty = InterruptOnce { remaining: &[], interrupted: false };
         let mut reader = FrameReader::new(empty, 16, 16, 0);
         assert!(reader.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod vectored_exchange_write_regressions {
+    use super::*;
+    use std::io::{IoSlice, Write};
+
+    #[derive(Default)]
+    struct ChunkedWriter {
+        bytes: Vec<u8>,
+        calls: usize,
+        interrupt_once: bool,
+    }
+
+    impl Write for ChunkedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let size = bytes.len().min(7);
+            self.bytes.extend_from_slice(&bytes[..size]);
+            Ok(size)
+        }
+
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.interrupt_once {
+                self.interrupt_once = false;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let mut remaining = 7usize;
+            let mut written = 0;
+            for buf in buffers {
+                let size = buf.len().min(remaining);
+                self.bytes.extend_from_slice(&buf[..size]);
+                remaining -= size;
+                written += size;
+                if remaining == 0 { break; }
+            }
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn vectored_partial_writes_and_interrupts_preserve_frames() {
+        for payload in [Vec::new(), vec![42u8; 1], vec![99u8; 1024]] {
+            let frame = Frame { stage: 3, task: 4, attempt: 2, payload };
+            let mut expected = Vec::new();
+            write_frame(&mut expected, &frame, 2048).unwrap();
+
+            let mut writer = ChunkedWriter { interrupt_once: true, ..Default::default() };
+            write_frame(&mut writer, &frame, 2048).unwrap();
+            assert_eq!(writer.bytes, expected);
+            assert!(writer.calls >= 2);
+            assert_eq!(read_frame(&mut writer.bytes.as_slice(), 2048).unwrap(), Some(frame));
+        }
+    }
+
+    #[test]
+    fn zero_length_writes_return_error_without_spinning() {
+        struct ZeroWriter;
+        impl Write for ZeroWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Ok(0) }
+            fn write_vectored(&mut self, _: &[IoSlice<'_>]) -> std::io::Result<usize> { Ok(0) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let frame = Frame { stage: 0, task: 0, attempt: 0, payload: Vec::new() };
+        assert!(write_frame(&mut ZeroWriter, &frame, 0).is_err());
     }
 }
