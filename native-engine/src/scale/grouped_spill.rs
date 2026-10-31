@@ -194,9 +194,11 @@ fn aggregate_shard(
     let mut groups: HashMap<Vec<Value>, Vec<State>> = HashMap::new();
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
+        let key_columns = keys.iter().map(|&index| batch.column(index))
+            .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
-            let key = keys.iter().map(|&col| batch.value(row, col).cloned())
-                .collect::<Result<Vec<_>>>()?;
+            let key = key_columns.iter().map(|column| column[row].clone())
+                .collect::<Vec<_>>();
             let at_capacity = groups.len() >= max_groups;
             let states = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -442,5 +444,45 @@ mod grouped_spill_window_output_tests {
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prebound_group_keys_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{collections::HashMap, fs, sync::atomic::{AtomicU64, Ordering}};
+    static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn nullable_groups_across_many_spill_batches_keep_exact_counts() {
+        let dir = std::env::temp_dir().join(format!("rustspark-prebound-groups-{}-{}",
+            std::process::id(), TEST_ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, true)]).unwrap();
+        let mut expected = HashMap::<Value, i64>::new();
+        let rows = (0..2048_i64).map(|n| {
+            let key = if n % 17 == 0 { Value::Null } else { Value::Integer(n % 13) };
+            *expected.entry(key.clone()).or_default() += 1;
+            vec![key]
+        }).collect();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let result = grouped_aggregate([Ok(batch)], schema,
+            &[("k".into(), "k".into())],
+            &[AggregateItem::new(AggregateOp::CountAll, "n")],
+            &dir, 8, 64, 31, &QueryControl::default()).unwrap();
+        let mut actual = HashMap::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 31).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                for row in batch.rows().unwrap() {
+                    let Value::Integer(count) = row[1] else { panic!("invalid count") };
+                    actual.insert(row[0].clone(), count);
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+        drop(result);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
