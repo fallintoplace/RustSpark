@@ -27,6 +27,14 @@ class VariabilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "p95"):
                     variation.inspect(data)
 
+    def test_extreme_finite_samples_do_not_overflow_mean_or_stddev(self):
+        stable = variation.inspect(report([1e308, 1e308, 1e308]))
+        self.assertEqual(stable["results"][0]["coefficient_of_variation"], 0)
+        self.assertEqual(stable["unstable_queries"], [])
+        noisy = variation.inspect(report([5e307, 7.5e307, 1e308]))
+        self.assertGreater(noisy["results"][0]["coefficient_of_variation"], 0.25)
+        self.assertEqual(noisy["unstable_queries"], [1])
+
     def test_noisy_samples_flagged(self):
         result = variation.inspect(report([10, 20, 10, 20]))
         self.assertEqual(result["unstable_queries"], [1])
