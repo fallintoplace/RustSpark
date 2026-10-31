@@ -142,7 +142,7 @@ fn execute_inner(
             if let Plan::Scan { table } = input.as_ref() {
                 distinct::distinct(catalog.get(table)?)?
             } else {
-                distinct::distinct(&descend(input)?)?
+                distinct::distinct_owned(descend(input)?)?
             }
         },
         Plan::Join {
