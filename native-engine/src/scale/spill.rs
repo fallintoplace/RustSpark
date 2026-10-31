@@ -8,6 +8,7 @@ const MAX_NAME_BYTES: usize = 4096;
 const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CELLS: usize = 4_000_000;
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+const ENCODE_BUFFER_BYTES: usize = 16 * 1024;
 
 fn write_u32(out: &mut impl Write, value: usize) -> Result<()> {
     let value = u32::try_from(value)
@@ -119,38 +120,51 @@ impl<W: Write> SpillWriter<W> {
             .map(|index| batch.column(index))
             .collect::<Result<Vec<_>>>()?;
         write_u32(&mut self.output, end - start)?;
+        // Buffer cells to avoid a virtual Write call per numeric value.
+        // Text larger than the scratch buffer is streamed directly to
+        // avoid duplicating multi-megabyte values in memory.
+        let mut encoded = Vec::with_capacity(ENCODE_BUFFER_BYTES);
         for row in start..end {
             for column in &columns {
                 match &column[row] {
-                    Value::Null => self.output.write_all(&[0])?,
-                    Value::Boolean(false) => self.output.write_all(&[1])?,
-                    Value::Boolean(true) => self.output.write_all(&[2])?,
+                    Value::Null => encoded.push(0),
+                    Value::Boolean(false) => encoded.push(1),
+                    Value::Boolean(true) => encoded.push(2),
                     Value::Integer(value) => {
-                        let mut wire = [0u8; 9];
-                        wire[0] = 3;
-                        wire[1..].copy_from_slice(&value.to_le_bytes());
-                        self.output.write_all(&wire)?;
+                        encoded.push(3);
+                        encoded.extend_from_slice(&value.to_le_bytes());
                     }
                     Value::Float(value) => {
-                        let mut wire = [0u8; 9];
-                        wire[0] = 4;
-                        wire[1..].copy_from_slice(&value.to_bits().to_le_bytes());
-                        self.output.write_all(&wire)?;
+                        encoded.push(4);
+                        encoded.extend_from_slice(&value.to_bits().to_le_bytes());
                     }
                     Value::Text(value) => {
-                        if value.len() > MAX_TEXT_BYTES {
-                            return Err(Error::Execution("spill text value too long".into()));
-                        }
-                        let mut prefix = [0u8; 5];
-                        prefix[0] = 5;
+                        // Payloads are validated before the batch header is written.
+                        encoded.push(5);
                         let len = u32::try_from(value.len())
                             .map_err(|_| Error::Execution("spill text length exceeds u32".into()))?;
-                        prefix[1..].copy_from_slice(&len.to_le_bytes());
-                        self.output.write_all(&prefix)?;
-                        self.output.write_all(value.as_bytes())?;
+                        encoded.extend_from_slice(&len.to_le_bytes());
+                        if value.len() >= ENCODE_BUFFER_BYTES {
+                            self.output.write_all(&encoded)?;
+                            encoded.clear();
+                            self.output.write_all(value.as_bytes())?;
+                        } else {
+                            if encoded.len() + value.len() > ENCODE_BUFFER_BYTES {
+                                self.output.write_all(&encoded)?;
+                                encoded.clear();
+                            }
+                            encoded.extend_from_slice(value.as_bytes());
+                        }
                     }
                 }
+                if encoded.len() >= ENCODE_BUFFER_BYTES {
+                    self.output.write_all(&encoded)?;
+                    encoded.clear();
+                }
             }
+        }
+        if !encoded.is_empty() {
+            self.output.write_all(&encoded)?;
         }
         Ok(())
     }
@@ -404,7 +418,7 @@ mod coalesced_spill_write_tests {
     }
 
     #[test]
-    fn numeric_and_text_wire_prefixes_use_single_write_calls() {
+    fn numeric_and_text_cells_are_coalesced_into_one_payload_write() {
         let schema = Schema::new(vec![
             Field::new("n", DataType::Integer, false),
             Field::new("f", DataType::Float, false),
@@ -416,7 +430,7 @@ mod coalesced_spill_write_tests {
         let mut writer = SpillWriter::new(CountingWriter::default(), schema).unwrap();
         let header_writes = writer.output.writes;
         writer.write_batch(&input).unwrap();
-        assert_eq!(writer.output.writes - header_writes, 5);
+        assert_eq!(writer.output.writes - header_writes, 2);
         let output = writer.finish().unwrap();
         let mut reader = SpillReader::new(output.bytes.as_slice(), 2).unwrap();
         assert_eq!(reader.next_batch().unwrap().unwrap(), input);
@@ -435,5 +449,53 @@ mod spill_header_preflight_atomicity_tests {
         let mut output = Vec::new();
         assert!(SpillWriter::new(&mut output, schema).is_err());
         assert!(output.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod buffered_spill_values_perf_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[derive(Default)]
+    struct CountingWriter { bytes: Vec<u8>, calls: usize }
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn large_fixed_width_batch_uses_bounded_write_calls() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, false)]).unwrap();
+        let source = Batch::from_rows(schema.clone(), (0..100_000_i64)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut writer = SpillWriter::new(CountingWriter::default(), schema).unwrap();
+        let before = writer.output.calls;
+        writer.write_batch(&source).unwrap();
+        assert!(writer.output.calls - before < 100);
+        let encoded = writer.finish().unwrap();
+        let mut reader = SpillReader::new(encoded.bytes.as_slice(), 100_000).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), source);
+    }
+
+    #[test]
+    fn large_text_bypasses_scratch_without_reordering_other_values() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("number", DataType::Integer, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(ENCODE_BUFFER_BYTES + 123)), Value::Integer(7)],
+            vec![Value::Null, Value::Integer(-1)],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(CountingWriter::default(), schema).unwrap();
+        writer.write_batch(&source).unwrap();
+        let encoded = writer.finish().unwrap();
+        let mut reader = SpillReader::new(encoded.bytes.as_slice(), 2).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), source);
     }
 }
