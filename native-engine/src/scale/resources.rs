@@ -56,6 +56,18 @@ impl Reservation {
     /// Transfer this guard's charge to other guards without releasing the budget.
     fn disarm(&mut self) { self.bytes = 0; }
 
+    /// Transfer an already-admitted allocation into another guard without
+    /// touching the atomic budget. Cross-budget transfers are not allowed.
+    pub fn absorb(&mut self, other: &mut Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.budget.used, &other.budget.used) {
+            return Err(Error::Execution("cannot combine different memory budgets".into()));
+        }
+        self.bytes = self.bytes.checked_add(other.bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
+        other.disarm();
+        Ok(())
+    }
+
     /// Transfer part of this allocation to another guard, with no new budget admission.
     pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
         if bytes > self.bytes {
@@ -210,5 +222,40 @@ mod bulk_reservation_transfer_regressions {
         assert!(reserve_many(&budget, &[40, 61]).is_err());
         assert_eq!(budget.used(), 0);
         assert!(reserve_many(&budget, &[]).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reservation_absorb_accounting_regressions {
+    use super::*;
+
+    #[test]
+    fn combines_guards_without_changing_budget_until_the_owner_drops() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let mut primary = budget.reserve(30).unwrap();
+        let mut secondary = budget.reserve(40).unwrap();
+        primary.absorb(&mut secondary).unwrap();
+        assert_eq!(primary.bytes(), 70);
+        assert_eq!(secondary.bytes(), 0);
+        assert_eq!(budget.used(), 70);
+        primary.resize(80).unwrap();
+        drop(secondary);
+        assert_eq!(budget.used(), 80);
+        drop(primary);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn never_transfers_a_guard_between_independent_budgets() {
+        let first = MemoryBudget::new(64).unwrap();
+        let second = MemoryBudget::new(64).unwrap();
+        let mut a = first.reserve(20).unwrap();
+        let mut b = second.reserve(30).unwrap();
+        assert!(a.absorb(&mut b).is_err());
+        assert_eq!((a.bytes(), b.bytes()), (20, 30));
+        assert_eq!((first.used(), second.used()), (20, 30));
+        drop(a);
+        drop(b);
+        assert_eq!((first.used(), second.used()), (0, 0));
     }
 }
