@@ -71,6 +71,19 @@ fn flush_pending_run(
     Ok(())
 }
 
+// Move a contiguous prefix of owned columns into the next spill run.
+// Retaining iterators avoids quadratic front-drains and TEXT cloning.
+fn take_owned_chunk(
+    schema: &Schema,
+    columns: &mut [std::vec::IntoIter<crate::scalar::Value>],
+    rows: usize,
+) -> Result<Batch> {
+    let chunk = columns.iter_mut()
+        .map(|column| column.by_ref().take(rows).collect())
+        .collect();
+    Batch::from_validated_columns(schema.clone(), chunk, rows)
+}
+
 pub fn write_sorted_runs<I>(
     input: I, schema: Schema, keys: &[SortKey],
     directory: &Path, max_rows_per_run: usize, control: &QueryControl,
@@ -99,17 +112,17 @@ where I: IntoIterator<Item = Result<Batch>>
                     &schema, keys, directory, max_rows_per_run, control)?;
             }
         } else {
-            // Split only batches that cross run boundaries. Entire small
-            // batches are transferred, avoiding an extra per-row clone.
-            let mut start = 0;
-            while start < incoming.num_rows() {
+            // The incoming batch is owned. Split each column's IntoIter so
+            // large TEXT allocations move into runs instead of being cloned.
+            let mut remaining = incoming.num_rows();
+            let mut columns = incoming.into_columns().into_iter()
+                .map(Vec::into_iter).collect::<Vec<_>>();
+            while remaining != 0 {
                 control.check()?;
-                let take = (max_rows_per_run - pending_rows)
-                    .min(incoming.num_rows() - start);
-                let end = start + take;
-                pending.push(incoming.slice_rows(start, end)?);
+                let take = (max_rows_per_run - pending_rows).min(remaining);
+                pending.push(take_owned_chunk(&schema, &mut columns, take)?);
                 pending_rows += take;
-                start = end;
+                remaining -= take;
                 if pending_rows == max_rows_per_run {
                     flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
                         &schema, keys, directory, max_rows_per_run, control)?;
@@ -300,5 +313,40 @@ mod owned_sorted_spill_run_regressions {
         drop(runs);
         assert!(paths.iter().all(|path| !path.exists()));
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_run_chunk_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn splits_oversized_owned_batches_without_cloning_text_payloads() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null],
+            vec![Value::Text("🙂".repeat(2048))],
+            vec![Value::Text("tail".into())],
+        ]).unwrap();
+        let pointer = match batch.value(1, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let mut columns = batch.into_columns().into_iter().map(Vec::into_iter).collect::<Vec<_>>();
+        let first = take_owned_chunk(&schema, &mut columns, 1).unwrap();
+        let second = take_owned_chunk(&schema, &mut columns, 2).unwrap();
+        assert_eq!(first.rows().unwrap(), vec![vec![Value::Null]]);
+        assert_eq!(second.num_rows(), 2);
+        assert_eq!(match second.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, pointer);
+        assert!(columns.iter().all(|column| column.len() == 0));
+
+        let empty_width = Schema::new(vec![]).unwrap();
+        assert_eq!(take_owned_chunk(&empty_width, &mut [], 3).unwrap().num_rows(), 3);
     }
 }
