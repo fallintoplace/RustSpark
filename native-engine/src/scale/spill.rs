@@ -284,13 +284,14 @@ impl<R: Read> SpillReader<R> {
         let mut bytes_seen = 4usize.checked_add(cells)
             .filter(|&bytes| bytes <= MAX_BATCH_BYTES)
             .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
-        let field_types = self.schema.fields().iter()
-            .map(|field| (field.data_type, field.nullable))
-            .collect::<Vec<_>>();
+        // The schema is immutable across batches. Read its field types
+        // directly rather than allocating a copied type/nullability vector
+        // for every small spill chunk.
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(rows)).collect::<Vec<_>>();
         for _ in 0..rows {
-            for (column, &(data_type, nullable)) in columns.iter_mut().zip(&field_types) {
+            for (column, field) in columns.iter_mut().zip(self.schema.fields()) {
+                let (data_type, nullable) = (field.data_type, field.nullable);
                 // Validate the cell against the declared schema before reading
                 // its variable-length payload or allocating a decoded String.
                 let tag = read_byte(&mut self.input)?;
@@ -752,5 +753,48 @@ mod selected_rows_spill_write_tests {
         assert_eq!(reader.next_batch().unwrap(), Some(batch.take(&[3, 1, 3, 0]).unwrap()));
         assert_eq!(reader.next_batch().unwrap(), Some(batch.slice_rows(1, 3).unwrap()));
         assert_eq!(reader.next_batch().unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_spill_schema_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn many_tiny_batches_keep_schema_and_nullable_cell_tags() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+            Field::new("enabled", DataType::Boolean, true),
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        for n in 0..64 {
+            let batch = Batch::from_rows(schema.clone(), vec![vec![
+                Value::Integer(n),
+                if n % 2 == 0 { Value::Text("界🙂".into()) } else { Value::Null },
+                if n % 3 == 0 { Value::Null } else { Value::Boolean(n % 2 == 0) },
+            ]]).unwrap();
+            writer.write_batch(&batch).unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        let mut reader = SpillReader::new(Cursor::new(bytes), 1).unwrap();
+        for n in 0..64 {
+            let batch = reader.next_batch().unwrap().unwrap();
+            assert_eq!(batch.schema(), &schema);
+            assert_eq!(batch.value(0, 0).unwrap(), &Value::Integer(n));
+            assert_eq!(batch.num_rows(), 1);
+        }
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn zero_width_spill_batches_keep_logical_row_counts() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 5).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 8).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap().num_rows(), 5);
     }
 }

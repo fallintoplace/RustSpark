@@ -1,7 +1,7 @@
 //! Streaming physical execution of the supported native logical-plan subset.
 use std::{cell::RefCell, collections::HashMap, fs::File, hash::{Hash, Hasher}, io::BufReader, path::PathBuf};
 use crate::{
-    aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
+    aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join, plan::Plan,
     project::Selection, scalar::Value,
     schema::{DataType, Field, Schema}, Error, Result,
 };
@@ -154,6 +154,7 @@ struct DistinctOutput {
     // Hash borrowed source columns; retain owned rows only for unique keys.
     // Equality inside each fingerprint bucket keeps collisions correct.
     seen: HashMap<u64, Vec<Vec<Value>>>,
+    schema: Option<Schema>,
     unique_keys: usize,
     retained_bytes: usize,
     max_keys: usize,
@@ -164,7 +165,8 @@ struct DistinctOutput {
 impl DistinctOutput {
     fn new(source: BatchStream, control: QueryControl, max_keys: usize, max_bytes: usize) -> Self {
         Self {
-            source, control, seen: HashMap::new(), unique_keys: 0, retained_bytes: 0,
+            source, control, seen: HashMap::new(), schema: None,
+            unique_keys: 0, retained_bytes: 0,
             max_keys, max_bytes, stopped: false,
         }
     }
@@ -193,6 +195,16 @@ impl Iterator for DistinctOutput {
                     return None;
                 }
             };
+            // DISTINCT hashes values by position. Do not collapse rows from
+            // batches whose field names, types or nullability changed.
+            if let Some(expected) = &self.schema {
+                if batch.schema() != expected {
+                    self.stopped = true;
+                    return Some(Err(Error::Schema("stream DISTINCT schema changed".into())));
+                }
+            } else {
+                self.schema = Some(batch.schema().clone());
+            }
             if batch.schema().is_empty() && batch.num_rows() != 0 {
                 let mut hash = std::collections::hash_map::DefaultHasher::new();
                 0usize.hash(&mut hash);
@@ -408,9 +420,6 @@ fn infer(
                 }).collect::<Result<Vec<_>>>()?;
             Schema::new(fields)
         }
-        _ => Err(Error::Unsupported(
-            "streaming schema inference is unavailable for this operator".into(),
-        )),
     }?;
     cache.schemas.borrow_mut().insert(plan as *const Plan, schema.clone());
     Ok(schema)
@@ -496,8 +505,8 @@ fn lower(
                 unreachable!("checked UNION ALL plan");
             };
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            let left = lower(left, catalog, options, control, depth + 2)?;
-            let right = lower(right, catalog, options, control, depth + 2)?;
+            let left = lower(left, catalog, options, control, depth + 2, cache)?;
+            let right = lower(right, catalog, options, control, depth + 2, cache)?;
             Ok(Box::new(UnionDistinctStream::new(
                 left, right, schema, control.clone(),
                 MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
@@ -602,9 +611,6 @@ fn lower(
                 child(left)?, child(right)?, schema, control.clone()
             )))
         }
-        _ => Err(Error::Unsupported(
-            "operator has no streaming physical implementation yet".into()
-        )),
     }
 }
 
@@ -1117,7 +1123,7 @@ mod borrowed_stream_distinct_probe_regressions {
             QueryControl::default(), 2, 4096);
         output.seen.insert(fingerprint, vec![vec![Value::Integer(99)]]);
         output.unique_keys = 1;
-        output.retained_bytes = super::row_footprint::footprint([&Value::Integer(99)]);
+        output.retained_bytes = super::super::row_footprint::footprint([&Value::Integer(99)].into_iter());
         let row = output.next().unwrap().unwrap();
         assert_eq!(row.rows().unwrap(), vec![vec![Value::Integer(42)]]);
         assert_eq!(output.unique_keys, 2);
@@ -1172,5 +1178,49 @@ mod streaming_schema_cache_regressions {
             .unwrap().map(|result| result.unwrap().rows().unwrap())
             .flatten().collect::<Vec<_>>();
         assert_eq!(rows, (0..128).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod distinct_schema_drift_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn rejects_changed_schema_even_for_duplicate_or_empty_batches() {
+        let first_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let changed_schema = Schema::new(vec![
+            Field::new("other_id", DataType::Integer, false),
+        ]).unwrap();
+        let first = Batch::from_rows(first_schema, vec![vec![Value::Integer(7)]]).unwrap();
+        let same_value = Batch::from_rows(changed_schema.clone(),
+            vec![vec![Value::Integer(7)]]).unwrap();
+        let empty = Batch::empty(changed_schema);
+        for changed in [same_value, empty] {
+            let mut stream = DistinctOutput::new(
+                Box::new([Ok(first.clone()), Ok(changed)].into_iter()),
+                QueryControl::default(), 16, 4096,
+            );
+            assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+            assert!(stream.next().unwrap().unwrap_err().to_string().contains("schema changed"));
+            assert!(stream.next().is_none());
+        }
+    }
+
+    #[test]
+    fn accepts_identical_schemas_across_batch_boundaries() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let first = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(7)]]).unwrap();
+        let second = Batch::from_rows(schema,
+            vec![vec![Value::Integer(7)], vec![Value::Integer(8)]]).unwrap();
+        let actual = DistinctOutput::new(
+            Box::new([Ok(first), Ok(second)].into_iter()),
+            QueryControl::default(), 16, 4096,
+        ).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.into_iter().flat_map(|b| b.rows().unwrap())
+            .collect::<Vec<_>>(), vec![vec![Value::Integer(7)], vec![Value::Integer(8)]]);
     }
 }

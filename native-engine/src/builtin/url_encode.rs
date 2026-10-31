@@ -13,30 +13,35 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > MAX_OUTPUT_BYTES {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
-    // No escaping or form-space substitution is needed for safe ASCII.
-    if text.bytes().all(is_url_safe) {
-        return Ok(Value::Text(text.to_owned()));
-    }
-    let mut output_bytes = 0usize;
-    for &byte in text.as_bytes() {
-        let emitted = if is_url_safe(byte) || byte == b' ' { 1 } else { 3 };
-        output_bytes = output_bytes.checked_add(emitted)
-            .filter(|&bytes| bytes <= MAX_OUTPUT_BYTES)
+    // Copy contiguous safe ASCII runs, encode exceptions, and check size
+    // before appending. Avoid the two pre-scans and per-byte char pushes.
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut start = 0usize;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if is_url_safe(byte) { continue; }
+        let added = if byte == b' ' { 1 } else { 3 };
+        output.len().checked_add(index - start)
+            .and_then(|len| len.checked_add(added))
+            .filter(|&len| len <= MAX_OUTPUT_BYTES)
             .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
-    }
-    let mut encoded = String::with_capacity(output_bytes);
-    for &byte in text.as_bytes() {
-        if is_url_safe(byte) {
-            encoded.push(char::from(byte));
-        } else if byte == b' ' {
-            encoded.push('+');
+        output.extend_from_slice(&bytes[start..index]);
+        if byte == b' ' {
+            output.push(b'+');
         } else {
-            encoded.push('%');
-            encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
-            encoded.push(char::from(DIGITS[usize::from(byte & 15)]));
+            output.extend_from_slice(&[
+                b'%', DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)],
+            ]);
         }
+        start = index + 1;
     }
-    Ok(Value::Text(encoded))
+    output.len().checked_add(bytes.len() - start)
+        .filter(|&len| len <= MAX_OUTPUT_BYTES)
+        .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
+    output.extend_from_slice(&bytes[start..]);
+    Ok(Value::Text(String::from_utf8(output)
+        .expect("URL_ENCODE produces ASCII-only bytes")))
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "url_encode", min_args: 1, max_args: 1, result_type: output, call: evaluate,
@@ -80,5 +85,32 @@ mod unescaped_ascii_url_fast_path_tests {
             Value::Text("a%2Bb+c".into()));
         assert_eq!(evaluate(&[Value::Text("é".into())]).unwrap(),
             Value::Text("%C3%A9".into()));
+    }
+}
+
+#[cfg(test)]
+mod single_pass_url_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn encodes_long_safe_runs_and_multibyte_utf8_bytes() {
+        let long = "a".repeat(250_000);
+        let input = format!("{long}/é 🙂?{long}");
+        let expected = format!("{long}%2F%C3%A9+%F0%9F%99%82%3F{long}");
+        assert_eq!(evaluate(&[Value::Text(input)]).unwrap(), Value::Text(expected));
+        assert_eq!(evaluate(&[Value::Text("+%&=".into())]).unwrap(),
+            Value::Text("%2B%25%26%3D".into()));
+    }
+
+    #[test]
+    fn checks_encoded_size_at_boundary_and_keeps_nulls() {
+        let limit = MAX_OUTPUT_BYTES;
+        assert_eq!(evaluate(&[Value::Text("a".repeat(limit))]).unwrap(),
+            Value::Text("a".repeat(limit)));
+        assert!(matches!(evaluate(&[Value::Text("/".repeat(limit / 3 + 1))]),
+            Err(Error::Execution(_))));
+        assert_eq!(evaluate(&[Value::Text(String::new())]).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }

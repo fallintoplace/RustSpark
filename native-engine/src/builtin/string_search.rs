@@ -67,7 +67,9 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
         start
     };
     let Some(found) = text[start..].find(needle) else { return Ok(Value::Integer(0)); };
-    let characters = super::char_length::character_count(&text[start..start + found]);
+    let characters = if ascii { found } else {
+        super::char_length::character_count(&text[start..start + found])
+    };
     let position = offset.checked_add(characters).and_then(|n| n.checked_add(1))
         .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
     let position = i64::try_from(position)
@@ -194,5 +196,25 @@ mod locate_ascii_offset_tests {
             Value::Integer(19_999)]).unwrap(), Value::Integer(20_001));
         assert_eq!(locate(&[Value::Text("x".into()), Value::Text("ééx".into()),
             Value::Integer(2)]).unwrap(), Value::Integer(3));
+    }
+}
+
+#[cfg(test)]
+mod locate_ascii_match_offset_regressions {
+    use super::*;
+
+    #[test]
+    fn reports_one_based_offsets_on_large_ascii_and_mixed_unicode() {
+        let ascii = format!("{}needle{}", "a".repeat(100_000), "z".repeat(100_000));
+        assert_eq!(locate(&[Value::Text("needle".into()), Value::Text(ascii.clone())]).unwrap(),
+            Value::Integer(100_001));
+        assert_eq!(locate(&[Value::Text("needle".into()), Value::Text(ascii),
+            Value::Integer(99_999)]).unwrap(), Value::Integer(100_001));
+        assert_eq!(locate(&[Value::Text("x".into()), Value::Text("é🙂xy".into()),
+            Value::Integer(2)]).unwrap(), Value::Integer(3));
+        assert_eq!(instr(&[Value::Text("🙂ab".into()), Value::Text("b".into())]).unwrap(),
+            Value::Integer(3));
+        assert_eq!(locate(&[Value::Text("absent".into()), Value::Text("abc".into())]).unwrap(),
+            Value::Integer(0));
     }
 }

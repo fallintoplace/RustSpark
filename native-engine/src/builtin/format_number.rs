@@ -19,16 +19,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Execution("FORMAT_NUMBER precision overflow".into()))?;
     if digits > 15 { return Err(Error::Execution("FORMAT_NUMBER supports at most 15 decimal places".into())); }
     let formatted = match args[0] {
-        Value::Integer(value) => {
-            // Casting BIGINT to f64 silently rounds values above 2^53.
-            let mut result = value.to_string();
-            if digits > 0 {
-                result.push('.');
-                const ZEROS: &str = "000000000000000";
-                result.push_str(&ZEROS[..digits]);
-            }
-            result
-        }
+        // Casting BIGINT to f64 silently rounds values above 2^53.
+        Value::Integer(value) => value.to_string(),
         Value::Float(value) if value.is_finite() => format!("{value:.digits$}"),
         Value::Float(_) => return Err(Error::Execution("FORMAT_NUMBER requires finite number".into())),
         _ => unreachable!("numeric input already validated"),
@@ -37,7 +29,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_or(("", formatted.as_str()), |rest| ("-", rest));
     let (whole, fractional) = unsigned.split_once('.')
         .map_or((unsigned, None), |(whole, fractional)| (whole, Some(fractional)));
-    let mut result = String::with_capacity(formatted.len().saturating_add(whole.len() / 3));
+    let mut result = String::with_capacity(formatted.len().saturating_add(whole.len() / 3)
+        .saturating_add(digits + 1));
     result.push_str(negative);
     for (index, byte) in whole.bytes().enumerate() {
         if index > 0 && (whole.len() - index) % 3 == 0 {
@@ -48,6 +41,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if let Some(fractional) = fractional {
         result.push('.');
         result.push_str(fractional);
+    } else if matches!(args[0], Value::Integer(_)) && digits > 0 {
+        const ZEROS: &str = "000000000000000";
+        result.push('.');
+        result.push_str(&ZEROS[..digits]);
     }
     Ok(Value::Text(result))
 }
@@ -103,5 +100,23 @@ mod integer_format_zero_suffix_tests {
         assert_eq!(evaluate(&[Value::Integer(-1), Value::Integer(1)]).unwrap(),
             Value::Text("-1.0".into()));
         assert!(evaluate(&[Value::Integer(1), Value::Integer(16)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod grouped_integer_fractional_suffix_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_full_bigint_precision_and_float_rounding() {
+        assert_eq!(evaluate(&[Value::Integer(i64::MIN), Value::Integer(3)]).unwrap(),
+            Value::Text("-9,223,372,036,854,775,808.000".into()));
+        assert_eq!(evaluate(&[Value::Integer(1_234_567), Value::Integer(15)]).unwrap(),
+            Value::Text("1,234,567.000000000000000".into()));
+        assert_eq!(evaluate(&[Value::Integer(1_234_567), Value::Integer(0)]).unwrap(),
+            Value::Text("1,234,567".into()));
+        assert_eq!(evaluate(&[Value::Float(1234.5), Value::Integer(2)]).unwrap(),
+            Value::Text("1,234.50".into()));
+        assert_eq!(evaluate(&[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
     }
 }

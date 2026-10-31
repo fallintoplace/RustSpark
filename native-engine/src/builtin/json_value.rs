@@ -3,9 +3,111 @@ use crate::{scalar::Value, schema::DataType, Result, Error};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+// Materialize only scalar root values. Container children are validated
+// and discarded, which avoids retaining wide trees just to reject them.
+enum RootScalar {
+    Null,
+    Text(String),
+    Container,
+}
+
+impl<'de> serde::Deserialize<'de> for RootScalar {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct ScalarVisitor;
+        impl<'de> serde::de::Visitor<'de> for ScalarVisitor {
+            type Value = RootScalar;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON scalar or container")
+            }
+
+            fn visit_unit<E: serde::de::Error>(self)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(RootScalar::Null)
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(RootScalar::Text(value.to_string()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(RootScalar::Text(serde_json::Number::from(value).to_string()))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(RootScalar::Text(serde_json::Number::from(value).to_string()))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64)
+                -> std::result::Result<Self::Value, E>
+            {
+                let number = serde_json::Number::from_f64(value)
+                    .expect("a parsed JSON number is finite");
+                Ok(RootScalar::Text(number.to_string()))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(RootScalar::Text(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(RootScalar::Text(value))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(RootScalar::Container)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some() {}
+                Ok(RootScalar::Container)
+            }
+        }
+        deserializer.deserialize_any(ScalarVisitor)
+    }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(path) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if path == "$" {
+        use serde::Deserialize;
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let root = RootScalar::deserialize(&mut deserializer)
+            .and_then(|root| deserializer.end().map(|()| root))
+            .map_err(|error| Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        return match root {
+            RootScalar::Null => Ok(Value::Null),
+            RootScalar::Text(value) => Ok(Value::Text(value)),
+            RootScalar::Container => Err(Error::Type(
+                "JSON_VALUE requires a scalar JSON node".into()
+            )),
+        };
+    }
     let document = json_path::parse(text)?;
     let Some(value) = json_path::lookup(Some(&document), path)? else { return Ok(Value::Null); };
     match value {
@@ -161,5 +263,44 @@ mod owned_json_merge_patch_regressions {
         assert_eq!(root, serde_json::json!({"field": "new"}));
         apply_merge_patch(&mut root, serde_json::Value::Null);
         assert!(root.is_null());
+    }
+}
+
+#[cfg(test)]
+mod root_json_value_streaming_tests {
+    use super::*;
+
+    #[test]
+    fn matches_serde_scalar_text_for_every_root_shape() {
+        for input in ["null", "true", "false", "0", "-0", "1.0", "-2.4e+3",
+            "18446744073709551615", r#""café\n🙂""#] {
+            let parsed: serde_json::Value = serde_json::from_str(input).unwrap();
+            let expected = match parsed {
+                serde_json::Value::Null => Value::Null,
+                serde_json::Value::Bool(value) => Value::Text(value.to_string()),
+                serde_json::Value::Number(value) => Value::Text(value.to_string()),
+                serde_json::Value::String(value) => Value::Text(value),
+                _ => unreachable!(),
+            };
+            assert_eq!(evaluate(&[
+                Value::Text(input.into()), Value::Text("$".into()),
+            ]).unwrap(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn does_not_accept_containers_or_malformed_suffixes() {
+        let many = format!("[{}]", vec![r#"{"a":[1,2,null]}"#; 5_000].join(","));
+        assert!(matches!(evaluate(&[
+            Value::Text(many), Value::Text("$".into()),
+        ]), Err(Error::Type(_))));
+        for input in [r#"{"a":1} trailing"#, "[1,,2]", r#""unterminated"#] {
+            assert!(matches!(evaluate(&[
+                Value::Text(input.into()), Value::Text("$".into()),
+            ]), Err(Error::Execution(_))));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text(r#"{"a":"yes"}"#.into()), Value::Text("$.a".into()),
+        ]).unwrap(), Value::Text("yes".into()));
     }
 }

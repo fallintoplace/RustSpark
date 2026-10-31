@@ -556,3 +556,78 @@ mod owned_bound_predicate_regressions {
             project(&batch, &selections).unwrap());
     }
 }
+
+
+/** Select a bounded direct-scan window without materializing unused columns.
+ *
+ * Computed projections return None because evaluating discarded rows may fail.
+ * A caller must retain the normal projection operator for those expressions.
+ */
+pub(crate) fn project_columns_window(
+    batch: &Batch, selections: &[Selection], offset: usize, count: Option<usize>,
+) -> Result<Option<Batch>> {
+    if !selections.iter().all(|selection|
+        matches!(&selection.expression, Expr::Column(_))) {
+        return Ok(None);
+    }
+    if count.is_some_and(|count| offset.checked_add(count).is_none()) {
+        return Err(crate::Error::Execution("LIMIT + OFFSET overflow".into()));
+    }
+    let start = offset.min(batch.num_rows());
+    let end = count.map_or(batch.num_rows(), |count|
+        start.saturating_add(count).min(batch.num_rows()));
+    let mut indices = Vec::with_capacity(selections.len());
+    let mut fields = Vec::with_capacity(selections.len());
+    for selection in selections {
+        let Expr::Column(name) = &selection.expression else {
+            unreachable!("checked column-only projection");
+        };
+        let index = batch.schema().column(name)?;
+        let field = batch.schema().field(index)?;
+        indices.push(index);
+        fields.push(Field::new(&selection.alias, field.data_type, field.nullable));
+    }
+    // Validate aliases before cloning any selected TEXT values.
+    let schema = Schema::new(fields)?;
+    let columns = indices.into_iter().map(|index| {
+        Ok(batch.column(index)?[start..end].to_vec())
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(Some(Batch::from_validated_columns(schema, columns, end - start)?))
+}
+
+#[cfg(test)]
+mod projected_catalog_window_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn direct_window_keeps_alias_order_nullability_and_empty_width_rows() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("hello".repeat(1024))],
+            vec![Value::Integer(3), Value::Null],
+        ]).unwrap();
+        let selections = [
+            Selection::new(Expr::Column("text".into()), "label"),
+            Selection::new(Expr::Column("ID".into()), "key"),
+        ];
+        let expected = crate::limit::limit(&project(&source, &selections).unwrap(),
+            1, Some(2)).unwrap();
+        let output = project_columns_window(&source, &selections, 1, Some(2))
+            .unwrap().unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(project_columns_window(&source, &[], 1, Some(2))
+            .unwrap().unwrap().num_rows(), 2);
+        assert!(project_columns_window(&source, &selections, usize::MAX, Some(1)).is_err());
+        assert!(project_columns_window(&source, &[
+            Selection::new(Expr::Column("missing".into()), "bad"),
+        ], 20, Some(1)).is_err());
+        assert!(project_columns_window(&source, &[
+            Selection::new(Expr::Column("id".into()), "x"),
+            Selection::new(Expr::Column("text".into()), "X"),
+        ], 0, Some(1)).is_err());
+    }
+}

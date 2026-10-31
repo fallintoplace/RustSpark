@@ -104,7 +104,7 @@ impl<R: BufRead> Records<R> {
                     fields.push(decode(field)?);
                     return Ok(Some(fields));
                 }
-                (State::Start | State::Unquoted, b'"') => {
+                (State::Unquoted, b'"') => {
                     return Err(Error::Parse("quote in unquoted CSV field".into()));
                 }
                 (State::AfterQuote, _) => {
@@ -480,7 +480,8 @@ mod buffered_csv_record_boundary_tests {
     struct Fragmented<R>(R);
     impl<R: Read> Read for Fragmented<R> {
         fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-            self.0.read(&mut bytes[..bytes.len().min(3)])
+            let max = bytes.len().min(3);
+            self.0.read(&mut bytes[..max])
         }
     }
 

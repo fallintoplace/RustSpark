@@ -18,6 +18,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .ok_or_else(|| Error::Execution("REGEXP_COUNT overflow".into()))?;
         return Ok(Value::Integer(count));
     }
+    if pattern == "." {
+        // Rust regex dot matches a Unicode scalar except LF by default.
+        let count = text.chars().filter(|&ch| ch != '\n').count();
+        return Ok(Value::Integer(i64::try_from(count)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
+    }
     if pattern.len() == 1 && pattern.as_bytes()[0].is_ascii_alphanumeric() {
         let needle = pattern.as_bytes()[0];
         let count = text.bytes().filter(|&byte| byte == needle).count();
@@ -104,5 +110,23 @@ mod literal_regex_count_tests {
             let expected = regex_support::compile(pattern).unwrap().find_iter(text).count();
             assert_eq!(evaluate(&args).unwrap(), Value::Integer(expected as i64));
         }
+    }
+}
+
+#[cfg(test)]
+mod dot_pattern_count_tests {
+    use super::*;
+
+    #[test]
+    fn dot_counts_non_newline_unicode_scalars_like_regex() {
+        for text in ["", "\n", "\n\n", "é🙂\nX", "\r\n", "foo\u{2028}bar"] {
+            let expected = regex_support::compile(".").unwrap().find_iter(text).count();
+            assert_eq!(
+                evaluate(&[Value::Text(text.into()), Value::Text(".".into())]).unwrap(),
+                Value::Integer(expected as i64)
+            );
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
+            Value::Null);
     }
 }

@@ -9,6 +9,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
+    if pattern == "." {
+        // Unlike a byte position, the SQL result counts Unicode scalars.
+        let position = text.chars().position(|ch| ch != '\n')
+            .map_or(0, |index| index + 1);
+        return i64::try_from(position).map(Value::Integer)
+            .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
+    }
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
         let Some(index) = text.find(pattern) else { return Ok(Value::Integer(0)); };
@@ -77,5 +84,25 @@ mod regexp_instr_unicode_offset_tests {
             let args = [Value::Text("🙂éfoo".into()), Value::Text(pattern.into())];
             assert_eq!(evaluate(&args).unwrap(), Value::Integer(3));
         }
+    }
+}
+
+#[cfg(test)]
+mod dot_pattern_instr_tests {
+    use super::*;
+
+    #[test]
+    fn dot_positions_match_regex_unicode_offsets() {
+        let re = regex_support::compile(".").unwrap();
+        for text in ["", "\n", "\n\n", "\n🙂z", "é\n🙂", "\r\n", "東京"] {
+            let expected = re.find(text)
+                .map_or(0, |matched| text[..matched.start()].chars().count() + 1);
+            assert_eq!(
+                evaluate(&[Value::Text(text.into()), Value::Text(".".into())]).unwrap(),
+                Value::Integer(expected as i64)
+            );
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
+            Value::Null);
     }
 }

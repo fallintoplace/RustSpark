@@ -18,13 +18,16 @@ pub(super) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
 }
 
 pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
-    let result_type = output_type(args, batch.schema())?;
     for arg in args {
         let value = arg.evaluate(batch, row)?;
         if !value.is_null() {
-            return Ok(match (result_type, value) {
-                (DataType::Float, Value::Integer(n)) => Value::Float(n as f64),
-                (_, value) => value,
+            // The SQL planner has validated output types already. Only an
+            // INTEGER result can need runtime widening to DOUBLE. Avoid
+            // rescanning argument types for TEXT, DOUBLE and all-NULL rows.
+            return Ok(match value {
+                Value::Integer(n) if output_type(args, batch.schema())? == DataType::Float =>
+                    Value::Float(n as f64),
+                value => value,
             });
         }
     }
@@ -52,5 +55,28 @@ mod tests {
             Expr::Literal(Value::Text("x".into())),
             Expr::Literal(Value::Integer(1)),
         ], batch.schema()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod coalesce_noninteger_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn text_float_all_null_and_numeric_promotion_preserve_results() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 1).unwrap();
+        let run = |values: &[Value]| {
+            let args = values.iter().cloned().map(Expr::Literal).collect::<Vec<_>>();
+            eval(&args, &batch, 0).unwrap()
+        };
+        assert_eq!(run(&[Value::Null, Value::Text("é🙂".into()),
+            Value::Text("unused".into())]), Value::Text("é🙂".into()));
+        assert_eq!(run(&[Value::Null, Value::Null]), Value::Null);
+        assert_eq!(run(&[Value::Float(1.25), Value::Integer(2)]),
+            Value::Float(1.25));
+        assert_eq!(run(&[Value::Integer(2), Value::Null, Value::Float(0.5)]),
+            Value::Float(2.0));
+        assert!(output_type(&[Expr::Literal(Value::Text("x".into())),
+            Expr::Literal(Value::Integer(1))], batch.schema()).is_err());
     }
 }
