@@ -72,6 +72,40 @@ fn fast_float_predicate<'a>(
     Ok(None)
 }
 
+// Match native SQL ordering for floats, including the engine's NaN-high
+// semantics and signed-zero equivalence.
+fn float_comparison(op: BinaryOp, left: f64, right: f64) -> Option<bool> {
+    use std::cmp::Ordering;
+    let order = match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).expect("non-NaN floats are ordered"),
+    };
+    Some(match op {
+        BinaryOp::Equal => order.is_eq(),
+        BinaryOp::NotEqual => !order.is_eq(),
+        BinaryOp::Less => order.is_lt(),
+        BinaryOp::LessEqual => !order.is_gt(),
+        BinaryOp::Greater => order.is_gt(),
+        BinaryOp::GreaterEqual => !order.is_lt(),
+        _ => return None,
+    })
+}
+
+fn fast_float_pair<'a>(
+    batch: &'a Batch, predicate: &'a Expr, boolean_op: BinaryOp,
+) -> Result<Option<(&'a [Value], (BinaryOp, f64), (BinaryOp, f64))>> {
+    let Expr::Binary { left, op, right } = predicate else { return Ok(None); };
+    if *op != boolean_op { return Ok(None); }
+    let Some((first, first_op, first_rhs)) =
+        fast_float_predicate(batch, left)? else { return Ok(None) };
+    let Some((second, second_op, second_rhs)) =
+        fast_float_predicate(batch, right)? else { return Ok(None) };
+    if !std::ptr::eq(first, second) { return Ok(None); }
+    Ok(Some((first, (first_op, first_rhs), (second_op, second_rhs))))
+}
+
 fn fast_integer_predicate<'a>(
     batch: &'a Batch,
     predicate: &'a Expr,
@@ -261,6 +295,26 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 }
             }
         }
+    } else if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
+        fast_float_pair(batch, predicate, BinaryOp::And)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(lhs) = value {
+                if float_comparison(first_op, *lhs, first_rhs) == Some(true)
+                    && float_comparison(second_op, *lhs, second_rhs) == Some(true) {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
+        fast_float_pair(batch, predicate, BinaryOp::Or)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(lhs) = value {
+                if float_comparison(first_op, *lhs, first_rhs) == Some(true)
+                    || float_comparison(second_op, *lhs, second_rhs) == Some(true) {
+                    selected.push(row);
+                }
+            }
+        }
     } else if let Some((column, op, rhs)) = fast_integer_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Integer(lhs) = value {
@@ -272,23 +326,9 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     } else if let Some((column, op, rhs)) = fast_float_predicate(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Float(lhs) = value {
-                let order = if lhs.is_nan() {
-                    if rhs.is_nan() { std::cmp::Ordering::Equal } else { std::cmp::Ordering::Greater }
-                } else if rhs.is_nan() {
-                    std::cmp::Ordering::Less
-                } else {
-                    lhs.partial_cmp(&rhs).expect("non-NaN floats are ordered")
-                };
-                let keep = match op {
-                    BinaryOp::Equal => order.is_eq(),
-                    BinaryOp::NotEqual => !order.is_eq(),
-                    BinaryOp::Less => order.is_lt(),
-                    BinaryOp::LessEqual => !order.is_gt(),
-                    BinaryOp::Greater => order.is_gt(),
-                    BinaryOp::GreaterEqual => !order.is_lt(),
-                    _ => false,
-                };
-                if keep { selected.push(row); }
+                if float_comparison(op, *lhs, rhs) == Some(true) {
+                    selected.push(row);
+                }
             }
         }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
@@ -817,5 +857,67 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fused_float_comparison_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn predicate(op: BinaryOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::binary(lhs, op, rhs)
+    }
+
+    #[test]
+    fn fused_float_ranges_match_scalar_for_nan_null_and_infinities() {
+        let values = vec![
+            Value::Null, Value::Float(f64::NEG_INFINITY),
+            Value::Float(-5.0), Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(1.5), Value::Float(f64::INFINITY),
+            Value::Float(f64::NAN), Value::Float(-f64::NAN),
+        ];
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("metric", DataType::Float, true)]).unwrap(),
+            values.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        let column = || Expr::Column("metric".into());
+        let between = predicate(BinaryOp::And,
+            predicate(BinaryOp::GreaterEqual, column(),
+                Expr::Literal(Value::Float(-0.0))),
+            predicate(BinaryOp::Less, column(),
+                Expr::Literal(Value::Float(f64::NAN))));
+        let outside = predicate(BinaryOp::Or,
+            predicate(BinaryOp::Less, Expr::Literal(Value::Float(0.0)), column()),
+            predicate(BinaryOp::Equal, column(),
+                Expr::Literal(Value::Float(f64::NAN))));
+        for expr in [between, outside] {
+            assert!(fast_float_pair(&batch, &expr, BinaryOp::And).unwrap().is_some()
+                || fast_float_pair(&batch, &expr, BinaryOp::Or).unwrap().is_some());
+            let expected = (0..batch.num_rows())
+                .filter(|&row| expr.evaluate(&batch, row).unwrap()
+                    .as_boolean().unwrap() == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &expr).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn fused_float_falls_back_for_different_columns() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("left", DataType::Float, true),
+            Field::new("right", DataType::Float, true),
+        ]).unwrap(), vec![
+            vec![Value::Float(1.0), Value::Float(4.0)],
+            vec![Value::Null, Value::Float(2.0)],
+            vec![Value::Float(5.0), Value::Float(5.0)],
+        ]).unwrap();
+        let expr = predicate(BinaryOp::And,
+            predicate(BinaryOp::Greater, Expr::Column("left".into()),
+                Expr::Literal(Value::Float(2.0))),
+            predicate(BinaryOp::Less, Expr::Column("right".into()),
+                Expr::Literal(Value::Float(5.0))));
+        assert!(fast_float_pair(&batch, &expr, BinaryOp::And).unwrap().is_none());
+        assert_eq!(select_indices(&batch, &expr).unwrap(), Vec::<usize>::new());
     }
 }
