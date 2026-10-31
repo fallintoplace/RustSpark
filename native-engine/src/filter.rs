@@ -17,6 +17,9 @@ pub fn filter_owned(batch: Batch, predicate: &Expr) -> Result<Batch> {
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch);
     }
+    if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
+        return Ok(Batch::empty(batch.schema().clone()));
+    }
     let indices = crate::vector_filter::select_indices(&batch, predicate)?;
     if indices.len() == batch.num_rows() {
         return Ok(batch);
@@ -238,5 +241,30 @@ mod move_owned_filter_payloads {
         assert!(filter_owned(input, &Expr::Column("id".into())).is_err());
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 4).unwrap();
         assert_eq!(filter_owned(zero, &Expr::Literal(Value::Boolean(true))).unwrap().num_rows(), 4);
+    }
+}
+
+#[cfg(test)]
+mod owned_constant_false_filter_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn false_and_unknown_discard_large_payloads_and_preserve_schema() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(100_000))], vec![Value::Null],
+        ]).unwrap();
+        for value in [Value::Boolean(false), Value::Null] {
+            let predicate = Expr::Literal(value);
+            let actual = filter_owned(batch.clone(), &predicate).unwrap();
+            assert_eq!(actual, filter(&batch, &predicate).unwrap());
+            assert_eq!(actual.schema(), &schema);
+            assert_eq!(actual.num_rows(), 0);
+        }
+        let zero_width = Batch::new_with_row_count(Schema::new(vec![]).unwrap(),
+            vec![], 20).unwrap();
+        assert_eq!(filter_owned(zero_width,
+            &Expr::Literal(Value::Boolean(false))).unwrap().num_rows(), 0);
     }
 }
