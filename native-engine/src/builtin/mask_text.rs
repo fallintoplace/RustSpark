@@ -28,6 +28,24 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let lowercase = replacement(args, 2, Some('x'))?;
     let digits = replacement(args, 3, Some('n'))?;
     let others = replacement(args, 4, None)?;
+    // ASCII replacements preserve the exact output length. Rewrite one
+    // buffer without checking UTF-8 growth on every character.
+    if input.is_ascii() && [uppercase, lowercase, digits, others].into_iter()
+        .flatten().all(|replacement| replacement.is_ascii()) {
+        let mut output = input.as_bytes().to_vec();
+        for byte in &mut output {
+            let original = char::from(*byte);
+            let selected = match *byte {
+                b'A'..=b'Z' => uppercase.unwrap_or(original),
+                b'a'..=b'z' => lowercase.unwrap_or(original),
+                b'0'..=b'9' => digits.unwrap_or(original),
+                _ => others.unwrap_or(original),
+            };
+            *byte = selected as u8;
+        }
+        return Ok(Value::Text(String::from_utf8(output)
+            .expect("ASCII replacements preserve UTF-8")));
+    }
     let mut result = String::with_capacity(input.len());
     if input.is_ascii() {
         for &byte in input.as_bytes() {
@@ -134,5 +152,34 @@ mod ascii_mask_classifier_regressions {
         ]), Err(Error::Execution(_))));
         assert_eq!(evaluate(&[Value::Text("é🙂".into())]).unwrap(),
             Value::Text("x🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod ascii_in_place_mask_regression_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_replacements_preserve_size_and_classification() {
+        let source = "Aa9-*? ".repeat(2000);
+        let expected = "Xxn-*? ".repeat(2000);
+        assert_eq!(evaluate(&[Value::Text(source)]).unwrap(), Value::Text(expected));
+        assert_eq!(evaluate(&[
+            Value::Text("Az9-_".into()),
+            Value::Text("Q".into()), Value::Text("k".into()),
+            Value::Text("7".into()), Value::Text("?".into()),
+        ]).unwrap(), Value::Text("Qk7??".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("Az9".into()), Value::Null, Value::Null, Value::Null,
+        ]).unwrap(), Value::Text("Az9".into()));
+    }
+
+    #[test]
+    fn unicode_replacements_use_the_bounded_fallback() {
+        assert_eq!(evaluate(&[
+            Value::Text("Aa1!".into()),
+            Value::Text("🙂".into()), Value::Text("é".into()),
+            Value::Text("界".into()), Value::Null,
+        ]).unwrap(), Value::Text("🙂é界!".into()));
     }
 }
