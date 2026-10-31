@@ -379,9 +379,46 @@ fn infer(
     }
 }
 
+/// Depth limits alone do not bound a wide binary plan. Check the total
+/// physical worklist before recursive inference or opening input sources.
+fn validate_plan_nodes(plan: &Plan) -> Result<()> {
+    const MAX_PLAN_NODES: usize = 4096;
+    let mut visited = 0usize;
+    let mut pending = vec![plan];
+    while let Some(node) = pending.pop() {
+        visited += 1;
+        if visited > MAX_PLAN_NODES {
+            return Err(Error::Execution(
+                "streaming query exceeds maximum node count".into(),
+            ));
+        }
+        match node {
+            Plan::Scan { .. } => {}
+            Plan::Filter { input, .. } |
+            Plan::Project { input, .. } |
+            Plan::Aggregate { input, .. } |
+            Plan::Sort { input, .. } |
+            Plan::Limit { input, .. } |
+            Plan::Distinct { input } => pending.push(input),
+            Plan::Join { left, right, .. } |
+            Plan::CrossJoin { left, right } |
+            Plan::UnionAll { left, right } |
+            Plan::Intersect { left, right } |
+            Plan::IntersectAll { left, right } |
+            Plan::Except { left, right } |
+            Plan::ExceptAll { left, right } => {
+                pending.push(left);
+                pending.push(right);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn output_schema(
     plan: &Plan, catalog: &FileCatalog, options: &StreamOptions
 ) -> Result<Schema> {
+    validate_plan_nodes(plan)?;
     infer(plan, catalog, 0, options.max_plan_depth)
 }
 
@@ -960,5 +997,38 @@ mod zero_width_stream_distinct_tests {
             Box::new([Ok(input)].into_iter()), QueryControl::default(), 1, 63);
         assert!(limited.next().unwrap().is_err());
         assert!(limited.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod wide_stream_plan_admission_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn rejects_wide_shallow_plans_before_schema_or_source_access() {
+        let mut plan = Plan::scan("not_registered");
+        // Only 14 levels deep, but 16,383 total plan nodes.
+        for _ in 0..13 {
+            plan = Plan::UnionAll {
+                left: Box::new(plan.clone()),
+                right: Box::new(plan),
+            };
+        }
+        let catalog = FileCatalog::new();
+        let options = StreamOptions::default();
+        assert!(output_schema(&plan, &catalog, &options)
+            .unwrap_err().to_string().contains("node count"));
+        assert!(execute(&plan, &catalog, &options, QueryControl::default())
+            .err().unwrap().to_string().contains("node count"));
+
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut registered = FileCatalog::new();
+        registered.register_csv("t", "not-opened.csv", schema.clone(), 128).unwrap();
+        let small = Plan::UnionAll {
+            left: Box::new(Plan::scan("t")),
+            right: Box::new(Plan::scan("t")),
+        };
+        assert_eq!(output_schema(&small, &registered, &options).unwrap(), schema);
     }
 }

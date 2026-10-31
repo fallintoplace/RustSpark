@@ -15,7 +15,7 @@ use super::{
 };
 
 static JOIN_ID: AtomicU64 = AtomicU64::new(1);
-const MAX_BUILD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BUILD_BYTES: usize = 128 * 1024 * 1024;
 
 pub struct JoinFiles {
     paths: Vec<PathBuf>,
@@ -37,12 +37,14 @@ fn load_build(
     path: &Path, schema: &Schema, max_rows: usize, io_rows: usize,
     control: &QueryControl,
 ) -> Result<Batch> {
-    load_build_with_budget(path, schema, max_rows, io_rows, MAX_BUILD_BYTES, control)
+    load_build_bounded(path, schema, max_rows, io_rows, MAX_BUILD_BYTES, control)
 }
 
-fn load_build_with_budget(
+/// Enforce both build cardinality and retained bytes before copying each
+/// decoded batch into the hash-join build side.
+fn load_build_bounded(
     path: &Path, schema: &Schema, max_rows: usize, io_rows: usize,
-    max_bytes: usize, control: &QueryControl,
+    max_build_bytes: usize, control: &QueryControl,
 ) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != schema {
@@ -51,26 +53,34 @@ fn load_build_with_budget(
     let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
     let mut rows = 0usize;
     let mut retained_bytes = 0usize;
+    let fixed_row_bytes = schema.len()
+        .checked_mul(std::mem::size_of::<Value>())
+        .and_then(|bytes| bytes.checked_add(64))
+        .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
-        let next = rows.checked_add(batch.num_rows())
+        let next_rows = rows.checked_add(batch.num_rows())
             .filter(|total| *total <= max_rows)
             .ok_or_else(|| Error::Execution("join build partition exceeds row budget".into()))?;
-        let source_columns = (0..schema.len())
-            .map(|column| batch.column(column)).collect::<Result<Vec<_>>>()?;
-        for row in 0..batch.num_rows() {
-            if row % 1024 == 0 { control.check()?; }
-            let bytes = super::row_footprint::footprint(
-                source_columns.iter().map(|column| &column[row]));
-            retained_bytes = retained_bytes.checked_add(bytes)
-                .filter(|total| *total <= max_bytes)
-                .ok_or_else(|| Error::Execution(
-                    "join build partition exceeds byte budget".into()))?;
+        let mut batch_bytes = batch.num_rows().checked_mul(fixed_row_bytes)
+            .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
+        for column in 0..schema.len() {
+            for value in batch.column(column)? {
+                if let Value::Text(text) = value {
+                    batch_bytes = batch_bytes.checked_add(text.len())
+                        .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
+                }
+            }
         }
-        for (source, output) in source_columns.iter().zip(columns.iter_mut()) {
-            output.extend_from_slice(source);
+        let next_bytes = retained_bytes.checked_add(batch_bytes)
+            .filter(|total| *total <= max_build_bytes)
+            .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
+        // No copy happens until both limits are admitted.
+        for (column, output) in columns.iter_mut().enumerate() {
+            output.extend_from_slice(batch.column(column)?);
         }
-        rows = next;
+        rows = next_rows;
+        retained_bytes = next_bytes;
     }
     Batch::new_with_row_count(schema.clone(), columns, rows)
 }
@@ -118,6 +128,12 @@ where L: IntoIterator<Item = Result<Batch>>,
         control.check()?;
         let build = load_build(
             right_path, &right_schema, max_build_rows, io_batch_rows, control)?;
+        // With no build rows, INNER, RIGHT and SEMI cannot produce results.
+        // Avoid decoding probe shards or creating an empty result spill file.
+        if build.num_rows() == 0 &&
+            matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi) {
+            continue;
+        }
         let mut reader = SpillReader::new(
             BufReader::new(File::open(left_path)?), io_batch_rows)?;
         if reader.schema() != &left_schema {
@@ -128,14 +144,8 @@ where L: IntoIterator<Item = Result<Batch>>,
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
-        // With no build rows, these join kinds cannot emit a match. The
-        // probe spill may be huge, so bypass its row decoding and hash build.
-        // LEFT, FULL, and ANTI must still visit the probe side.
-        if build.num_rows() == 0 &&
-            matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi) {
-            writer.finish()?;
-            continue;
-        }
+        // LEFT, FULL and ANTI must still visit the probe side even when
+        // the build partition contains no rows.
         // A RIGHT or FULL join must emit build-only rows once per partition,
         // not once for every probe batch.
         let outer_build = matches!(kind, JoinKind::Right | JoinKind::Full);
@@ -439,6 +449,8 @@ mod empty_build_grace_join_short_circuit_tests {
                 }
             }
             assert_eq!(rows, 0);
+            assert!(files.paths().is_empty());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
             drop(files);
         }
         fs::remove_dir_all(dir).unwrap();
@@ -446,36 +458,46 @@ mod empty_build_grace_join_short_circuit_tests {
 }
 
 #[cfg(test)]
-mod grace_join_build_byte_budget_tests {
+mod bounded_grace_build_bytes_tests {
     use super::*;
     use crate::schema::{DataType, Field};
-    use std::{fs, io::BufWriter};
+    use std::fs;
 
     #[test]
-    fn rejects_wide_builds_even_below_row_count_limit() {
+    fn repeated_text_rows_respect_the_build_byte_budget() {
         let dir = std::env::temp_dir().join(format!(
-            "native-join-build-budget-{}-{}", std::process::id(),
-            JOIN_ID.fetch_add(1, Ordering::Relaxed)
+            "rustspark-grace-build-bytes-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()
         ));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("build.rspill");
-        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
-        let expected = Batch::from_rows(schema.clone(), vec![
-            vec![Value::Text("large".repeat(400))],
-            vec![Value::Text("small".into())],
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
         ]).unwrap();
-        let mut writer = SpillWriter::new(BufWriter::new(File::create(&path).unwrap()),
-            schema.clone()).unwrap();
-        writer.write_batch(&expected).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("é".repeat(20))],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("x".repeat(40))],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(
+            BufWriter::new(File::create(&path).unwrap()), schema.clone()
+        ).unwrap();
+        writer.write_batch_range(&batch, 0, 2).unwrap();
+        writer.write_batch_range(&batch, 2, 3).unwrap();
         writer.finish().unwrap();
+
+        let bytes_per_row = 64 + schema.len() * std::mem::size_of::<Value>();
+        let total = bytes_per_row * 3 + 40 + 40;
         let control = QueryControl::default();
-        let error = load_build_with_budget(&path, &schema, 10, 2, 1024, &control)
-            .unwrap_err();
-        assert!(error.to_string().contains("byte budget"));
-        assert_eq!(load_build_with_budget(&path, &schema, 10, 2, 8192,
-            &control).unwrap(), expected);
-        assert!(load_build_with_budget(&path, &schema, 1, 2, 8192,
-            &control).is_err());
+        assert_eq!(
+            load_build_bounded(&path, &schema, 3, 2, total, &control).unwrap(),
+            batch
+        );
+        assert!(load_build_bounded(&path, &schema, 3, 2, total - 1, &control)
+            .unwrap_err().to_string().contains("byte budget"));
+        assert!(load_build_bounded(&path, &schema, 2, 2, total, &control).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }
