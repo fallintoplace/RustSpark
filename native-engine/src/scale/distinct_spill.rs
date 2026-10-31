@@ -69,9 +69,11 @@ where I: IntoIterator<Item = Result<Batch>>
         let mut retained_bytes = 0usize;
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
-            let columns = (0..batch.schema().len()).map(|column| batch.column(column))
-                .collect::<Result<Vec<_>>>()?;
-            for index in 0..batch.num_rows() {
+            // The spill decoder owns these columns. Move first-seen keys
+            // into retained state instead of cloning large TEXT values.
+            let row_count = batch.num_rows();
+            let mut columns = batch.into_columns();
+            for index in 0..row_count {
                 if index % 1024 == 0 { control.check()?; }
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 columns.len().hash(&mut hasher);
@@ -91,7 +93,9 @@ where I: IntoIterator<Item = Result<Batch>>
                 let next_bytes = retained_bytes.checked_add(footprint)
                     .filter(|&bytes| bytes <= MAX_DISTINCT_STATE_BYTES)
                     .ok_or_else(|| Error::Execution("DISTINCT partition exceeds memory budget".into()))?;
-                let row = batch.row(index)?;
+                let row = columns.iter_mut()
+                    .map(|column| std::mem::replace(&mut column[index], Value::Null))
+                    .collect();
                 seen.entry(fingerprint).or_default().push(row);
                 unique_rows += 1;
                 retained_bytes = next_bytes;
@@ -249,5 +253,42 @@ mod borrowed_distinct_spill_membership_tests {
         assert!(found.contains(&vec![Value::Text("other".into()), Value::Null]));
         drop(files);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_distinct_spill_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn unique_large_text_and_repeated_null_keys_round_trip() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-owned-distinct-{}-{}",
+            std::process::id(),
+            DISTINCT_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let long = "🙂".repeat(20_000);
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(long.clone())], vec![Value::Null],
+            vec![Value::Text(long.clone())], vec![Value::Text("other".into())],
+        ]).unwrap();
+        let files = distinct_to_disk([Ok(input)], schema.clone(), &dir, 4, 4, 2,
+            &QueryControl::default()).unwrap();
+        let mut values = Vec::new();
+        for path in files.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 16).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                values.extend(batch.rows().unwrap().into_iter().map(|row| row[0].clone()));
+            }
+        }
+        assert_eq!(values.len(), 3);
+        assert!(values.contains(&Value::Null));
+        assert!(values.contains(&Value::Text(long)));
+        assert!(values.contains(&Value::Text("other".into())));
+        drop(files);
+        std::fs::remove_dir(dir).unwrap();
     }
 }
