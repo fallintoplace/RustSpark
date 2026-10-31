@@ -43,9 +43,15 @@ impl StageGraph {
         let mut indegree = vec![0usize; stages.len()];
         let mut successors = vec![Vec::new(); stages.len()];
         for (position, stage) in stages.iter().enumerate() {
-            let mut seen = HashSet::new();
+            // Most distributed plans have unary stages or binary joins.
+            // Avoid a HashSet allocation for those common fan-ins.
+            if stage.dependencies.len() == 2 &&
+                stage.dependencies[0] == stage.dependencies[1] {
+                return Err(Error::Execution("duplicate stage dependency".into()));
+            }
+            let mut seen = (stage.dependencies.len() > 2).then(HashSet::new);
             for dep in &stage.dependencies {
-                if !seen.insert(*dep) {
+                if seen.as_mut().is_some_and(|keys| !keys.insert(*dep)) {
                     return Err(Error::Execution("duplicate stage dependency".into()));
                 }
                 let source = *index.get(dep)
@@ -338,5 +344,34 @@ mod bounded_stage_partition_tasks_tests {
             (4, 0), (9, 0), (9, 1), (9, 2)
         ]);
         assert!(graph.ready_tasks(&HashSet::from([2, 4, 9]), 8).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod narrow_stage_dependencies_tests {
+    use super::*;
+
+    #[test]
+    fn long_unary_chain_is_valid_and_topologically_stable() {
+        let stages = (0..4096_u64).map(|id| Stage {
+            id, partitions: 1,
+            dependencies: if id == 0 { vec![] } else { vec![id - 1] },
+        }).collect();
+        let graph = StageGraph::new(stages).unwrap();
+        assert_eq!(graph.longest_dependency_chain(), 4096);
+        assert_eq!(graph.topological_order().len(), 4096);
+        assert_eq!(graph.ready(&HashSet::new()), vec![0]);
+    }
+
+    #[test]
+    fn binary_and_wide_duplicate_dependencies_are_rejected() {
+        for duplicates in [vec![0, 0], vec![0, 1, 0]] {
+            let mut stages = vec![
+                Stage { id: 0, dependencies: vec![], partitions: 1 },
+                Stage { id: 1, dependencies: vec![], partitions: 1 },
+            ];
+            stages.push(Stage { id: 2, dependencies: duplicates, partitions: 1 });
+            assert!(StageGraph::new(stages).is_err());
+        }
     }
 }
