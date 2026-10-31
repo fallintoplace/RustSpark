@@ -120,6 +120,19 @@ impl RunMerger {
     }
 
     fn less_run(&self, a: usize, b: usize) -> bool {
+        if self.keys.len() == 1 {
+            let key = &self.keys[0];
+            let left = self.runs[a].peek(key.column).expect("active run has a key");
+            let right = self.runs[b].peek(key.column).expect("active run has a key");
+            let order = match (left, right) {
+                (Value::Integer(x), Value::Integer(y)) => {
+                    let cmp = x.cmp(y);
+                    if key.descending { cmp.reverse() } else { cmp }
+                }
+                _ => compare_value(left, right, key),
+            };
+            return order == Ordering::Less || (order == Ordering::Equal && a < b);
+        }
         for key in &self.keys {
             let left = self.runs[a].peek(key.column).expect("active run has a key");
             let right = self.runs[b].peek(key.column).expect("active run has a key");
@@ -510,5 +523,46 @@ mod deferred_external_merge_error_tests {
         assert!(merge.next().unwrap().is_err());
         assert!(merge.next().is_none());
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod single_integer_key_merge_heap_regressions {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+    static RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn nullable_integer_heap_matches_stable_full_sort_across_many_runs() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-int-heap-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("sequence", DataType::Integer, false),
+        ]).unwrap();
+        let rows = (0..72_i64).map(|n| vec![
+            if n % 11 == 0 { Value::Null } else { Value::Integer((n * 7) % 5) },
+            Value::Integer(n),
+        ]).collect::<Vec<_>>();
+        let input = Batch::from_rows(schema.clone(), rows).unwrap();
+        for (descending, nulls_first) in [(false, true), (true, false)] {
+            let keys = [SortKey {
+                expression: Expr::Column("key".into()), descending, nulls_first,
+            }];
+            let expected = crate::sort::sort(&input, &keys).unwrap().rows().unwrap();
+            let runs = write_sorted_runs([Ok(input.clone())], schema.clone(),
+                &keys, &dir, 4, &QueryControl::default()).unwrap();
+            let merger = RunMerger::new(runs.files(), schema.clone(), &keys,
+                4, 6, QueryControl::default()).unwrap();
+            let actual = merger.collect::<Result<Vec<_>>>().unwrap()
+                .iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            drop(runs);
+        }
+        fs::remove_dir(dir).unwrap();
     }
 }
