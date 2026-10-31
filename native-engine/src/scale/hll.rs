@@ -491,7 +491,8 @@ mod hll_wire_exchange_regressions {
             a.add(&Value::Integer(n));
             b.add(&Value::Integer(n + 20_000));
         }
-        for sketch in [&HyperLogLog::new(), &a, &b] {
+        let empty = HyperLogLog::new();
+        for sketch in [&empty, &a, &b] {
             let wire = sketch.to_wire_bytes();
             assert_eq!(wire.len(), WIRE_BYTES);
             assert_eq!(HyperLogLog::from_wire_bytes(&wire).unwrap(), *sketch);
