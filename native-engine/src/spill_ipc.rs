@@ -1,6 +1,6 @@
 //! Temporary Arrow IPC spill files for memory-bounded native operators.
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -62,7 +62,7 @@ pub fn spill(dir: impl AsRef<Path>, schema: &Schema, batches: &[Batch]) -> Resul
         "rustspark-spill-{}-{timestamp}-{identifier}.arrow",
         std::process::id()
     ));
-    let output = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    let output = crate::scale::private_files::create_private(&path)?;
     let temporary = SpillFile { path };
     let arrow_schema = arrow_bridge::to_arrow(&Batch::empty(schema.clone()))?.schema();
     let mut writer = FileWriter::try_new(output, &arrow_schema)

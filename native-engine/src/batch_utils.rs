@@ -43,9 +43,12 @@ pub fn concat(
             return Ok(second);
         }
     }
-    let mut total = 0usize;
-    let mut columns: Vec<Vec<Value>> = (0..schema.len()).map(|_| Vec::new()).collect();
-    for batch in std::iter::once(first).chain(std::iter::once(second)).chain(inputs) {
+    // The first owned batch already owns validated column buffers. Use
+    // them as accumulation buffers instead of allocating one Vec per column
+    // and copying the first batch into those fresh vectors.
+    let mut total = first.num_rows();
+    let mut columns = first.into_columns();
+    for batch in std::iter::once(second).chain(inputs) {
         if batch.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
@@ -285,5 +288,41 @@ mod validated_owned_concatenation_regressions {
         let parts = (0..19).map(|_| Batch::new_with_row_count(
             empty_schema.clone(), vec![], 7).unwrap()).collect::<Vec<_>>();
         assert_eq!(concat(&empty_schema, parts, 133).unwrap().num_rows(), 133);
+    }
+}
+
+#[cfg(test)]
+mod reuse_first_concat_column_buffers_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn multiple_owned_inputs_preserve_payloads_and_cardinality() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("💡".repeat(4096))], vec![Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("tail".into())],
+        ]).unwrap();
+        let first_ptr = match first.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let output = concat(&schema, [first, second], 3).unwrap();
+        assert_eq!(output.num_rows(), 3);
+        assert_eq!(match output.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, first_ptr);
+        assert_eq!(output.value(1, 0).unwrap(), &Value::Null);
+        assert_eq!(output.value(2, 0).unwrap(), &Value::Text("tail".into()));
+
+        let zero_width = Schema::new(vec![]).unwrap();
+        let batches = (1..=4).map(|count|
+            Batch::new_with_row_count(zero_width.clone(), vec![], count).unwrap());
+        assert_eq!(concat(&zero_width, batches, 10).unwrap().num_rows(), 10);
     }
 }

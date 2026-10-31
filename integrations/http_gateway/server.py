@@ -10,6 +10,7 @@ import hmac
 import json
 import math
 import os
+import signal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import re
@@ -42,15 +43,21 @@ def parse_result_rows(text: str) -> list[dict]:
     def reject_constant(value):
         raise ValueError(f"Nonfinite SQL result constant: {value}")
 
-    rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
-                      parse_constant=reject_constant, parse_float=finite_float)
+    try:
+        rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
+                          parse_constant=reject_constant, parse_float=finite_float)
+    except RecursionError as error:
+        raise ValueError("SQL result exceeds JSON nesting limit") from error
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL result must be a list of objects")
     return rows
 
 
 def validate_params(body: bytes) -> dict[str, str]:
-    payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
+    try:
+        payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
+    except RecursionError as error:
+        raise ValueError("JSON request exceeds nesting limit") from error
     if not isinstance(payload, dict) or set(payload) != {"params"}:
         raise ValueError("Expected JSON object containing only params")
     params = payload["params"]
@@ -85,15 +92,32 @@ def command_for_template(binary: str, database: Path, template: Path,
 
 
 
+
+
+def _kill_backend_group(process: subprocess.Popen) -> None:
+    """Kill inherited pipe holders as well as the immediate SQL process."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
 def run_bounded_backend(command: list[str], timeout: float,
                         max_bytes: int = MAX_BACKEND_OUTPUT_BYTES) -> subprocess.CompletedProcess:
     """Drain stdout with a hard memory limit. Discard backend diagnostics."""
-    if timeout <= 0 or max_bytes <= 0:
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or timeout <= 0 or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("Invalid query execution budget")
     output = bytearray()
     exceeded = threading.Event()
     with subprocess.Popen(command, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL) as process:
+                          stderr=subprocess.DEVNULL,
+                          start_new_session=(os.name == "posix")) as process:
         assert process.stdout is not None
 
         def drain():
@@ -103,10 +127,7 @@ def run_bounded_backend(command: list[str], timeout: float,
                     return
                 if len(output) + len(chunk) > max_bytes:
                     exceeded.set()
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
+                    _kill_backend_group(process)
                     return
                 output.extend(chunk)
 
@@ -115,13 +136,13 @@ def run_bounded_backend(command: list[str], timeout: float,
         deadline = time.monotonic() + timeout
         thread.join(max(0.0, deadline - time.monotonic()))
         if thread.is_alive():
-            process.kill()
+            _kill_backend_group(process)
             thread.join()
             raise subprocess.TimeoutExpired(command, timeout)
         try:
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            process.kill()
+            _kill_backend_group(process)
             process.wait()
             raise
         if exceeded.is_set():

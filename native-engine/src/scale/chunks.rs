@@ -161,7 +161,26 @@ impl Iterator for BatchChunks<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
     }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.0.nth(n)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+
+    fn count(self) -> usize {
+        self.0.count()
+    }
+
+    fn last(self) -> Option<Self::Item> {
+        self.0.last()
+    }
 }
+
+impl ExactSizeIterator for BatchChunks<'_> {}
+impl std::iter::FusedIterator for BatchChunks<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -457,5 +476,28 @@ mod precomputed_row_batch_limits_tests {
         assert!(RowBatcher::with_byte_budget(
             std::iter::empty(), schema, 10, width - 1,
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scale_chunk_iterator_adaptor_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn wrapper_preserves_exact_size_and_skip_behavior() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..23)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut chunks = BatchChunks::new(&input, 4).unwrap();
+        assert_eq!(chunks.len(), 6);
+        assert_eq!(chunks.size_hint(), (6, Some(6)));
+        assert_eq!(chunks.nth(2).unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(8)]);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.last().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(20)]);
+        assert_eq!(BatchChunks::new(&input, 4).unwrap().count(), 6);
+        let mut exhausted = BatchChunks::new(&input, 4).unwrap();
+        assert!(exhausted.nth(usize::MAX).is_none());
+        assert!(exhausted.next().is_none());
     }
 }
