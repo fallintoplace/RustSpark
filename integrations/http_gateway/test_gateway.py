@@ -3,8 +3,11 @@ import unittest
 import tempfile
 import subprocess
 import sys
+import socket
+import threading
+from http.server import HTTPServer
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler
 
 
 class GatewayTests(unittest.TestCase):
@@ -92,6 +95,45 @@ class BoundedBackendTests(unittest.TestCase):
                 [sys.executable, "-c", "import time; time.sleep(2)"],
                 timeout=0.1, max_bytes=32,
             )
+
+
+class RequestFramingTests(unittest.TestCase):
+    def test_ambiguous_content_length_and_chunked_encoding_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(
+                secret="test-secret" * 3, queries=directory, database=directory,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+            ))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                headers = (
+                    b"POST /v1/query/safe HTTP/1.1\\r\\n"
+                    b"Host: localhost\\r\\n"
+                    b"Authorization: Bearer test-secrettest-secrettest-secret\\r\\n"
+                    b"Content-Type: application/json\\r\\n"
+                )
+                for framing in (
+                    b"Content-Length: 2\\r\\nContent-Length: 2\\r\\n",
+                    b"Content-Length: 2\\r\\nTransfer-Encoding: chunked\\r\\n",
+                    b"Transfer-Encoding: chunked\\r\\n",
+                    b"Content-Length: +2\\r\\n",
+                    b"Content-Length: 2, 2\\r\\n",
+                ):
+                    with self.subTest(framing=framing), socket.create_connection(
+                        server.server_address, timeout=2,
+                    ) as connection:
+                        connection.settimeout(2)
+                        connection.sendall(headers + framing + b"\\r\\n{}")
+                        response = connection.recv(4096).split(b"\\r\\n", 1)[0]
+                        self.assertIn(b"400", response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

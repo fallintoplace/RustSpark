@@ -164,11 +164,18 @@ def make_handler(*, secret: str, queries: Path, database: Path,
             if not hmac.compare_digest(token, "Bearer " + secret):
                 self.send_json(401, {"error": "Unauthorized"})
                 return
-            try:
-                length = int(self.headers.get("Content-Length", ""))
-            except ValueError:
+            # Never guess a request body boundary from ambiguous HTTP framing.
+            lengths = self.headers.get_all("Content-Length", [])
+            if not lengths:
+                self.close_connection = True
                 self.send_json(411, {"error": "Content-Length required"})
                 return
+            if (len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0])
+                    or self.headers.get_all("Transfer-Encoding")):
+                self.close_connection = True
+                self.send_json(400, {"error": "Ambiguous request framing"})
+                return
+            length = int(lengths[0])
             if not 0 <= length <= MAX_REQUEST_BYTES:
                 self.send_json(413, {"error": "Request too large"})
                 return
