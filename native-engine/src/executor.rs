@@ -137,8 +137,19 @@ fn execute_inner(
             }
         },
         Plan::Limit { input, offset, count } => {
-            // A LIMIT over a scan must not materialize and budget the whole input.
-            if let Plan::Scan { table } = input.as_ref() {
+            // A bounded filter over a scan needs only OFFSET + LIMIT matches.
+            // Do not allocate all matching rows or reject a large intermediate
+            // result against the budget for the small final window.
+            if let Plan::Filter { input: source, predicate } = input.as_ref() {
+                if let (Plan::Scan { table }, Some(count)) = (source.as_ref(), count) {
+                    let needed = offset.checked_add(*count)
+                        .ok_or_else(|| Error::Execution("LIMIT + OFFSET overflow".into()))?;
+                    let filtered = filter::filter_first(catalog.get(table)?, predicate, needed)?;
+                    limit::limit_owned(filtered, *offset, Some(*count))?
+                } else {
+                    limit::limit_owned(descend(input)?, *offset, *count)?
+                }
+            } else if let Plan::Scan { table } = input.as_ref() {
                 limit::limit(catalog.get(table)?, *offset, *count)?
             } else {
                 limit::limit_owned(descend(input)?, *offset, *count)?
@@ -518,6 +529,45 @@ mod owned_intermediate_limit_execution_tests {
                 expected);
         }
         assert!(execute(&filtered.limit(usize::MAX, Some(1)), &catalog).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod bounded_filter_scan_limit_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn limit_pushdown_keeps_filtered_offset_under_final_row_budget() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        catalog.register("data", Batch::from_rows(schema, (0..100)
+            .map(|n| vec![if n % 11 == 0 { Value::Null } else { Value::Integer(n) }])
+            .collect()).unwrap()).unwrap();
+        let predicate = Expr::binary(Expr::Column("n".into()),
+            BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(10)));
+        let plan = Plan::scan("data").filter(predicate).limit(3, Some(2));
+        let options = ExecutionOptions { max_output_rows: 2, ..ExecutionOptions::default() };
+        let output = execute_with_options(&plan, &catalog, options).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Integer(14)], vec![Value::Integer(15)]
+        ]);
+        assert!(execute_with_options(&Plan::scan("data"), &catalog, options).is_err());
+    }
+
+    #[test]
+    fn zero_limit_still_validates_predicate_and_overflow() {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        catalog.register("data", Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)]
+        ]).unwrap()).unwrap();
+        assert!(execute(&Plan::scan("data").filter(
+            Expr::Column("n".into())).limit(0, Some(0)), &catalog).is_err());
+        assert!(execute(&Plan::scan("data").filter(
+            Expr::Literal(Value::Boolean(true))).limit(usize::MAX, Some(1)), &catalog).is_err());
     }
 }
 
