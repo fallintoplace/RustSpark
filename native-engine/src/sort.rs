@@ -96,13 +96,22 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         });
         return Ok(indices);
     }
-    let mut key_columns = Vec::with_capacity(keys.len());
+    // A mixed ORDER BY should not clone direct-column TEXT keys just because
+    // another key is computed. Borrow the input window and materialize only
+    // expression results, keeping both kinds of keys indexed from zero.
+    let mut key_columns: Vec<std::borrow::Cow<'_, [Value]>> =
+        Vec::with_capacity(keys.len());
     for key in keys {
-        let mut values = Vec::with_capacity(end - start);
-        for row in start..end {
-            values.push(key.expression.evaluate(batch, row)?);
+        if let Expr::Column(name) = &key.expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            key_columns.push(std::borrow::Cow::Borrowed(&column[start..end]));
+        } else {
+            let mut values = Vec::with_capacity(end - start);
+            for row in start..end {
+                values.push(key.expression.evaluate(batch, row)?);
+            }
+            key_columns.push(std::borrow::Cow::Owned(values));
         }
-        key_columns.push(values);
     }
     let mut indices: Vec<usize> = (0..end - start).collect();
     indices.sort_by(|&left, &right| {
@@ -116,6 +125,39 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
     });
     for index in &mut indices { *index += start; }
     Ok(indices)
+}
+
+#[cfg(test)]
+mod mixed_key_borrowed_sort_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_and_direct_text_keys_sort_a_nonzero_window() {
+        let payload = "p".repeat(32 * 1024);
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(9), Value::Text(format!("z{payload}"))],
+            vec![Value::Integer(2), Value::Text(format!("z{payload}"))],
+            vec![Value::Integer(1), Value::Text(format!("x{payload}"))],
+            vec![Value::Integer(2), Value::Text(format!("a{payload}"))],
+            vec![Value::Integer(0), Value::Text(format!("m{payload}"))],
+        ]).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)))),
+            SortKey::ascending(Expr::Column("label".into())),
+        ];
+        let output = sort_range(&batch, &keys, 1, 4).unwrap();
+        assert_eq!(output.column(0).unwrap(), &[
+            Value::Integer(1), Value::Integer(2), Value::Integer(2),
+        ]);
+        assert_eq!(output.column(1).unwrap()[1],
+            Value::Text(format!("a{payload}")));
+    }
 }
 
 #[cfg(test)]
