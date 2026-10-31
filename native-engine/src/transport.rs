@@ -204,6 +204,19 @@ impl<R: Read> Iterator for FrameReader<R> {
     type Item = Result<Frame>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
+        if self.frames_seen >= self.max_frames {
+            // Preserve clean EOF when the stream ends at the limit. If one
+            // more frame exists, reject it before reading its header or
+            // allocating its potentially large payload.
+            self.finished = true;
+            let mut extra = [0u8; 1];
+            return match self.input.read(&mut extra) {
+                Ok(0) => None,
+                Ok(_) => Some(Err(Error::Execution(
+                    "exchange stream frame count limit exceeded".into()))),
+                Err(error) => Some(Err(error.into())),
+            };
+        }
         let remaining = self.max_total_bytes.saturating_sub(self.bytes_seen);
         match read_frame(&mut self.input, self.max_frame_bytes.min(remaining)) {
             Ok(None) => { self.finished = true; None }
@@ -212,10 +225,6 @@ impl<R: Read> Iterator for FrameReader<R> {
                 Some(Err(error))
             }
             Ok(Some(frame)) => {
-                if self.frames_seen >= self.max_frames {
-                    self.finished = true;
-                    return Some(Err(Error::Execution("exchange stream frame count limit exceeded".into())));
-                }
                 let Some(total) = self.bytes_seen.checked_add(frame.payload.len())
                     .filter(|&bytes| bytes <= self.max_total_bytes) else {
                     self.finished = true;
@@ -245,20 +254,7 @@ pub fn read_frames_limited(
     max_total_bytes: usize,
     max_frames: usize,
 ) -> Result<Vec<Frame>> {
-    let mut frames = Vec::new();
-    let mut total = 0_usize;
-    while let Some(frame) = read_frame(
-        input, max_frame_bytes.min(max_total_bytes.saturating_sub(total))
-    )? {
-        if frames.len() >= max_frames {
-            return Err(Error::Execution("exchange stream frame count limit exceeded".into()));
-        }
-        total = total.checked_add(frame.payload.len())
-            .filter(|used| *used <= max_total_bytes)
-            .ok_or_else(|| Error::Execution("exchange stream byte budget exceeded".into()))?;
-        frames.push(frame);
-    }
-    Ok(frames)
+    FrameReader::new(input, max_frame_bytes, max_total_bytes, max_frames).collect()
 }
 
 #[cfg(test)]
@@ -466,5 +462,43 @@ mod shuffle_header_integrity_tests {
         let mut legacy = encoded;
         legacy[..4].copy_from_slice(b"RSP1");
         assert!(read_frame(&mut legacy.as_slice(), 128).is_err());
+    }
+}
+
+#[cfg(test)]
+mod early_frame_count_rejection_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn extra_frame_is_rejected_without_decoding_its_payload() {
+        let mut wire = Vec::new();
+        let first = Frame { stage: 1, task: 1, attempt: 1, payload: vec![3; 12] };
+        let extra = Frame { stage: 1, task: 2, attempt: 1, payload: vec![9; 32 * 1024] };
+        write_frame(&mut wire, &first, 32 * 1024).unwrap();
+        write_frame(&mut wire, &extra, 32 * 1024).unwrap();
+        let first_bytes = HEADER_BYTES + first.payload.len();
+        let mut reader = FrameReader::new(Cursor::new(wire.as_slice()),
+            32 * 1024, 64 * 1024, 1);
+        assert_eq!(reader.next().unwrap().unwrap(), first);
+        assert!(reader.next().unwrap().unwrap_err().to_string().contains("frame count"));
+        assert_eq!(reader.input.position(), (first_bytes + 1) as u64);
+        assert!(reader.next().is_none());
+        let mut cursor = Cursor::new(wire.as_slice());
+        assert!(read_frames_limited(&mut cursor, 32 * 1024, 64 * 1024, 1).is_err());
+        assert_eq!(cursor.position(), (first_bytes + 1) as u64);
+    }
+
+    #[test]
+    fn exactly_at_frame_limit_preserves_clean_eof() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &Frame { stage: 1, task: 5, attempt: 1,
+            payload: vec![7; 2] }, 2).unwrap();
+        assert_eq!(read_frames_limited(&mut wire.as_slice(), 2, 2, 1)
+            .unwrap().len(), 1);
+        assert!(read_frames_limited(&mut [].as_slice(), 2, 2, 0)
+            .unwrap().is_empty());
+        assert!(read_frames_limited(&mut wire.as_slice(), 2, 2, 0)
+            .unwrap_err().to_string().contains("frame count"));
     }
 }
