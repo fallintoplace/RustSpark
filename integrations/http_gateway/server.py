@@ -11,7 +11,7 @@ import json
 import math
 import os
 import signal
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
 import subprocess
@@ -151,6 +151,36 @@ def run_bounded_backend(command: list[str], timeout: float,
             command, process.returncode, output.decode("utf-8"), ""
         )
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Serve independent queries concurrently with an upper bound on workers."""
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, address, handler, *, max_workers: int = 8):
+        if type(max_workers) is not int or not 1 <= max_workers <= 32:
+            raise ValueError("Gateway worker limit must be in 1..=32")
+        self._worker_slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        # Backpressure at admission instead of creating unbounded threads
+        # under a burst of slow or long-running SQL requests.
+        self._worker_slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            request.settimeout(10)
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+
 def make_handler(*, secret: str, queries: Path, database: Path,
                  binary: str, max_rows: int, timeout: int):
     class Handler(BaseHTTPRequestHandler):
@@ -244,6 +274,7 @@ def main():
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--max-rows", type=int, default=500)
     parser.add_argument("--query-timeout", type=int, default=20)
+    parser.add_argument("--max-concurrent-queries", type=int, default=8)
     args = parser.parse_args()
     secret = os.environ.get("RUSTSPARK_GATEWAY_TOKEN", "")
     if len(secret) < 24:
@@ -258,7 +289,10 @@ def main():
         max_rows=args.max_rows, timeout=args.query_timeout,
     )
     # Intentionally loopback only; use TLS and a trusted reverse proxy for remote use.
-    with HTTPServer(("127.0.0.1", args.port), handler) as server:
+    with BoundedThreadingHTTPServer(
+        ("127.0.0.1", args.port), handler,
+        max_workers=args.max_concurrent_queries,
+    ) as server:
         print(f"RustSpark SQL template gateway listening on 127.0.0.1:{args.port}")
         server.serve_forever()
 
