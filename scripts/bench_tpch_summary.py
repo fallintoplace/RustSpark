@@ -4,8 +4,15 @@
 import argparse
 import json
 import math
-import statistics
 from pathlib import Path
+
+
+def finite_sample_median(samples):
+    ordered = sorted(samples)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (
+        ordered[middle - 1] + (ordered[middle] - ordered[middle - 1]) / 2
+    )
 
 
 def checked_medians(entries):
@@ -23,7 +30,7 @@ def checked_medians(entries):
                            or not math.isfinite(sample) or sample <= 0
                            for sample in samples)):
                 raise ValueError(f"Invalid timing samples for query {row['id']}")
-            if abs(statistics.median(samples) - value) > 0.002:
+            if abs(finite_sample_median(samples) - value) > 0.002:
                 raise ValueError(f"Reported median differs from samples for query {row['id']}")
         medians.append(float(value))
     return medians
