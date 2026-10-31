@@ -98,6 +98,12 @@ where L: IntoIterator<Item = Result<Batch>>,
         control.check()?;
         let build = load_build(
             right_path, &right_schema, max_build_rows, io_batch_rows, control)?;
+        // With no build rows, INNER, RIGHT and SEMI cannot produce results.
+        // Avoid decoding probe shards or creating an empty result spill file.
+        if build.num_rows() == 0 &&
+            matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi) {
+            continue;
+        }
         let mut reader = SpillReader::new(
             BufReader::new(File::open(left_path)?), io_batch_rows)?;
         if reader.schema() != &left_schema {
@@ -108,14 +114,8 @@ where L: IntoIterator<Item = Result<Batch>>,
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         output.paths.push(path);
         let mut writer = SpillWriter::new(BufWriter::new(file), result_schema.clone())?;
-        // With no build rows, these join kinds cannot emit a match. The
-        // probe spill may be huge, so bypass its row decoding and hash build.
-        // LEFT, FULL, and ANTI must still visit the probe side.
-        if build.num_rows() == 0 &&
-            matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi) {
-            writer.finish()?;
-            continue;
-        }
+        // LEFT, FULL and ANTI must still visit the probe side even when
+        // the build partition contains no rows.
         // A RIGHT or FULL join must emit build-only rows once per partition,
         // not once for every probe batch.
         let outer_build = matches!(kind, JoinKind::Right | JoinKind::Full);
@@ -419,6 +419,8 @@ mod empty_build_grace_join_short_circuit_tests {
                 }
             }
             assert_eq!(rows, 0);
+            assert!(files.paths().is_empty());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
             drop(files);
         }
         fs::remove_dir_all(dir).unwrap();
