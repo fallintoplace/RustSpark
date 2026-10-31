@@ -9,7 +9,9 @@ import socket
 import threading
 from http.server import HTTPServer
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler
+from unittest.mock import patch
+from http.client import HTTPConnection
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler, BoundedThreadingHTTPServer
 
 
 class GatewayTests(unittest.TestCase):
@@ -173,3 +175,75 @@ class RequestFramingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class GatewayConcurrentQueryTests(unittest.TestCase):
+    def test_worker_budget_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "worker limit"):
+            BoundedThreadingHTTPServer(("127.0.0.1", 0), make_handler(
+                secret="test-secret" * 3, queries=Path("."), database=Path("."),
+                binary="unused", max_rows=1, timeout=1), max_workers=0)
+
+    def test_two_independent_queries_can_run_at_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            handler = make_handler(
+                secret="test-secret" * 3, queries=directory, database=directory,
+                binary="unused", max_rows=1, timeout=5,
+            )
+            server = BoundedThreadingHTTPServer(
+                ("127.0.0.1", 0), handler, max_workers=2,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            first_started = threading.Event()
+            both_started = threading.Event()
+            release = threading.Event()
+            running = 0
+            lock = threading.Lock()
+
+            def fake_backend(*args, **kwargs):
+                nonlocal running
+                with lock:
+                    running += 1
+                    if running == 1:
+                        first_started.set()
+                    if running == 2:
+                        both_started.set()
+                if not release.wait(5):
+                    raise RuntimeError("SQL worker timed out in concurrency test")
+                with lock:
+                    running -= 1
+                return subprocess.CompletedProcess(args[0], 0, "[]", "")
+
+            results = []
+            def request():
+                connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                try:
+                    connection.request("POST", "/v1/query/safe", body=b'{"params":{}}',
+                        headers={"Authorization": "Bearer " + "test-secret" * 3,
+                                 "Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    results.append((response.status, response.read()))
+                finally:
+                    connection.close()
+
+            thread.start()
+            try:
+                with patch("server.run_bounded_backend", side_effect=fake_backend):
+                    clients = [threading.Thread(target=request) for _ in range(2)]
+                    for client in clients:
+                        client.start()
+                    try:
+                        self.assertTrue(first_started.wait(3))
+                        self.assertTrue(both_started.wait(3),
+                            "A serial HTTPServer blocks the second query")
+                    finally:
+                        release.set()
+                        for client in clients:
+                            client.join(timeout=5)
+                self.assertEqual(results, [(200, b'{"rows":[]}')] * 2)
+            finally:
+                release.set()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
