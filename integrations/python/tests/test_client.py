@@ -228,5 +228,27 @@ class BoundedProcessCaptureTests(unittest.TestCase):
                 RustSpark().query("SELECT 1", max_output_bytes=invalid)
 
 
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_keyboard_interrupt_terminates_process_and_pipe_workers(self):
+        import rustspark_local.subprocess_budget as capture
+        original_popen = subprocess.Popen
+        started = []
+
+        def record_process(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            started.append(process)
+            return process
+
+        with patch.object(capture.subprocess, "Popen", side_effect=record_process):
+            with patch.object(capture.threading.Thread, "join", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_bounded(
+                        [sys.executable, "-c", "import time; time.sleep(30)"],
+                        timeout=5, max_output_bytes=1024,
+                    )
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll(), "interrupted SQL child must be reaped")
+
+
 if __name__ == "__main__":
     unittest.main()
