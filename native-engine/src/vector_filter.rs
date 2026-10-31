@@ -105,7 +105,7 @@ fn fast_integer_predicate<'a>(
 }
 
 fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
-    -> Result<Option<(&'a [Value], bool)>>
+    -> Result<Option<(&'a [Value], bool, bool)>>
 {
     let (inner, select_null) = match predicate {
         Expr::IsNull(inner) => (inner.as_ref(), true),
@@ -116,7 +116,9 @@ fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
         _ => return Ok(None),
     };
     let Expr::Column(name) = inner else { return Ok(None) };
-    Ok(Some((batch.column(batch.schema().column(name)?)?, select_null)))
+    let index = batch.schema().column(name)?;
+    let nullable = batch.schema().field(index)?.nullable;
+    Ok(Some((batch.column(index)?, select_null, nullable)))
 }
 
 /// Return matching row offsets; NULL predicates are not included.
@@ -165,7 +167,11 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
         }
-    } else if let Some((column, select_null)) = fast_null_test(batch, predicate)? {
+    } else if let Some((column, select_null, nullable)) = fast_null_test(batch, predicate)? {
+        if !nullable {
+            // Valid native batches cannot contain NULL in a required column.
+            return Ok(if select_null { Vec::new() } else { (0..batch.num_rows()).collect() });
+        }
         for (row, value) in column.iter().enumerate() {
             if value.is_null() == select_null { selected.push(row); }
         }
@@ -416,5 +422,22 @@ mod native_negated_boolean_scan_tests {
         assert_eq!(select_indices(&input,
             &Expr::Not(Box::new(Expr::Column("enabled".into())))
         ).unwrap(), [2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod nonnullable_null_test_fast_path_tests {
+    use super::*;
+    use crate::{schema::{Schema, Field, DataType}, scalar::Value};
+    #[test]
+    fn required_columns_skip_is_null_value_scans() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..1000).map(|n|
+            vec![Value::Integer(n)]).collect()).unwrap();
+        let is_null = Expr::IsNull(Box::new(Expr::Column("n".into())));
+        let not_null = Expr::Not(Box::new(is_null.clone()));
+        assert!(select_indices(&input, &is_null).unwrap().is_empty());
+        assert_eq!(select_indices(&input, &not_null).unwrap(),
+            (0..input.num_rows()).collect::<Vec<_>>());
     }
 }
