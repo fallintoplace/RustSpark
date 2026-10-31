@@ -5,7 +5,8 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
-    builder::StringBuilder, types::Int32Type,
+    builder::StringBuilder,
+    types::{Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type},
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
 
@@ -74,6 +75,26 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
         .map_err(|err| Error::Execution(format!("Arrow conversion failed: {err}")))
 }
 
+
+macro_rules! decode_utf8_dictionary {
+    ($array:expr, $key_type:ty) => {{
+        let dictionary = $array.as_any().downcast_ref::<DictionaryArray<$key_type>>()
+            .ok_or_else(|| Error::Type("invalid dictionary Arrow array".into()))?;
+        let values = dictionary.values().as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| Error::Type("dictionary values are not UTF-8".into()))?;
+        (0..dictionary.len()).map(|row| -> Result<Value> {
+            if dictionary.is_null(row) { return Ok(Value::Null); }
+            let code = usize::try_from(dictionary.keys().value(row))
+                .map_err(|_| Error::Type("negative or overflowing dictionary code".into()))?;
+            if code >= values.len() {
+                return Err(Error::Type("Arrow dictionary code out of bounds".into()));
+            }
+            if values.is_null(code) { Ok(Value::Null) }
+            else { Ok(Value::Text(values.value(code).into())) }
+        }).collect::<Result<Vec<_>>>()
+    }};
+}
+
 pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
     let mut fields = Vec::new();
     let mut columns = Vec::new();
@@ -87,8 +108,11 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
             ArrowType::Dictionary(key, value)
-                if **key == ArrowType::Int32 && **value == ArrowType::Utf8 =>
-                DataType::Text,
+                if **value == ArrowType::Utf8 &&
+                    matches!(key.as_ref(),
+                        ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
+                        ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 | ArrowType::UInt64
+                    ) => DataType::Text,
             other => return Err(Error::Unsupported(format!("unsupported Arrow type: {other}"))),
         };
         fields.push(Field::new(field.name(), data_type, field.is_nullable()));
@@ -204,23 +228,18 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     else { Value::Text(values.value(row).into()) }
                 }).collect())
             }
-            ArrowType::Dictionary(key, value)
-                if **key == ArrowType::Int32 && **value == ArrowType::Utf8 => {
-                let dictionary = array.as_any().downcast_ref::<DictionaryArray<Int32Type>>()
-                    .ok_or_else(|| Error::Type("invalid dictionary Arrow array".into()))?;
-                let values = dictionary.values().as_any().downcast_ref::<StringArray>()
-                    .ok_or_else(|| Error::Type("dictionary values are not UTF-8".into()))?;
-                Some((0..dictionary.len()).map(|row| {
-                    if dictionary.is_null(row) { Value::Null }
-                    else {
-                        let code = dictionary.keys().value(row) as usize;
-                        if values.is_null(code) {
-                            Value::Null
-                        } else {
-                            Value::Text(values.value(code).into())
-                        }
-                    }
-                }).collect())
+            ArrowType::Dictionary(key, value) if **value == ArrowType::Utf8 => {
+                Some(match key.as_ref() {
+                    ArrowType::Int8 => decode_utf8_dictionary!(array, Int8Type)?,
+                    ArrowType::Int16 => decode_utf8_dictionary!(array, Int16Type)?,
+                    ArrowType::Int32 => decode_utf8_dictionary!(array, Int32Type)?,
+                    ArrowType::Int64 => decode_utf8_dictionary!(array, Int64Type)?,
+                    ArrowType::UInt8 => decode_utf8_dictionary!(array, UInt8Type)?,
+                    ArrowType::UInt16 => decode_utf8_dictionary!(array, UInt16Type)?,
+                    ArrowType::UInt32 => decode_utf8_dictionary!(array, UInt32Type)?,
+                    ArrowType::UInt64 => decode_utf8_dictionary!(array, UInt64Type)?,
+                    _ => return Err(Error::Unsupported("unsupported Arrow dictionary key type".into())),
+                })
             }
             _ => None,
         };
@@ -516,5 +535,39 @@ mod arrow_decoded_column_validation_tests {
             vec![Value::Integer(8), Value::Null, Value::Null],
         ]).unwrap();
         assert_eq!(from_arrow(&to_arrow(&batch).unwrap()).unwrap(), batch);
+    }
+}
+
+#[cfg(test)]
+mod arrow_dictionary_key_width_regressions {
+    use super::*;
+    use arrow_array::builder::StringDictionaryBuilder;
+
+    #[test]
+    fn decodes_all_arrow_dictionary_integer_keys_without_losing_nulls() {
+        macro_rules! check {
+            ($key:ty) => {{
+                let mut dictionary = StringDictionaryBuilder::<$key>::new();
+                dictionary.append("Berlin").unwrap();
+                dictionary.append_null();
+                dictionary.append("Berlin").unwrap();
+                dictionary.append("東京").unwrap();
+                let record = RecordBatch::try_from_iter(vec![
+                    ("city", Arc::new(dictionary.finish()) as ArrayRef),
+                ]).unwrap();
+                assert_eq!(from_arrow(&record).unwrap().column(0).unwrap(), &[
+                    Value::Text("Berlin".into()), Value::Null,
+                    Value::Text("Berlin".into()), Value::Text("東京".into()),
+                ]);
+            }};
+        }
+        check!(Int8Type);
+        check!(Int16Type);
+        check!(Int32Type);
+        check!(Int64Type);
+        check!(UInt8Type);
+        check!(UInt16Type);
+        check!(UInt32Type);
+        check!(UInt64Type);
     }
 }
