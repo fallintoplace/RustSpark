@@ -37,3 +37,23 @@ test("bounds recursive JSON validation before exhausting the JavaScript stack", 
   const nested = "[".repeat(300) + "0" + "]".repeat(300);
   assert.throws(() => parseStrictJSON(nested), /nesting limit/);
 });
+
+
+test("validates large escaped text without decoding it during the pre-scan", () => {
+  const text = "🙂\\\"é".repeat(100_000);
+  const payload = JSON.stringify([{ name: text, nested: { text } }]);
+  const originalParse = JSON.parse;
+  let calls = 0;
+  try {
+    JSON.parse = (...args) => { calls++; return originalParse(...args); };
+    const rows = parseStrictJSON(payload);
+    assert.equal(rows[0].name, text);
+    assert.equal(rows[0].nested.text, text);
+    // Two object keys per object plus the final document parse, not a
+    // second decode of either large text value.
+    assert.equal(calls, 4);
+  } finally {
+    JSON.parse = originalParse;
+  }
+  assert.throws(() => parseStrictJSON('[{"name":"broken\\\\uZ"}]'), SyntaxError);
+});
