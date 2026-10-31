@@ -56,12 +56,23 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         first_end -= left.len_utf8();
         second_end -= right.len_utf8();
     }
-    let a = first[..first_end].chars().collect::<Vec<_>>();
-    let b = second[..second_end].chars().collect::<Vec<_>>();
-    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
+    // ASCII-only middle spans can use borrowed UTF-8 bytes directly.
+    let first = &first[..first_end];
+    let second = &second[..second_end];
+    if first.is_ascii() && second.is_ascii() {
+        return distance_units(first.as_bytes(), second.as_bytes(), threshold);
+    }
+    let a = first.chars().collect::<Vec<_>>();
+    let b = second.chars().collect::<Vec<_>>();
+    distance_units(&a, &b, threshold)
+}
+
+fn distance_units<T: Eq + Copy>(
+    a: &[T], b: &[T], threshold: Option<usize>,
+) -> Result<Value> {    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
-    let (longer, shorter) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
+    let (longer, shorter) = if a.len() >= b.len() { (a, b) } else { (b, a) };
     if shorter.is_empty() {
         let distance = longer.len();
         return Ok(Value::Integer(if threshold.is_some_and(|limit| distance > limit) { -1 }
@@ -306,5 +317,47 @@ mod shared_unicode_edge_streaming_tests {
                 Value::Text(left.into()), Value::Text(right.into())
             ]).unwrap(), Value::Integer(expected));
         }
+    }
+}
+
+#[cfg(test)]
+mod levenshtein_borrowed_ascii_tests {
+    use super::*;
+
+    fn distance(a: &str, b: &str, threshold: Option<i64>) -> Result<Value> {
+        let mut args = vec![Value::Text(a.into()), Value::Text(b.into())];
+        if let Some(threshold) = threshold { args.push(Value::Integer(threshold)); }
+        evaluate(&args)
+    }
+
+    #[test]
+    fn byte_slice_dp_matches_unicode_scalar_dp() {
+        for (a, b, expected) in [
+            ("kitten", "sitting", 3),
+            ("aaaaabc", "aaaaaxc", 1),
+            ("abc", "cab", 2),
+            ("abc", "abc", 0),
+            ("", "abc", 3),
+            ("a🙂b", "a🙂c", 1),
+            ("café", "cafe", 1),
+            ("é🙂é", "éXé", 1),
+        ] {
+            assert_eq!(distance(a, b, None).unwrap(), Value::Integer(expected));
+            assert_eq!(distance(a, b, Some(expected)).unwrap(),
+                Value::Integer(expected));
+            if expected > 0 {
+                assert_eq!(distance(a, b, Some(expected - 1)).unwrap(),
+                    Value::Integer(-1));
+            }
+        }
+    }
+
+    #[test]
+    fn huge_matching_ascii_edges_only_process_the_trimmed_middle() {
+        let prefix = "a".repeat(100_000);
+        let left = format!("{prefix}X{prefix}");
+        let right = format!("{prefix}Y{prefix}");
+        assert_eq!(distance(&left, &right, Some(1)).unwrap(), Value::Integer(1));
+        assert_eq!(distance(&left, &right, Some(0)).unwrap(), Value::Integer(-1));
     }
 }
