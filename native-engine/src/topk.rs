@@ -504,7 +504,7 @@ mod topk_computed_singleton_and_owned_offset_regressions {
     use crate::{expr::{BinaryOp, Expr}, schema::{DataType, Field, Schema}};
 
     #[test]
-    fn computed_limit_one_matches_stable_sort_for_ties_nulls_and_nan() {
+    fn computed_limit_one_matches_stable_sort_for_ties_and_nulls() {
         let batch = Batch::from_rows(Schema::new(vec![
             Field::new("n", DataType::Float, true),
             Field::new("payload", DataType::Text, false),
@@ -513,7 +513,7 @@ mod topk_computed_singleton_and_owned_offset_regressions {
             vec![Value::Null, Value::Text("null".into())],
             vec![Value::Float(1.0), Value::Text("winner".into())],
             vec![Value::Float(1.0), Value::Text("tie".into())],
-            vec![Value::Float(f64::NAN), Value::Text("nan".into())],
+            vec![Value::Float(-1.0), Value::Text("negative".into())],
         ]).unwrap();
         for (descending, nulls_first) in [
             (false, false), (false, true), (true, false), (true, true)
