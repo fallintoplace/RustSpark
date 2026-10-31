@@ -341,9 +341,9 @@ mod owned_cross_run_split_regressions {
                 rows.extend(batch.rows().unwrap());
             }
         }
-        rows.sort_by_key(|row| match row[0] { Value::Integer(n) => n, _ => unreachable!() });
+        rows.sort_by_key(|row| match &row[0] { Value::Integer(n) => *n, _ => unreachable!() });
         let mut expected = expected;
-        expected.sort_by_key(|row| match row[0] { Value::Integer(n) => n, _ => unreachable!() });
+        expected.sort_by_key(|row| match &row[0] { Value::Integer(n) => *n, _ => unreachable!() });
         assert_eq!(rows, expected);
         let paths = runs.files().to_vec();
         drop(runs);
