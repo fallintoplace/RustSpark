@@ -295,11 +295,43 @@ pub fn aggregate_global_stream(
     Batch::from_rows(schema, vec![row])
 }
 
+const MAX_GROUP_KEY_BYTES: usize = 64 * 1024 * 1024;
+
+fn group_key_state_bytes(key: &[Value], state_count: usize) -> Result<usize> {
+    // GROUP BY keeps one copy in the hash index and one in the result rows.
+    // Account for both owned keys and the per-group aggregate states.
+    let fixed = 128usize.checked_add(state_count.checked_mul(std::mem::size_of::<State>())
+        .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?)
+        .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?;
+    key.iter().try_fold(fixed, |used, value| {
+        let slot = std::mem::size_of::<Value>().checked_mul(2)
+            .and_then(|n| n.checked_add(match value {
+                Value::Text(text) => text.len().checked_mul(2)
+                    .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?,
+                _ => 0,
+            }))
+            .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))?;
+        used.checked_add(slot)
+            .ok_or_else(|| Error::Execution("GROUP BY key size overflow".into()))
+    })
+}
+
 pub fn aggregate_with_max_groups(
     batch: &Batch,
     group_by: &[(Expr, String)],
     items: &[AggregateItem],
     max_groups: usize,
+) -> Result<Batch> {
+    aggregate_with_limits(batch, group_by, items, max_groups, MAX_GROUP_KEY_BYTES)
+}
+
+/// Bound the memory retained by GROUP BY keys as well as group cardinality.
+pub fn aggregate_with_limits(
+    batch: &Batch,
+    group_by: &[(Expr, String)],
+    items: &[AggregateItem],
+    max_groups: usize,
+    max_key_state_bytes: usize,
 ) -> Result<Batch> {
     let mut fields = Vec::with_capacity(group_by.len() + items.len());
     for (expr, alias) in group_by {
@@ -313,11 +345,17 @@ pub fn aggregate_with_max_groups(
     let schema = Schema::new(fields)?;
     let mut group_indices: HashMap<Vec<Value>, usize> = HashMap::new();
     let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
+    let mut retained_group_bytes = 0usize;
 
     if group_by.is_empty() {
         if max_groups == 0 {
             return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
         }
+        let size = group_key_state_bytes(&[], items.len())?;
+        if size > max_key_state_bytes {
+            return Err(Error::Execution("GROUP BY key state byte budget exceeded".into()));
+        }
+        retained_group_bytes = size;
         groups.push((Vec::new(), items.iter().map(|item| State::new(&item.op)).collect()));
     }
     let bound_columns = group_by.iter().map(|(expr, _)| match expr {
@@ -340,9 +378,14 @@ pub fn aggregate_with_max_groups(
                     if groups.len() >= max_groups {
                         return Err(Error::Execution("GROUP BY group count exceeds memory budget".into()));
                     }
+                    let bytes = group_key_state_bytes(entry.key(), items.len())?;
+                    let next = retained_group_bytes.checked_add(bytes)
+                        .filter(|&size| size <= max_key_state_bytes)
+                        .ok_or_else(|| Error::Execution("GROUP BY key state byte budget exceeded".into()))?;
                     let index = groups.len();
                     groups.push((entry.key().clone(), items.iter().map(|item| State::new(&item.op)).collect()));
                     entry.insert(index);
+                    retained_group_bytes = next;
                     index
                 }
             }
@@ -608,5 +651,45 @@ mod count_argument_preflight_regressions {
             assert_eq!(aggregate(&batch, &[], &[AggregateItem::new(op, "count")])
                 .unwrap().row(0).unwrap(), vec![Value::Integer(0)]);
         }
+    }
+}
+
+#[cfg(test)]
+mod in_memory_group_key_byte_admission_regressions {
+    use super::*;
+
+    #[test]
+    fn wide_text_groups_are_bounded_even_below_count_limit() {
+        let schema = Schema::new(vec![
+            Field::new("category", DataType::Text, false),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let key_a = "a".repeat(400);
+        let key_b = "b".repeat(400);
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text(key_a.clone()), Value::Integer(1)],
+            vec![Value::Text(key_a.clone()), Value::Integer(2)],
+            vec![Value::Text(key_b.clone()), Value::Integer(3)],
+        ]).unwrap();
+        let group_by = [(Expr::Column("category".into()), "category".into())];
+        let items = [AggregateItem::new(
+            AggregateOp::Sum(Expr::Column("amount".into())), "total",
+        )];
+        let one_key = group_key_state_bytes(&[Value::Text(key_a)], items.len()).unwrap();
+        assert!(aggregate_with_limits(&input, &group_by, &items, 10, one_key).is_err());
+        let result = aggregate_with_limits(&input, &group_by, &items, 10, one_key * 2)
+            .unwrap().rows().unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|row| row[1] == Value::Integer(3)));
+    }
+
+    #[test]
+    fn even_global_aggregates_admit_their_state_budget() {
+        let input = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 1).unwrap();
+        let items = [AggregateItem::new(AggregateOp::CountAll, "total")];
+        assert!(aggregate_with_limits(&input, &[], &items, 1, 0).is_err());
+        let exact = group_key_state_bytes(&[], items.len()).unwrap();
+        let result = aggregate_with_limits(&input, &[], &items, 1, exact).unwrap();
+        assert_eq!(result.row(0).unwrap(), vec![Value::Integer(1)]);
     }
 }
