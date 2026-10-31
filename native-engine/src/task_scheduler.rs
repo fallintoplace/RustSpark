@@ -153,6 +153,26 @@ impl TaskScheduler {
         expired
     }
 
+    fn renew_with_deadline(&mut self, lease: &Lease, now: Instant, deadline: Instant) -> bool {
+        let Some(task) = self.tasks.get_mut(&lease.task) else { return false; };
+        match &task.status {
+            TaskStatus::Leased { worker, attempt, until }
+                if *worker == lease.worker && *attempt == lease.attempt && *until > now => {
+                let old_until = *until;
+                let new_until = deadline.max(old_until);
+                task.status = TaskStatus::Leased {
+                    worker: lease.worker, attempt: lease.attempt, until: new_until,
+                };
+                if new_until != old_until {
+                    self.deadlines.remove(&(old_until, lease.task));
+                    self.deadlines.insert((new_until, lease.task));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Extend an active attempt without reviving a stale or expired lease.
     pub fn renew(&mut self, lease: &Lease, now: Instant, ttl: Duration) -> Result<bool> {
         if ttl.is_zero() {
@@ -160,21 +180,23 @@ impl TaskScheduler {
         }
         let deadline = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task heartbeat deadline overflow".into()))?;
-        let Some(task) = self.tasks.get_mut(&lease.task) else { return Ok(false); };
-        match &task.status {
-            TaskStatus::Leased { worker, attempt, until }
-                if *worker == lease.worker && *attempt == lease.attempt && *until > now => {
-                let old_until = *until;
-                let new_until = deadline.max(old_until);
-                task.status = TaskStatus::Leased { worker: lease.worker, attempt: lease.attempt, until: new_until };
-                if new_until != old_until {
-                    self.deadlines.remove(&(old_until, lease.task));
-                    self.deadlines.insert((new_until, lease.task));
-                }
-                Ok(true)
-            }
-            _ => Ok(false),
+        Ok(self.renew_with_deadline(lease, now, deadline))
+    }
+
+    /// Renew a worker's lease window with one clock and deadline calculation.
+    /// Results correspond to input order; an invalid attempt cannot extend
+    /// another worker's lease. A zero TTL rejects the whole batch up front.
+    pub fn renew_many(
+        &mut self, leases: &[Lease], now: Instant, ttl: Duration,
+    ) -> Result<Vec<bool>> {
+        if ttl.is_zero() {
+            return Err(Error::Execution("task heartbeat TTL must be positive".into()));
         }
+        let deadline = now.checked_add(ttl)
+            .ok_or_else(|| Error::Execution("task heartbeat deadline overflow".into()))?;
+        Ok(leases.iter().map(|lease| {
+            self.renew_with_deadline(lease, now, deadline)
+        }).collect())
     }
 
     pub fn finish(&mut self, lease: &Lease, success: bool) -> bool {
@@ -628,5 +650,48 @@ mod hash_index_scheduler_regressions {
         assert!(TaskScheduler::with_task_limit([5, 1, 2], 2, 2).is_err());
         let scheduler = TaskScheduler::with_task_limit([5, 1, 2], 2, 3).unwrap();
         assert_eq!(scheduler.queued_tasks(10), vec![1, 2, 5]);
+    }
+}
+
+#[cfg(test)]
+mod batched_heartbeat_regressions {
+    use super::*;
+
+    #[test]
+    fn renews_valid_leases_without_reviving_stale_or_foreign_attempts() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let mut scheduler = TaskScheduler::new([10, 20, 30], 3).unwrap();
+        let leases = scheduler.lease_many(7, now, ttl, 3).unwrap();
+        let mut foreign = leases[1].clone();
+        foreign.worker = 99;
+        assert!(scheduler.renew_many(&leases, now, Duration::ZERO).is_err());
+        assert_eq!(scheduler.renew_many(
+            &[leases[0].clone(), foreign, leases[2].clone()],
+            now + Duration::from_secs(3), Duration::from_secs(10),
+        ).unwrap(), [true, false, true]);
+        assert_eq!(scheduler.counts().leased, 3);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(6)), 1);
+        assert_eq!(scheduler.status(20), Some(&TaskStatus::Queued));
+        assert_eq!(scheduler.counts(), TaskCounts {
+            queued: 1, leased: 2, done: 0, failed: 0,
+        });
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(13)), 2);
+        assert!(scheduler.renew_many(
+            &[leases[0].clone()], now + Duration::from_secs(14), ttl,
+        ).unwrap().iter().all(|accepted| !accepted));
+    }
+
+    #[test]
+    fn a_new_deadline_never_shortens_an_existing_lease() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1], 2).unwrap();
+        let lease = scheduler.lease(9, now, Duration::from_secs(30))
+            .unwrap().unwrap();
+        assert_eq!(scheduler.renew_many(
+            &[lease.clone()], now, Duration::from_secs(1),
+        ).unwrap(), [true]);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(2)), 0);
+        assert!(scheduler.finish_at(&lease, true, now + Duration::from_secs(3)));
     }
 }
