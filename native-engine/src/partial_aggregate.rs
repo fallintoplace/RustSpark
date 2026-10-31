@@ -34,21 +34,40 @@ impl State {
     }
 }
 
+fn key_footprint(key: &Value) -> Result<usize> {
+    // Account for the owned hash-map entry and its optional string allocation.
+    let fixed = std::mem::size_of::<Value>() + std::mem::size_of::<State>() + 64;
+    let text_bytes = match key { Value::Text(text) => text.len(), _ => 0 };
+    fixed.checked_add(text_bytes)
+        .ok_or_else(|| Error::Execution("partial aggregation key size overflow".into()))
+}
+
 #[derive(Clone, Debug)]
 pub struct PartialGroupSum {
     key_column: String,
     amount_column: String,
     key_type: Option<DataType>,
     max_groups: usize,
+    max_key_bytes: usize,
+    retained_key_bytes: usize,
     groups: HashMap<Value, State>,
     failed: bool,
 }
 
 impl PartialGroupSum {
     pub fn new(key: impl Into<String>, amount: impl Into<String>, max_groups: usize) -> Self {
+        Self::with_key_byte_limit(key, amount, max_groups, 64 * 1024 * 1024)
+    }
+
+    /// Bound retained group keys as well as their cardinality.
+    pub fn with_key_byte_limit(
+        key: impl Into<String>, amount: impl Into<String>,
+        max_groups: usize, max_key_bytes: usize,
+    ) -> Self {
         Self {
             key_column: key.into(), amount_column: amount.into(),
-            key_type: None, max_groups, groups: HashMap::new(), failed: false,
+            key_type: None, max_groups, max_key_bytes, retained_key_bytes: 0,
+            groups: HashMap::new(), failed: false,
         }
     }
 
@@ -81,9 +100,13 @@ impl PartialGroupSum {
                 if self.groups.len() >= self.max_groups {
                     return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
                 }
+                let next_bytes = self.retained_key_bytes.checked_add(key_footprint(key_value)?)
+                    .filter(|&size| size <= self.max_key_bytes)
+                    .ok_or_else(|| Error::Execution("partial aggregation key memory budget exceeded".into()))?;
                 let mut state = State::default();
                 state.add(value)?;
                 self.groups.insert(key_value.clone(), state);
+                self.retained_key_bytes = next_bytes;
             }
         }
         Ok(())
@@ -108,6 +131,7 @@ impl PartialGroupSum {
             }
         }
         let mut new_groups = 0usize;
+        let mut merged_key_bytes = self.retained_key_bytes;
         for (key, state) in &other.groups {
             // Reuse the lookup for admission and overflow preflight instead of
             // hashing every incoming group twice.
@@ -115,6 +139,9 @@ impl PartialGroupSum {
             if current.is_none() {
                 new_groups = new_groups.checked_add(1)
                     .ok_or_else(|| Error::Execution("group cardinality overflow".into()))?;
+                merged_key_bytes = merged_key_bytes.checked_add(key_footprint(key)?)
+                    .filter(|&size| size <= self.max_key_bytes)
+                    .ok_or_else(|| Error::Execution("merged group key memory budget exceeded".into()))?;
             }
             if self.groups.len().checked_add(new_groups)
                 .is_none_or(|count| count > self.max_groups) {
@@ -134,6 +161,7 @@ impl PartialGroupSum {
             entry.has_value |= state.has_value;
         }
         self.key_type = self.key_type.or(other.key_type);
+        self.retained_key_bytes = merged_key_bytes;
         Ok(())
     }
 
@@ -277,5 +305,54 @@ mod partial_aggregate_single_lookup_merge_tests {
             vec![Value::Text("b".into()), Value::Integer(1), Value::Null],
             vec![Value::Text("c".into()), Value::Integer(1), Value::Integer(-2)],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod partial_group_key_byte_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_keys_do_not_consume_extra_admission_budget() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, false),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let one = Batch::from_rows(schema.clone(), (0..50)
+            .map(|_| vec![Value::Text("a".repeat(40)), Value::Integer(1)])
+            .collect()).unwrap();
+        let mut agg = PartialGroupSum::with_key_byte_limit("k", "amount", 10, 200);
+        agg.update(&one).unwrap();
+        assert_eq!(agg.groups.len(), 1);
+        assert_eq!(agg.retained_key_bytes, key_footprint(&Value::Text("a".repeat(40))).unwrap());
+        assert_eq!(agg.finish().unwrap().row(0).unwrap()[2], Value::Integer(50));
+
+        let mut agg = PartialGroupSum::with_key_byte_limit("k", "amount", 10, 200);
+        agg.update(&one).unwrap();
+        let other = Batch::from_rows(schema, vec![
+            vec![Value::Text("b".repeat(40)), Value::Integer(1)],
+        ]).unwrap();
+        assert!(agg.update(&other).is_err());
+        assert_eq!(agg.groups.len(), 1);
+        assert!(agg.finish().is_err());
+    }
+
+    #[test]
+    fn merge_preflights_retained_key_bytes_before_writing_groups() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, false),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let single = |key: &str| Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(key.repeat(40)), Value::Integer(1)],
+        ]).unwrap();
+        let mut left = PartialGroupSum::with_key_byte_limit("k", "amount", 10, 200);
+        let mut right = PartialGroupSum::with_key_byte_limit("k", "amount", 10, 200);
+        left.update(&single("a")).unwrap();
+        right.update(&single("b")).unwrap();
+        let original = left.groups.clone();
+        assert!(left.merge(right).is_err());
+        assert_eq!(left.groups.len(), original.len());
+        assert!(left.failed);
     }
 }
