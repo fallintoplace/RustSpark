@@ -85,6 +85,17 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inconsistent"):
             evidence.qualify(manifest, benchmark, verification)
 
+    def test_unrepresentable_timing_values_fail_with_validation_errors(self):
+        with self.assertRaisesRegex(ValueError, "positive finite"):
+            evidence.checked_number(10**500, "Timing")
+        manifest, benchmark, verification = fixtures()
+        for row in benchmark["results"]:
+            row["samples_ms"] = [1e308] * 3
+            row["median_ms"] = 1e308
+            row["p95_ms"] = 1e308
+        with self.assertRaisesRegex(ValueError, "median total"):
+            evidence.qualify(manifest, benchmark, verification)
+
     def test_rejects_duplicate_query_ids_and_false_rows(self):
         manifest, benchmark, verification = fixtures()
         benchmark["results"][0]["id"] = 2
