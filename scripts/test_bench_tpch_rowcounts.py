@@ -16,6 +16,11 @@ class CountTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 counts.parse_count(value)
 
+    def test_timeout_is_a_positive_integer_before_loading_fixtures(self):
+        for invalid in (True, False, 0, -1, 1.5, float("nan"), float("inf"), "120"):
+            with self.subTest(value=invalid), self.assertRaisesRegex(ValueError, "Timeout"):
+                counts.check("rs", Path("."), timeout=invalid)
+
     def test_duplicate_manifest_keys_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory)
