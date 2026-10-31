@@ -14,6 +14,11 @@ class DataFrameCommandTests(unittest.TestCase):
         self.assertIn("--output-arrow", args)
         self.assertEqual(args[args.index("--max-rows") + 1], "25")
 
+    def test_nontext_sql_uses_validation_error(self):
+        for sql in (None, 1, False, [], ""):
+            with self.subTest(sql=sql), self.assertRaisesRegex(ValueError, "SQL cannot be empty"):
+                build_command(sql, Path("out.arrow"))
+
     def test_refuses_unbounded_and_conflicting_options(self):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), max_rows=0)
