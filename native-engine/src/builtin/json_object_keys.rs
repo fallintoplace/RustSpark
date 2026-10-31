@@ -1,5 +1,34 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
+use serde::{Deserialize, de::{IgnoredAny, MapAccess, Visitor}};
+use std::fmt;
+
+struct RootObjectKeys(Vec<String>);
+
+impl<'de> Deserialize<'de> for RootObjectKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct Collector;
+        impl<'de> Visitor<'de> for Collector {
+            type Value = RootObjectKeys;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                let mut keys = Vec::new();
+                while let Some((key, _)) = map.next_entry::<String, IgnoredAny>()? {
+                    keys.push(key);
+                }
+                Ok(RootObjectKeys(keys))
+            }
+        }
+        deserializer.deserialize_map(Collector)
+    }
+}
+
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
@@ -41,6 +70,25 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { "$" };
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+    }
+    if path == "$" && text.trim_start().starts_with('{') {
+        // Only object member names are needed. Skip each member's value
+        // without allocating the nested JSON tree.
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let keys = RootObjectKeys::deserialize(&mut deserializer)
+            .and_then(|result| deserializer.end().map(|()| result.0));
+        let Ok(mut keys) = keys else { return Ok(Value::Null); };
+        // serde_json::Map uses sorted unique keys by default. Preserve its
+        // duplicate-key and output-order semantics for the streaming path.
+        keys.sort_unstable();
+        keys.dedup();
+        let mut output = KeyOutput { bytes: Vec::new(), limit: 16 * 1024 * 1024 };
+        serde_json::to_writer(&mut output, &keys)
+            .map_err(|error| Error::Execution(format!(
+                "JSON_OBJECT_KEYS serialization failed: {error}"
+            )))?;
+        return Ok(Value::Text(String::from_utf8(output.bytes)
+            .expect("JSON serializer emits UTF-8")));
     }
     let doc = match serde_json::from_str::<serde_json::Value>(text) {
         Ok(doc) => doc,
@@ -128,5 +176,35 @@ mod json_object_keys_budget_tests {
         assert!(serialize_keys(map, 8).is_err());
         let document = serde_json::json!({"\u{0000}\u{0000}\u{0000}": 1});
         assert!(serialize_keys(document.as_object().unwrap(), 12).is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_root_object_keys_tests {
+    use super::*;
+
+    #[test]
+    fn root_keys_are_sorted_deduplicated_and_preserve_unicode() {
+        let input = r#"{"z":{"deep":[1,2,3]},"é":null,"a":true,"z":4}"#;
+        assert_eq!(evaluate(&[Value::Text(input.into())]).unwrap(),
+            Value::Text(r#"["a","z","é"]"#.into()));
+        let wide = format!(r#"{{"payload":[{}],"name":"🙂"}}"#,
+            vec!["{\"x\":[1,null,true]}"; 10_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(wide)]).unwrap(),
+            Value::Text(r#"["name","payload"]"#.into()));
+        assert_eq!(evaluate(&[Value::Text("{}".into())]).unwrap(),
+            Value::Text("[]".into()));
+    }
+
+    #[test]
+    fn malformed_root_returns_null_and_nested_paths_still_work() {
+        for invalid in ["{", "{\"a\": 1} trailing", "{\"a\": [1,INVALID]}"] {
+            assert_eq!(evaluate(&[Value::Text(invalid.into())]).unwrap(),
+                Value::Null);
+        }
+        assert_eq!(evaluate(&[Value::Text(r#"{"outer":{"b":1,"a":2}}"#.into()),
+            Value::Text("$.outer".into())]).unwrap(),
+            Value::Text(r#"["a","b"]"#.into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
