@@ -58,7 +58,6 @@ fn flush_pending_run(
     let input = crate::batch_utils::concat(
         schema, std::mem::take(pending), max_rows_per_run,
     )?;
-    // Move validated row payloads through the sort instead of cloning TEXT values.
     let sorted = sort::sort_owned(input, keys)?;
     *pending_rows = 0;
     let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
@@ -260,6 +259,46 @@ mod coalesced_sorted_runs_regressions {
             &dir, 5, &QueryControl::default()).unwrap();
         assert_eq!(runs.files().len(), 3);
         drop(runs);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_sorted_spill_run_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+    use crate::scale::spill::SpillReader;
+
+    #[test]
+    fn moves_large_text_values_without_changing_stable_sort_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-sort-owned-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2), Value::Text("🙂".repeat(4096))],
+            vec![Value::Null, Value::Text("before".into())],
+            vec![Value::Integer(2), Value::Text("after".into())],
+            vec![Value::Integer(1), Value::Null],
+        ]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let expected = sort::sort(&batch, &keys).unwrap();
+        let runs = write_sorted_runs([Ok(batch)], schema, &keys,
+            &dir, 16, &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 1);
+        let mut reader = SpillReader::new(BufReader::new(
+            std::fs::File::open(&runs.files()[0]).unwrap()), 16).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), expected);
+        assert!(reader.next_batch().unwrap().is_none());
+        let paths = runs.files().to_vec();
+        drop(runs);
+        assert!(paths.iter().all(|path| !path.exists()));
         fs::remove_dir(dir).unwrap();
     }
 }
