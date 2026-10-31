@@ -129,6 +129,44 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                         closed = true;
                         break;
                     }
+                } else if next == '\\' && character == '\'' {
+                    let escaped = chars.next().ok_or_else(||
+                        Error::Parse("unterminated SQL string escape".into()))?;
+                    match escaped {
+                        '0'..='7' => {
+                            let mut code = escaped.to_digit(8).expect("octal digit");
+                            for _ in 0..2 {
+                                let Some(digit) = chars.peek().and_then(|ch| ch.to_digit(8)) else {
+                                    break;
+                                };
+                                chars.next();
+                                code = code * 8 + digit;
+                            }
+                            value.push(char::from_u32(code).expect("octal byte is valid Unicode"));
+                        }
+                        'u' | 'U' => {
+                            let digits = if escaped == 'u' { 4 } else { 8 };
+                            let mut code = 0u32;
+                            for _ in 0..digits {
+                                let digit = chars.next().and_then(|ch| ch.to_digit(16))
+                                    .ok_or_else(|| Error::Parse("invalid SQL Unicode escape".into()))?;
+                                code = (code << 4) | digit;
+                            }
+                            value.push(char::from_u32(code).ok_or_else(||
+                                Error::Parse("SQL Unicode escape is not a Unicode scalar".into()))?);
+                        }
+                        'n' => value.push('\n'),
+                        'r' => value.push('\r'),
+                        't' => value.push('\t'),
+                        'b' => value.push('\u{0008}'),
+                        'Z' => value.push('\u{001a}'),
+                        '%' | '_' => {
+                            // LIKE needs its escape marker after SQL literal decoding.
+                            value.push('\\');
+                            value.push(escaped);
+                        }
+                        other => value.push(other),
+                    }
                 } else {
                     value.push(next);
                 }
@@ -280,5 +318,45 @@ mod lexer_capacity_perf_tests {
         assert_eq!(tokens.first(), Some(&Token::Word("SELECT".into())));
         assert_eq!(tokens.last(), Some(&Token::Word("data".into())));
         assert!(tokens.len() > 500);
+    }
+}
+
+#[cfg(test)]
+mod spark_sql_literal_escape_tests {
+    use super::*;
+
+    #[test]
+    fn regular_literals_decode_spark_escapes_without_touching_raw_strings() {
+        let tokens = tokenize(r"SELECT 'can\'t', '\n', '\101', '\u3042', '\U0001F44D', '\%', '\_', r'\n', '\z' FROM t").unwrap();
+        let values = tokens.into_iter().filter_map(|token| match token {
+            Token::Text(s) => Some(s), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(values, ["can't", "\n", "A", "あ", "👍", r"\%", r"\_", r"\n", "z"]);
+    }
+
+    #[test]
+    fn string_escapes_handle_controls_budgets_and_invalid_unicode() {
+        assert_eq!(tokenize(r"SELECT '\0\b\r\t\Z' FROM t").unwrap()[1],
+            Token::Text("\0\u{0008}\r\t\u{001a}".into()));
+        for input in [r"SELECT 'a\", r"SELECT '\u12'", r"SELECT '\U00110000'",
+                      r"SELECT '\uD800'"] {
+            assert!(tokenize(input).is_err(), "{input}");
+        }
+        assert_eq!(tokenize("SELECT 'it''s' FROM t").unwrap()[1],
+            Token::Text("it's".into()));
+    }
+
+    #[test]
+    fn escaped_sql_quotes_survive_native_planning_and_execution() {
+        use crate::{batch::Batch, catalog::Catalog, executor, scalar::Value,
+            schema::{DataType, Field, Schema}, sql};
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema,
+            vec![vec![Value::Integer(1)]]).unwrap()).unwrap();
+        let query = r"SELECT 'it\'s ok\n' AS text FROM t";
+        let rows = executor::execute(&sql::parse_sql(query).unwrap(), &catalog)
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("it's ok\n".into())]]);
     }
 }
