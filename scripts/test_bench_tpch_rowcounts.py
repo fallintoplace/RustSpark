@@ -3,6 +3,8 @@
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+from unittest.mock import patch
 
 import bench_tpch_rowcounts as counts
 
@@ -31,6 +33,20 @@ class CountTests(unittest.TestCase):
             command = counts.count_command("rs", fixture, "customer")
             self.assertIn("SELECT COUNT(*) AS n FROM customer", command)
             self.assertIn("--stdout-format", command)
+
+    def test_rejects_oversized_count_output_without_capturing_it_in_memory(self):
+        command = [sys.executable, "-c", "print('x' * 70000)"]
+        with patch.object(counts, "count_command", return_value=command):
+            with self.assertRaisesRegex(ValueError, "64 KiB"):
+                counts.execute_count("rustspark", Path("."), "customer", 5)
+
+    def test_failure_preserves_only_bounded_diagnostic_tail(self):
+        command = [sys.executable, "-c",
+                   "import sys; sys.stderr.write('x' * 70000 + 'FINAL ERROR'); sys.exit(2)"]
+        with patch.object(counts, "count_command", return_value=command):
+            with self.assertRaisesRegex(RuntimeError, "FINAL ERROR") as raised:
+                counts.execute_count("rustspark", Path("."), "customer", 5)
+        self.assertLess(len(str(raised.exception)), 600)
 
     def test_unknown_table(self):
         with self.assertRaises(ValueError):
