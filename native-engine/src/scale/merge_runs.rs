@@ -191,7 +191,7 @@ impl RunMerger {
         }
         let Some(&index) = self.heap.first() else { return Ok(AppendStatus::Exhausted); };
         let selected = &mut self.runs[index];
-        let batch = selected.batch.as_ref()
+        let batch = selected.batch.as_mut()
             .ok_or_else(|| Error::Execution("missing active external merge batch".into()))?;
         // Count retained Value slots and text payloads before copying any
         // row. A row that cannot fit by itself is an execution error.
@@ -210,9 +210,9 @@ impl RunMerger {
             return Ok(AppendStatus::Full);
         }
         *output_bytes = output_bytes.saturating_add(row_bytes);
-        for (column, dest) in output.iter_mut().enumerate() {
-            dest.push(batch.column(column)?[selected.position].clone());
-        }
+        // Each run is consumed in sorted order. Transfer its owned row
+        // payloads into the output batch without cloning large TEXT values.
+        batch.move_row_to_columns(selected.position, output)?;
         selected.position += 1;
         // Refill and rebalance on the next append, before any further row is
         // copied. A corrupt later spill batch cannot hide a valid prefix.
