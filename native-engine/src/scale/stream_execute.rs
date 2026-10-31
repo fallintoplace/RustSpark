@@ -1,5 +1,5 @@
 //! Streaming physical execution of the supported native logical-plan subset.
-use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
+use std::{collections::HashMap, fs::File, hash::{Hash, Hasher}, io::BufReader, path::PathBuf};
 use crate::{
     aggregate::{self, AggregateOp}, batch::Batch, expr::Expr, join::{self, JoinKind}, plan::Plan,
     project::Selection, scalar::Value,
@@ -151,7 +151,10 @@ const MAX_STREAM_DISTINCT_BYTES: usize = 64 * 1024 * 1024;
 struct DistinctOutput {
     source: BatchStream,
     control: QueryControl,
-    seen: HashMap<Vec<Value>, ()>,
+    // Hash borrowed source columns; retain owned rows only for unique keys.
+    // Equality inside each fingerprint bucket keeps collisions correct.
+    seen: HashMap<u64, Vec<Vec<Value>>>,
+    unique_keys: usize,
     retained_bytes: usize,
     max_keys: usize,
     max_bytes: usize,
@@ -161,7 +164,7 @@ struct DistinctOutput {
 impl DistinctOutput {
     fn new(source: BatchStream, control: QueryControl, max_keys: usize, max_bytes: usize) -> Self {
         Self {
-            source, control, seen: HashMap::new(), retained_bytes: 0,
+            source, control, seen: HashMap::new(), unique_keys: 0, retained_bytes: 0,
             max_keys, max_bytes, stopped: false,
         }
     }
@@ -191,20 +194,50 @@ impl Iterator for DistinctOutput {
                 }
             };
             if batch.schema().is_empty() && batch.num_rows() != 0 {
-                let empty_key = Vec::new();
-                if self.seen.contains_key(&empty_key) { continue; }
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                0usize.hash(&mut hash);
+                let fingerprint = hash.finish();
+                if self.seen.get(&fingerprint).is_some_and(|entries|
+                    entries.iter().any(Vec::is_empty)) { continue; }
                 let next_total = self.retained_bytes.checked_add(64);
-                if self.seen.len() >= self.max_keys ||
+                if self.unique_keys >= self.max_keys ||
                     next_total.is_none_or(|size| size > self.max_bytes) {
                     self.stopped = true;
                     return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
                 }
                 self.retained_bytes = next_total.expect("checked DISTINCT memory");
-                self.seen.insert(empty_key, ());
+                self.unique_keys += 1;
+                self.seen.entry(fingerprint).or_default().push(Vec::new());
                 return Some(batch.slice_rows(0, 1));
             }
+            let columns = match (0..batch.schema().len())
+                .map(|col| batch.column(col)).collect::<Result<Vec<_>>>() {
+                    Ok(columns) => columns,
+                    Err(error) => {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                };
             let mut selected = Vec::new();
             for row in 0..batch.num_rows() {
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                columns.len().hash(&mut hash);
+                for column in &columns { column[row].hash(&mut hash); }
+                let fingerprint = hash.finish();
+                if self.seen.get(&fingerprint).is_some_and(|entries|
+                    entries.iter().any(|key| key.iter().zip(&columns)
+                        .all(|(value, column)| value == &column[row]))) {
+                    continue;
+                }
+                let footprint = super::row_footprint::footprint(
+                    columns.iter().map(|column| &column[row])
+                );
+                let next_total = self.retained_bytes.checked_add(footprint);
+                if self.unique_keys >= self.max_keys ||
+                    next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.stopped = true;
+                    return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
+                }
                 let key = match batch.row(row) {
                     Ok(key) => key,
                     Err(error) => {
@@ -212,22 +245,10 @@ impl Iterator for DistinctOutput {
                         return Some(Err(error));
                     }
                 };
-                let at_limit = self.seen.len() >= self.max_keys;
-                match self.seen.entry(key) {
-                    std::collections::hash_map::Entry::Occupied(_) => continue,
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let key = entry.key();
-                        let footprint = super::row_footprint::footprint(key.iter());
-                        let next_total = self.retained_bytes.checked_add(footprint);
-                        if at_limit || next_total.is_none_or(|size| size > self.max_bytes) {
-                            self.stopped = true;
-                            return Some(Err(Error::Execution("stream DISTINCT memory budget exceeded".into())));
-                        }
-                        self.retained_bytes = next_total.expect("validated DISTINCT memory");
-                        entry.insert(());
-                        selected.push(row);
-                    }
-                }
+                self.retained_bytes = next_total.expect("validated DISTINCT memory");
+                self.unique_keys += 1;
+                self.seen.entry(fingerprint).or_default().push(key);
+                selected.push(row);
             }
             if !selected.is_empty() {
                 if selected.len() == batch.num_rows() {
@@ -1036,5 +1057,47 @@ mod wide_stream_plan_admission_tests {
             right: Box::new(Plan::scan("t")),
         };
         assert_eq!(output_schema(&small, &registered, &options).unwrap(), schema);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_stream_distinct_probe_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn duplicate_wide_rows_are_not_materialized_again() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let text = "é🙂".repeat(1000);
+        let mk = |id| vec![Value::Integer(id), Value::Text(text.clone())];
+        let batch = Batch::from_rows(schema, (0..200)
+            .map(|row| mk(if row % 2 == 0 { 1 } else { 2 })).collect()).unwrap();
+        let mut output = DistinctOutput::new(Box::new([Ok(batch)].into_iter()),
+            QueryControl::default(), 2, 16 * 1024);
+        let result = output.next().unwrap().unwrap();
+        assert_eq!(result.rows().unwrap(), vec![mk(1), mk(2)]);
+        assert!(output.next().is_none());
+        assert_eq!(output.unique_keys, 2);
+    }
+
+    #[test]
+    fn fingerprint_collisions_still_use_full_row_equality() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Integer(42)]]).unwrap();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        1usize.hash(&mut hasher);
+        Value::Integer(42).hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let mut output = DistinctOutput::new(Box::new([Ok(batch)].into_iter()),
+            QueryControl::default(), 2, 4096);
+        output.seen.insert(fingerprint, vec![vec![Value::Integer(99)]]);
+        output.unique_keys = 1;
+        output.retained_bytes = super::row_footprint::footprint([&Value::Integer(99)]);
+        let row = output.next().unwrap().unwrap();
+        assert_eq!(row.rows().unwrap(), vec![vec![Value::Integer(42)]]);
+        assert_eq!(output.unique_keys, 2);
     }
 }
