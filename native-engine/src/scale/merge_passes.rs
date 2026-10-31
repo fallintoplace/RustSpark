@@ -1,5 +1,6 @@
 //! Multi-pass external merge to bound open file descriptors.
 use std::{
+    collections::HashSet,
     fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
@@ -67,6 +68,16 @@ pub fn merge_to_fan_in(
             writer.finish()?;
             next_pass.push(path);
         }
+        // Once this pass has produced all its runs, older temporary runs
+        // are dead. Keep carried-through runs and remove only retired scratch.
+        // This bounds scratch space across arbitrarily many merge passes.
+        let live: HashSet<&PathBuf> = next_pass.iter().collect();
+        for path in &result.scratch {
+            if !live.contains(path) {
+                std::fs::remove_file(path)?;
+            }
+        }
+        result.scratch.retain(|path| live.contains(path));
         result.current = next_pass;
     }
     Ok(result)
@@ -147,5 +158,49 @@ mod merge_pass_large_batch_rejection_tests {
             &keys, Path::new("."), 1, &QueryControl::default()).unwrap();
         assert!(merge_to_fan_in(source, Path::new("."), schema, &keys,
             2, 65_537, &QueryControl::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod retired_merge_scratch_tests {
+    use super::*;
+    use crate::{
+        batch::Batch, expr::Expr, scalar::Value,
+        schema::{DataType, Field}, scale::sorted_runs::write_sorted_runs,
+    };
+    use std::fs;
+
+    #[test]
+    fn deletes_previous_passes_but_keeps_current_runs_readable() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-merge-gc-{}-{}", std::process::id(),
+            PASS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("n".into()))];
+        let source = Batch::from_rows(schema.clone(), (0..128).rev()
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let runs = write_sorted_runs([Ok(source)], schema.clone(), &keys, &dir, 4,
+            &QueryControl::default()).unwrap();
+        assert_eq!(runs.files().len(), 32);
+        let merged = merge_to_fan_in(runs, &dir, schema.clone(), &keys, 2, 4,
+            &QueryControl::default()).unwrap();
+        let active_scratch = fs::read_dir(&dir).unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy()
+                .starts_with("rustspark-merge-"))
+            .collect::<Vec<_>>();
+        assert_eq!(active_scratch.len(), merged.files().len());
+        assert_eq!(active_scratch.len(), 2);
+        assert!(active_scratch.iter().all(|path| merged.files().contains(path)));
+        let rows = RunMerger::new(merged.files(), schema, &keys, 4, 7,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.iter().flat_map(|b| b.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>(),
+            (0..128).map(Value::Integer).collect::<Vec<_>>());
+        drop(merged);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
     }
 }
