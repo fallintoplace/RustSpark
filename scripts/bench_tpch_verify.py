@@ -146,7 +146,10 @@ def reference_connection(directory):
 
 
 def verify(binary, parquet, queries, timeout=120, partitions=2, tolerance=Decimal("0.000001")):
-    if timeout <= 0 or partitions < 1 or not tolerance.is_finite() or tolerance < 0:
+    if (type(timeout) is not int or timeout <= 0
+            or type(partitions) is not int or partitions < 1
+            or not isinstance(tolerance, Decimal)
+            or not tolerance.is_finite() or tolerance < 0):
         raise ValueError("Invalid verification parameters")
     args = input_arguments(parquet)
     con = reference_connection(parquet)
