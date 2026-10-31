@@ -142,6 +142,21 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
             }
             return batch.take(&[best]);
         }
+        // A single computed sort key also needs only the best candidate.
+        // Evaluate every row to preserve expression error semantics.
+        let key = &keys[0];
+        let mut best_row = 0usize;
+        let mut best_value = key.expression.evaluate(batch, 0)?;
+        for row in 1..batch.num_rows() {
+            let value = key.expression.evaluate(batch, row)?;
+            if crate::sort::compare_values(
+                &value, &best_value, key.descending, key.nulls_first,
+            ) == Ordering::Less {
+                best_row = row;
+                best_value = value;
+            }
+        }
+        return batch.take(&[best_row]);
     }
     if keys.iter().all(|key| matches!(&key.expression, crate::expr::Expr::Column(_))) {
         return top_k_columns(batch, keys, k);
@@ -237,7 +252,8 @@ pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize
         return batch.take(&[]);
     }
     let best = top_k(batch, keys, required)?;
-    crate::limit::limit(&best, offset, Some(count))
+    // The candidate batch is owned; keep its text allocations when slicing.
+    crate::limit::limit_owned(best, offset, Some(count))
 }
 
 #[cfg(test)]
@@ -478,6 +494,72 @@ mod computed_single_key_heap_tests {
                         expected.slice_rows(0, k).unwrap());
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod topk_computed_singleton_and_owned_offset_regressions {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_limit_one_matches_stable_sort_for_ties_nulls_and_nan() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Float, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap(), vec![
+            vec![Value::Float(3.0), Value::Text("first".into())],
+            vec![Value::Null, Value::Text("null".into())],
+            vec![Value::Float(1.0), Value::Text("winner".into())],
+            vec![Value::Float(1.0), Value::Text("tie".into())],
+            vec![Value::Float(f64::NAN), Value::Text("nan".into())],
+        ]).unwrap();
+        for (descending, nulls_first) in [
+            (false, false), (false, true), (true, false), (true, true)
+        ] {
+            let key = SortKey {
+                expression: Expr::binary(Expr::Column("n".into()),
+                    BinaryOp::Add, Expr::Literal(Value::Float(0.0))),
+                descending, nulls_first,
+            };
+            let expected = crate::sort::sort(&batch, &[key.clone()]).unwrap();
+            assert_eq!(top_k(&batch, &[key], 1).unwrap().rows().unwrap(),
+                expected.slice_rows(0, 1).unwrap().rows().unwrap());
+        }
+    }
+
+    #[test]
+    fn computed_limit_one_still_evaluates_later_failing_rows() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false)
+        ]).unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(i64::MAX)],
+        ]).unwrap();
+        let key = SortKey::ascending(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)),
+        ));
+        assert!(top_k(&batch, &[key], 1).is_err());
+    }
+
+    #[test]
+    fn paginated_topk_keeps_stable_order_on_wide_text() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap(), (0..120).map(|index| vec![
+            Value::Integer((index * 19 % 37) as i64),
+            if index % 13 == 0 { Value::Null }
+            else { Value::Text(format!("{index}-{}", "🙂".repeat(128))) },
+        ]).collect()).unwrap();
+        let key = SortKey::ascending(Expr::Column("score".into()));
+        let sorted = crate::sort::sort(&batch, &[key.clone()]).unwrap();
+        for offset in [0usize, 1, 13, 111, 120, 200] {
+            let start = offset.min(sorted.num_rows());
+            let end = start.saturating_add(7).min(sorted.num_rows());
+            assert_eq!(top_k_offset(&batch, &[key.clone()], offset, 7).unwrap(),
+                sorted.slice_rows(start, end).unwrap());
         }
     }
 }
