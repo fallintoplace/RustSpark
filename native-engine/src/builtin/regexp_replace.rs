@@ -23,7 +23,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
         let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        if text.is_ascii() {
+            offset.min(text.len())
+        } else {
+            text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
+        }
     } else { 0 };
     let suffix = &text[start..];
 
@@ -287,5 +291,28 @@ mod single_pass_literal_replace_regressions {
             Value::Text("a".repeat(1_000_000)), Value::Text("a".into()),
             Value::Text("z".repeat(17)),
         ]), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod ascii_regex_replace_position_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn large_ascii_positions_match_one_based_unicode_semantics() {
+        let input = "a".repeat(30_000);
+        let actual = evaluate(&[
+            Value::Text(input.clone()), Value::Text("a".into()),
+            Value::Text("b".into()), Value::Integer(30_000),
+        ]).unwrap();
+        assert_eq!(actual, Value::Text(format!("{}b", "a".repeat(29_999))));
+        assert_eq!(evaluate(&[
+            Value::Text(input.clone()), Value::Text("a".into()),
+            Value::Text("b".into()), Value::Integer(i64::MAX),
+        ]).unwrap(), Value::Text(input));
+        assert_eq!(evaluate(&[
+            Value::Text("é🙂abc".into()), Value::Text("a".into()),
+            Value::Text("X".into()), Value::Integer(3),
+        ]).unwrap(), Value::Text("é🙂Xbc".into()));
     }
 }

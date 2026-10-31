@@ -220,6 +220,39 @@ impl ColumnStatistics {
         // temporary statistics copies two potentially very large strings.
         if let Some(first) = batches.first() {
             let index = first.schema().column(name)?;
+            if first.schema().field(index)?.data_type == DataType::Integer {
+                let mut rows = 0u64;
+                let mut nulls = 0u64;
+                let mut min: Option<i64> = None;
+                let mut max: Option<i64> = None;
+                for batch in batches {
+                    let column = batch.schema().column(name)?;
+                    if batch.schema().field(column)?.data_type != DataType::Integer {
+                        return Err(Error::Type("statistics batches disagree on column type".into()));
+                    }
+                    rows = rows.checked_add(u64::try_from(batch.num_rows())
+                        .map_err(|_| Error::Execution("statistics row count overflow".into()))?)
+                        .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
+                    for value in batch.column(column)? {
+                        match value {
+                            Value::Null => {
+                                nulls = nulls.checked_add(1)
+                                    .ok_or_else(|| Error::Execution("statistics NULL count overflow".into()))?;
+                            }
+                            Value::Integer(number) => {
+                                min = Some(min.map_or(*number, |old| old.min(*number)));
+                                max = Some(max.map_or(*number, |old| old.max(*number)));
+                            }
+                            _ => unreachable!("native batch schema was validated"),
+                        }
+                    }
+                }
+                return Ok(Self {
+                    rows, nulls,
+                    min: min.map(Value::Integer),
+                    max: max.map(Value::Integer),
+                });
+            }
             if first.schema().field(index)?.data_type == DataType::Text {
                 let mut rows = 0u64;
                 let mut nulls = 0u64;
@@ -562,5 +595,35 @@ mod borrowed_multibatch_text_extrema_tests {
             vec![vec![Value::Integer(1)]],
         ).unwrap();
         assert!(ColumnStatistics::from_batches(&[batches[0].clone(), mixed], "key").is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_multibatch_integer_stats_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn matches_checked_merges_for_many_nullable_integer_batches() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        let batches = (0..128_i64).map(|i| Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(i - 1000)],
+            vec![Value::Null],
+            vec![Value::Integer(500 - i)],
+        ]).unwrap()).collect::<Vec<_>>();
+        let mut expected = ColumnStatistics::default();
+        for batch in &batches {
+            expected.merge(&ColumnStatistics::from_batch(batch, "n").unwrap()).unwrap();
+        }
+        assert_eq!(ColumnStatistics::from_batches(&batches, "n").unwrap(), expected);
+        assert_eq!((expected.rows, expected.nulls), (384, 128));
+        assert_eq!(ColumnStatistics::from_batches(&[Batch::empty(schema.clone())],
+            "n").unwrap(), ColumnStatistics::default());
+        let changed = Batch::empty(Schema::new(vec![
+            Field::new("n", DataType::Float, true),
+        ]).unwrap());
+        assert!(ColumnStatistics::from_batches(&[batches[0].clone(), changed], "n").is_err());
     }
 }

@@ -215,6 +215,11 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         fast_integer_in_list(batch, predicate)? {
         // NULL needles never satisfy WHERE. An unmatched NOT IN with any
         // NULL choice is also UNKNOWN, not TRUE.
+        // Neither case below can admit any row, so avoid probing a large
+        // column or building an output selection vector.
+        if (negated && has_null) || (!negated && keys.is_empty()) {
+            return Ok(selected);
+        }
         for (row, value) in column.iter().enumerate() {
             if let Value::Integer(value) = value {
                 let matched = keys.contains(value);
@@ -225,6 +230,9 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
     } else if let Some((column, keys, negated, has_null)) =
         fast_text_in_list(batch, predicate)? {
+        if (negated && has_null) || (!negated && keys.is_empty()) {
+            return Ok(selected);
+        }
         for (row, value) in column.iter().enumerate() {
             if let Value::Text(text) = value {
                 let matched = keys.contains(text.as_str());
@@ -326,6 +334,43 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
 
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
     batch.take(&select_indices(batch, predicate)?)
+}
+
+#[cfg(test)]
+mod null_in_list_short_circuit_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn null_choices_cannot_select_rows_in_integer_or_text_lists() {
+        for (kind, column, literal) in [
+            (DataType::Integer, vec![Value::Integer(7), Value::Null,
+                Value::Integer(8)], Value::Integer(7)),
+            (DataType::Text, vec![Value::Text("seven".into()), Value::Null,
+                Value::Text("eight".into())], Value::Text("seven".into())),
+        ] {
+            let schema = Schema::new(vec![Field::new("k", kind, true)]).unwrap();
+            let batch = Batch::from_rows(schema, column.into_iter()
+                .map(|value| vec![value]).collect()).unwrap();
+            let bad_not_in = Expr::InList {
+                needle: Box::new(Expr::Column("k".into())),
+                choices: vec![Expr::Literal(literal), Expr::Literal(Value::Null)],
+                negated: true,
+            };
+            let only_null = Expr::InList {
+                needle: Box::new(Expr::Column("k".into())),
+                choices: vec![Expr::Literal(Value::Null)],
+                negated: false,
+            };
+            for predicate in [bad_not_in, only_null] {
+                assert_eq!(select_indices(&batch, &predicate).unwrap(), Vec::<usize>::new());
+                for row in 0..batch.num_rows() {
+                    assert_ne!(predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap(),
+                        Some(true));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

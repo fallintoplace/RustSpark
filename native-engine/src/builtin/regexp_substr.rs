@@ -7,6 +7,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
+    if pattern == ".*" {
+        // A greedy unanchored dot-star match starts at zero and stops at LF.
+        return Ok(Value::Text(text.split('\n').next().unwrap_or("").to_owned()));
+    }
     if pattern == "." {
         // The default regex dot matches one Unicode scalar other than LF.
         return Ok(text.chars().find(|&ch| ch != '\n')
@@ -84,6 +88,25 @@ mod dot_pattern_substring_tests {
             );
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(),
+            Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod greedy_dot_star_substr_regressions {
+    use super::*;
+
+    #[test]
+    fn extracts_the_same_first_match_as_the_regex_engine() {
+        let regex = regex_support::compile(".*").unwrap();
+        for text in ["", "\n", "\n\n", "abc\ndef", "é🙂\n東京", "\r\n", "東京"] {
+            let expected = regex.find(text).map_or(Value::Null,
+                |matched| Value::Text(matched.as_str().into()));
+            assert_eq!(evaluate(&[
+                Value::Text(text.into()), Value::Text(".*".into()),
+            ]).unwrap(), expected);
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".*".into())]).unwrap(),
             Value::Null);
     }
 }

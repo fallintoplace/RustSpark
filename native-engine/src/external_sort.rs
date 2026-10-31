@@ -29,6 +29,7 @@ pub struct ExternalSort {
     runs: Vec<Run>,
     winners: RunTournament,
     output_rows: usize,
+    pending_error: Option<Error>,
     finished: bool,
 }
 
@@ -80,6 +81,7 @@ pub fn external_sort(
         runs,
         winners,
         output_rows,
+        pending_error: None,
         finished: false,
     })
 }
@@ -149,6 +151,10 @@ impl Iterator for ExternalSort {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
+        if let Some(error) = self.pending_error.take() {
+            self.finished = true;
+            return Some(Err(error));
+        }
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(self.output_rows)).collect::<Vec<_>>();
         let mut row_count = 0usize;
@@ -159,12 +165,21 @@ impl Iterator for ExternalSort {
             };
             let run = &mut self.runs[selected];
             let Some(batch) = run.batch.as_ref() else {
-                self.finished = true;
-                return Some(Err(Error::Execution("missing active external sort batch".into())));
+                let error = Error::Execution("missing active external sort batch".into());
+                if row_count == 0 {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                self.pending_error = Some(error);
+                break;
             };
             if let Err(error) = batch.append_row_to_columns(run.position, &mut columns) {
-                self.finished = true;
-                return Some(Err(error));
+                if row_count == 0 {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                self.pending_error = Some(error);
+                break;
             }
             row_count += 1;
             run.position += 1;
@@ -174,15 +189,15 @@ impl Iterator for ExternalSort {
                         run.batch = next;
                         run.position = 0;
                     }
-                    Err(e) => {
-                        self.finished = true;
-                        return Some(Err(e));
+                    Err(error) => {
+                        self.pending_error = Some(error);
+                        break;
                     }
                 }
             }
             if let Err(error) = self.winners.update(selected, &self.runs, &self.keys) {
-                self.finished = true;
-                return Some(Err(error));
+                self.pending_error = Some(error);
+                break;
             }
         }
         if row_count == 0 {
@@ -375,5 +390,51 @@ mod columnar_external_merge_output_tests {
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(actual.into_iter().flat_map(|batch| batch.rows().unwrap())
             .collect::<Vec<_>>(), expected);
+    }
+}
+
+#[cfg(test)]
+mod deferred_external_sort_error_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn computed_key_failure_preserves_prior_output_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("d", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Integer(1)],
+            vec![Value::Integer(10), Value::Integer(0)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2), Value::Integer(1)],
+        ]).unwrap();
+        let mut runs = Vec::new();
+        for batch in [left, right] {
+            let spill = spill_ipc::spill(std::env::temp_dir(), &schema, &[batch]).unwrap();
+            let mut reader = spill.read().unwrap();
+            let first = reader.next().unwrap().unwrap();
+            runs.push(Run { _spill: spill, reader, batch: Some(first), position: 0 });
+        }
+        let keys = vec![BoundSortKey {
+            key: SortKey::ascending(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Divide,
+                Expr::Column("d".into()),
+            )),
+            column: None,
+        }];
+        let winners = RunTournament::new(&runs, &keys).unwrap();
+        let mut merge = ExternalSort {
+            schema, keys, runs, winners, output_rows: 16,
+            pending_error: None, finished: false,
+        };
+        let prefix = merge.next().unwrap().unwrap();
+        assert_eq!(prefix.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(1)]
+        ]);
+        assert!(merge.next().unwrap().is_err());
+        assert!(merge.next().is_none());
     }
 }

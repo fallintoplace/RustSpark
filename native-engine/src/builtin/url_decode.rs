@@ -17,16 +17,16 @@ pub(super) fn decode(text: &str) -> Result<String> {
         return Err(Error::Execution("URL_DECODE input exceeds native 16 MiB budget".into()));
     }
     let bytes = text.as_bytes();
-    if !bytes.contains(&b'%') {
-        return Ok(if bytes.contains(&b'+') {
-            text.replace('+', " ")
-        } else {
-            text.to_owned()
-        });
-    }
+    // Check both escape forms in one pass. Most URL values are already
+    // decoded, so avoid scanning them twice before returning the copy.
+    let Some(first_escape) = bytes.iter()
+        .position(|&byte| byte == b'%' || byte == b'+') else {
+        return Ok(text.to_owned());
+    };
     let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    let mut start = 0usize;
+    decoded.extend_from_slice(&bytes[..first_escape]);
+    let mut index = first_escape;
+    let mut start = first_escape;
     while index < bytes.len() {
         if bytes[index] != b'%' && bytes[index] != b'+' {
             index += 1;
@@ -108,5 +108,28 @@ mod url_decode_untouched_run_tests {
         }
         assert_eq!(decode("").unwrap(), "");
         assert_eq!(decode("safeASCII").unwrap(), "safeASCII");
+    }
+}
+
+#[cfg(test)]
+mod first_special_byte_decode_regressions {
+    use super::*;
+
+    #[test]
+    fn preserves_utf8_prefixes_plus_signs_and_percent_escapes() {
+        for (input, output) in [
+            ("", ""), ("plain", "plain"), ("é🙂東京", "é🙂東京"),
+            ("é🙂+東京", "é🙂 東京"), ("prefix%20suffix", "prefix suffix"),
+            ("é🙂%2B%20東京", "é🙂+ 東京"), ("%25+%25", "% %"),
+            ("a%2520b", "a%20b"), ("++", "  "),
+        ] {
+            assert_eq!(decode(input).unwrap(), output, "{input}");
+        }
+        let prefix = "東京🙂".repeat(20_000);
+        assert_eq!(decode(&format!("{prefix}+%2B")).unwrap(),
+            format!("{prefix} +"));
+        for invalid in ["%", "%0", "%G1", "%FF", "a+%G1"] {
+            assert!(decode(invalid).is_err(), "{invalid}");
+        }
     }
 }
