@@ -32,25 +32,28 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
         !replacement.contains('$') {
-        let matches = suffix.match_indices(pattern).count();
-        let removed = matches.checked_mul(pattern.len())
-            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
-        let output_bytes = start.checked_add(suffix.len() - removed)
-            .and_then(|base| matches.checked_mul(replacement.len())
-                .and_then(|inserted| base.checked_add(inserted)))
-            .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
-        if output_bytes > 16 * 1024 * 1024 {
-            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-        }
-        let mut result = String::with_capacity(output_bytes);
+        // Walk the literal matches once. The old path scanned the same
+        // payload a second time solely to size the output allocation.
+        let mut result = String::with_capacity(text.len());
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
         for (index, _) in suffix.match_indices(pattern) {
-            result.push_str(&suffix[consumed..index]);
+            let unchanged = &suffix[consumed..index];
+            if result.len().checked_add(unchanged.len())
+                .and_then(|size| size.checked_add(replacement.len()))
+                .is_none_or(|size| size > 16 * 1024 * 1024) {
+                return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+            }
+            result.push_str(unchanged);
             result.push_str(replacement);
             consumed = index + pattern.len();
         }
-        result.push_str(&suffix[consumed..]);
+        let trailing = &suffix[consumed..];
+        if result.len().checked_add(trailing.len())
+            .is_none_or(|size| size > 16 * 1024 * 1024) {
+            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+        }
+        result.push_str(trailing);
         return Ok(Value::Text(result));
     }
 
@@ -210,5 +213,49 @@ mod literal_regexp_replace_fast_path_tests {
             Value::Text("z".repeat(17)),
         ];
         assert!(matches!(evaluate(&args), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod literal_one_pass_tests {
+    use super::*;
+
+    fn apply(text: &str, pattern: &str, replacement: &str) -> Result<Value> {
+        evaluate(&[
+            Value::Text(text.into()),
+            Value::Text(pattern.into()),
+            Value::Text(replacement.into()),
+        ])
+    }
+
+    #[test]
+    fn ascii_literal_replacement_respects_unicode_and_nonoverlapping_matches() {
+        assert_eq!(apply("café-café", "af", "X").unwrap(),
+            Value::Text("cXé-cXé".into()));
+        assert_eq!(apply("aaaaa", "aa", "b").unwrap(),
+            Value::Text("bba".into()));
+        assert_eq!(apply("abc", "xyz", "replacement").unwrap(),
+            Value::Text("abc".into()));
+        assert_eq!(apply("xxy", "x", "").unwrap(), Value::Text("y".into()));
+    }
+
+    #[test]
+    fn literal_path_preserves_position_and_output_limits() {
+        let args = [
+            Value::Text("alpha-alpha".into()),
+            Value::Text("alpha".into()),
+            Value::Text("x".into()),
+            Value::Integer(7),
+        ];
+        assert_eq!(evaluate(&args).unwrap(), Value::Text("alpha-x".into()));
+        let large = "a".repeat(8 * 1024 * 1024 + 1);
+        assert!(apply(&large, "a", "bb").unwrap_err()
+            .to_string().contains("16 MiB"));
+    }
+
+    #[test]
+    fn dollar_replacements_continue_to_use_capture_expansion() {
+        assert_eq!(apply("aa", "(a)", "11").unwrap(),
+            Value::Text("aaaa".into()));
     }
 }
