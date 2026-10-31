@@ -105,16 +105,32 @@ where I: IntoIterator<Item = Result<Batch>>
         let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
         result.paths.push(path);
         let mut output = SpillWriter::new(BufWriter::new(file), schema.clone())?;
-        let mut pending = Vec::with_capacity(io_batch_rows.min(unique_rows));
+        // Every retained row was decoded from a validated spill batch.
+        // Assemble columns directly instead of buffering row vectors and
+        // transposing them once more during each output flush.
+        let capacity = io_batch_rows.min(unique_rows).min(256);
+        let mut columns: Vec<Vec<Value>> = (0..schema.len())
+            .map(|_| Vec::with_capacity(capacity)).collect();
+        let mut pending_rows = 0usize;
         for (index, row) in seen.into_values().flatten().enumerate() {
             if index % 1024 == 0 { control.check()?; }
-            pending.push(row);
-            if pending.len() == io_batch_rows {
-                output.write_batch(&Batch::from_rows(schema.clone(), std::mem::take(&mut pending))?)?;
+            for (column, value) in columns.iter_mut().zip(row) {
+                column.push(value);
+            }
+            pending_rows += 1;
+            if pending_rows == io_batch_rows {
+                output.write_batch(&Batch::from_validated_columns(
+                    schema.clone(), std::mem::take(&mut columns), pending_rows
+                )?)?;
+                columns = (0..schema.len())
+                    .map(|_| Vec::with_capacity(capacity)).collect();
+                pending_rows = 0;
             }
         }
-        if !pending.is_empty() {
-            output.write_batch(&Batch::from_rows(schema.clone(), pending)?)?;
+        if pending_rows != 0 {
+            output.write_batch(&Batch::from_validated_columns(
+                schema.clone(), columns, pending_rows
+            )?)?;
         }
         output.finish()?;
     }

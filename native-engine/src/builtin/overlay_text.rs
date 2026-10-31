@@ -29,11 +29,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
     // A byte count bounds the number of UTF-8 characters, so impossible
     // character positions need no iterator traversal.
-    let begin = if index >= text.len() { text.len() } else {
+    let ascii = text.is_ascii();
+    let begin = if index >= text.len() { text.len() } else if ascii {
+        // Byte and character offsets are identical for ASCII text.
+        index
+    } else {
         text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
     };
     let remaining = &text[begin..];
-    let end = if count >= remaining.len() { text.len() } else {
+    let end = if count >= remaining.len() { text.len() } else if ascii {
+        begin + count
+    } else {
         remaining.char_indices().nth(count).map_or(text.len(), |(byte, _)| begin + byte)
     };
     let result_len = begin.checked_add(replacement.len())
@@ -52,11 +58,15 @@ fn common_suffix_type(types: &[DataType]) -> Result<DataType> { super::text_type
 fn common_suffix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
-    let mut start = left.len();
-    for ((offset, first), (_, second)) in left.char_indices().rev().zip(right.char_indices().rev()) {
-        if first != second { break; }
-        start = offset;
+    if left == right {
+        return Ok(Value::Text(left.to_owned()));
     }
+    let common_bytes = left.as_bytes().iter().rev().zip(right.as_bytes().iter().rev())
+        .take_while(|(first, second)| first == second).count();
+    let mut start = left.len() - common_bytes;
+    // Equal trailing UTF-8 continuation bytes do not imply equal characters.
+    // Discard any leading fragment before slicing at a scalar boundary.
+    while !left.is_char_boundary(start) { start += 1; }
     Ok(Value::Text(left[start..].to_string()))
 }
 
@@ -149,5 +159,55 @@ mod overlay_actual_output_budget_tests {
         assert_eq!(result, Value::Text(replacement));
         assert!(evaluate(&[Value::Text("a".repeat(16 * 1024 * 1024)),
             Value::Text("b".into()), Value::Integer(1), Value::Integer(0)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod overlay_ascii_offset_perf_tests {
+    use super::*;
+
+    #[test]
+    fn large_ascii_offsets_retain_exact_slice_boundaries() {
+        let input = "a".repeat(1_000_000);
+        let mut expected = input.clone();
+        expected.replace_range(800_000..800_001, "XYZ");
+        assert_eq!(evaluate(&[
+            Value::Text(input), Value::Text("XYZ".into()),
+            Value::Integer(800_001), Value::Integer(1),
+        ]).unwrap(), Value::Text(expected));
+    }
+
+    #[test]
+    fn unicode_offsets_and_suffix_identity_stay_correct() {
+        assert_eq!(evaluate(&[
+            Value::Text("é🙂abc".into()), Value::Text("界".into()),
+            Value::Integer(2), Value::Integer(2),
+        ]).unwrap(), Value::Text("é界bc".into()));
+        assert_eq!(common_suffix(&[
+            Value::Text("abc🙂é".into()), Value::Text("xyz🙂é".into()),
+        ]).unwrap(), Value::Text("🙂é".into()));
+        let same = Value::Text("é🙂".repeat(30_000));
+        assert_eq!(common_suffix(&[same.clone(), same.clone()]).unwrap(), same);
+    }
+}
+
+#[cfg(test)]
+mod utf8_common_suffix_byte_scan_tests {
+    use super::*;
+
+    #[test]
+    fn excludes_matching_continuation_bytes_from_different_scalars() {
+        let suffix = |left: &str, right: &str| common_suffix(&[
+            Value::Text(left.into()), Value::Text(right.into()),
+        ]).unwrap();
+        assert_eq!(suffix("abcxyz", "12xyz"), Value::Text("xyz".into()));
+        assert_eq!(suffix("é", "©"), Value::Text(String::new()));
+        assert_eq!(suffix("éx", "©x"), Value::Text("x".into()));
+        assert_eq!(suffix("abc🙂東京", "xyz🙂東京"), Value::Text("🙂東京".into()));
+        assert_eq!(suffix("a", "a"), Value::Text("a".into()));
+        assert_eq!(suffix("abc", ""), Value::Text(String::new()));
+        let long = "xyz".repeat(100_000);
+        assert_eq!(suffix(&format!("A{long}"), &format!("B{long}")), Value::Text(long));
+        assert_eq!(common_suffix(&[Value::Null, Value::Text("abc".into())]).unwrap(), Value::Null);
     }
 }

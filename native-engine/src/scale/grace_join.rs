@@ -10,7 +10,7 @@ use crate::{
     schema::Schema, Error, Result,
 };
 use super::{
-    cancel::QueryControl, chunks::BatchChunks,
+    cancel::QueryControl,
     partition_spill::PartitionWriter, spill::{SpillReader, SpillWriter},
 };
 
@@ -84,7 +84,7 @@ fn load_build_bounded(
         rows = next_rows;
         retained_bytes = next_bytes;
     }
-    Batch::new_with_row_count(schema.clone(), columns, rows)
+    Batch::from_validated_columns(schema.clone(), columns, rows)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,7 +204,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                     }
                     rows += 1;
                     if rows >= io_batch_rows {
-                        let batch = Batch::new_with_row_count(
+                        let batch = Batch::from_validated_columns(
                             result_schema.clone(), std::mem::take(&mut columns), rows,
                         )?;
                         writer.write_batch(&batch)?;
@@ -214,7 +214,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                 }
             }
             if rows != 0 {
-                writer.write_batch(&Batch::new_with_row_count(result_schema.clone(), columns, rows)?)?;
+                writer.write_batch(&Batch::from_validated_columns(result_schema.clone(), columns, rows)?)?;
             }
         }
         writer.finish()?;

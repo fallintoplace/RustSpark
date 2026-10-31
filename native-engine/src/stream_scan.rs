@@ -85,7 +85,7 @@ impl Iterator for ScanCursor<'_> {
                 self.columns.iter().map(|&column| {
                     Ok(self.source.column(column)?[start..end].to_vec())
                 }).collect::<Result<Vec<_>>>()
-                    .and_then(|columns| Batch::new_with_row_count(
+                    .and_then(|columns| Batch::from_validated_columns(
                         self.output_schema.clone(), columns, end - start,
                     ))
             };
@@ -122,7 +122,7 @@ impl Iterator for ScanCursor<'_> {
             let values = self.source.column(column)?;
             Ok(selected.iter().map(|&row| values[row].clone()).collect::<Vec<Value>>())
         }).collect::<Result<Vec<_>>>()
-            .and_then(|columns| Batch::new_with_row_count(
+            .and_then(|columns| Batch::from_validated_columns(
                 self.output_schema.clone(), columns, selected.len(),
             ));
         if output.is_err() { self.failed = true; }
@@ -219,7 +219,9 @@ impl Iterator for WindowedScan<'_> {
             let offset = self.skip;
             self.skip = 0;
             self.remaining -= count;
-            return Some(crate::limit::limit(&batch, offset, Some(count)));
+            // The scan cursor produced an owned, validated intermediate batch.
+            // Move retained payloads into the window instead of cloning them.
+            return Some(crate::limit::limit_owned(batch, offset, Some(count)));
         }
     }
 }
@@ -447,5 +449,51 @@ mod predicate_error_deferred_prefix_tests {
         let result = scan_window(&batch, Some(predicate()), &["num"], 10, 0, 1)
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(result[0].rows().unwrap(), vec![vec![Value::Integer(5)]]);
+    }
+}
+
+#[cfg(test)]
+mod moved_scan_window_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn nullable_text_projection_and_pagination_match_reference_scan() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema, (0..37).map(|index| vec![
+            Value::Integer(index),
+            if index % 5 == 0 { Value::Null } else {
+                Value::Text(format!("{index}:{}", "é🙂".repeat(1024)))
+            },
+        ]).collect()).unwrap();
+        let predicate = Expr::binary(Expr::Column("id".into()),
+            BinaryOp::GreaterEqual, Expr::Literal(Value::Integer(7)));
+        for batch_size in [1, 2, 8, 31] {
+            let all = scan(&source, Some(predicate.clone()), &["payload"], batch_size)
+                .unwrap().collect::<Result<Vec<_>>>().unwrap();
+            let full_rows = all.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+            for (offset, limit) in [(0, 1), (2, 3), (10, 20), (100, 10)] {
+                let window = scan_window(&source, Some(predicate.clone()),
+                    &["payload"], batch_size, offset, limit)
+                    .unwrap().collect::<Result<Vec<_>>>().unwrap();
+                let actual = window.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+                let expected = full_rows.iter().skip(offset).take(limit).cloned().collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_column_scans_preserve_row_count_across_windows() {
+        let source = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 11).unwrap();
+        for chunk in [1, 3, 16] {
+            let batches = scan_window(&source, None, &[], chunk, 4, 5)
+                .unwrap().collect::<Result<Vec<_>>>().unwrap();
+            assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 5);
+            assert!(batches.iter().all(|batch| batch.schema().is_empty()));
+        }
     }
 }

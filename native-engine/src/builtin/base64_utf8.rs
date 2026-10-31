@@ -88,9 +88,16 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
         if (padding == 2 && (b & 15) != 0) || (padding == 1 && (c & 3) != 0) {
             return Err(Error::Parse("noncanonical BASE64 padding bits".into()));
         }
-        bytes.push((a << 2) | (b >> 4));
-        if padding < 2 { bytes.push((b << 4) | (c >> 2)); }
-        if padding == 0 { bytes.push((c << 6) | d); }
+        if padding == 0 {
+            bytes.extend_from_slice(&[
+                (a << 2) | (b >> 4),
+                (b << 4) | (c >> 2),
+                (c << 6) | d,
+            ]);
+        } else {
+            bytes.push((a << 2) | (b >> 4));
+            if padding == 1 { bytes.push((b << 4) | (c >> 2)); }
+        }
     }
     let decoded = String::from_utf8(bytes)
         .map_err(|_| Error::Type("UNBASE64_UTF8 decoded bytes are not UTF-8".into()))?;
@@ -180,5 +187,24 @@ mod bulk_quartet_base64_regressions {
                 Value::Text(encoded.into()));
         }
         assert_eq!(base64(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod full_quartet_decode_regressions {
+    use super::*;
+
+    #[test]
+    fn handles_long_complete_groups_and_padded_tails() {
+        for length in 0..=512 {
+            let source = Value::Text("éa".repeat(length));
+            let encoded = base64(&[source.clone()]).unwrap();
+            assert_eq!(unbase64_utf8(&[encoded]).unwrap(), source);
+        }
+        assert_eq!(unbase64_utf8(&[Value::Text("YWJjZGVmZw==".into())]).unwrap(),
+            Value::Text("abcdefg".into()));
+        assert!(unbase64_utf8(&[Value::Text("YWJjZGVmZ=== ".into())]).is_err());
+        assert!(unbase64_utf8(&[Value::Text("YWI=".into())]).is_ok());
+        assert_eq!(unbase64_utf8(&[Value::Null]).unwrap(), Value::Null);
     }
 }

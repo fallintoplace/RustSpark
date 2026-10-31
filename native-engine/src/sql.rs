@@ -311,7 +311,7 @@ impl Parser {
                         if !self.take_symbol(',') { break; }
                     }
                     self.expect_symbol(')')?;
-                    left = Expr::InList { needle: Box::new(left), choices, negated };
+                    left = Expr::InList { needle: Box::new(left), choices, negated: negate };
                     continue;
                 }
             }
