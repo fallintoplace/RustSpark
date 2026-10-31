@@ -39,10 +39,20 @@ fn json_depth(args: &[Value]) -> Result<Value> {
         maximum = maximum.max(depth);
         match node {
             serde_json::Value::Array(items) => {
-                for child in items { nodes.push((child, depth + 1)); }
+                for child in items {
+                    maximum = maximum.max(depth + 1);
+                    if matches!(child, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
+                        nodes.push((child, depth + 1));
+                    }
+                }
             }
             serde_json::Value::Object(fields) => {
-                for child in fields.values() { nodes.push((child, depth + 1)); }
+                for child in fields.values() {
+                    maximum = maximum.max(depth + 1);
+                    if matches!(child, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
+                        nodes.push((child, depth + 1));
+                    }
+                }
             }
             _ => {}
         }
@@ -92,5 +102,19 @@ mod json_depth_scalar_fast_path_tests {
         }
         assert_eq!(json_depth(&[Value::Text("[[1]]".into())]).unwrap(), Value::Integer(3));
         assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod wide_json_depth_tests {
+    use super::*;
+
+    #[test]
+    fn flat_wide_arrays_and_nested_containers_keep_correct_depth() {
+        let wide = format!("[{}]", vec!["null"; 20_000].join(","));
+        assert_eq!(json_depth(&[Value::Text(wide)]).unwrap(), Value::Integer(2));
+        assert_eq!(json_depth(&[Value::Text("[[1],true]".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(json_depth(&[Value::Text(r#"{"a":{"b":2},"c":null}"#.into())]).unwrap(),
+            Value::Integer(3));
     }
 }
