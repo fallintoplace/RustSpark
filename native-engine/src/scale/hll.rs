@@ -69,9 +69,22 @@ impl HyperLogLog {
             self.harmonic_scaled = other.harmonic_scaled;
             return;
         }
-        for (index, &rank) in other.registers.iter().enumerate() {
-            self.update_register(index, rank);
+        // Merge the 4 KiB register arrays with one harmonic adjustment.
+        // Updating the fixed-point accumulator per changed register creates
+        // an unnecessary dependency chain on dense distributed sketches.
+        let mut replaced_weight = 0u128;
+        let mut merged_weight = 0u128;
+        let mut new_nonempty = 0usize;
+        for (current, &incoming) in self.registers.iter_mut().zip(other.registers.iter()) {
+            if incoming > *current {
+                replaced_weight += harmonic_weight(*current);
+                merged_weight += harmonic_weight(incoming);
+                new_nonempty += usize::from(*current == 0);
+                *current = incoming;
+            }
         }
+        self.harmonic_scaled = self.harmonic_scaled - replaced_weight + merged_weight;
+        self.nonempty += new_nonempty;
     }
 
     pub fn estimate(&self) -> f64 {
@@ -385,5 +398,56 @@ mod cached_hll_harmonic_regressions {
         copied.merge(&first);
         assert_eq!(copied, first);
         verify(&copied);
+    }
+}
+
+#[cfg(test)]
+mod batched_hll_merge_regressions {
+    use super::*;
+
+    fn reference_merge(target: &mut HyperLogLog, source: &HyperLogLog) {
+        for (index, &rank) in source.registers.iter().enumerate() {
+            target.update_register(index, rank);
+        }
+    }
+
+    #[test]
+    fn batched_merges_match_reference_for_dense_sparse_and_duplicate_sketches() {
+        let mut sources = (0..8).map(|_| HyperLogLog::new()).collect::<Vec<_>>();
+        for value in 0..120_000 {
+            let owner = (value as usize / 5) % sources.len();
+            sources[owner].add(&Value::Integer(value % 85_000));
+        }
+        let mut merged = HyperLogLog::new();
+        let mut reference = HyperLogLog::new();
+        for sketch in sources.iter().chain(sources.iter().rev()) {
+            merged.merge(sketch);
+            reference_merge(&mut reference, sketch);
+            assert_eq!(merged, reference);
+            assert_eq!(merged.harmonic_scaled,
+                merged.registers.iter().map(|&rank| harmonic_weight(rank)).sum::<u128>());
+            assert_eq!(merged.nonempty, merged.registers.iter()
+                .filter(|&&rank| rank != 0).count());
+        }
+        let before = merged.clone();
+        merged.merge(&HyperLogLog::new());
+        assert_eq!(merged, before);
+    }
+
+    #[test]
+    fn individual_register_updates_match_merge_with_disjoint_registers() {
+        let mut a = HyperLogLog::new();
+        let mut b = HyperLogLog::new();
+        for index in 0..REGISTERS {
+            if index % 3 == 0 {
+                a.update_register(index, ((index % 31) + 1) as u8);
+            } else {
+                b.update_register(index, ((index % 37) + 1) as u8);
+            }
+        }
+        let mut expected = a.clone();
+        reference_merge(&mut expected, &b);
+        a.merge(&b);
+        assert_eq!(a, expected);
     }
 }
