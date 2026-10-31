@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -212,6 +213,13 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
     Schema::new(fields)
 }
 
+/// Compare a retained group key directly against borrowed batch columns.
+/// Keep equality checks even after hashing to handle fingerprint collisions.
+fn matches_group_row(key: &[Value], columns: &[&[Value]], row: usize) -> bool {
+    key.len() == columns.len() &&
+        key.iter().zip(columns).all(|(value, column)| value == &column[row])
+}
+
 fn aggregate_shard(
     path: &Path, input: &Schema, keys: &[usize],
     items: &[AggregateItem], output: &Schema,
@@ -230,38 +238,51 @@ fn aggregate_shard_with_budget(
 ) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != input { return Err(Error::Schema("group shard schema mismatch".into())); }
-    let mut groups: HashMap<Vec<Value>, Vec<State>> = HashMap::new();
+    // Fingerprint borrowed keys on each row and materialize an owned key
+    // only for the first occurrence of a group. Position vectors preserve
+    // correctness under hash collisions without cloning duplicate TEXT keys.
+    let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
+    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut retained_key_state_bytes = 0usize;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
         let key_columns = keys.iter().map(|&index| batch.column(index))
             .collect::<Result<Vec<_>>>()?;
         for row in 0..batch.num_rows() {
-            let key = key_columns.iter().map(|column| column[row].clone())
-                .collect::<Vec<_>>();
-            let at_capacity = groups.len() >= max_groups;
-            let states = match groups.entry(key) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    if at_capacity {
-                        return Err(Error::Execution("group state count exceeds partition budget".into()));
-                    }
-                    // The group-count cap alone is insufficient for wide text keys.
-                    // Charge unique keys and their fixed aggregate state once.
-                    let footprint = super::row_footprint::footprint(entry.key().iter())
-                        .saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
-                    let next_bytes = retained_key_state_bytes.checked_add(footprint)
-                        .filter(|total| *total <= max_key_state_bytes)
-                        .ok_or_else(|| Error::Execution(
-                            "group key state byte budget exceeded".into()))?;
-                    let initial = items.iter()
-                        .map(|item| new_state(&item.op))
-                        .collect::<Result<Vec<_>>>()?;
-                    retained_key_state_bytes = next_bytes;
-                    entry.insert(initial)
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key_columns.len().hash(&mut hasher);
+            for column in &key_columns { column[row].hash(&mut hasher); }
+            let fingerprint = hasher.finish();
+            let existing = by_hash.get(&fingerprint).and_then(|positions| {
+                positions.iter().copied().find(|&position| {
+                    matches_group_row(&groups[position].0, &key_columns, row)
+                })
+            });
+            let position = if let Some(position) = existing {
+                position
+            } else {
+                if groups.len() >= max_groups {
+                    return Err(Error::Execution("group state count exceeds partition budget".into()));
                 }
+                // Charge only unique group keys before cloning any TEXT values.
+                let footprint = super::row_footprint::footprint(
+                    key_columns.iter().map(|column| &column[row])
+                ).saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
+                let next_bytes = retained_key_state_bytes.checked_add(footprint)
+                    .filter(|total| *total <= max_key_state_bytes)
+                    .ok_or_else(|| Error::Execution(
+                        "group key state byte budget exceeded".into()))?;
+                let initial = items.iter().map(|item| new_state(&item.op))
+                    .collect::<Result<Vec<_>>>()?;
+                let key = key_columns.iter().map(|column| column[row].clone())
+                    .collect::<Vec<_>>();
+                let position = groups.len();
+                groups.push((key, initial));
+                by_hash.entry(fingerprint).or_default().push(position);
+                retained_key_state_bytes = next_bytes;
+                position
             };
-            for (state, item) in states.iter_mut().zip(items) {
+            for (state, item) in groups[position].1.iter_mut().zip(items) {
                 add_to_state(state, &item.op, &batch, row,
                     &mut retained_key_state_bytes, max_key_state_bytes)?;
             }
@@ -786,5 +807,45 @@ mod columnar_grouped_shard_output_tests {
             vec![Value::Text("東京".into()), Value::Integer(3), Value::Integer(12)],
         ]);
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod borrowed_group_key_equality_regressions {
+    use super::*;
+
+    #[test]
+    fn compares_nullable_unicode_and_canonical_float_values_without_cloning() {
+        let key = vec![
+            Value::Text("東京🙂".repeat(1000)),
+            Value::Float(f64::NAN), Value::Null,
+        ];
+        let columns = vec![
+            vec![Value::Text("東京🙂".repeat(1000)), Value::Text("different".into())],
+            vec![Value::Float(-f64::NAN), Value::Float(0.0)],
+            vec![Value::Null, Value::Null],
+        ];
+        let borrowed = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        assert!(matches_group_row(&key, &borrowed, 0));
+        assert!(!matches_group_row(&key, &borrowed, 1));
+        assert!(!matches_group_row(&key[..2], &borrowed, 0));
+    }
+
+    #[test]
+    fn collision_candidate_lookup_requires_exact_group_equality() {
+        let keys = vec![
+            vec![Value::Text("group-1".into()), Value::Integer(1)],
+            vec![Value::Text("group-2".into()), Value::Integer(1)],
+        ];
+        let columns = vec![
+            vec![Value::Text("group-2".into())],
+            vec![Value::Integer(1)],
+        ];
+        let borrowed = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let candidate_bucket = [0usize, 1usize];
+        let matched = candidate_bucket.into_iter().find(|&position| {
+            matches_group_row(&keys[position], &borrowed, 0)
+        });
+        assert_eq!(matched, Some(1));
     }
 }
