@@ -171,10 +171,6 @@ class RequestFramingTests(unittest.TestCase):
                 server.server_close()
                 worker.join(timeout=2)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
 class BoundedGatewayConcurrencyTests(unittest.TestCase):
     def test_slow_partial_body_does_not_block_health_and_times_out(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -232,3 +228,7 @@ class BoundedGatewayConcurrencyTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 worker.join(timeout=2)
+
+
+if __name__ == "__main__":
+    unittest.main()
