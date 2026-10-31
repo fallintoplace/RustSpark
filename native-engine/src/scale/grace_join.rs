@@ -183,25 +183,32 @@ where L: IntoIterator<Item = Result<Batch>>,
                 }
             }
         }
+        // No further probe can read the build side after this point.
+        drop(prepared);
         if outer_build {
             let mut columns: Vec<Vec<Value>> =
                 (0..result_schema.len()).map(|_| Vec::new()).collect();
-            let build_columns = (0..right_schema.len())
-                .map(|index| build.column(index)).collect::<Result<Vec<_>>>()?;
+            let matched = matched_right.as_ref()
+                .ok_or_else(|| Error::Execution("missing outer-join match state".into()))?;
+            // The hash table no longer borrows build columns. Consume them in
+            // lockstep so unmatched TEXT payloads move into output rather than
+            // being cloned from the retained build-side batch.
+            let mut build_columns = build.into_columns().into_iter()
+                .map(Vec::into_iter).collect::<Vec<_>>();
             let mut rows = 0usize;
-            for right_row in 0..build.num_rows() {
+            for &was_matched in matched {
                 control.check()?;
-                let matched = matched_right.as_ref()
-                    .and_then(|bits| bits.get(right_row))
-                    .ok_or_else(|| Error::Execution("missing outer-join match state".into()))?;
-                if !*matched {
+                if !was_matched {
                     for output in &mut columns[..left_schema.len()] {
                         output.push(Value::Null);
                     }
-                    for (input, output) in build_columns.iter()
-                        .zip(columns[left_schema.len()..].iter_mut()) {
-                        output.push(input[right_row].clone());
-                    }
+                }
+                for (input, output) in build_columns.iter_mut()
+                    .zip(columns[left_schema.len()..].iter_mut()) {
+                    let value = input.next().expect("matched bitmap covers build rows");
+                    if !was_matched { output.push(value); }
+                }
+                if !was_matched {
                     rows += 1;
                     if rows >= io_batch_rows {
                         let batch = Batch::from_validated_columns(
@@ -544,5 +551,58 @@ mod owned_grace_build_admission_tests {
         assert!(load_build_bounded(&path, &schema, 3, 2, 5_000,
             &QueryControl::default()).is_err());
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_unmatched_grace_join_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn moves_large_nullable_unmatched_values_after_full_join_probing() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-owned-outer-{}-{}", std::process::id(),
+            JOIN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let large = "🙂".repeat(20_000);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("left".into())],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("matched".into())],
+            vec![Value::Integer(3), Value::Text(large.clone())],
+            vec![Value::Null, Value::Null],
+            vec![Value::Integer(4), Value::Text("last".into())],
+        ]).unwrap();
+        let result = grace_join(
+            [Ok(left)], [Ok(right)], schema.clone(), schema,
+            "key", "key", JoinKind::Full, &dir, 1, 8, 2,
+            &QueryControl::default(),
+        ).unwrap();
+        let mut actual = Vec::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 2).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                actual.extend(batch.rows().unwrap());
+            }
+        }
+        assert_eq!(actual.len(), 5);
+        assert!(actual.contains(&vec![
+            Value::Null, Value::Null, Value::Integer(3), Value::Text(large),
+        ]));
+        assert!(actual.contains(&vec![
+            Value::Null, Value::Null, Value::Null, Value::Null,
+        ]));
+        assert!(actual.contains(&vec![
+            Value::Integer(2), Value::Null, Value::Null, Value::Null,
+        ]));
+        drop(result);
+        std::fs::remove_dir(dir).unwrap();
     }
 }
