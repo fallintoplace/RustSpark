@@ -30,7 +30,12 @@ pub fn concat(
         if second.schema() != schema {
             return Err(Error::Schema("cannot concatenate different batch schemas".into()));
         }
-        if second.num_rows() == 0 { return Ok(first); }
+        if second.num_rows() == 0 {
+            if first.num_rows() > max_rows {
+                return Err(Error::Execution("batch collection row limit exceeded".into()));
+            }
+            return Ok(first);
+        }
         if first.num_rows() == 0 {
             if second.num_rows() > max_rows {
                 return Err(Error::Execution("batch collection row limit exceeded".into()));
@@ -199,7 +204,8 @@ mod empty_pair_concat_passthrough_tests {
         let empty = Batch::empty(schema.clone());
         assert_eq!(concat(&schema, [empty.clone(), populated.clone()], 2).unwrap(), populated);
         assert_eq!(concat(&schema, [populated.clone(), empty], 2).unwrap(), populated);
-        assert!(concat(&schema, [Batch::empty(schema.clone()), populated], 1).is_err());
+        assert!(concat(&schema, [Batch::empty(schema.clone()), populated.clone()], 1).is_err());
+        assert!(concat(&schema, [populated, Batch::empty(schema.clone())], 1).is_err());
         let mismatched = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
         assert!(concat(&schema, [Batch::empty(schema.clone()), Batch::empty(mismatched)], 2).is_err());
     }
