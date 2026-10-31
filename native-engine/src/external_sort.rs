@@ -16,9 +16,16 @@ struct Run {
     position: usize,
 }
 
+// Resolve direct column references once per sort, not on every tournament
+// comparison. Computed expressions retain the existing evaluator path.
+struct BoundSortKey {
+    key: SortKey,
+    column: Option<usize>,
+}
+
 pub struct ExternalSort {
     schema: Schema,
-    keys: Vec<SortKey>,
+    keys: Vec<BoundSortKey>,
     runs: Vec<Run>,
     winners: RunTournament,
     output_rows: usize,
@@ -39,6 +46,13 @@ pub fn external_sort(
     if run_rows == 0 || output_rows == 0 || run_rows > 65_536 || output_rows > 65_536 {
         return Err(Error::Execution("external sort batch sizes must be in 1..=65536".into()));
     }
+    let bound_keys = keys.iter().map(|key| {
+        let column = match &key.expression {
+            crate::expr::Expr::Column(name) => Some(schema.column(name)?),
+            _ => None,
+        };
+        Ok(BoundSortKey { key: key.clone(), column })
+    }).collect::<Result<Vec<_>>>()?;
     let mut runs = Vec::new();
     for input_batch in input {
         if input_batch.schema() != schema {
@@ -59,10 +73,10 @@ pub fn external_sort(
     }
     // Build a fallible tournament tree once, then update only the path
     // affected by each emitted row. This avoids comparing every run per row.
-    let winners = RunTournament::new(&runs, keys)?;
+    let winners = RunTournament::new(&runs, &bound_keys)?;
     Ok(ExternalSort {
         schema: schema.clone(),
-        keys: keys.to_vec(),
+        keys: bound_keys,
         runs,
         winners,
         output_rows,
@@ -70,24 +84,19 @@ pub fn external_sort(
     })
 }
 
-fn compare_runs(left: &Run, right: &Run, keys: &[SortKey]) -> Result<Ordering> {
+fn compare_runs(left: &Run, right: &Run, keys: &[BoundSortKey]) -> Result<Ordering> {
     let a = left.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
     let b = right.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
     for key in keys {
-        // Most external sorts use bare column keys. Borrow these values
-        // directly from the resident run batch rather than constructing two
-        // owned Values for every comparison and output row.
-        let x: Cow<'_, crate::scalar::Value> = match &key.expression {
-            crate::expr::Expr::Column(name) =>
-                Cow::Borrowed(a.value(left.position, a.schema().column(name)?)?),
-            _ => Cow::Owned(key.expression.evaluate(a, left.position)?),
+        let x: Cow<'_, crate::scalar::Value> = match key.column {
+            Some(index) => Cow::Borrowed(a.value(left.position, index)?),
+            None => Cow::Owned(key.key.expression.evaluate(a, left.position)?),
         };
-        let y: Cow<'_, crate::scalar::Value> = match &key.expression {
-            crate::expr::Expr::Column(name) =>
-                Cow::Borrowed(b.value(right.position, b.schema().column(name)?)?),
-            _ => Cow::Owned(key.expression.evaluate(b, right.position)?),
+        let y: Cow<'_, crate::scalar::Value> = match key.column {
+            Some(index) => Cow::Borrowed(b.value(right.position, index)?),
+            None => Cow::Owned(key.key.expression.evaluate(b, right.position)?),
         };
-        let order = crate::sort::compare_values(&x, &y, key.descending, key.nulls_first);
+        let order = crate::sort::compare_values(&x, &y, key.key.descending, key.key.nulls_first);
         if order != Ordering::Equal { return Ok(order); }
     }
     Ok(Ordering::Equal)
@@ -99,7 +108,7 @@ struct RunTournament {
 }
 
 impl RunTournament {
-    fn select(runs: &[Run], keys: &[SortKey], a: Option<usize>, b: Option<usize>) -> Result<Option<usize>> {
+    fn select(runs: &[Run], keys: &[BoundSortKey], a: Option<usize>, b: Option<usize>) -> Result<Option<usize>> {
         match (a, b) {
             (None, other) | (other, None) => Ok(other),
             (Some(left), Some(right)) => {
@@ -110,7 +119,7 @@ impl RunTournament {
         }
     }
 
-    fn new(runs: &[Run], keys: &[SortKey]) -> Result<Self> {
+    fn new(runs: &[Run], keys: &[BoundSortKey]) -> Result<Self> {
         let leaves = runs.len().next_power_of_two().max(1);
         let mut tree = vec![None; leaves * 2];
         for (index, run) in runs.iter().enumerate() {
@@ -124,7 +133,7 @@ impl RunTournament {
 
     fn winner(&self) -> Option<usize> { self.tree[1] }
 
-    fn update(&mut self, index: usize, runs: &[Run], keys: &[SortKey]) -> Result<()> {
+    fn update(&mut self, index: usize, runs: &[Run], keys: &[BoundSortKey]) -> Result<()> {
         let mut node = self.leaves + index;
         self.tree[node] = runs[index].batch.as_ref().map(|_| index);
         while node > 1 {
@@ -307,5 +316,34 @@ mod tournament_merge_regressions {
         assert_eq!(sorted.winners.winner(), None);
         assert!(sorted.next().is_none());
         assert!(sorted.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod bound_external_sort_keys_tests {
+    use super::*;
+    use crate::{expr::{Expr, BinaryOp}, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn bound_column_and_computed_keys_match_full_sort_across_runs() {
+        let schema = Schema::new(vec![
+            Field::new("x", DataType::Integer, false),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..70).map(|id| vec![
+            Value::Integer((id * 19) % 13), Value::Integer(id),
+        ]).collect()).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::Column("x".into())),
+            SortKey::ascending(Expr::binary(
+                Expr::Column("id".into()), BinaryOp::Add, Expr::Literal(Value::Integer(1)),
+            )),
+        ];
+        let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
+        let actual = external_sort(vec![batch], &schema, &keys,
+            std::env::temp_dir(), 3, 7).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap().into_iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }
