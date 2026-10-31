@@ -15,7 +15,8 @@ pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
         values.extend_from_slice(right.column(column)?);
         columns.push(values);
     }
-    Batch::new_with_row_count(schema, columns, count)
+    // Inputs and numeric widening are already validated for this schema.
+    Batch::from_validated_columns(schema, columns, count)
 }
 
 /// Concatenate temporary inputs by consuming their columns. A changed numeric
@@ -48,7 +49,8 @@ pub fn union_all_owned(left: Batch, right: Batch) -> Result<Batch> {
         }
         left_values.append(right_values);
     }
-    Batch::new_with_row_count(schema, columns, count)
+    // Inputs and numeric widening are already validated for this schema.
+    Batch::from_validated_columns(schema, columns, count)
 }
 
 #[cfg(test)]
@@ -358,5 +360,50 @@ mod owned_union_all_regressions {
         let one = Batch::new_with_row_count(empty.clone(), vec![], 2).unwrap();
         let two = Batch::new_with_row_count(empty, vec![], 3).unwrap();
         assert_eq!(union_all_owned(one, two).unwrap().num_rows(), 5);
+    }
+}
+
+
+#[cfg(test)]
+mod union_all_validated_column_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn borrowed_and_owned_unions_agree_for_numeric_widening_and_nulls() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(10)], vec![Value::Integer(20)],
+        ]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("other", DataType::Float, true),
+        ]).unwrap(), vec![
+            vec![Value::Float(3.5)], vec![Value::Null],
+        ]).unwrap();
+        let borrowed = union_all(&left, &right).unwrap();
+        let owned = union_all_owned(left, right).unwrap();
+        assert_eq!(borrowed, owned);
+        assert_eq!(owned.rows().unwrap(), vec![
+            vec![Value::Float(10.0)], vec![Value::Float(20.0)],
+            vec![Value::Float(3.5)], vec![Value::Null],
+        ]);
+    }
+
+    #[test]
+    fn preserves_large_text_payloads_and_zero_column_row_counts() {
+        let schema = Schema::new(vec![Field::new("body", DataType::Text, true)]).unwrap();
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(16_384))], vec![Value::Null],
+        ]).unwrap();
+        let b = Batch::from_rows(schema, vec![
+            vec![Value::Text("X".repeat(16_384))],
+        ]).unwrap();
+        assert_eq!(union_all_owned(a.clone(), b.clone()).unwrap(),
+            union_all(&a, &b).unwrap());
+        let empty = Schema::new(vec![]).unwrap();
+        let a = Batch::new_with_row_count(empty.clone(), vec![], 5).unwrap();
+        let b = Batch::new_with_row_count(empty, vec![], 3).unwrap();
+        assert_eq!(union_all_owned(a, b).unwrap().num_rows(), 8);
     }
 }
