@@ -82,6 +82,33 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     Batch::from_validated_columns(schema, columns, total)
 }
 
+/// Concatenate already-owned batches by moving scalar values and their TEXT
+/// allocations. Reject incompatible schemas before consuming any input columns.
+pub fn concatenate_owned(batches: Vec<Batch>) -> Result<Batch> {
+    let first = batches.first().ok_or_else(||
+        Error::Schema("cannot concatenate without a schema".into()))?;
+    if batches.len() == 1 {
+        return Ok(batches.into_iter().next().expect("one owned batch"));
+    }
+    let schema = first.schema().clone();
+    let mut total = 0usize;
+    for batch in &batches {
+        if batch.schema() != &schema {
+            return Err(Error::Schema("batch schemas must match exactly".into()));
+        }
+        total = total.checked_add(batch.num_rows())
+            .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
+    }
+    let mut columns: Vec<Vec<Value>> = (0..schema.len())
+        .map(|_| Vec::with_capacity(total)).collect();
+    for batch in batches {
+        for (target, mut source) in columns.iter_mut().zip(batch.into_columns()) {
+            target.append(&mut source);
+        }
+    }
+    Batch::from_validated_columns(schema, columns, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +262,59 @@ mod chunk_iterator_terminal_tests {
         let empty = Batch::empty(input.schema().clone());
         assert_eq!(chunks(&empty, 3).unwrap().count(), 0);
         assert!(chunks(&empty, 3).unwrap().last().is_none());
+    }
+}
+
+#[cfg(test)]
+mod owned_batch_concatenation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn moves_wide_unicode_payloads_and_preserves_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("東京🙂".repeat(2048)), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text("second".repeat(1024)), Value::Integer(3)],
+        ]).unwrap();
+        let first_ptr = match left.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(),
+            _ => unreachable!(),
+        };
+        let last_ptr = match right.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(),
+            _ => unreachable!(),
+        };
+        let expected = concatenate(&[left.clone(), right.clone()]).unwrap();
+        let actual = concatenate_owned(vec![left, right]).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(match actual.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(),
+            _ => unreachable!(),
+        }, first_ptr);
+        assert_eq!(match actual.value(2, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(),
+            _ => unreachable!(),
+        }, last_ptr);
+    }
+
+    #[test]
+    fn retains_zero_column_rows_and_validates_all_inputs() {
+        let schema = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
+        let right = Batch::new_with_row_count(schema, vec![], 5).unwrap();
+        assert_eq!(concatenate_owned(vec![left.clone(), right]).unwrap().num_rows(), 8);
+        assert_eq!(concatenate_owned(vec![left.clone()]).unwrap(), left);
+        assert!(concatenate_owned(vec![]).is_err());
+        let other = Batch::empty(Schema::new(vec![
+            Field::new("n", DataType::Integer, true)
+        ]).unwrap());
+        assert!(concatenate_owned(vec![left, other]).is_err());
     }
 }
