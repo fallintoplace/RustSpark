@@ -16,15 +16,20 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
     if characters == Some("") {
         return Ok(Value::Text(text.to_owned()));
     }
+    // An ASCII input cannot match a non-ASCII trim character. Even with
+    // mixed Unicode trim sets, use an ASCII lookup instead of building a
+    // per-row HashSet of scalars that could never match this input.
     let ascii_set = characters
-        .filter(|chars| chars.len() >= 8 && chars.is_ascii())
+        .filter(|chars| chars.len() >= 8 && (chars.is_ascii() || text.is_ascii()))
         .map(|chars| {
             let mut lookup = [false; 128];
-            for byte in chars.bytes() { lookup[byte as usize] = true; }
+            for character in chars.chars() {
+                if character.is_ascii() { lookup[character as usize] = true; }
+            }
             lookup
         });
     let unicode_set = characters
-        .filter(|chars| chars.len() >= 32 && !chars.is_ascii())
+        .filter(|chars| chars.len() >= 32 && !chars.is_ascii() && !text.is_ascii())
         .map(|chars| chars.chars().collect::<HashSet<_>>());
     let contains = |ch: char| {
         if let Some(lookup) = &ascii_set {
@@ -193,5 +198,38 @@ mod trim_empty_text_fast_path_tests {
         assert_eq!(rtrim(&[Value::Text(String::new()), chars]).unwrap(),
             Value::Text(String::new()));
         assert_eq!(btrim(&[Value::Text(String::new()), Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod mixed_unicode_trim_on_ascii_tests {
+    use super::*;
+
+    fn apply(text: &str, chars: &str, left: bool, right: bool) -> Value {
+        trim(&[
+            Value::Text(text.into()), Value::Text(chars.into())
+        ], left, right).unwrap()
+    }
+
+    #[test]
+    fn ascii_inputs_use_only_the_relevant_part_of_mixed_unicode_sets() {
+        let trim_set = format!("{}abcXYZ", "🙂é界".repeat(64));
+        assert_eq!(apply("aXahelloYc", &trim_set, true, true),
+            Value::Text("hello".into()));
+        assert_eq!(apply("aXahelloYc", &trim_set, true, false),
+            Value::Text("helloYc".into()));
+        assert_eq!(apply("aXahelloYc", &trim_set, false, true),
+            Value::Text("aXahello".into()));
+        assert_eq!(apply("helloworld", &trim_set, true, true),
+            Value::Text("helloworld".into()));
+    }
+
+    #[test]
+    fn nonascii_inputs_still_consult_unicode_trim_membership() {
+        let trim_set = format!("{}a", "🙂é界".repeat(32));
+        assert_eq!(apply("🙂éahello界🙂", &trim_set, true, true),
+            Value::Text("hello".into()));
+        assert_eq!(apply("🙂éahello界🙂", &trim_set, true, false),
+            Value::Text("hello界🙂".into()));
     }
 }
