@@ -43,15 +43,21 @@ def parse_result_rows(text: str) -> list[dict]:
     def reject_constant(value):
         raise ValueError(f"Nonfinite SQL result constant: {value}")
 
-    rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
-                      parse_constant=reject_constant, parse_float=finite_float)
+    try:
+        rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
+                          parse_constant=reject_constant, parse_float=finite_float)
+    except RecursionError as error:
+        raise ValueError("SQL result exceeds JSON nesting limit") from error
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL result must be a list of objects")
     return rows
 
 
 def validate_params(body: bytes) -> dict[str, str]:
-    payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
+    try:
+        payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
+    except RecursionError as error:
+        raise ValueError("JSON request exceeds nesting limit") from error
     if not isinstance(payload, dict) or set(payload) != {"params"}:
         raise ValueError("Expected JSON object containing only params")
     params = payload["params"]
