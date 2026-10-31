@@ -63,6 +63,10 @@ fn common_prefix_type(types: &[DataType]) -> Result<DataType> { super::text_type
 fn common_prefix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left == right {
+        // Compare bytes once instead of decoding every matching Unicode scalar.
+        return Ok(Value::Text(left.to_owned()));
+    }
     let mut end = 0;
     for ((offset, first), (_, second)) in left.char_indices().zip(right.char_indices()) {
         if first != second { break; }
@@ -160,5 +164,20 @@ mod ascii_width_slice_tests {
         assert_eq!(right(&[input.clone(), Value::Integer(i64::MAX)]).unwrap(), input);
         assert_eq!(left(&[Value::Text("🙂abc".into()), Value::Integer(2)]).unwrap(),
             Value::Text("🙂a".into()));
+    }
+}
+
+#[cfg(test)]
+mod equal_common_prefix_fast_path_tests {
+    use super::*;
+    #[test]
+    fn identical_unicode_strings_keep_their_full_prefix() {
+        let text = Value::Text("🙂é東京".repeat(1000));
+        assert_eq!(common_prefix(&[text.clone(), text.clone()]).unwrap(), text);
+        assert_eq!(common_prefix(&[Value::Text("🙂a".into()),
+            Value::Text("🙂b".into())]).unwrap(), Value::Text("🙂".into()));
+        assert_eq!(common_prefix(&[Value::Text("".into()),
+            Value::Text("".into())]).unwrap(), Value::Text("".into()));
+        assert_eq!(common_prefix(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
     }
 }
