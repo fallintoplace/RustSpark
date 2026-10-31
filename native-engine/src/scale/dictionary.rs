@@ -163,7 +163,7 @@ impl DictionaryColumn {
             .map(|(index, text)| (text.as_str(), index as u32)).collect();
         let mut bytes = left.encoded_string_bytes;
         let mut mapping = Vec::with_capacity(right.dictionary.len());
-        for text in &right.dictionary {
+        for text in right.dictionary.iter() {
             let code = if let Some(&existing) = seen.get(text) {
                 existing
             } else {

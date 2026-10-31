@@ -1,12 +1,14 @@
 //! Generate independently sorted spill runs with deterministic scratch cleanup.
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 use crate::{batch::Batch, schema::Schema, sort::{self, SortKey}, Error, Result};
 use super::{cancel::QueryControl, spill::SpillWriter};
+#[cfg(test)]
+use std::fs::File;
 
 static RUN_ID: AtomicU64 = AtomicU64::new(1);
 

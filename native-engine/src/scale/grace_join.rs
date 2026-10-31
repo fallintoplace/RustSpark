@@ -10,7 +10,7 @@ use crate::{
     schema::Schema, Error, Result,
 };
 use super::{
-    cancel::QueryControl, chunks::BatchChunks,
+    cancel::QueryControl,
     partition_spill::PartitionWriter, spill::{SpillReader, SpillWriter},
 };
 

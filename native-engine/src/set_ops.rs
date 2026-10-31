@@ -165,7 +165,7 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
 fn right_counts<'a>(
     columns: &'a [&'a [Value]], rows: usize, max_distinct_keys: usize,
 ) -> Result<HashMap<BorrowedSetRow<'a>, usize>> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::<BorrowedSetRow<'a>, usize>::new();
     for row in 0..rows {
         let key = BorrowedSetRow { columns, row };
         let at_limit = counts.len() >= max_distinct_keys;

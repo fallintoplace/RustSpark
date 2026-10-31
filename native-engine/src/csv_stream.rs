@@ -104,7 +104,7 @@ impl<R: BufRead> Records<R> {
                     fields.push(decode(field)?);
                     return Ok(Some(fields));
                 }
-                (State::Start | State::Unquoted, b'"') => {
+                (State::Unquoted, b'"') => {
                     return Err(Error::Parse("quote in unquoted CSV field".into()));
                 }
                 (State::AfterQuote, _) => {
