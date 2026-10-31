@@ -223,6 +223,37 @@ impl TaskScheduler {
         true
     }
 
+    /// Reclaim leases owned by a disconnected worker without waiting for TTL.
+    ///
+    /// Retry attempts already consumed stay consumed, and late completions
+    /// from the disconnected worker cannot commit. This is an infrequent
+    /// recovery operation, so scanning the bounded task table avoids a
+    /// persistent worker-to-task index on every ordinary lease operation.
+    pub fn reclaim_worker(&mut self, worker: u64) -> usize {
+        let leased = self.tasks.iter().filter_map(|(&id, task)| {
+            match task.status {
+                TaskStatus::Leased { worker: owner, until, .. } if owner == worker =>
+                    Some((id, until)),
+                _ => None,
+            }
+        }).collect::<Vec<_>>();
+
+        for &(id, until) in &leased {
+            self.deadlines.remove(&(until, id));
+            let task = self.tasks.get_mut(&id).expect("leased task exists");
+            self.counts.leased -= 1;
+            if task.attempts >= self.max_attempts {
+                task.status = TaskStatus::Failed;
+                self.counts.failed += 1;
+            } else {
+                task.status = TaskStatus::Queued;
+                self.counts.queued += 1;
+                self.ready.insert(id);
+            }
+        }
+        leased.len()
+    }
+
     pub fn cancel_task(&mut self, id: u64) -> bool {
         let Some(task) = self.tasks.get_mut(&id) else { return false; };
         if matches!(task.status, TaskStatus::Queued | TaskStatus::Leased { .. }) {
@@ -628,5 +659,55 @@ mod hash_index_scheduler_regressions {
         assert!(TaskScheduler::with_task_limit([5, 1, 2], 2, 2).is_err());
         let scheduler = TaskScheduler::with_task_limit([5, 1, 2], 2, 3).unwrap();
         assert_eq!(scheduler.queued_tasks(10), vec![1, 2, 5]);
+    }
+}
+
+#[cfg(test)]
+mod worker_disconnect_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn disconnected_worker_requeues_only_its_own_attempts() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([1, 2, 3], 2).unwrap();
+        let abandoned = scheduler.lease_many(11, now, Duration::from_secs(60), 2).unwrap();
+        let alive = scheduler.lease(12, now, Duration::from_secs(60))
+            .unwrap().unwrap();
+        assert_eq!(scheduler.reclaim_worker(11), 2);
+        assert_eq!(scheduler.reclaim_worker(11), 0);
+        assert_eq!(scheduler.counts(), TaskCounts {
+            queued: 2, leased: 1, done: 0, failed: 0,
+        });
+        for lease in &abandoned {
+            assert!(!scheduler.finish_at(lease, true, now));
+        }
+        assert_eq!(scheduler.status(alive.task), Some(&TaskStatus::Leased {
+            worker: 12, attempt: 1, until: now + Duration::from_secs(60),
+        }));
+        let retried = scheduler.lease_many(13, now, Duration::from_secs(60), 2).unwrap();
+        assert_eq!(retried.iter().map(|lease| lease.task).collect::<Vec<_>>(),
+            abandoned.iter().map(|lease| lease.task).collect::<Vec<_>>());
+        assert!(retried.iter().all(|lease| lease.attempt == 2));
+        assert_eq!(scheduler.reclaim_worker(13), 2);
+        assert_eq!(scheduler.counts(), TaskCounts {
+            queued: 0, leased: 1, done: 0, failed: 2,
+        });
+        assert!(retried.iter().all(|lease| scheduler.status(lease.task) == Some(&TaskStatus::Failed)));
+        assert!(scheduler.finish_at(&alive, true, now));
+        assert_eq!(scheduler.counts().done, 1);
+    }
+
+    #[test]
+    fn worker_recovery_removes_deadlines_and_prevents_late_commits() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([42], 3).unwrap();
+        let original = scheduler.lease(3, now, Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(scheduler.reclaim_worker(3), 1);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(2)), 0);
+        let retry = scheduler.lease(4, now + Duration::from_secs(2),
+            Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(retry.attempt, 2);
+        assert!(!scheduler.finish_at(&original, true, now));
+        assert!(scheduler.finish_at(&retry, true, now + Duration::from_secs(2)));
     }
 }
