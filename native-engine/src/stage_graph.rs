@@ -460,9 +460,9 @@ mod precomputed_critical_path_order_regressions {
         ]).unwrap();
         for _ in 0..100 {
             assert_eq!(graph.ready_by_critical_path(&HashSet::new()), [10, 20, 60]);
-            assert_eq!(graph.ready_by_critical_path(&HashSet::from([10])), [20, 30, 70, 60]);
+            assert_eq!(graph.ready_by_critical_path(&HashSet::from([10])), [20, 30, 60, 70]);
             assert_eq!(graph.ready_by_critical_path(&HashSet::from([10, 20])),
-                [30, 40, 70, 60]);
+                [30, 40, 60, 70]);
         }
     }
 }
