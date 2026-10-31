@@ -149,8 +149,10 @@ impl Iterator for ExternalSort {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished { return None; }
-        let mut rows = Vec::with_capacity(self.output_rows.min(65_536));
-        while rows.len() < self.output_rows {
+        let mut columns = (0..self.schema.len())
+            .map(|_| Vec::with_capacity(self.output_rows)).collect::<Vec<_>>();
+        let mut row_count = 0usize;
+        while row_count < self.output_rows {
             let Some(selected) = self.winners.winner() else {
                 self.finished = true;
                 break;
@@ -160,13 +162,11 @@ impl Iterator for ExternalSort {
                 self.finished = true;
                 return Some(Err(Error::Execution("missing active external sort batch".into())));
             };
-            match batch.row(run.position) {
-                Ok(row) => rows.push(row),
-                Err(e) => {
-                    self.finished = true;
-                    return Some(Err(e));
-                }
+            if let Err(error) = batch.append_row_to_columns(run.position, &mut columns) {
+                self.finished = true;
+                return Some(Err(error));
             }
+            row_count += 1;
             run.position += 1;
             if run.position == batch.num_rows() {
                 match run.reader.next().transpose() {
@@ -185,10 +185,12 @@ impl Iterator for ExternalSort {
                 return Some(Err(error));
             }
         }
-        if rows.is_empty() {
+        if row_count == 0 {
             None
         } else {
-            Some(Batch::from_rows(self.schema.clone(), rows))
+            // Every source cell came from a validated IPC batch. The output
+            // only needs shape validation, not a second scalar type scan.
+            Some(Batch::from_validated_columns(self.schema.clone(), columns, row_count))
         }
     }
 }
@@ -345,5 +347,33 @@ mod bound_external_sort_keys_tests {
             .collect::<Result<Vec<_>>>().unwrap().into_iter()
             .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod columnar_external_merge_output_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn many_small_runs_keep_nullable_text_and_stable_ties() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let batches = (0..5).map(|part| Batch::from_rows(schema.clone(),
+            (0..11).map(|row| vec![
+                if row % 9 == 0 { Value::Null } else { Value::Integer((row % 4) as i64) },
+                if row % 7 == 0 { Value::Null } else {
+                    Value::Text(format!("{part}:{row}:{}", "é🙂".repeat(128)))
+                },
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let combined = crate::batch_chunks::concatenate(&batches).unwrap();
+        let expected = sort::sort(&combined, &keys).unwrap().rows().unwrap();
+        let actual = external_sort(batches, &schema, &keys, std::env::temp_dir(), 3, 7)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), expected);
     }
 }
