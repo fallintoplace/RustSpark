@@ -10,9 +10,6 @@ fn output(types: &[DataType]) -> Result<DataType> {
 }
 fn width_bucket(args: &[Value]) -> Result<Value> {
     if args.iter().any(Value::is_null) { return Ok(Value::Null); }
-    let x = super::number(&args[0])?.expect("non-NULL");
-    let lower = super::number(&args[1])?.expect("non-NULL");
-    let upper = super::number(&args[2])?.expect("non-NULL");
     let buckets = super::integer(&args[3])?.expect("non-NULL");
     if !(1..=1_000_000).contains(&buckets) {
         return Err(Error::Execution("WIDTH_BUCKET count must be in 1..=1000000".into()));
@@ -37,6 +34,9 @@ fn width_bucket(args: &[Value]) -> Result<Value> {
         };
         return Ok(Value::Integer(slot as i64));
     }
+    let x = super::number(&args[0])?.expect("non-NULL");
+    let lower = super::number(&args[1])?.expect("non-NULL");
+    let upper = super::number(&args[2])?.expect("non-NULL");
     if !x.is_finite() || !lower.is_finite() || !upper.is_finite() || lower == upper {
         return Err(Error::Execution("WIDTH_BUCKET requires finite increasing bounds".into()));
     }
@@ -141,5 +141,26 @@ mod exact_bigint_width_bucket_tests {
         assert_eq!(run(i64::MIN + 1, i64::MIN, i64::MIN + 2), Value::Integer(2));
         assert_eq!(run(i64::MAX - 1, i64::MAX, i64::MAX - 2), Value::Integer(2));
         assert_eq!(run(i64::MAX, i64::MAX, i64::MAX - 2), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod integer_width_bucket_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn exact_large_integers_and_mixed_float_inputs_keep_their_buckets() {
+        let run = |x, low, high| width_bucket(&[
+            Value::Integer(x), Value::Integer(low), Value::Integer(high), Value::Integer(5),
+        ]).unwrap();
+        assert_eq!(run(i64::MAX - 1, i64::MAX - 5, i64::MAX), Value::Integer(5));
+        assert_eq!(run(i64::MIN + 1, i64::MIN, i64::MIN + 5), Value::Integer(2));
+        assert_eq!(run(i64::MIN, i64::MAX, i64::MIN), Value::Integer(6));
+        assert_eq!(width_bucket(&[
+            Value::Float(2.5), Value::Integer(0), Value::Integer(10), Value::Integer(2),
+        ]).unwrap(), Value::Integer(1));
+        assert_eq!(width_bucket(&[
+            Value::Null, Value::Integer(0), Value::Integer(10), Value::Integer(2),
+        ]).unwrap(), Value::Null);
     }
 }

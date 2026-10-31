@@ -237,7 +237,7 @@ impl Iterator for RunMerger {
             }
         }
         if rows == 0 { None }
-        else { Some(Batch::new_with_row_count(self.schema.clone(), columns, rows)) }
+        else { Some(Batch::from_validated_columns(self.schema.clone(), columns, rows)) }
     }
 }
 

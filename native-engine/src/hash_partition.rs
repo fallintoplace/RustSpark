@@ -39,6 +39,9 @@ impl Hasher for PartitionHasher {
     fn write_isize(&mut self, value: isize) { self.write(&(value as i64).to_le_bytes()); }
 }
 
+// Input batches have already passed schema validation. Both borrowed and
+// owned partition paths only clone or move those same typed scalar cells;
+// rebuilding buckets therefore needs shape checks, not type checks per cell.
 pub fn partition(batch: &Batch, keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
     if partitions == 0 || partitions > 4096 || keys.is_empty() {
         return Err(Error::Execution("hash partitions must be in 1..=4096 with nonempty keys".into()));
@@ -126,7 +129,7 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
                 target.extend_from_slice(batch.column(index)?);
             }
         }
-        return Ok(vec![Batch::new_with_row_count(schema.clone(), columns, total)?]);
+        return Ok(vec![Batch::from_validated_columns(schema.clone(), columns, total)?]);
     }
 
     // Bind each source column once. Hashing and output reconstruction can
@@ -166,7 +169,7 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
         let columns = columns.unwrap_or_else(|| {
             (0..schema.len()).map(|_| Vec::new()).collect()
         });
-        Batch::new_with_row_count(schema.clone(), columns, rows)
+        Batch::from_validated_columns(schema.clone(), columns, rows)
     }).collect()
 }
 
@@ -208,7 +211,7 @@ pub fn partition_batches_owned(
                 destination.extend(source);
             }
         }
-        return Ok(vec![Batch::new_with_row_count(schema, combined, total)?]);
+        return Ok(vec![Batch::from_validated_columns(schema, combined, total)?]);
     }
 
     let mut counts = vec![0usize; partitions];
@@ -247,7 +250,7 @@ pub fn partition_batches_owned(
         }
     }
     output.into_iter().zip(counts).map(|(columns, rows)| {
-        Batch::new_with_row_count(schema.clone(),
+        Batch::from_validated_columns(schema.clone(),
             columns.unwrap_or_else(|| vec![Vec::new(); width]), rows)
     }).collect()
 }
@@ -641,5 +644,34 @@ mod portable_typed_partition_hash_tests {
         bytes.write(&(-3_i32).to_le_bytes());
         bytes.write(&(17_u64).to_le_bytes());
         assert_eq!(typed.finish(), bytes.finish());
+    }
+}
+
+#[cfg(test)]
+mod trusted_partition_bucket_construction_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn moved_and_borrowed_buckets_match_nullable_wide_inputs() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let input = (0..5).map(|part| Batch::from_rows(schema.clone(),
+            (0..37).map(|row| vec![
+                if row % 7 == 0 { Value::Null } else { Value::Integer((row % 11) as i64) },
+                if row % 13 == 0 { Value::Null }
+                else { Value::Text(format!("{part}-{row}-{}", "é🙂".repeat(1024))) },
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        for partitions in [1, 2, 3, 16, 257] {
+            let copied = partition_batches(&input, &["key"], partitions).unwrap();
+            let moved = partition_batches_owned(input.clone(), &["key"], partitions).unwrap();
+            assert_eq!(copied, moved);
+            assert_eq!(copied.iter().map(Batch::num_rows).sum::<usize>(), 185);
+        }
+        let different_schema = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
+        assert!(partition_batches_owned(vec![input[0].clone(), Batch::empty(different_schema)],
+            &["key"], 2).is_err());
     }
 }

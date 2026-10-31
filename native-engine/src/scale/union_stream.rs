@@ -55,6 +55,12 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     }
                     let needs_widening = batch.schema().fields().iter().zip(self.schema.fields())
                         .any(|(source, target)| source.data_type != target.data_type);
+                    // Narrowing nullability still requires a full cell check.
+                    // Ordinary UNION output widens nullability, so its typed
+                    // columns can skip an otherwise redundant validation scan.
+                    let needs_null_check = batch.schema().fields().iter()
+                        .zip(self.schema.fields())
+                        .any(|(source, target)| source.nullable && !target.nullable);
                     let rebased = if needs_widening {
                         // SQL UNION coercion is positional. Only integer-to-double
                         // promotion is supported by native set schemas.
@@ -80,7 +86,11 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                                     columns.push(values);
                                 }
                             }
-                            Batch::new_with_row_count(self.schema.clone(), columns, rows)
+                            if needs_null_check {
+                                Batch::new_with_row_count(self.schema.clone(), columns, rows)
+                            } else {
+                                Batch::from_validated_columns(self.schema.clone(), columns, rows)
+                            }
                         })()
                     } else {
                         batch.relabel(self.schema.clone())
@@ -537,5 +547,38 @@ mod owned_union_numeric_widening_tests {
             vec![Value::Float(-7.0), Value::Text("last".into())],
         ]);
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod union_narrow_nullability_regression {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+    #[test]
+    fn integer_promotion_does_not_bypass_required_field_check() {
+        let source = Schema::new(vec![
+            Field::new("n", DataType::Integer, true)
+        ]).unwrap();
+        let target = Schema::new(vec![
+            Field::new("n", DataType::Float, false)
+        ]).unwrap();
+        let nullable = Batch::from_rows(source.clone(), vec![
+            vec![Value::Integer(2)], vec![Value::Null]
+        ]).unwrap();
+        let mut rejected = UnionAllStream::new(
+            [Ok(nullable)].into_iter(), std::iter::empty::<Result<Batch>>(),
+            target.clone(), QueryControl::default()
+        );
+        assert!(rejected.next().unwrap().is_err());
+
+        let nonnull = Batch::from_rows(source, vec![
+            vec![Value::Integer(2)]
+        ]).unwrap();
+        let mut accepted = UnionAllStream::new(
+            [Ok(nonnull)].into_iter(), std::iter::empty::<Result<Batch>>(),
+            target, QueryControl::default()
+        );
+        assert_eq!(accepted.next().unwrap().unwrap().row(0).unwrap(),
+            vec![Value::Float(2.0)]);
     }
 }
