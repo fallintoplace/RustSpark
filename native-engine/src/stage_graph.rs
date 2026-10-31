@@ -14,8 +14,8 @@ pub struct StageGraph {
     stages: Vec<Stage>,
     order: Vec<u64>,
     order_indices: Vec<usize>,
+    critical_order_indices: Vec<usize>,
     longest_chain: usize,
-    remaining_depth: HashMap<u64, usize>,
 }
 
 impl StageGraph {
@@ -94,10 +94,13 @@ impl StageGraph {
                     .max(depth_to_leaf[child] + 1);
             }
         }
-        let remaining_depth = stages.iter().enumerate()
-            .map(|(position, stage)| (stage.id, depth_to_leaf[position]))
-            .collect();
-        Ok(Self { stages, order, order_indices, longest_chain, remaining_depth })
+        // Critical-path priority is fixed for the lifetime of a stage graph.
+        // Sort once instead of allocating and sorting runnable IDs per poll.
+        let mut critical_order_indices = order_indices.clone();
+        critical_order_indices.sort_unstable_by_key(|&position| {
+            (std::cmp::Reverse(depth_to_leaf[position]), stages[position].id)
+        });
+        Ok(Self { stages, order, order_indices, critical_order_indices, longest_chain })
     }
 
     pub fn topological_order(&self) -> &[u64] {
@@ -121,9 +124,10 @@ impl StageGraph {
 
     /// Dependency-ready stages ordered by longest remaining downstream chain.
     pub fn ready_by_critical_path(&self, completed: &HashSet<u64>) -> Vec<u64> {
-        let mut ready = self.ready(completed);
-        ready.sort_by_key(|id| (std::cmp::Reverse(self.remaining_depth[id]), *id));
-        ready
+        self.critical_order_indices.iter().filter_map(|&position| {
+            let stage = &self.stages[position];
+            Self::dependency_ready(stage, completed).then_some(stage.id)
+        }).collect()
     }
 
     /// Return runnable stages in topology order without exceeding worker capacity.
@@ -436,5 +440,29 @@ mod inflight_stage_partition_scheduling_tests {
         completed.insert(2);
         assert_eq!(graph.ready_tasks_excluding(&completed, &HashSet::new(), 10),
             vec![(3, 0), (3, 1)]);
+    }
+}
+
+#[cfg(test)]
+mod precomputed_critical_path_order_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_polls_preserve_priority_ties_and_dependency_gates() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 70, dependencies: vec![10], partitions: 1 },
+            Stage { id: 50, dependencies: vec![30], partitions: 1 },
+            Stage { id: 10, dependencies: vec![], partitions: 1 },
+            Stage { id: 40, dependencies: vec![20], partitions: 1 },
+            Stage { id: 30, dependencies: vec![10], partitions: 1 },
+            Stage { id: 20, dependencies: vec![], partitions: 1 },
+            Stage { id: 60, dependencies: vec![], partitions: 1 },
+        ]).unwrap();
+        for _ in 0..100 {
+            assert_eq!(graph.ready_by_critical_path(&HashSet::new()), [10, 20, 60]);
+            assert_eq!(graph.ready_by_critical_path(&HashSet::from([10])), [20, 30, 70, 60]);
+            assert_eq!(graph.ready_by_critical_path(&HashSet::from([10, 20])),
+                [30, 40, 70, 60]);
+        }
     }
 }
