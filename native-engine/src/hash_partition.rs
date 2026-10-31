@@ -2,8 +2,15 @@ use std::hash::{Hash, Hasher};
 
 use crate::{batch::Batch, Error, Result};
 
-#[derive(Default)]
 pub(crate) struct PartitionHasher(u64);
+
+impl Default for PartitionHasher {
+    fn default() -> Self {
+        // FNV-1a's offset basis is the hash of an empty byte sequence.
+        // write(&[]) must be a no-op, not an implicit initializer.
+        Self(0xcbf29ce484222325)
+    }
+}
 
 impl Hasher for PartitionHasher {
     fn finish(&self) -> u64 {
@@ -11,9 +18,6 @@ impl Hasher for PartitionHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if self.0 == 0 {
-            self.0 = 0xcbf29ce484222325;
-        }
         for byte in bytes {
             self.0 ^= u64::from(*byte);
             self.0 = self.0.wrapping_mul(0x100000001b3);
@@ -116,8 +120,12 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     let sources = input.iter().map(|batch| (0..schema.len())
         .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()
     ).collect::<Result<Vec<_>>>()?;
-    // Keep only row coordinates until all source batches have been partitioned.
-    let mut buckets: Vec<Vec<(usize, usize)>> = vec![Vec::new(); partitions];
+    // Construct each destination column on the first matching row.
+    // This avoids retaining O(total_rows) (batch, row) coordinates and a
+    // separate second pass to materialize the partition payloads.
+    let mut buckets: Vec<Option<Vec<Vec<crate::scalar::Value>>>> =
+        std::iter::repeat_with(|| None).take(partitions).collect();
+    let mut row_counts = vec![0usize; partitions];
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
         let bound = &sources[batch_index];
@@ -131,19 +139,20 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
                 Some(mask) => (hash as usize) & mask,
                 None => (hash % partitions as u64) as usize,
             };
-            buckets[bucket].push((batch_index, row));
+            let columns = buckets[bucket].get_or_insert_with(|| {
+                (0..schema.len()).map(|_| Vec::new()).collect::<Vec<_>>()
+            });
+            for (destination, source) in columns.iter_mut().zip(bound) {
+                destination.push(source[row].clone());
+            }
+            row_counts[bucket] += 1;
         }
     }
-    buckets.into_iter().map(|entries| {
-        let count = entries.len();
-        let mut columns = (0..schema.len()).map(|_| Vec::with_capacity(count))
-            .collect::<Vec<_>>();
-        for (batch_index, row) in entries {
-            for (index, column) in columns.iter_mut().enumerate() {
-                column.push(sources[batch_index][index][row].clone());
-            }
-        }
-        Batch::new_with_row_count(schema.clone(), columns, count)
+    buckets.into_iter().zip(row_counts).map(|(columns, rows)| {
+        let columns = columns.unwrap_or_else(|| {
+            (0..schema.len()).map(|_| Vec::new()).collect()
+        });
+        Batch::new_with_row_count(schema.clone(), columns, rows)
     }).collect()
 }
 
@@ -375,5 +384,70 @@ mod borrowed_shuffle_column_sources_tests {
                 assert_eq!(output[shard].rows().unwrap(), expected);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod direct_column_partition_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn sparse_and_dense_fanouts_match_per_batch_partitioning() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let batches = (0..17).map(|part| {
+            Batch::from_rows(schema.clone(), (0..61).map(|row| vec![
+                if row % 7 == 0 { Value::Null } else {
+                    Value::Text(format!("key-{}", row % 11)) },
+                Value::Integer(part * 100 + row),
+                Value::Text(format!("{part}:{row}:{}", "é".repeat(20))),
+            ]).collect()).unwrap()
+        }).collect::<Vec<_>>();
+        for partitions in [2, 7, 64, 1024] {
+            let direct = partition_batches(&batches, &["key"], partitions).unwrap();
+            assert_eq!(direct.len(), partitions);
+            assert_eq!(direct.iter().map(Batch::num_rows).sum::<usize>(), 17 * 61);
+            let pieces = batches.iter().map(|batch| partition(batch, &["key"], partitions).unwrap())
+                .collect::<Vec<_>>();
+            for index in 0..partitions {
+                let expected = pieces.iter().flat_map(|set| set[index].rows().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(direct[index].rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod partition_hasher_state_regressions {
+    use super::PartitionHasher;
+    use std::hash::Hasher;
+
+    #[test]
+    fn empty_writes_are_noops_and_default_hashes_empty_input() {
+        let empty = PartitionHasher::default().finish();
+        assert_eq!(empty, 0xcbf29ce484222325);
+        let mut hasher = PartitionHasher::default();
+        hasher.write(&[]);
+        hasher.write(&[]);
+        assert_eq!(hasher.finish(), empty);
+    }
+
+    #[test]
+    fn hash_is_independent_of_write_boundaries() {
+        let value = b"native-shuffle-partition-key";
+        let mut whole = PartitionHasher::default();
+        whole.write(value);
+        let mut fragments = PartitionHasher::default();
+        fragments.write(&[]);
+        fragments.write(&value[..4]);
+        fragments.write(&value[4..15]);
+        fragments.write(&[]);
+        fragments.write(&value[15..]);
+        assert_eq!(fragments.finish(), whole.finish());
     }
 }

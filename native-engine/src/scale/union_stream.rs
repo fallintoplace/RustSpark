@@ -47,11 +47,38 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     // adopts left input names and widened nullability.
                     if batch.schema().len() != self.schema.len() ||
                         !batch.schema().fields().iter().zip(self.schema.fields())
-                            .all(|(source, target)| source.data_type == target.data_type) {
+                            .all(|(source, target)| source.data_type == target.data_type ||
+                                (source.data_type == crate::schema::DataType::Integer &&
+                                 target.data_type == crate::schema::DataType::Float)) {
                         self.stopped = true;
                         return Some(Err(Error::Schema("UNION ALL input schemas differ".into())));
                     }
-                    let rebased = batch.relabel(self.schema.clone());
+                    let needs_widening = batch.schema().fields().iter().zip(self.schema.fields())
+                        .any(|(source, target)| source.data_type != target.data_type);
+                    let rebased = if needs_widening {
+                        // SQL UNION coercion is positional. Only integer-to-double
+                        // promotion is supported by native set schemas.
+                        (|| -> Result<Batch> {
+                            let mut columns = Vec::with_capacity(self.schema.len());
+                            for (index, source_field) in batch.schema().fields().iter().enumerate() {
+                                let values = batch.column(index)?;
+                                if source_field.data_type == crate::schema::DataType::Integer &&
+                                   self.schema.field(index)?.data_type == crate::schema::DataType::Float {
+                                    columns.push(values.iter().map(|value| match value {
+                                        crate::scalar::Value::Integer(value) =>
+                                            crate::scalar::Value::Float(*value as f64),
+                                        crate::scalar::Value::Null => crate::scalar::Value::Null,
+                                        _ => unreachable!("validated integer input batch"),
+                                    }).collect());
+                                } else {
+                                    columns.push(values.to_vec());
+                                }
+                            }
+                            Batch::new_with_row_count(self.schema.clone(), columns, batch.num_rows())
+                        })()
+                    } else {
+                        batch.relabel(self.schema.clone())
+                    };
                     match rebased {
                         Ok(batch) if batch.num_rows() == 0 => continue,
                         Ok(batch) => return Some(Ok(batch)),
@@ -387,5 +414,53 @@ mod zero_column_stream_union_fast_path_tests {
             std::iter::empty(), schema, QueryControl::default(), 1, 63).unwrap();
         assert!(limited.next().unwrap().is_err());
         assert!(limited.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod union_stream_numeric_coercion_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn union_all_widens_integer_positions_without_changing_other_columns() {
+        let integer_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let float_schema = Schema::new(vec![
+            Field::new("other", DataType::Float, true),
+            Field::new("value", DataType::Text, true),
+        ]).unwrap();
+        let output = Schema::new(vec![
+            Field::new("id", DataType::Float, true),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let first = Batch::from_rows(integer_schema, vec![
+            vec![Value::Integer(7), Value::Text("left".into())],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let second = Batch::from_rows(float_schema, vec![
+            vec![Value::Float(3.5), Value::Text("right".into())],
+        ]).unwrap();
+        let merged = UnionAllStream::new([Ok(first)].into_iter(), [Ok(second)].into_iter(),
+            output.clone(), QueryControl::default()).collect::<Result<Vec<_>>>().unwrap();
+        assert!(merged.iter().all(|batch| batch.schema() == &output));
+        assert_eq!(merged.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>(), vec![
+            vec![Value::Float(7.0), Value::Text("left".into())],
+            vec![Value::Null, Value::Null],
+            vec![Value::Float(3.5), Value::Text("right".into())],
+        ]);
+    }
+
+    #[test]
+    fn union_all_rejects_narrowing_or_unrelated_types() {
+        let output = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let float_schema = Schema::new(vec![Field::new("id", DataType::Float, false)]).unwrap();
+        let float = Batch::from_rows(float_schema, vec![vec![Value::Float(1.0)]]).unwrap();
+        let mut union = UnionAllStream::new([Ok(float)].into_iter(),
+            std::iter::empty(), output, QueryControl::default());
+        assert!(union.next().unwrap().is_err());
+        assert!(union.next().is_none());
     }
 }

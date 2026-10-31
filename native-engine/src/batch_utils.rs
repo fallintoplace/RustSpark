@@ -54,8 +54,10 @@ pub fn concat(
         if total > max_rows {
             return Err(Error::Execution("batch collection row limit exceeded".into()));
         }
-        for (index, output) in columns.iter_mut().enumerate() {
-            output.extend_from_slice(batch.column(index)?);
+        // The iterator owns each batch. Move its column values rather than
+        // deep-cloning TEXT payloads for every concatenated row.
+        for (output, values) in columns.iter_mut().zip(batch.into_columns()) {
+            output.extend(values);
         }
     }
     Batch::new_with_row_count(schema.clone(), columns, total)
@@ -208,5 +210,52 @@ mod empty_pair_concat_passthrough_tests {
         assert!(concat(&schema, [populated, Batch::empty(schema.clone())], 1).is_err());
         let mismatched = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
         assert!(concat(&schema, [Batch::empty(schema.clone()), Batch::empty(mismatched)], 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod owned_concat_move_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn concatenation_reuses_allocations_of_owned_text_values() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("key", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".repeat(4096)), Value::Integer(1)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("payload".repeat(2048)), Value::Integer(3)],
+        ]).unwrap();
+        let left_ptr = match &left.column(0).unwrap()[0] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!()
+        };
+        let right_ptr = match &right.column(0).unwrap()[1] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!()
+        };
+        let result = concat(&schema, [left, right], 3).unwrap();
+        assert_eq!(result.num_rows(), 3);
+        assert_eq!(result.column(1).unwrap(), &[
+            Value::Integer(1), Value::Integer(2), Value::Integer(3)
+        ]);
+        assert_eq!(match &result.column(0).unwrap()[0] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!()
+        }, left_ptr);
+        assert_eq!(match &result.column(0).unwrap()[2] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!()
+        }, right_ptr);
+    }
+
+    #[test]
+    fn owned_concat_still_checks_limits_and_zero_width_rows() {
+        let schema = Schema::new(vec![]).unwrap();
+        let left = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
+        let right = Batch::new_with_row_count(schema.clone(), vec![], 2).unwrap();
+        assert_eq!(concat(&schema, [left.clone(), right.clone()], 5).unwrap().num_rows(), 5);
+        assert!(concat(&schema, [left, right], 4).is_err());
     }
 }

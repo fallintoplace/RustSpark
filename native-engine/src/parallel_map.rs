@@ -124,7 +124,7 @@ pub fn filter_partitions(
     max_workers: usize,
     predicate: crate::expr::Expr,
 ) -> Result<Vec<Batch>> {
-    map_partitions(input, max_workers, |batch| crate::filter::filter(&batch, &predicate))
+    map_partitions(input, max_workers, |batch| crate::filter::filter_owned(batch, &predicate))
 }
 
 #[cfg(test)]

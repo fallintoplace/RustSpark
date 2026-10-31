@@ -405,6 +405,30 @@ impl<'a> PreparedHashJoin<'a> {
             }
             return left.take(&selected);
         }
+        // On high-fanout joins, reject oversized output before cloning a
+        // million wide rows or mutating the caller's match bitmap. Skip the
+        // extra hash probes when a cheap cardinality bound proves safety.
+        let probe_rows = end - start;
+        let possible_rows = probe_rows.checked_mul(self.right.num_rows().max(1));
+        if possible_rows.is_none_or(|limit| limit > MAX_JOIN_ROWS) {
+            let mut planned_rows = 0usize;
+            for row in start..end {
+                let key = left.value(row, self.left_column)?;
+                let matches = if joinable(key) {
+                    self.right_hash.get(key).map_or(0, Vec::len)
+                } else {
+                    0
+                };
+                let output = if matches == 0 && self.kind == JoinKind::Left {
+                    1
+                } else {
+                    matches
+                };
+                planned_rows = planned_rows.checked_add(output)
+                    .filter(|&rows| rows <= MAX_JOIN_ROWS)
+                    .ok_or_else(|| Error::Execution("join output exceeds safety limit".into()))?;
+            }
+        }
         let left_columns = (0..self.left_schema.len())
             .map(|col| left.column(col)).collect::<Result<Vec<_>>>()?;
         let right_columns = (0..self.right.schema().len())
@@ -616,5 +640,54 @@ mod empty_cross_join_output_fast_path_tests {
             assert_eq!(result.schema().len(), 2);
             assert_eq!(result.schema().fields()[1].name, "right_id");
         }
+    }
+}
+
+#[cfg(test)]
+mod preflight_join_cardinality_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn oversized_fanout_fails_before_cloning_or_mutating_bitmap() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), (0..2_000).map(|_| vec![
+            Value::Integer(7), Value::Text("large".repeat(100)),
+        ]).collect()).unwrap();
+        let right = Batch::from_rows(schema, (0..600).map(|_| vec![
+            Value::Integer(7), Value::Text("right".repeat(100)),
+        ]).collect()).unwrap();
+        let prepared = PreparedHashJoin::new(left.schema().clone(), &right,
+            "key", "key", JoinKind::Inner).unwrap();
+        let mut flags = vec![false; right.num_rows()];
+        assert!(prepared.probe_with_matches(&left, Some(&mut flags)).unwrap_err()
+            .to_string().contains("safety limit"));
+        assert!(flags.iter().all(|&flag| !flag));
+    }
+
+    #[test]
+    fn high_theoretical_fanout_keeps_sparse_matches_and_left_rows() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), (0..2_000).map(|index| vec![
+            if index == 100 { Value::Integer(7) } else { Value::Integer(8) },
+        ]).collect()).unwrap();
+        let right = Batch::from_rows(schema, (0..600).map(|index| vec![
+            Value::Integer(if index == 0 { 7 } else { 9 }),
+        ]).collect()).unwrap();
+        let prepared = PreparedHashJoin::new(left.schema().clone(), &right,
+            "key", "key", JoinKind::Inner).unwrap();
+        let mut flags = vec![false; right.num_rows()];
+        let result = prepared.probe_with_matches(&left, Some(&mut flags)).unwrap();
+        assert_eq!(result.num_rows(), 1);
+        assert_eq!(result.value(0, 0).unwrap(), &Value::Integer(7));
+        assert!(flags[0]);
+        assert!(flags[1..].iter().all(|&flag| !flag));
+
+        let left_join = PreparedHashJoin::new(left.schema().clone(), &right,
+            "key", "key", JoinKind::Left).unwrap();
+        assert_eq!(left_join.probe(&left).unwrap().num_rows(), 2_000);
     }
 }

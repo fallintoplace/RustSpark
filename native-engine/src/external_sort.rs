@@ -20,6 +20,7 @@ pub struct ExternalSort {
     schema: Schema,
     keys: Vec<SortKey>,
     runs: Vec<Run>,
+    winners: RunTournament,
     output_rows: usize,
     finished: bool,
 }
@@ -56,10 +57,14 @@ pub fn external_sort(
             runs.push(Run { _spill: spill, reader, batch: first, position: 0 });
         }
     }
+    // Build a fallible tournament tree once, then update only the path
+    // affected by each emitted row. This avoids comparing every run per row.
+    let winners = RunTournament::new(&runs, keys)?;
     Ok(ExternalSort {
         schema: schema.clone(),
         keys: keys.to_vec(),
         runs,
+        winners,
         output_rows,
         finished: false,
     })
@@ -88,6 +93,48 @@ fn compare_runs(left: &Run, right: &Run, keys: &[SortKey]) -> Result<Ordering> {
     Ok(Ordering::Equal)
 }
 
+struct RunTournament {
+    tree: Vec<Option<usize>>,
+    leaves: usize,
+}
+
+impl RunTournament {
+    fn select(runs: &[Run], keys: &[SortKey], a: Option<usize>, b: Option<usize>) -> Result<Option<usize>> {
+        match (a, b) {
+            (None, other) | (other, None) => Ok(other),
+            (Some(left), Some(right)) => {
+                let order = compare_runs(&runs[left], &runs[right], keys)?;
+                // Earlier input runs win equal-key ties, retaining stable order.
+                Ok(Some(if order == Ordering::Greater { right } else { left }))
+            }
+        }
+    }
+
+    fn new(runs: &[Run], keys: &[SortKey]) -> Result<Self> {
+        let leaves = runs.len().next_power_of_two().max(1);
+        let mut tree = vec![None; leaves * 2];
+        for (index, run) in runs.iter().enumerate() {
+            if run.batch.is_some() { tree[leaves + index] = Some(index); }
+        }
+        for node in (1..leaves).rev() {
+            tree[node] = Self::select(runs, keys, tree[node * 2], tree[node * 2 + 1])?;
+        }
+        Ok(Self { tree, leaves })
+    }
+
+    fn winner(&self) -> Option<usize> { self.tree[1] }
+
+    fn update(&mut self, index: usize, runs: &[Run], keys: &[SortKey]) -> Result<()> {
+        let mut node = self.leaves + index;
+        self.tree[node] = runs[index].batch.as_ref().map(|_| index);
+        while node > 1 {
+            node /= 2;
+            self.tree[node] = Self::select(runs, keys, self.tree[node * 2], self.tree[node * 2 + 1])?;
+        }
+        Ok(())
+    }
+}
+
 impl Iterator for ExternalSort {
     type Item = Result<Batch>;
 
@@ -95,23 +142,7 @@ impl Iterator for ExternalSort {
         if self.finished { return None; }
         let mut rows = Vec::with_capacity(self.output_rows.min(65_536));
         while rows.len() < self.output_rows {
-            let mut best: Option<usize> = None;
-            for i in 0..self.runs.len() {
-                if self.runs[i].batch.is_none() { continue; }
-                if let Some(current) = best {
-                    match compare_runs(&self.runs[i], &self.runs[current], &self.keys) {
-                        Ok(Ordering::Less) => best = Some(i),
-                        Ok(_) => {}
-                        Err(e) => {
-                            self.finished = true;
-                            return Some(Err(e));
-                        }
-                    }
-                } else {
-                    best = Some(i);
-                }
-            }
-            let Some(selected) = best else {
+            let Some(selected) = self.winners.winner() else {
                 self.finished = true;
                 break;
             };
@@ -139,6 +170,10 @@ impl Iterator for ExternalSort {
                         return Some(Err(e));
                     }
                 }
+            }
+            if let Err(error) = self.winners.update(selected, &self.runs, &self.keys) {
+                self.finished = true;
+                return Some(Err(error));
             }
         }
         if rows.is_empty() {
@@ -188,11 +223,10 @@ mod output_allocation_tests {
     use super::*;
     use crate::schema::{DataType, Field};
     #[test]
-    fn empty_input_accepts_large_output_batch_setting() {
+    fn empty_input_still_enforces_output_batch_budget() {
         let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
-        let mut output = external_sort(Vec::<Batch>::new(), &schema, &[],
-            std::env::temp_dir(), 1, usize::MAX).unwrap();
-        assert!(output.next().is_none());
+        assert!(external_sort(Vec::<Batch>::new(), &schema, &[],
+            std::env::temp_dir(), 1, usize::MAX).is_err());
     }
 }
 
@@ -223,5 +257,55 @@ mod external_sort_borrowed_column_keys_tests {
         let merged = result.iter().flat_map(|b| b.rows().unwrap()).collect::<Vec<_>>();
         let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
         assert_eq!(merged, expected);
+    }
+}
+
+#[cfg(test)]
+mod tournament_merge_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn hundreds_of_runs_match_stable_sort_for_mixed_keys() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("seq", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..233).rev().map(|n| vec![
+            if n % 17 == 0 { Value::Null } else { Value::Integer(n % 11) },
+            Value::Integer(n),
+        ]).collect()).unwrap();
+        for keys in [
+            vec![SortKey::ascending(Expr::Column("key".into()))],
+            vec![SortKey {
+                expression: Expr::Column("key".into()),
+                descending: true, nulls_first: false,
+            }],
+            vec![
+                SortKey::ascending(Expr::Column("key".into())),
+                SortKey { expression: Expr::Column("seq".into()),
+                    descending: true, nulls_first: true },
+            ],
+        ] {
+            let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
+            for run_rows in [1, 3, 11] {
+                let result = external_sort(vec![batch.clone()], &schema, &keys,
+                    std::env::temp_dir(), run_rows, 7).unwrap()
+                    .collect::<Result<Vec<_>>>().unwrap();
+                let actual = result.into_iter().flat_map(|chunk| chunk.rows().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "run_rows={run_rows}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_merge_has_no_selected_run() {
+        let schema = Schema::new(vec![]).unwrap();
+        let mut sorted = external_sort(vec![], &schema, &[],
+            std::env::temp_dir(), 1, 1).unwrap();
+        assert_eq!(sorted.winners.winner(), None);
+        assert!(sorted.next().is_none());
+        assert!(sorted.next().is_none());
     }
 }

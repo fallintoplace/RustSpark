@@ -53,6 +53,37 @@ impl ColumnStatistics {
                 max: max.map(Value::Integer),
             });
         }
+        if batch.schema().field(column)?.data_type == DataType::Float {
+            // Native DOUBLE bounds order NaNs after every non-NaN value,
+            // and treat signed zero as equal. Keep the first equal extremum.
+            let rows = u64::try_from(values.len())
+                .map_err(|_| Error::Execution("statistics row count overflow".into()))?;
+            let mut nulls = 0u64;
+            let mut min: Option<f64> = None;
+            let mut max: Option<f64> = None;
+            for value in values {
+                match value {
+                    Value::Null => nulls += 1,
+                    Value::Float(n) => {
+                        if min.is_none_or(|old|
+                            !n.is_nan() && (old.is_nan() || *n < old)) {
+                            min = Some(*n);
+                        }
+                        if max.is_none_or(|old|
+                            (n.is_nan() && !old.is_nan()) ||
+                            (!n.is_nan() && *n > old)) {
+                            max = Some(*n);
+                        }
+                    }
+                    _ => unreachable!("native batch schema was validated"),
+                }
+            }
+            return Ok(Self {
+                rows, nulls,
+                min: min.map(Value::Float),
+                max: max.map(Value::Float),
+            });
+        }
         if batch.schema().field(column)?.data_type == DataType::Boolean {
             // Boolean bounds need only two flags, not per-row dynamic SQL
             // comparisons or temporary Value clones.
@@ -336,6 +367,34 @@ mod invalid_input_summary_regressions {
         let mut malformed = invalid.clone();
         assert!(malformed.merge(&original).is_err());
         assert_eq!(malformed, invalid);
+    }
+}
+
+#[cfg(test)]
+mod typed_double_statistics_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn verify(values: Vec<Value>) {
+        let schema = Schema::new(vec![Field::new("amount", DataType::Float, true)]).unwrap();
+        let input = Batch::from_rows(schema, values.clone().into_iter().map(|v| vec![v]).collect()).unwrap();
+        let direct = ColumnStatistics::from_batch(&input, "amount").unwrap();
+        let mut incremental = ColumnStatistics::default();
+        for value in &values { incremental.observe(value).unwrap(); }
+        assert_eq!(direct, incremental);
+    }
+
+    #[test]
+    fn typed_bounds_match_sql_ordering_with_nan_infinities_and_signed_zero() {
+        verify(vec![Value::Null, Value::Float(f64::NAN),
+            Value::Float(f64::NEG_INFINITY), Value::Float(-0.0),
+            Value::Float(0.0), Value::Float(1.5), Value::Float(f64::INFINITY),
+            Value::Float(f64::NAN), Value::Null]);
+        verify(vec![Value::Float(0.0), Value::Float(-0.0)]);
+        verify(vec![Value::Float(-0.0), Value::Float(0.0)]);
+        verify(vec![Value::Float(f64::NAN), Value::Float(f64::NAN)]);
+        verify(vec![Value::Null, Value::Null]);
+        verify(vec![]);
     }
 }
 

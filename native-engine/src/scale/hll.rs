@@ -4,7 +4,16 @@ use crate::{scalar::Value, Error, Result};
 
 const PRECISION: u32 = 12;
 const REGISTERS: usize = 1 << PRECISION;
-// HLL rank is clamped to 65 - PRECISION, so a 54-entry table is enough.
+// Use exact fixed-point harmonic weights. Every reachable HLL rank has
+// a power-of-two reciprocal, so register updates are lossless in u128.
+const HARMONIC_BITS: u32 = 65 - PRECISION;
+const HARMONIC_SCALE: u128 = 1u128 << HARMONIC_BITS;
+fn harmonic_weight(rank: u8) -> u128 {
+    1u128 << (HARMONIC_BITS - u32::from(rank))
+}
+
+// Retained as the reference table for differential regression tests.
+#[cfg(test)]
 const RECIPROCAL_POWERS: [f64; 54] = {
     let mut values = [0.0; 54];
     let mut index = 0;
@@ -21,16 +30,23 @@ const RECIPROCAL_POWERS: [f64; 54] = {
 pub struct HyperLogLog {
     registers: [u8; REGISTERS],
     nonempty: usize,
+    harmonic_scaled: u128,
 }
 
 impl HyperLogLog {
-    fn update_register(register: &mut u8, rank: u8) -> bool {
-        let newly_occupied = *register == 0 && rank != 0;
-        *register = (*register).max(rank);
-        newly_occupied
+    fn update_register(&mut self, index: usize, rank: u8) {
+        let old = self.registers[index];
+        if rank <= old { return; }
+        self.registers[index] = rank;
+        self.harmonic_scaled = self.harmonic_scaled - harmonic_weight(old)
+            + harmonic_weight(rank);
+        if old == 0 { self.nonempty += 1; }
     }
 
-    pub fn new() -> Self { Self { registers: [0; REGISTERS], nonempty: 0 } }
+    pub fn new() -> Self {
+        Self { registers: [0; REGISTERS], nonempty: 0,
+            harmonic_scaled: REGISTERS as u128 * HARMONIC_SCALE }
+    }
 
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
     pub fn add(&mut self, value: &Value) {
@@ -41,9 +57,7 @@ impl HyperLogLog {
         let index = (hash >> (64 - PRECISION)) as usize;
         let rank = ((hash << PRECISION).leading_zeros() + 1)
             .min(65 - PRECISION) as u8;
-        if Self::update_register(&mut self.registers[index], rank) {
-            self.nonempty += 1;
-        }
+        self.update_register(index, rank);
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -52,10 +66,11 @@ impl HyperLogLog {
             // Copy a populated sketch into a fresh target in one operation.
             self.registers.copy_from_slice(&other.registers);
             self.nonempty = other.nonempty;
+            self.harmonic_scaled = other.harmonic_scaled;
             return;
         }
-        for (dest, source) in self.registers.iter_mut().zip(other.registers.iter().copied()) {
-            if Self::update_register(dest, source) { self.nonempty += 1; }
+        for (index, &rank) in other.registers.iter().enumerate() {
+            self.update_register(index, rank);
         }
     }
 
@@ -63,10 +78,7 @@ impl HyperLogLog {
         if self.nonempty == 0 { return 0.0; }
         let m = REGISTERS as f64;
         let zeros = REGISTERS - self.nonempty;
-        let mut harmonic = 0.0;
-        for &rank in &self.registers {
-            harmonic += RECIPROCAL_POWERS[usize::from(rank)];
-        }
+        let harmonic = self.harmonic_scaled as f64 / HARMONIC_SCALE as f64;
         let alpha = 0.7213 / (1.0 + 1.079 / m);
         let raw = alpha * m * m / harmonic;
         if raw <= 2.5 * m && zeros > 0 {
@@ -236,7 +248,9 @@ mod hll_estimation_lookup_tests {
         let alpha = 0.7213 / (1.0 + 1.079 / m);
         let raw = alpha * m * m / harmonic;
         let reference = if raw <= 2.5 * m && zeros > 0 { m * (m / zeros as f64).ln() } else { raw };
-        assert_eq!(sketch.estimate(), reference);
+        // The fixed-point sum is exact; converting the whole sum to f64
+        // can round differently from 4096 individual floating additions.
+        assert!((sketch.estimate() - reference).abs() <= reference * 1e-12);
         assert_eq!(HyperLogLog::new().estimate(), 0.0);
     }
 }
@@ -337,5 +351,39 @@ mod hll_borrowed_merge_tests {
         let once = first.clone();
         first.merge(&second);
         assert_eq!(first, once);
+    }
+}
+
+#[cfg(test)]
+mod cached_hll_harmonic_regressions {
+    use super::*;
+
+    fn verify(sketch: &HyperLogLog) {
+        let expected: u128 = sketch.registers.iter().map(|&rank| harmonic_weight(rank)).sum();
+        assert_eq!(sketch.harmonic_scaled, expected);
+        assert_eq!(sketch.nonempty_registers(), sketch.registers.iter().filter(|&&rank| rank > 0).count());
+        assert!(sketch.estimate().is_finite());
+    }
+
+    #[test]
+    fn cached_harmonic_matches_full_register_scan_after_merges_and_duplicates() {
+        let mut first = HyperLogLog::new();
+        let mut second = HyperLogLog::new();
+        verify(&first);
+        for n in 0..32_000 {
+            first.add(&Value::Integer(n));
+            second.add(&Value::Integer(n + 8_000));
+        }
+        verify(&first);
+        verify(&second);
+        first.merge(&second);
+        verify(&first);
+        let baseline = first.clone();
+        first.merge(&second);
+        assert_eq!(first, baseline);
+        let mut copied = HyperLogLog::new();
+        copied.merge(&first);
+        assert_eq!(copied, first);
+        verify(&copied);
     }
 }

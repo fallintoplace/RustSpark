@@ -44,13 +44,19 @@ impl<R: BufRead> CsvRows<R> {
                 self.reader.consume(1);
             }
         }
+        // Match the strict CSV parser's field states while scanning records.
+        // A quote inside an unquoted field must never hide a line separator.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum QuoteState { Start, Unquoted, Quoted, AfterQuote }
         let mut bytes = Vec::new();
-        let mut quoted = false;
+        let mut state = QuoteState::Start;
         loop {
             let available = self.reader.fill_buf()?;
             if available.is_empty() {
                 if bytes.is_empty() { return Ok(None); }
-                if quoted { return Err(Error::Parse("unterminated quoted CSV field".into())); }
+                if state == QuoteState::Quoted {
+                    return Err(Error::Parse("unterminated quoted CSV field".into()));
+                }
                 break;
             }
             let mut consumed = 0;
@@ -60,10 +66,31 @@ impl<R: BufRead> CsvRows<R> {
                     return Err(Error::Execution("CSV record exceeds byte limit".into()));
                 }
                 consumed += 1;
-                if byte == b'"' { quoted = !quoted; }
-                if (byte == b'\n' || byte == b'\r') && !quoted {
+                match state {
+                    QuoteState::Start => match byte {
+                        b'"' => state = QuoteState::Quoted,
+                        b',' => {},
+                        b'\n' | b'\r' => complete = true,
+                        _ => state = QuoteState::Unquoted,
+                    },
+                    QuoteState::Unquoted => match byte {
+                        b',' => state = QuoteState::Start,
+                        b'"' => return Err(Error::Parse("quote in unquoted CSV field".into())),
+                        b'\n' | b'\r' => complete = true,
+                        _ => {},
+                    },
+                    QuoteState::Quoted => {
+                        if byte == b'"' { state = QuoteState::AfterQuote; }
+                    },
+                    QuoteState::AfterQuote => match byte {
+                        b'"' => state = QuoteState::Quoted,
+                        b',' => state = QuoteState::Start,
+                        b'\n' | b'\r' => complete = true,
+                        _ => return Err(Error::Parse("unexpected characters after CSV quote".into())),
+                    },
+                }
+                if complete {
                     self.skip_lf = byte == b'\r';
-                    complete = true;
                     break;
                 }
             }
@@ -259,5 +286,50 @@ mod streamed_required_csv_column_regressions {
         let values = CsvRows::new(Cursor::new("id,note\n1,\n"), nullable, 128)
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(values, vec![vec![Value::Integer(1), Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod strict_csv_record_boundary_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+    use std::io::{BufReader, Cursor};
+
+    fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, false),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn malformed_quotes_do_not_hide_following_records() {
+        for input in [
+            "id,note\n1,bad\"quote\n2,safe\n",
+            "id,note\n1,\"quoted\"extra\n2,safe\n",
+        ] {
+            let mut reader = CsvRows::new(Cursor::new(input), schema(), 1024).unwrap();
+            assert!(matches!(reader.next(), Some(Err(Error::Parse(_)))));
+            assert!(reader.next().is_none());
+        }
+    }
+
+    #[test]
+    fn doubled_quotes_and_multiline_records_survive_single_byte_buffers() {
+        let input = "id,note\r\n1,\"a\"\"b\r\nc\"\r\n2,plain\r\n";
+        let reader = BufReader::with_capacity(1, Cursor::new(input.as_bytes()));
+        let actual = CsvRows::new(reader, schema(), 256).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual, vec![
+            vec![Value::Integer(1), Value::Text("a\"b\r\nc".into())],
+            vec![Value::Integer(2), Value::Text("plain".into())],
+        ]);
+    }
+
+    #[test]
+    fn unterminated_quote_is_reported_at_eof() {
+        let mut reader = CsvRows::new(Cursor::new("id,note\n1,\"unfinished"), schema(), 256).unwrap();
+        assert!(matches!(reader.next(), Some(Err(Error::Parse(_)))));
+        assert!(reader.next().is_none());
     }
 }
