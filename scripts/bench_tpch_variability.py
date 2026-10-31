@@ -5,7 +5,14 @@ import argparse
 import json
 import math
 from pathlib import Path
-import statistics
+
+
+def finite_median(values):
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (
+        ordered[middle - 1] + (ordered[middle] - ordered[middle - 1]) / 2
+    )
 
 
 def check_samples(entry):
@@ -14,7 +21,7 @@ def check_samples(entry):
         raise ValueError("At least three measured samples are required")
     if any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0 for x in samples):
         raise ValueError("Invalid timing sample")
-    median = statistics.median(samples)
+    median = finite_median(samples)
     recorded = entry.get("median_ms")
     if type(recorded) not in (int, float) or not math.isfinite(recorded) or abs(recorded - median) > 0.002:
         raise ValueError("Reported median differs from timing samples")
@@ -35,8 +42,8 @@ def variability_row(number, entry, threshold, max_relative_mad=None):
     normalized = [sample / scale for sample in samples]
     mean = statistics.fmean(normalized)
     cv = statistics.pstdev(normalized) / mean if mean else 0.0
-    median = statistics.median(samples)
-    mad = statistics.median(abs(x - median) for x in samples)
+    median = finite_median(samples)
+    mad = finite_median(abs(x - median) for x in samples)
     relative_mad = mad / median
     return {"id": number, "coefficient_of_variation": round(cv, 4),
                  "median_absolute_deviation_ms": round(mad, 3),
