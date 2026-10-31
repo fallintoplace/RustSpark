@@ -4,6 +4,7 @@ import (
     "bytes"
     "context"
     "errors"
+    "encoding/json"
     "fmt"
     "reflect"
     "strings"
@@ -161,5 +162,25 @@ func TestNamedParameterLimitsMatchNativeCLI(t *testing.T) {
         "max": "utf8:" + strings.Repeat("x", 8192-len("utf8:")),
     }}); err != nil {
         t.Fatalf("valid maximum-length parameter rejected: %v", err)
+    }
+}
+
+func TestDecodeRowsRejectsDuplicateJSONKeysAtEveryDepth(t *testing.T) {
+    invalid := []string{
+        `[{"id":1,"id":2}]`,
+        `[{"nested":{"id":1,"id":2}}]`,
+        `[{"nested":[{"name":"a","name":"b"}]}]`,
+        `[{"a":1,"\\u0061":2}]`,
+    }
+    for _, raw := range invalid {
+        if _, err := decodeRows(strings.NewReader(raw)); err == nil ||
+            !strings.Contains(err.Error(), "duplicate") {
+            t.Errorf("expected duplicate-key error for %q, got %v", raw, err)
+        }
+    }
+    rows, err := decodeRows(strings.NewReader(`[{"nested":[{"id":1},{"id":2}],"n":1234567890123456789}]`))
+    if err != nil { t.Fatal(err) }
+    if _, ok := rows[0]["n"].(json.Number); !ok {
+        t.Fatalf("numeric precision was not retained: %#v", rows[0]["n"])
     }
 }
