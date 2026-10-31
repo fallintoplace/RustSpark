@@ -34,10 +34,12 @@ def run_bounded(
     stdout = bytearray()
     stderr = bytearray()
     exceeded = threading.Event()
-    with subprocess.Popen(
+    process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=(os.name == "posix"),
-    ) as process:
+    )
+    workers = []
+    try:
         assert process.stdout is not None and process.stderr is not None
 
         def collect(pipe, target: bytearray, limit: int):
@@ -83,3 +85,15 @@ def run_bounded(
         except UnicodeDecodeError as exc:
             raise ValueError("SQL backend returned invalid UTF-8") from exc
         return subprocess.CompletedProcess(command, process.returncode, output, errors)
+    finally:
+        # Popen.__exit__ waits for the child without killing it. An interrupt
+        # while collecting pipes must stop the entire process group first.
+        if process.poll() is None:
+            _kill_process_group(process)
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait()
+        for worker in workers:
+            if worker.is_alive():
+                worker.join(timeout=1)
