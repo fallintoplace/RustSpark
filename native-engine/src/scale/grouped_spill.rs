@@ -40,6 +40,7 @@ impl Drop for GroupFiles {
 
 const MAX_DISTINCT_KEYS_PER_GROUP: usize = 65_536;
 const MAX_DISTINCT_BYTES_PER_GROUP: usize = 16 * 1024 * 1024;
+const MAX_GROUP_KEY_STATE_BYTES: usize = 64 * 1024 * 1024;
 
 enum State {
     Count(i64),
@@ -204,9 +205,21 @@ fn aggregate_shard(
     items: &[AggregateItem], output: &Schema,
     max_groups: usize, io_rows: usize, control: &QueryControl,
 ) -> Result<Batch> {
+    aggregate_shard_with_budget(path, input, keys, items, output,
+        max_groups, io_rows, MAX_GROUP_KEY_STATE_BYTES, control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aggregate_shard_with_budget(
+    path: &Path, input: &Schema, keys: &[usize],
+    items: &[AggregateItem], output: &Schema,
+    max_groups: usize, io_rows: usize, max_key_state_bytes: usize,
+    control: &QueryControl,
+) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != input { return Err(Error::Schema("group shard schema mismatch".into())); }
     let mut groups: HashMap<Vec<Value>, Vec<State>> = HashMap::new();
+    let mut retained_key_state_bytes = 0usize;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
         for row in 0..batch.num_rows() {
@@ -219,9 +232,18 @@ fn aggregate_shard(
                     if at_capacity {
                         return Err(Error::Execution("group state count exceeds partition budget".into()));
                     }
+                    // The group-count cap alone is insufficient for wide text keys.
+                    // Charge unique keys and their fixed aggregate state once.
+                    let footprint = super::row_footprint::footprint(entry.key().iter())
+                        .saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
+                    let next_bytes = retained_key_state_bytes.checked_add(footprint)
+                        .filter(|total| *total <= max_key_state_bytes)
+                        .ok_or_else(|| Error::Execution(
+                            "group key state byte budget exceeded".into()))?;
                     let initial = items.iter()
                         .map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
+                    retained_key_state_bytes = next_bytes;
                     entry.insert(initial)
                 }
             };
@@ -460,6 +482,49 @@ mod grouped_spill_window_output_tests {
         assert_eq!(rows.len(), 11);
         assert!(rows.iter().all(|row| row[1] == Value::Integer(1)));
         drop(output);
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grouped_spill_key_state_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, io::BufWriter};
+
+    #[test]
+    fn unique_wide_keys_consume_budget_but_duplicates_do_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "native-group-state-budget-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("groups.rspill");
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, false)]).unwrap();
+        let key = Value::Text("alpha".repeat(8));
+        let other = Value::Text("beta".repeat(8));
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![key.clone()], vec![key.clone()], vec![other.clone()],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(File::create(&path).unwrap()),
+            schema.clone()).unwrap();
+        writer.write_batch(&source).unwrap();
+        writer.finish().unwrap();
+        let items = [AggregateItem::new(AggregateOp::CountAll, "n")];
+        let output = output_schema(&schema, &[("k".into(), "k".into())], &items).unwrap();
+        let one_group_budget = super::super::row_footprint::footprint(
+            std::iter::once(&key)).saturating_add(std::mem::size_of::<State>());
+        let control = QueryControl::default();
+        let err = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
+            10, 3, one_group_budget, &control).unwrap_err();
+        assert!(err.to_string().contains("byte budget"));
+        let actual = aggregate_shard_with_budget(&path, &schema, &[0], &items, &output,
+            10, 3, 8192, &control).unwrap().rows().unwrap();
+        assert_eq!(actual.len(), 2);
+        assert!(actual.contains(&vec![key, Value::Integer(2)]));
+        assert!(actual.contains(&vec![other, Value::Integer(1)]));
+        assert!(path.exists());
+        fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
     }
 }
