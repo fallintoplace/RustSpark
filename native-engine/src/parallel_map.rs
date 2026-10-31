@@ -46,12 +46,14 @@ where
                 if failed.load(Ordering::Acquire) { break; }
                 // Claim several adjacent partitions under one mutex
                 // acquisition, then run all operators outside the lock.
-                let claimed = {
+                // Use a bounded stack array instead of allocating a Vec
+                // for every claim, especially costly for tiny partitions.
+                let claimed: [Option<(usize, Batch)>; TASK_CLAIM_BATCH] = {
                     let mut queue = tasks.lock().unwrap_or_else(|e| e.into_inner());
-                    queue.by_ref().take(TASK_CLAIM_BATCH).collect::<Vec<_>>()
+                    std::array::from_fn(|_| queue.next())
                 };
-                if claimed.is_empty() { break; }
-                for (index, batch) in claimed {
+                if claimed[0].is_none() { break; }
+                for (index, batch) in claimed.into_iter().flatten() {
                     if failed.load(Ordering::Acquire) { break; }
                     let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
                         .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
@@ -295,5 +297,31 @@ mod chunk_claim_parallel_map_tests {
             Ok(batch)
         });
         assert!(result.unwrap_err().to_string().contains("injected task failure"));
+    }
+}
+
+#[cfg(test)]
+mod fixed_claim_array_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn partial_final_claims_and_empty_queue_preserve_all_results() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        for count in [2usize, 16, 17, 31, 32, 33, 1027] {
+            let input = (0..count).map(|n| Batch::from_rows(schema.clone(),
+                vec![vec![Value::Integer(n as i64)]]).unwrap()).collect();
+            let called = AtomicUsize::new(0);
+            let results = map_partitions(input, 5, |batch| {
+                called.fetch_add(1, Ordering::Relaxed);
+                Ok(batch)
+            }).unwrap();
+            assert_eq!(called.load(Ordering::Relaxed), count);
+            assert_eq!(results.len(), count);
+            for (index, batch) in results.iter().enumerate() {
+                assert_eq!(batch.value(0, 0).unwrap(), &Value::Integer(index as i64));
+            }
+        }
     }
 }
