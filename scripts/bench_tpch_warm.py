@@ -19,8 +19,9 @@ BOUNDARY = "__rustspark_tpch_boundary"
 
 
 def requests_for(queries, warmup, repeat):
-    if warmup < 0 or repeat < 1 or not queries:
-        raise ValueError("Queries required; warmup >= 0 and repeat >= 1")
+    if (type(warmup) is not int or type(repeat) is not int
+            or warmup < 0 or repeat < 1 or not queries):
+        raise ValueError("Queries required; integer warmup >= 0 and repeat >= 1")
     ids = [number for number, _ in queries]
     if (any(type(number) is not int or number not in range(1, 23) for number in ids)
             or len(set(ids)) != len(ids)):
@@ -105,8 +106,9 @@ def parse_shell(stdout, stderr, requests, warmup, repeat):
 
 
 def benchmark(binary, queries, parquet, warmup=1, repeat=5, partitions=2, timeout=3600):
-    if partitions < 1 or timeout < 1:
-        raise ValueError("Positive partitions and timeout required")
+    if (type(partitions) is not int or type(timeout) is not int
+            or partitions < 1 or timeout < 1):
+        raise ValueError("Positive integer partitions and timeout required")
     requests = requests_for(queries, warmup, repeat)
     command = [str(binary), *input_arguments(parquet), "--interactive",
                "--stdout-format", "json", "--target-partitions", str(partitions)]

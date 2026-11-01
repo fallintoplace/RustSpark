@@ -8,6 +8,13 @@ import re
 from pathlib import Path
 
 
+def finite_duration(value):
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def checked_medians(report):
     if "warm" not in str(report.get("metric", "")).lower():
         raise ValueError("Only warm-session reports may be compared")
@@ -22,7 +29,7 @@ def checked_medians(report):
         value = row.get("median_ms")
         if (type(number) is not int or number not in range(1, 23) or number in out
                 or row.get("status") != "ok" or type(value) not in (float, int)
-                or not math.isfinite(value) or value <= 0):
+                or value <= 0 or not finite_duration(value)):
             raise ValueError("Invalid or incomplete warm TPC-H timings")
         out[number] = value
     return out
@@ -66,6 +73,14 @@ def check_matching_samples(rustspark, duckdb):
             raise ValueError(f"Warm TPC-H {field} differs between runs")
 
 
+def checked_speed_ratio(numerator, denominator):
+    ratio = numerator / denominator
+    if not math.isfinite(ratio) or ratio <= 0:
+        raise ValueError("Warm TPC-H latency ratio is outside finite numeric range")
+    rounded = round(ratio, 4)
+    return rounded if rounded > 0 else float(f"{ratio:.4g}")
+
+
 def compare(rustspark, duckdb, verified):
     check_matching_samples(rustspark, duckdb)
     verified_ids(verified)
@@ -81,17 +96,22 @@ def compare(rustspark, duckdb, verified):
         raise ValueError("Reference verification uses different SQL query files")
     rows = []
     for number in sorted(rs):
-        ratio = dd[number] / rs[number]
+        ratio = checked_speed_ratio(dd[number], rs[number])
         rows.append({"id": number, "rustspark_median_ms": rs[number],
-                     "duckdb_median_ms": dd[number], "duckdb_over_rustspark": round(ratio, 4),
-                     "rustspark_faster": ratio > 1})
-    geo = math.exp(math.fsum(math.log(dd[n]) - math.log(rs[n]) for n in rs) / 22)
+                     "duckdb_median_ms": dd[number], "duckdb_over_rustspark": ratio,
+                     "rustspark_faster": dd[number] > rs[number]})
+    try:
+        geo = math.exp(math.fsum(math.log(dd[n]) - math.log(rs[n]) for n in rs) / 22)
+    except OverflowError as error:
+        raise ValueError("Warm TPC-H geometric ratio exceeds finite range") from error
+    if not math.isfinite(geo) or geo <= 0:
+        raise ValueError("Warm TPC-H geometric ratio exceeds finite range")
     return {
         "metric": "per-query warm-session latency ratio; DuckDB / RustSpark",
         "warning": "Cross-engine serialization differs; not official TPC-H throughput",
         "verified_queries": 22,
         "rustspark_faster_queries": sum(row["rustspark_faster"] for row in rows),
-        "geometric_mean_duckdb_over_rustspark": round(geo, 4),
+        "geometric_mean_duckdb_over_rustspark": checked_speed_ratio(geo, 1.0),
         "rustspark_partitions": rustspark.get("target_partitions"),
         "duckdb_threads": duckdb.get("threads"),
         "queries": rows,

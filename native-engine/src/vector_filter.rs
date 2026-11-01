@@ -13,19 +13,31 @@ fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
     })
 }
 
-fn fast_text_equality<'a>(
+fn fast_text_comparison<'a>(
     batch: &'a Batch, predicate: &'a Expr,
-) -> Result<Option<(&'a [Value], bool, &'a str)>> {
+) -> Result<Option<(&'a [Value], BinaryOp, &'a str)>> {
     if let Expr::Binary { left, op, right } = predicate {
-        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-            let (name, value) = match (left.as_ref(), right.as_ref()) {
-                (Expr::Column(name), Expr::Literal(Value::Text(value))) |
-                (Expr::Literal(Value::Text(value)), Expr::Column(name)) => (name, value),
+        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual |
+            BinaryOp::Less | BinaryOp::LessEqual |
+            BinaryOp::Greater | BinaryOp::GreaterEqual) {
+            let (name, op, value) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(name), Expr::Literal(Value::Text(value))) =>
+                    (name, *op, value),
+                (Expr::Literal(Value::Text(value)), Expr::Column(name)) => {
+                    let reversed = match op {
+                        BinaryOp::Less => BinaryOp::Greater,
+                        BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                        BinaryOp::Greater => BinaryOp::Less,
+                        BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                        other => *other,
+                    };
+                    (name, reversed, value)
+                },
                 _ => return Ok(None),
             };
             let index = batch.schema().column(name)?;
             if batch.schema().field(index)?.data_type == DataType::Text {
-                return Ok(Some((batch.column(index)?, *op == BinaryOp::Equal, value)));
+                return Ok(Some((batch.column(index)?, op, value)));
             }
         }
     }
@@ -40,6 +52,19 @@ fn fast_boolean_column<'a>(batch: &'a Batch, predicate: &Expr) -> Result<Option<
     } else {
         Ok(None)
     }
+}
+
+// Directly evaluate two Boolean input columns in one pass. For WHERE,
+// a row is selected only when the Boolean expression is TRUE; NULL
+// contributes UNKNOWN and is excluded unless the other OR operand is TRUE.
+fn fast_boolean_pair<'a>(
+    batch: &'a Batch, predicate: &Expr, boolean_op: BinaryOp,
+) -> Result<Option<(&'a [Value], &'a [Value])>> {
+    let Expr::Binary { left, op, right } = predicate else { return Ok(None); };
+    if *op != boolean_op { return Ok(None); }
+    let Some(first) = fast_boolean_column(batch, left)? else { return Ok(None) };
+    let Some(second) = fast_boolean_column(batch, right)? else { return Ok(None) };
+    Ok(Some((first, second)))
 }
 
 fn fast_float_predicate<'a>(
@@ -199,6 +224,41 @@ fn fast_text_in_list<'a>(
     Ok(Some((batch.column(index)?, keys, *negated, has_null)))
 }
 
+// Spark orders NaN after finite values, but treats NaNs as equal and
+// signed zero as equal in IN membership. Match Value::sql_compare exactly.
+fn float_membership_key(number: f64) -> u64 {
+    if number.is_nan() { f64::NAN.to_bits() }
+    else if number == 0.0 { 0.0f64.to_bits() }
+    else { number.to_bits() }
+}
+
+fn fast_float_in_list<'a>(
+    batch: &'a Batch, predicate: &Expr,
+) -> Result<Option<(&'a [Value], std::collections::HashSet<u64>, bool, bool)>> {
+    let Expr::InList { needle, choices, negated } = predicate else {
+        return Ok(None);
+    };
+    let Expr::Column(name) = needle.as_ref() else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Float {
+        return Ok(None);
+    }
+    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut has_null = false;
+    for choice in choices {
+        match choice {
+            Expr::Literal(Value::Float(value)) => {
+                keys.insert(float_membership_key(*value));
+            },
+            Expr::Literal(Value::Null) => has_null = true,
+            // Mixed INTEGER/DOUBLE comparisons use exact SQL comparisons
+            // instead of rounding integers into DOUBLE keys.
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((batch.column(index)?, keys, *negated, has_null)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -212,6 +272,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     }
     let mut selected = Vec::new();
     if let Some((column, keys, negated, has_null)) =
+        fast_float_in_list(batch, predicate)? {
+        if (negated && has_null) || (!negated && keys.is_empty()) {
+            return Ok(selected);
+        }
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(value) = value {
+                let matched = keys.contains(&float_membership_key(*value));
+                if if negated { !has_null && !matched } else { matched } {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, keys, negated, has_null)) =
         fast_integer_in_list(batch, predicate)? {
         // NULL needles never satisfy WHERE. An unmatched NOT IN with any
         // NULL choice is also UNKNOWN, not TRUE.
@@ -291,6 +364,22 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
                 if keep { selected.push(row); }
             }
         }
+    } else if let Some((first, second)) =
+        fast_boolean_pair(batch, predicate, BinaryOp::And)? {
+        for (row, (left, right)) in first.iter().zip(second).enumerate() {
+            if matches!(left, Value::Boolean(true))
+                && matches!(right, Value::Boolean(true)) {
+                selected.push(row);
+            }
+        }
+    } else if let Some((first, second)) =
+        fast_boolean_pair(batch, predicate, BinaryOp::Or)? {
+        for (row, (left, right)) in first.iter().zip(second).enumerate() {
+            if matches!(left, Value::Boolean(true))
+                || matches!(right, Value::Boolean(true)) {
+                selected.push(row);
+            }
+        }
     } else if let Some(column) = fast_boolean_column(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(true)) { selected.push(row); }
@@ -316,10 +405,20 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
         }
-    } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
+    } else if let Some((column, op, rhs)) = fast_text_comparison(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Text(lhs) = value {
-                if (lhs.as_str() == rhs) == equals { selected.push(row); }
+                let order = lhs.as_str().cmp(rhs);
+                let keep = match op {
+                    BinaryOp::Equal => order.is_eq(),
+                    BinaryOp::NotEqual => !order.is_eq(),
+                    BinaryOp::Less => order.is_lt(),
+                    BinaryOp::LessEqual => !order.is_gt(),
+                    BinaryOp::Greater => order.is_gt(),
+                    BinaryOp::GreaterEqual => !order.is_lt(),
+                    _ => unreachable!("matched relational operator"),
+                };
+                if keep { selected.push(row); }
             }
         }
     } else {
@@ -817,5 +916,153 @@ mod text_in_list_fast_path_regressions {
             choices: vec![Expr::Literal(Value::Text("abc".into()))], negated: false,
         };
         assert!(select_indices(&batch, &missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fused_boolean_columns_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn boolean_pair_matches_scalar_three_valued_logic() {
+        let choices = [Value::Boolean(false), Value::Boolean(true), Value::Null];
+        let rows = choices.iter().flat_map(|first| choices.iter().map(move |second|
+            vec![first.clone(), second.clone()])).collect::<Vec<_>>();
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Boolean, true),
+            Field::new("b", DataType::Boolean, true),
+        ]).unwrap(), rows).unwrap();
+        for op in [BinaryOp::And, BinaryOp::Or] {
+            let predicate = Expr::binary(
+                Expr::Column("a".into()), op, Expr::Column("b".into()));
+            assert!(fast_boolean_pair(&batch, &predicate, op).unwrap().is_some());
+            let expected = (0..batch.num_rows())
+                .filter(|&row| predicate.evaluate(&batch, row).unwrap()
+                    .as_boolean().unwrap() == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+        }
+        let same = Expr::binary(
+            Expr::Column("a".into()), BinaryOp::Or, Expr::Column("a".into()));
+        assert_eq!(select_indices(&batch, &same).unwrap(), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn computed_boolean_expressions_keep_scalar_fallback() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("a", DataType::Boolean, true),
+            Field::new("b", DataType::Boolean, true),
+        ]).unwrap(), vec![
+            vec![Value::Boolean(true), Value::Boolean(false)],
+            vec![Value::Boolean(false), Value::Boolean(true)],
+            vec![Value::Null, Value::Boolean(true)],
+        ]).unwrap();
+        let predicate = Expr::binary(
+            Expr::Not(Box::new(Expr::Column("a".into()))),
+            BinaryOp::Or, Expr::Column("b".into()));
+        assert!(fast_boolean_pair(&batch, &predicate, BinaryOp::Or).unwrap().is_none());
+        let expected = (0..batch.num_rows())
+            .filter(|&row| predicate.evaluate(&batch, row).unwrap()
+                .as_boolean().unwrap() == Some(true))
+            .collect::<Vec<_>>();
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+    }
+}
+
+#[cfg(test)]
+mod float_in_membership_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn float_sets_match_sql_for_nan_signed_zero_nulls_and_infinities() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("v", DataType::Float, true)]).unwrap(),
+            [Value::Null, Value::Float(f64::NAN), Value::Float(-f64::NAN),
+             Value::Float(-0.0), Value::Float(0.0), Value::Float(-0.25),
+             Value::Float(1.5), Value::Float(f64::INFINITY),
+             Value::Float(f64::NEG_INFINITY)]
+                .into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        for choices in [
+            vec![Value::Float(f64::NAN), Value::Float(0.0)],
+            vec![Value::Float(-0.0), Value::Float(1.5), Value::Null],
+            vec![Value::Null],
+            vec![],
+            vec![Value::Float(f64::NEG_INFINITY), Value::Float(f64::INFINITY)],
+        ] {
+            for negated in [true, false] {
+                let predicate = Expr::InList {
+                    needle: Box::new(Expr::Column("v".into())),
+                    choices: choices.iter().cloned().map(Expr::Literal).collect(),
+                    negated,
+                };
+                let expected = (0..batch.num_rows()).filter(|&row|
+                    predicate.evaluate(&batch, row).unwrap()
+                        .as_boolean().unwrap() == Some(true)
+                ).collect::<Vec<_>>();
+                assert_eq!(select_indices(&batch, &predicate).unwrap(), expected,
+                    "choices={choices:?}, negated={negated}");
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_numeric_lists_retain_exact_scalar_comparisons() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("v", DataType::Float, false)]).unwrap(),
+            vec![vec![Value::Float(9_007_199_254_740_992.0)]],
+        ).unwrap();
+        let predicate = Expr::InList {
+            needle: Box::new(Expr::Column("v".into())),
+            choices: vec![Expr::Literal(Value::Integer(9_007_199_254_740_993))],
+            negated: false,
+        };
+        assert!(select_indices(&batch, &predicate).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_text_ordering_vector_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn all_text_orderings_match_scalar_for_both_operand_orders() {
+        let large = "漢字é🙂".repeat(2048);
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap(),
+            vec![
+                Value::Null, Value::Text("".into()),
+                Value::Text("é".into()), Value::Text("e".into()),
+                Value::Text("東京".into()), Value::Text("🙂".into()),
+                Value::Text(large.clone()), Value::Text(large.clone()),
+            ].into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        for literal in ["", "é", "e", "東京", "🙂", large.as_str(), "missing"] {
+            for op in [
+                BinaryOp::Equal, BinaryOp::NotEqual,
+                BinaryOp::Less, BinaryOp::LessEqual,
+                BinaryOp::Greater, BinaryOp::GreaterEqual,
+            ] {
+                for literal_left in [false, true] {
+                    let (left, right) = if literal_left {
+                        (Expr::Literal(Value::Text(literal.into())),
+                            Expr::Column("text".into()))
+                    } else {
+                        (Expr::Column("text".into()),
+                            Expr::Literal(Value::Text(literal.into())))
+                    };
+                    let predicate = Expr::binary(left, op, right);
+                    let expected = (0..batch.num_rows()).filter(|&row|
+                        predicate.evaluate(&batch, row).unwrap()
+                            .as_boolean().unwrap() == Some(true)
+                    ).collect::<Vec<_>>();
+                    assert_eq!(select_indices(&batch, &predicate).unwrap(), expected,
+                        "operator={op:?}, literal_left={literal_left}");
+                }
+            }
+        }
     }
 }

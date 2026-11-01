@@ -53,6 +53,13 @@ class CountTests(unittest.TestCase):
                 counts.execute_count("rustspark", Path("."), "customer", 5)
         self.assertLess(len(str(raised.exception)), 600)
 
+    def test_invalid_utf8_count_output_returns_validation_error(self):
+        command = [sys.executable, "-c",
+                   "import sys; sys.stdout.buffer.write(bytes([255]))"]
+        with patch.object(counts, "count_command", return_value=command):
+            with self.assertRaisesRegex(ValueError, "UTF-8"):
+                counts.execute_count("rs", Path("."), "customer", 5)
+
     def test_unknown_table(self):
         with self.assertRaises(ValueError):
             counts.count_command("rs", Path("."), "customers")

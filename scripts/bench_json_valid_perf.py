@@ -48,6 +48,8 @@ def expected_valid_count(rows):
 
 
 def write_fixture(path, rows):
+    if type(rows) is not int or rows < 1:
+        raise ValueError("Fixture rows must be a positive integer")
     with path.open("w", encoding="utf-8", newline="") as output:
         writer = csv.writer(output)
         writer.writerow(["payload"])
@@ -80,8 +82,9 @@ def run_case(binary, csv_path, expected, timeout):
 
 def compare(baseline_binary, candidate_binary, rows=120_000, repeat=7, warmup=2,
             timeout=120):
-    if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
-        raise ValueError("rows, repeat and timeout must be positive; warmup >= 0")
+    if (any(type(value) is not int for value in (rows, repeat, warmup, timeout))
+            or rows < 1 or repeat < 1 or warmup < 0 or timeout < 1):
+        raise ValueError("rows, repeat and timeout must be positive integers; warmup >= 0")
     with tempfile.TemporaryDirectory(prefix="rustspark-json-valid-") as directory:
         fixture = Path(directory) / "payloads.csv"
         write_fixture(fixture, rows)

@@ -787,7 +787,6 @@ mod mixed_topk_key_buffer_regressions {
         }
     }
 }
-
 #[cfg(test)]
 mod owned_topk_payload_regressions {
     use super::*;
@@ -840,3 +839,4 @@ mod owned_topk_payload_regressions {
         assert_eq!(top_k_owned(input, &[], 0).unwrap().num_rows(), 0);
     }
 }
+

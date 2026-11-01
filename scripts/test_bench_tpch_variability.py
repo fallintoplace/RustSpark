@@ -60,6 +60,26 @@ class VariabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "median"):
             variation.inspect(changed)
 
+    def test_huge_timing_values_and_nonobject_reports_fail_cleanly(self):
+        for invalid in (None, [], "not a report"):
+            with self.assertRaises(ValueError):
+                variation.inspect(invalid)
+        data = report([1, 2, 3])
+        for field in ("median_ms", "p95_ms"):
+            data["results"][0][field] = 10**500
+            with self.assertRaises(ValueError):
+                variation.inspect(data)
+            if field == "median_ms":
+                data["results"][0][field] = 2.0
+            else:
+                data["results"][0].pop(field)
+        data["results"][0]["samples_ms"][0] = 10**500
+        with self.assertRaises(ValueError):
+            variation.inspect(data)
+        for key in ("threshold", "max_relative_mad"):
+            with self.assertRaises(ValueError):
+                variation.inspect(report([1, 1, 1]), **{key: 10**500})
+
     def test_duplicate_query_ids_and_threshold_rejected(self):
         r = report([1, 2, 3])
         r["results"] *= 2

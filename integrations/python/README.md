@@ -40,3 +40,12 @@ PYTHONPATH=integrations/python/src python3 -m unittest discover -s integrations/
 ```
 
 For reviewed SQL files, pass `query(None, sql_file="queries/report.sql")` instead of SQL text. Table names and typed parameter names follow the CLI ASCII identifier rules and are rejected before subprocess launch if invalid.
+
+## Streaming SQL rows
+
+`RustSpark.iter_rows(sql, ...)` yields checked NDJSON object rows as they
+arrive without accumulating a complete JSON array. It preserves Python int64
+precision, rejects duplicate result keys and nonfinite numeric values, and
+limits each row to 16 MiB and total stdout to 64 MiB by default. Pass
+`process_timeout` to enforce a hard wall-clock deadline. Call `close()`
+on the iterator when you stop consuming early to terminate the subprocess.

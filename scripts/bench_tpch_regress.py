@@ -7,9 +7,17 @@ import math
 from pathlib import Path
 
 
+def finite_nonnegative_number(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def checked_median(value, number):
-    if (isinstance(value, bool) or not isinstance(value, (float, int))
-            or not math.isfinite(value) or value <= 0):
+    if not finite_nonnegative_number(value) or value == 0:
         raise ValueError(f"Invalid median for query {number}")
     return float(value)
 
@@ -56,8 +64,7 @@ def calculate_suite_speedup(old, new):
 
 
 def checked_regression_threshold(value):
-    if (type(value) not in (int, float) or not math.isfinite(value)
-            or value < 0):
+    if not finite_nonnegative_number(value):
         raise ValueError("Regression threshold must be finite and nonnegative")
     return value
 

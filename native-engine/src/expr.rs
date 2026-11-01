@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crate::{
     batch::Batch,
@@ -43,6 +43,19 @@ pub enum Expr {
     IsDistinctFrom { left: Box<Expr>, right: Box<Expr>, negated: bool },
     /// A bounded Spark IN/NOT IN list that evaluates its left operand once.
     InList { needle: Box<Expr>, choices: Vec<Expr>, negated: bool },
+}
+
+// Borrow scalar operands whose original lifetimes cover this row evaluation.
+fn borrowed_like_operand<'a>(
+    expr: &'a Expr, batch: &'a Batch, row: usize,
+) -> Result<Cow<'a, Value>> {
+    match expr {
+        Expr::Column(name) => Ok(Cow::Borrowed(
+            batch.value(row, batch.schema().column(name)?)?
+        )),
+        Expr::Literal(value) => Ok(Cow::Borrowed(value)),
+        expr => Ok(Cow::Owned(expr.evaluate(batch, row)?)),
+    }
 }
 
 impl Expr {
@@ -231,13 +244,15 @@ impl Expr {
                 Ok(Value::Boolean(if *negated { !distinct } else { distinct }))
             },
             Self::Like { value, pattern, escape } => {
-                let value = value.evaluate(batch, row)?;
-                let pattern = pattern.evaluate(batch, row)?;
+                // LIKE only reads its operands. Avoid cloning long input TEXT,
+                // patterns and ESCAPE literals for every row.
+                let value = borrowed_like_operand(value, batch, row)?;
+                let pattern = borrowed_like_operand(pattern, batch, row)?;
                 let escaped = match escape {
-                    None => Value::Text("\\".into()),
-                    Some(expr) => expr.evaluate(batch, row)?,
+                    None => Cow::Owned(Value::Text("\\".into())),
+                    Some(expr) => borrowed_like_operand(expr, batch, row)?,
                 };
-                match (value, pattern, escaped) {
+                match (value.as_ref(), pattern.as_ref(), escaped.as_ref()) {
                     (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) =>
                         Ok(Value::Null),
                     (Value::Text(value), Value::Text(pattern), Value::Text(escape)) => {
@@ -247,7 +262,7 @@ impl Expr {
                         if chars.next().is_some() {
                             return Err(Error::Type("LIKE ESCAPE must be one character".into()));
                         }
-                        Ok(Value::Boolean(sql_like_escape(&value, &pattern, escape)?))
+                        Ok(Value::Boolean(sql_like_escape(value, pattern, escape)?))
                     }
                     _ => Err(Error::Type("LIKE and ESCAPE require text values".into())),
                 }
@@ -270,12 +285,27 @@ impl Expr {
                 }
             },
             Self::Binary { left, op, right } => {
-                let left = left.evaluate(batch, row)?;
+                // Comparisons and boolean predicates only inspect their
+                // operands. Borrow direct columns and constants instead of
+                // cloning wide TEXT values for every evaluated row.
+                let left: Cow<'_, Value> = match left.as_ref() {
+                    Expr::Column(name) => Cow::Borrowed(
+                        batch.value(row, batch.schema().column(name)?)?
+                    ),
+                    Expr::Literal(value) => Cow::Borrowed(value),
+                    expr => Cow::Owned(expr.evaluate(batch, row)?),
+                };
                 if (*op == BinaryOp::And && left.as_boolean()? == Some(false))
                     || (*op == BinaryOp::Or && left.as_boolean()? == Some(true)) {
-                    return Ok(left);
+                    return Ok(left.into_owned());
                 }
-                let right = right.evaluate(batch, row)?;
+                let right: Cow<'_, Value> = match right.as_ref() {
+                    Expr::Column(name) => Cow::Borrowed(
+                        batch.value(row, batch.schema().column(name)?)?
+                    ),
+                    Expr::Literal(value) => Cow::Borrowed(value),
+                    expr => Cow::Owned(expr.evaluate(batch, row)?),
+                };
                 evaluate_binary(&left, *op, &right)
             }
         }
@@ -860,6 +890,90 @@ mod streaming_like_matcher_tests {
             .to_string().contains("work budget"));
         assert!(sql_like(&huge, "a%").unwrap());
         assert!(sql_like(&"é🙂".repeat(5_000), "é%🙂").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_like_operands_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn unicode_wide_text_escaped_wildcards_and_nulls() {
+        let schema = Schema::new(vec![
+            Field::new("body", DataType::Text, true),
+            Field::new("pattern", DataType::Text, true),
+        ]).unwrap();
+        let long = "é🙂".repeat(40_000);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(format!("start{long}finish")), Value::Text("start%finish".into())],
+            vec![Value::Text("a_b".into()), Value::Text("a\\_b".into())],
+            vec![Value::Null, Value::Text("%".into())],
+            vec![Value::Text("x".into()), Value::Null],
+        ]).unwrap();
+        let like = Expr::Like {
+            value: Box::new(Expr::Column("body".into())),
+            pattern: Box::new(Expr::Column("pattern".into())),
+            escape: None,
+        };
+        assert_eq!(like.evaluate(&batch, 0).unwrap(), Value::Boolean(true));
+        assert_eq!(like.evaluate(&batch, 1).unwrap(), Value::Boolean(true));
+        assert_eq!(like.evaluate(&batch, 2).unwrap(), Value::Null);
+        assert_eq!(like.evaluate(&batch, 3).unwrap(), Value::Null);
+        let escaped = Expr::Like {
+            value: Box::new(Expr::Literal(Value::Text("a_b".into()))),
+            pattern: Box::new(Expr::Literal(Value::Text("a!_b".into()))),
+            escape: Some(Box::new(Expr::Literal(Value::Text("!".into())))),
+        };
+        assert_eq!(escaped.evaluate(&batch, 0).unwrap(), Value::Boolean(true));
+        let invalid = Expr::Like {
+            value: Box::new(Expr::Column("body".into())),
+            pattern: Box::new(Expr::Literal(Value::Text("%".into()))),
+            escape: Some(Box::new(Expr::Literal(Value::Text("xx".into())))),
+        };
+        assert!(invalid.evaluate(&batch, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_binary_operands_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn wide_text_comparisons_keep_null_and_numeric_semantics() {
+        let very_large = "🙂".repeat(70_000);
+        let schema = Schema::new(vec![
+            Field::new("left", DataType::Text, true),
+            Field::new("right", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(very_large.clone()), Value::Text(very_large.clone()), Value::Integer(4)],
+            vec![Value::Text("ab".into()), Value::Text("bc".into()), Value::Integer(0)],
+            vec![Value::Null, Value::Text("bc".into()), Value::Integer(2)],
+        ]).unwrap();
+        let equals = Expr::binary(
+            Expr::Column("left".into()), BinaryOp::Equal,
+            Expr::Column("right".into()),
+        );
+        assert_eq!(equals.evaluate(&batch, 0).unwrap(), Value::Boolean(true));
+        assert_eq!(equals.evaluate(&batch, 1).unwrap(), Value::Boolean(false));
+        assert_eq!(equals.evaluate(&batch, 2).unwrap(), Value::Null);
+        let less = Expr::binary(
+            Expr::Column("left".into()), BinaryOp::Less,
+            Expr::Column("right".into()),
+        );
+        assert_eq!(less.evaluate(&batch, 1).unwrap(), Value::Boolean(true));
+        let sum = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(3)),
+        );
+        assert_eq!(sum.evaluate(&batch, 0).unwrap(), Value::Integer(7));
+        let short_circuit = Expr::binary(
+            Expr::Literal(Value::Boolean(false)), BinaryOp::And,
+            Expr::binary(Expr::Literal(Value::Integer(1)), BinaryOp::Divide,
+                Expr::Literal(Value::Integer(0))),
+        );
+        assert_eq!(short_circuit.evaluate(&batch, 0).unwrap(), Value::Boolean(false));
     }
 }
 

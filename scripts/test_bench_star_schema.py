@@ -30,6 +30,16 @@ class StarSchemaTests(unittest.TestCase):
             self.assertIn("--csv-schema", command)
             self.assertEqual(command[command.index("--sql") + 1], "SELECT 1")
 
+    def test_rejects_noninteger_dimensions_before_creating_tables(self):
+        for options in ((True, 3, 2), (10, False, 2), (10, 3, 1.5),
+                        (10, 3, float("nan")), ("10", 3, 2), (10, None, 2)):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                bench.answers(*options)
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError):
+                    bench.fixtures(Path(tmp), *options)
+                self.assertFalse(list(Path(tmp).iterdir()))
+
     def test_rejects_invalid_dimensions(self):
         for options in [(0, 1, 1), (10, 0, 2), (10, 2, -1)]:
             with self.subTest(options=options), self.assertRaises(ValueError):
