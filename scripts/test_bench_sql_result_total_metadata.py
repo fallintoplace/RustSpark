@@ -23,6 +23,17 @@ class TotalCoverageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "totals differ"):
             verify.verify_reports(sample(4), sample(3))
 
+    def test_a_missing_total_cannot_match_a_declared_total(self):
+        actual = sample(3)
+        reference = sample(3)
+        actual.pop("queries_total")
+        with self.assertRaisesRegex(ValueError, "totals differ"):
+            verify.verify_reports(actual, reference)
+        with self.assertRaisesRegex(ValueError, "totals differ"):
+            verify.verify_reports(reference, actual)
+        reference.pop("queries_total")
+        self.assertEqual(verify.verify_reports(actual, reference), [])
+
     def test_matching_totals_pass(self):
         self.assertEqual(verify.verify_reports(sample(3), sample(3)), [])
 

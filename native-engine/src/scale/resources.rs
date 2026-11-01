@@ -31,7 +31,14 @@ impl MemoryBudget {
     /// Atomically reserve estimated operator memory. The returned guard releases
     /// the reservation even if the operator exits with an error.
     pub fn reserve(&self, bytes: usize) -> Result<Reservation> {
-        if bytes == 0 { return Ok(Reservation { budget: self.clone(), bytes: 0 }); }
+        self.charge(bytes)?;
+        Ok(Reservation { budget: self.clone(), bytes })
+    }
+
+    // Charge the existing budget directly. Resizing a reservation must not
+    // construct and disarm a second guard for every incremental growth.
+    fn charge(&self, bytes: usize) -> Result<()> {
+        if bytes == 0 { return Ok(()); }
         let mut current = self.used.load(Ordering::Acquire);
         loop {
             let next = current.checked_add(bytes)
@@ -43,7 +50,7 @@ impl MemoryBudget {
             match self.used.compare_exchange_weak(
                 current, next, Ordering::AcqRel, Ordering::Acquire
             ) {
-                Ok(_) => return Ok(Reservation { budget: self.clone(), bytes }),
+                Ok(_) => return Ok(()),
                 Err(actual) => current = actual,
             }
         }
@@ -53,8 +60,17 @@ impl MemoryBudget {
 impl Reservation {
     pub fn bytes(&self) -> usize { self.bytes }
 
-    /// Transfer this guard's charge to other guards without releasing the budget.
-    fn disarm(&mut self) { self.bytes = 0; }
+    /// Transfer an already-admitted allocation into another guard without
+    /// touching the atomic budget. Cross-budget transfers are not allowed.
+    pub fn absorb(&mut self, other: &mut Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.budget.used, &other.budget.used) {
+            return Err(Error::Execution("cannot combine different memory budgets".into()));
+        }
+        self.bytes = self.bytes.checked_add(other.bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
+        other.bytes = 0;
+        Ok(())
+    }
 
     /// Transfer part of this allocation to another guard, with no new budget admission.
     pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
@@ -67,10 +83,7 @@ impl Reservation {
 
     pub fn resize(&mut self, new_bytes: usize) -> Result<()> {
         if new_bytes > self.bytes {
-            let extra = new_bytes - self.bytes;
-            let mut additional = self.budget.reserve(extra)?;
-            // Transfer the reservation, then release only the guard object.
-            additional.disarm();
+            self.budget.charge(new_bytes - self.bytes)?;
         } else if new_bytes < self.bytes {
             self.budget.used.fetch_sub(self.bytes - new_bytes, Ordering::AcqRel);
         }
@@ -212,3 +225,61 @@ mod bulk_reservation_transfer_regressions {
         assert!(reserve_many(&budget, &[]).unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod direct_budget_resize_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_growth_and_failure_preserve_total_reservations() {
+        let budget = MemoryBudget::new(1024).unwrap();
+        let mut first = budget.reserve(1).unwrap();
+        let second = budget.reserve(512).unwrap();
+        for target in 2..=400 {
+            first.resize(target).unwrap();
+            assert_eq!(budget.used(), target + second.bytes());
+        }
+        assert!(first.resize(513).is_err());
+        assert_eq!(first.bytes(), 400);
+        assert_eq!(budget.used(), 912);
+        first.resize(0).unwrap();
+        assert_eq!(budget.used(), 512);
+        drop((first, second));
+        assert_eq!(budget.used(), 0);
+    }
+}
+#[cfg(test)]
+mod reservation_absorb_accounting_regressions {
+    use super::*;
+
+    #[test]
+    fn combines_guards_without_changing_budget_until_the_owner_drops() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let mut primary = budget.reserve(30).unwrap();
+        let mut secondary = budget.reserve(40).unwrap();
+        primary.absorb(&mut secondary).unwrap();
+        assert_eq!(primary.bytes(), 70);
+        assert_eq!(secondary.bytes(), 0);
+        assert_eq!(budget.used(), 70);
+        primary.resize(80).unwrap();
+        drop(secondary);
+        assert_eq!(budget.used(), 80);
+        drop(primary);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn never_transfers_a_guard_between_independent_budgets() {
+        let first = MemoryBudget::new(64).unwrap();
+        let second = MemoryBudget::new(64).unwrap();
+        let mut a = first.reserve(20).unwrap();
+        let mut b = second.reserve(30).unwrap();
+        assert!(a.absorb(&mut b).is_err());
+        assert_eq!((a.bytes(), b.bytes()), (20, 30));
+        assert_eq!((first.used(), second.used()), (20, 30));
+        drop(a);
+        drop(b);
+        assert_eq!((first.used(), second.used()), (0, 0));
+    }
+}
+

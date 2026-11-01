@@ -8,31 +8,51 @@ from pathlib import Path
 import statistics
 
 
+def finite_median(values):
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (
+        ordered[middle - 1] + (ordered[middle] - ordered[middle - 1]) / 2
+    )
+
+
+def valid_nonnegative_number(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def check_samples(entry):
     samples = entry.get("samples_ms")
     if not isinstance(samples, list) or len(samples) < 3:
         raise ValueError("At least three measured samples are required")
-    if any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0 for x in samples):
+    if any(not valid_nonnegative_number(x) or x == 0 for x in samples):
         raise ValueError("Invalid timing sample")
-    median = statistics.median(samples)
+    median = finite_median(samples)
     recorded = entry.get("median_ms")
-    if type(recorded) not in (int, float) or not math.isfinite(recorded) or abs(recorded - median) > 0.002:
+    if not valid_nonnegative_number(recorded) or abs(recorded - median) > 0.002:
         raise ValueError("Reported median differs from timing samples")
     if "p95_ms" in entry:
         p95 = entry["p95_ms"]
         expected = sorted(samples)[math.ceil(0.95 * len(samples)) - 1]
-        if (type(p95) not in (int, float) or not math.isfinite(p95)
-                or abs(p95 - expected) > 0.002):
+        if (not valid_nonnegative_number(p95) or abs(p95 - expected) > 0.002):
             raise ValueError("Reported p95 differs from timing samples")
     return samples
 
 
 def variability_row(number, entry, threshold, max_relative_mad=None):
     samples = check_samples(entry)
-    mean = statistics.fmean(samples)
-    cv = statistics.pstdev(samples) / mean if mean else 0.0
-    median = statistics.median(samples)
-    mad = statistics.median(abs(x - median) for x in samples)
+    # The sum of valid large samples can overflow f64 even when their
+    # coefficient of variation is zero. Normalize by the largest sample.
+    scale = max(samples)
+    normalized = [sample / scale for sample in samples]
+    mean = statistics.fmean(normalized)
+    cv = statistics.pstdev(normalized) / mean if mean else 0.0
+    median = finite_median(samples)
+    mad = finite_median(abs(x - median) for x in samples)
     relative_mad = mad / median
     return {"id": number, "coefficient_of_variation": round(cv, 4),
                  "median_absolute_deviation_ms": round(mad, 3),
@@ -51,11 +71,12 @@ def checked_query_id(entry, seen):
 
 
 def inspect(report, threshold=0.15, max_relative_mad=None):
-    if type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 0:
+    if not valid_nonnegative_number(threshold):
         raise ValueError("Variation threshold must be finite and nonnegative")
-    if max_relative_mad is not None and (type(max_relative_mad) not in (int, float)
-            or not math.isfinite(max_relative_mad) or max_relative_mad < 0):
+    if max_relative_mad is not None and not valid_nonnegative_number(max_relative_mad):
         raise ValueError("Relative MAD threshold must be finite and nonnegative")
+    if not isinstance(report, dict):
+        raise ValueError("TPC-H variability report must be an object")
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("TPC-H report has no query results")

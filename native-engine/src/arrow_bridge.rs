@@ -5,7 +5,8 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
-    builder::StringBuilder, types::Int32Type,
+    builder::StringBuilder, types::{Int8Type, Int16Type, Int32Type, Int64Type,
+        UInt8Type, UInt16Type, UInt32Type, UInt64Type},
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
 
@@ -74,6 +75,42 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
         .map_err(|err| Error::Execution(format!("Arrow conversion failed: {err}")))
 }
 
+
+// Decode the dictionary's keys without expanding or copying dictionary values
+// per row. Checked conversion and bounds ensure malformed input returns an error.
+macro_rules! decode_text_dictionary {
+    ($array:expr, $key_type:ty) => {{
+        let dictionary = $array.as_any().downcast_ref::<DictionaryArray<$key_type>>()
+            .ok_or_else(|| Error::Type("invalid Arrow dictionary array".into()))?;
+        let values = dictionary.values();
+        let utf8 = values.as_any().downcast_ref::<StringArray>();
+        let large_utf8 = values.as_any().downcast_ref::<LargeStringArray>();
+        if utf8.is_none() && large_utf8.is_none() {
+            return Err(Error::Type("dictionary values are not UTF-8".into()));
+        }
+        let mut decoded = Vec::with_capacity(dictionary.len());
+        for row in 0..dictionary.len() {
+            if dictionary.is_null(row) {
+                decoded.push(Value::Null);
+                continue;
+            }
+            let key = usize::try_from(dictionary.keys().value(row))
+                .map_err(|_| Error::Type("negative or oversized dictionary key".into()))?;
+            if key >= values.len() {
+                return Err(Error::Type("Arrow dictionary key out of bounds".into()));
+            }
+            if values.is_null(key) {
+                decoded.push(Value::Null);
+            } else if let Some(strings) = utf8 {
+                decoded.push(Value::Text(strings.value(key).into()));
+            } else if let Some(strings) = large_utf8 {
+                decoded.push(Value::Text(strings.value(key).into()));
+            }
+        }
+        decoded
+    }};
+}
+
 pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
     let mut fields = Vec::new();
     let mut columns = Vec::new();
@@ -87,7 +124,10 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
             ArrowType::Dictionary(key, value)
-                if **key == ArrowType::Int32 && **value == ArrowType::Utf8 =>
+                if matches!(key.as_ref(),
+                    ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
+                    ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 | ArrowType::UInt64)
+                    && matches!(value.as_ref(), ArrowType::Utf8 | ArrowType::LargeUtf8) =>
                 DataType::Text,
             other => return Err(Error::Unsupported(format!("unsupported Arrow type: {other}"))),
         };
@@ -205,22 +245,18 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                 }).collect())
             }
             ArrowType::Dictionary(key, value)
-                if **key == ArrowType::Int32 && **value == ArrowType::Utf8 => {
-                let dictionary = array.as_any().downcast_ref::<DictionaryArray<Int32Type>>()
-                    .ok_or_else(|| Error::Type("invalid dictionary Arrow array".into()))?;
-                let values = dictionary.values().as_any().downcast_ref::<StringArray>()
-                    .ok_or_else(|| Error::Type("dictionary values are not UTF-8".into()))?;
-                Some((0..dictionary.len()).map(|row| {
-                    if dictionary.is_null(row) { Value::Null }
-                    else {
-                        let code = dictionary.keys().value(row) as usize;
-                        if values.is_null(code) {
-                            Value::Null
-                        } else {
-                            Value::Text(values.value(code).into())
-                        }
-                    }
-                }).collect())
+                if matches!(value.as_ref(), ArrowType::Utf8 | ArrowType::LargeUtf8) => {
+                Some(match key.as_ref() {
+                    ArrowType::Int8 => decode_text_dictionary!(array, Int8Type),
+                    ArrowType::Int16 => decode_text_dictionary!(array, Int16Type),
+                    ArrowType::Int32 => decode_text_dictionary!(array, Int32Type),
+                    ArrowType::Int64 => decode_text_dictionary!(array, Int64Type),
+                    ArrowType::UInt8 => decode_text_dictionary!(array, UInt8Type),
+                    ArrowType::UInt16 => decode_text_dictionary!(array, UInt16Type),
+                    ArrowType::UInt32 => decode_text_dictionary!(array, UInt32Type),
+                    ArrowType::UInt64 => decode_text_dictionary!(array, UInt64Type),
+                    _ => return Err(Error::Unsupported("unsupported Arrow dictionary key type".into())),
+                })
             }
             _ => None,
         };
@@ -516,5 +552,59 @@ mod arrow_decoded_column_validation_tests {
             vec![Value::Integer(8), Value::Null, Value::Null],
         ]).unwrap();
         assert_eq!(from_arrow(&to_arrow(&batch).unwrap()).unwrap(), batch);
+    }
+}
+
+#[cfg(test)]
+mod varied_dictionary_key_widths {
+    use super::*;
+
+    #[test]
+    fn decodes_signed_and_unsigned_dictionary_keys_with_large_utf8_values() {
+        let names: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("Berlin"), None, Some("東京"),
+        ]));
+        let narrow = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![Some(0), Some(2), Some(1), None]),
+            Arc::clone(&names),
+        ).unwrap();
+        let wide = DictionaryArray::<UInt16Type>::try_new(
+            UInt16Array::from(vec![Some(0), Some(1), None, Some(0)]),
+            Arc::new(LargeStringArray::from(vec![
+                Some("east"), Some("é🙂"),
+            ])),
+        ).unwrap();
+        let arrow = RecordBatch::try_from_iter(vec![
+            ("small", Arc::new(narrow) as ArrayRef),
+            ("large", Arc::new(wide) as ArrayRef),
+        ]).unwrap();
+        let native = from_arrow(&arrow).unwrap();
+        assert_eq!(native.num_rows(), 4);
+        assert_eq!(native.rows().unwrap(), vec![
+            vec![Value::Text("Berlin".into()), Value::Text("east".into())],
+            vec![Value::Text("東京".into()), Value::Text("é🙂".into())],
+            vec![Value::Null, Value::Null],
+            vec![Value::Null, Value::Text("east".into())],
+        ]);
+        assert_eq!(from_arrow(&to_arrow(&native).unwrap()).unwrap(), native);
+    }
+
+    #[test]
+    fn decodes_unsigned_32_bit_keys_without_coercion() {
+        let values: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("first"), Some("last"),
+        ]));
+        let dictionary = DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from(vec![Some(1), Some(0), Some(1)]), values,
+        ).unwrap();
+        let arrow = RecordBatch::try_from_iter(vec![
+            ("label", Arc::new(dictionary) as ArrayRef),
+        ]).unwrap();
+        let native = from_arrow(&arrow).unwrap();
+        assert_eq!(native.column(0).unwrap(), &[
+            Value::Text("last".into()),
+            Value::Text("first".into()),
+            Value::Text("last".into()),
+        ]);
     }
 }

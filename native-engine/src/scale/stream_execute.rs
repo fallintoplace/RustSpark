@@ -8,7 +8,7 @@ use crate::{
 use super::{
     cancel::QueryControl,
     chunks::RowBatcher, file_catalog::FileCatalog,
-    stream_ops::{FilterStream, ProjectStream, LimitStream},
+    stream_ops::{FilterStream, FilterLimitStream, ProjectStream, LimitStream},
     union_stream::{UnionAllStream, UnionDistinctStream},
     cross_join_stream::CrossJoinStream,
     set_stream::{SetStream, SetMode, set_schema},
@@ -32,10 +32,11 @@ impl Iterator for SortedOutput {
     fn next(&mut self) -> Option<Self::Item> { self.reader.next() }
 }
 
-/// The shard file ownership must outlive the active spill reader.
+/// Rust drops fields in declaration order. Close the active reader before
+// GroupFiles attempts to unlink scratch files, including on Windows.
 struct GroupedOutput {
-    files: GroupFiles,
     reader: Option<SpillReader<BufReader<File>>>,
+    files: GroupFiles,
     next_file: usize,
     batch_rows: usize,
     control: QueryControl,
@@ -89,10 +90,11 @@ impl Iterator for GroupedOutput {
     }
 }
 
-/// Keep hash join shard paths owned until the active reader has finished.
+/// Close the active join reader before JoinFiles removes its scratch files.
+/// In particular, Windows cannot unlink an open spill file.
 struct JoinedOutput {
-    files: JoinFiles,
     reader: Option<SpillReader<BufReader<File>>>,
+    files: JoinFiles,
     next_file: usize,
     batch_rows: usize,
     control: QueryControl,
@@ -246,12 +248,12 @@ impl Iterator for DistinctOutput {
                         .all(|(value, column)| value == &column[row]))) {
                     continue;
                 }
-                let footprint = super::row_footprint::footprint(
+                let minimum = super::row_footprint::minimum_cloned_footprint(
                     columns.iter().map(|column| &column[row])
                 );
-                let next_total = self.retained_bytes.checked_add(footprint);
                 if self.unique_keys >= self.max_keys ||
-                    next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.retained_bytes.checked_add(minimum)
+                        .is_none_or(|size| size > self.max_bytes) {
                     self.pending_error = Some(Error::Execution(
                         "stream DISTINCT memory budget exceeded".into()));
                     break;
@@ -263,6 +265,13 @@ impl Iterator for DistinctOutput {
                         break;
                     }
                 };
+                let actual_footprint = super::row_footprint::footprint(key.iter());
+                let next_total = self.retained_bytes.checked_add(actual_footprint);
+                if next_total.is_none_or(|size| size > self.max_bytes) {
+                    self.pending_error = Some(Error::Execution(
+                        "stream DISTINCT memory budget exceeded".into()));
+                    break;
+                }
                 self.retained_bytes = next_total.expect("validated DISTINCT memory");
                 self.unique_keys += 1;
                 self.seen.entry(fingerprint).or_default().push(key);
@@ -577,6 +586,17 @@ fn lower(
         }
         Plan::Project { input, selections } =>
             Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Limit { input, offset, count: Some(count) }
+            if matches!(input.as_ref(), Plan::Filter { .. }) => {
+            let Plan::Filter { input: source, predicate } = input.as_ref() else {
+                unreachable!("matched direct filter under bounded limit");
+            };
+            // Keep the original depth accounting for both plan nodes.
+            let source = lower(source, catalog, options, control, depth + 2, cache)?;
+            Ok(Box::new(FilterLimitStream::new(
+                source, predicate.clone(), *offset, *count, control.clone(),
+            )))
+        }
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
@@ -1301,5 +1321,164 @@ mod stream_distinct_deferred_budget_tests {
         ]);
         assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod compact_retained_stream_key_accounting {
+    use super::*;
+
+    #[test]
+    fn stream_distinct_admits_small_clones_from_large_capacity_input() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, false)]).unwrap();
+        let mut source = String::with_capacity(16 * 1024);
+        source.push_str("key");
+        let batch = Batch::from_rows(schema,
+            vec![vec![Value::Text(source)]]).unwrap();
+        let mut distinct = DistinctOutput::new(
+            Box::new(std::iter::once(Ok(batch))), QueryControl::default(), 1, 128,
+        );
+        assert_eq!(distinct.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("key".into())]]);
+        assert_eq!(distinct.retained_bytes, 64 + std::mem::size_of::<Value>() + 3);
+        assert!(distinct.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod bounded_filter_limit_fusion_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::Field};
+
+    #[test]
+    fn direct_where_limit_does_not_evaluate_rows_after_limit() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+            vec![Value::Integer(0)],
+        ]).unwrap();
+        let predicate = Expr::binary(
+            Expr::binary(Expr::Literal(Value::Integer(10)), BinaryOp::Divide,
+                Expr::Column("n".into())),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(0)),
+        );
+        for (offset, result) in [(0, 1), (1, 2)] {
+            let plan = Plan::Values { batch: batch.clone() }
+                .filter(predicate.clone()).limit(offset, Some(1));
+            let chunks = execute(&plan, &FileCatalog::new(),
+                &StreamOptions::default(), QueryControl::default()).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            let rows = chunks.into_iter().flat_map(|part| part.rows().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(rows, vec![vec![Value::Integer(result)]]);
+        }
+        let plan = Plan::Values { batch }.filter(predicate).limit(0, Some(3));
+        assert!(execute(&plan, &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default()).unwrap()
+            .collect::<Result<Vec<_>>>().is_err());
+    }
+
+    #[test]
+    fn fused_windows_match_unfused_filter_limit_across_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..100)
+            .map(|n| vec![if n % 9 == 0 { Value::Null } else { Value::Integer(n) }])
+            .collect()).unwrap();
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(12)));
+        for (offset, count) in [(0, 1), (0, 100), (5, 7), (30, 4), (100, 1)] {
+            let plan = Plan::Values { batch: batch.clone() }
+                .filter(predicate.clone()).limit(offset, Some(count));
+            let fused = execute(&plan, &FileCatalog::new(),
+                &StreamOptions::default(), QueryControl::default()).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            let baseline = LimitStream::new(FilterStream::new(
+                std::iter::once(Ok(batch.clone())), predicate.clone(),
+                QueryControl::default(),
+            ), offset, Some(count), QueryControl::default())
+                .collect::<Result<Vec<_>>>().unwrap();
+            let fused_rows = fused.into_iter().flat_map(|part| part.rows().unwrap())
+                .collect::<Vec<_>>();
+            let old_rows = baseline.into_iter().flat_map(|part| part.rows().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(fused_rows, old_rows);
+        }
+    }
+}
+
+#[cfg(test)]
+mod early_stream_drop_cleans_spill_files_tests {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp}, expr::Expr,
+        join::JoinKind, schema::{DataType, Field}, scalar::Value};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn partially_read_grouped_stream_closes_reader_before_unlinking_scratch() {
+        let root = std::env::temp_dir().join(format!(
+            "rustspark-group-early-drop-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let scratch = root.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let csv = root.join("data.csv");
+        fs::write(&csv, b"g\n1\n2\n1\n2\n").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("g", DataType::Integer, false),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("data", &csv, schema, 1024).unwrap();
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("data")),
+            group_by: vec![(Expr::Column("g".into()), "g".into())],
+            aggregates: vec![AggregateItem::new(AggregateOp::CountAll, "rows")],
+        };
+        let options = StreamOptions {
+            batch_rows: 1, scratch_directory: scratch.clone(),
+            ..StreamOptions::default()
+        };
+        let mut stream = execute(&plan, &catalog, &options, QueryControl::default()).unwrap();
+        assert!(stream.next().unwrap().unwrap().num_rows() > 0);
+        drop(stream);
+        assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partially_read_join_stream_closes_reader_before_unlinking_scratch() {
+        let root = std::env::temp_dir().join(format!(
+            "rustspark-join-early-drop-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let scratch = root.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let left = root.join("left.csv");
+        let right = root.join("right.csv");
+        fs::write(&left, b"id\n1\n2\n3\n").unwrap();
+        fs::write(&right, b"id\n2\n3\n").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("lhs", &left, schema.clone(), 1024).unwrap();
+        catalog.register_csv("rhs", &right, schema, 1024).unwrap();
+        let plan = Plan::Join {
+            left: Box::new(Plan::scan("lhs")),
+            right: Box::new(Plan::scan("rhs")),
+            left_key: "id".into(), right_key: "id".into(), kind: JoinKind::Left,
+        };
+        let options = StreamOptions {
+            batch_rows: 1, scratch_directory: scratch.clone(),
+            ..StreamOptions::default()
+        };
+        let mut stream = execute(&plan, &catalog, &options, QueryControl::default()).unwrap();
+        let first = stream.next().unwrap().unwrap();
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(first.schema().len(), 2);
+        drop(stream);
+        assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 }

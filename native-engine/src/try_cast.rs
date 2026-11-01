@@ -29,7 +29,9 @@ pub fn convert(value: Value, target: DataType) -> Value {
             _ => Value::Null,
         },
         DataType::Float => match value {
-            Value::Float(n) if n.is_finite() => Value::Float(n),
+            // An identity DOUBLE cast cannot fail, even for NaN or infinities.
+            // Match Value::cast_to(DataType::Float) and preserve its payload.
+            Value::Float(n) => Value::Float(n),
             Value::Integer(n) => Value::Float(n as f64),
             Value::Boolean(n) => Value::Float(if n { 1.0 } else { 0.0 }),
             Value::Text(n) => n.trim().parse::<f64>().ok().filter(|n| n.is_finite())
@@ -85,5 +87,24 @@ mod consistent_double_to_string_cast_tests {
         assert_eq!(convert(Value::Integer(1), DataType::Text),
             Value::Text("1".into()));
         assert_eq!(convert(Value::Null, DataType::Text), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod try_cast_float_identity_regressions {
+    use super::*;
+
+    #[test]
+    fn identity_double_try_cast_preserves_nan_infinity_and_signed_zero() {
+        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 0.0, 1e300] {
+            let input = Value::Float(number);
+            assert_eq!(convert(input.clone(), DataType::Float),
+                input.cast_to(DataType::Float).unwrap());
+        }
+        for text in ["NaN", "inf", "-Infinity", "1e9999"] {
+            assert_eq!(convert(Value::Text(text.into()), DataType::Float), Value::Null);
+        }
+        assert_eq!(convert(Value::Float(f64::NAN), DataType::Integer), Value::Null);
+        assert_eq!(convert(Value::Float(f64::INFINITY), DataType::Boolean), Value::Null);
     }
 }

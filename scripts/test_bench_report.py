@@ -92,6 +92,17 @@ class BenchmarkReportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bench_report.render_report(sample)
 
+    def test_unrepresentable_timing_in_measurements_is_rejected(self):
+        for field in ("median_ms", "p95_ms", "samples_ms"):
+            payload = report()
+            point = payload["results"]["rustspark"]["scan_count"]
+            if field == "samples_ms":
+                point[field][0] = 10**500
+            else:
+                point[field] = 10**500
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bench_report.render_report(payload)
+
     def test_rejects_p95_smaller_than_median(self):
         sample = report()
         sample["results"]["rustspark"]["scan_count"]["p95_ms"] = 5
@@ -103,6 +114,14 @@ class BenchmarkReportTests(unittest.TestCase):
         sample["results"]["rustspark"]["scan_count"]["median_ms"] = 7.3
         with self.assertRaisesRegex(ValueError, "do not match samples"):
             bench_report.render_report(sample)
+
+    def test_extreme_finite_latency_does_not_produce_infinite_ratio(self):
+        sample = report()
+        sample["results"]["rustspark"]["scan_count"] = measurement(5e-324)
+        sample["results"]["duckdb"]["scan_count"] = measurement(1e100)
+        rendered = bench_report.render_report(sample)
+        self.assertIn("| scan_count | n/a |", rendered)
+        self.assertNotIn("infx", rendered)
 
     def test_zero_rounded_rustspark_median_has_no_ratio(self):
         sample = report()

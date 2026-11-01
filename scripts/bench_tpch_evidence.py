@@ -13,6 +13,33 @@ import math
 from pathlib import Path
 import statistics
 
+def load_evidence(path):
+    """Parse benchmark evidence without silently normalizing invalid JSON."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate evidence JSON key: {key}")
+            result[key] = value
+        return result
+
+    def finite_float(raw):
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("Nonfinite evidence JSON number")
+        return value
+
+    def reject_constant(raw):
+        raise ValueError(f"Nonfinite evidence JSON constant: {raw}")
+
+    return json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=unique_keys,
+        parse_float=finite_float,
+        parse_constant=reject_constant,
+    )
+
+
 TABLES = ("customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier")
 FULL_SUITE = set(range(1, 23))
 
@@ -25,7 +52,13 @@ def checked_hash(value, label):
 
 
 def checked_number(value, label):
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+    if type(value) not in (int, float) or value <= 0:
+        raise ValueError(f"{label} must be a positive finite number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError(f"{label} must be a positive finite number")
     return value
 
@@ -124,13 +157,18 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         if (p95 + 0.01 < median
                 or not math.isclose(p95, measured_p95, rel_tol=0, abs_tol=0.01)):
             raise ValueError(f"Query {number} p95 is inconsistent with timing samples")
-        if not math.isclose(statistics.median(samples), median, abs_tol=0.01):
+        if not math.isclose(statistics.median(samples), median, rel_tol=0, abs_tol=0.01):
             raise ValueError(f"Query {number} median is inconsistent with timing samples")
         if (type(reference.get("expected_rows")) is not int
                 or type(reference.get("actual_rows")) is not int
                 or reference["expected_rows"] != reference["actual_rows"]):
             raise ValueError(f"Query {number} has inconsistent result row counts")
         total_median_ms.append(median)
+
+    try:
+        total_seconds = math.fsum(total_median_ms) / 1000
+    except OverflowError as error:
+        raise ValueError("TPC-H median total exceeds finite numeric range") from error
 
     return {
         "qualification": "complete-22-query-cold-tpch",
@@ -142,7 +180,7 @@ def qualify(manifest, benchmark, verification, fixture_dir=None):
         "samples_per_query": repeat,
         "warmups_per_query": warmup,
         "binary_sha256": binary,
-        "sum_query_medians_seconds": round(math.fsum(total_median_ms) / 1000, 3),
+        "sum_query_medians_seconds": round(total_seconds, 3),
         "note": "Evidence for this workload only, not a Spark or DuckDB speedup claim",
     }
 
@@ -157,9 +195,9 @@ def main(argv=None):
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
-        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        benchmark = json.loads(args.benchmark.read_text(encoding="utf-8"))
-        verification = json.loads(args.verification.read_text(encoding="utf-8"))
+        manifest = load_evidence(args.manifest)
+        benchmark = load_evidence(args.benchmark)
+        verification = load_evidence(args.verification)
         result = qualify(manifest, benchmark, verification,
                          args.manifest.parent if args.check_files else None)
         rendered = json.dumps(result, indent=2) + "\n"

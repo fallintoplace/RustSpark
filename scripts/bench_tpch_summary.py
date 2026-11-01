@@ -4,8 +4,24 @@
 import argparse
 import json
 import math
-import statistics
 from pathlib import Path
+
+
+def finite_sample_median(samples):
+    ordered = sorted(samples)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (
+        ordered[middle - 1] + (ordered[middle] - ordered[middle - 1]) / 2
+    )
+
+
+def valid_positive_duration(value):
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def checked_medians(entries):
@@ -14,16 +30,16 @@ def checked_medians(entries):
         if row.get("status") != "ok":
             raise ValueError(f"Query {row['id']} did not execute successfully")
         value = row.get("median_ms")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        if not valid_positive_duration(value):
             raise ValueError(f"Invalid median for query {row['id']}")
         if "samples_ms" in row:
             samples = row["samples_ms"]
             if (not isinstance(samples, list) or not samples
                     or any(type(sample) not in (int, float)
-                           or not math.isfinite(sample) or sample <= 0
+                           or not valid_positive_duration(sample)
                            for sample in samples)):
                 raise ValueError(f"Invalid timing samples for query {row['id']}")
-            if abs(statistics.median(samples) - value) > 0.002:
+            if abs(finite_sample_median(samples) - value) > 0.002:
                 raise ValueError(f"Reported median differs from samples for query {row['id']}")
         medians.append(float(value))
     return medians
@@ -46,7 +62,10 @@ def complete_query_rows(report):
 def summarize(report):
     entries = complete_query_rows(report)
     medians = checked_medians(entries)
-    total = math.fsum(medians)
+    try:
+        total = math.fsum(medians)
+    except OverflowError as error:
+        raise ValueError("TPC-H latency sum exceeds finite range") from error
     slowest = sorted(entries, key=lambda row: (-row["median_ms"], row["id"]))[:3]
     return {
         "queries_executed": 22,
@@ -54,7 +73,7 @@ def summarize(report):
         "sum_median_ms": round(total, 3),
         "top_latency_queries": [row["id"] for row in slowest],
         "top_three_latency_percent": round(
-            math.fsum(row["median_ms"] for row in slowest) * 100 / total, 2,
+            math.fsum(row["median_ms"] for row in slowest) / total * 100, 2,
         ),
         "geometric_mean_ms": round(math.exp(math.fsum(math.log(value) for value in medians) / 22), 3),
         "slowest_query": max(entries, key=lambda row: row["median_ms"])["id"],
