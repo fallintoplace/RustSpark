@@ -10,6 +10,32 @@ def report(*items):
 
 
 class RegressionTests(unittest.TestCase):
+    def test_malformed_report_shapes_fail_with_validation_errors(self):
+        valid = report((1, 10))
+        for invalid in (None, [], {"results": ["not an object"]}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                regress.compare(valid, invalid)
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                regress.medians(invalid)
+
+    def test_duplicate_json_fields_cannot_replace_benchmark_results(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "benchmark.json"
+            for invalid in (
+                '{"results":[{"id":1}],"results":[]}',
+                '{"results":[{"id":1,"id":2,"status":"ok"}]}',
+                '{"results":[{"id":1,"median_ms":NaN}]}',
+            ):
+                with self.subTest(invalid=invalid):
+                    path.write_text(invalid, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        regress.read_benchmark_report(path)
+            path.write_text('{"results":[{"id":1,"median_ms":10}]}',
+                            encoding="utf-8")
+            self.assertEqual(regress.read_benchmark_report(path)["results"][0]["id"], 1)
+
     def test_different_environment_blocks_comparison(self):
         first = report((1, 10))
         second = report((1, 9))
