@@ -30,6 +30,21 @@ def _add_named_tables(command: list[str], flag: str,
         command.extend([flag, f"{name}={file_path}"])
 
 
+def _add_named_parameters(command: list[str],
+                          parameters: Mapping[str, str] | None) -> None:
+    params = parameters or {}
+    if len(params) > 64 or any(
+        not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None
+        for name in params
+    ):
+        raise ValueError("Invalid SQL parameter name or parameter count")
+    for name in sorted(params):
+        value = params[name]
+        if not isinstance(value, str) or ":" not in value or len(value.encode("utf-8")) > 8192:
+            raise ValueError("SQL parameters must be bounded typed values")
+        command.extend(["--named-param", f"{name}={value}"])
+
+
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | Path | None = None,
                   parquet: str | Path | None = None,
@@ -39,7 +54,8 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   max_rows: int | None = None,
                   csv_tables: Mapping[str, str | Path] | None = None,
                   parquet_tables: Mapping[str, str | Path] | None = None,
-                  json_tables: Mapping[str, str | Path] | None = None) -> list[str]:
+                  json_tables: Mapping[str, str | Path] | None = None,
+                  named_params: Mapping[str, str] | None = None) -> list[str]:
     if not isinstance(sql, str) or not sql.strip():
         raise ValueError("SQL cannot be blank")
     if sum(source is not None for source in (csv, parquet, json_input)) > 1:
@@ -70,6 +86,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     _add_named_tables(command, "--csv-table", csv_tables)
     _add_named_tables(command, "--parquet-table", parquet_tables)
     _add_named_tables(command, "--json-table", json_tables)
+    __add_named_parameters(command, named_params)
     if query_timeout is not None:
         command.extend(["--query-timeout", str(query_timeout)])
     if max_rows is not None:
@@ -138,6 +155,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                          csv_tables: Mapping[str, str | Path] | None = None,
                          parquet_tables: Mapping[str, str | Path] | None = None,
                          json_tables: Mapping[str, str | Path] | None = None,
+                         named_params: Mapping[str, str] | None = None,
                          temp_dir: str | None = None,
                          process_timeout: float | None = None,
                          max_arrow_bytes: int = 512 * 1024 * 1024) -> Iterator[object]:
@@ -161,7 +179,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
             json_input=json_input, query_timeout=query_timeout,
             database_dir=database_dir, max_rows=max_rows,
             csv_tables=csv_tables, parquet_tables=parquet_tables,
-            json_tables=json_tables,
+            json_tables=json_tables, named_params=named_params,
         )
         # A backend can emit arbitrarily many diagnostics. Keep these off
         # the Python heap and surface only a bounded tail on failure.
