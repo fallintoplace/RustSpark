@@ -68,6 +68,22 @@ fn scan_with_expected_schema(
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
     let file = File::open(path)?;
+    scan_with_expected_file(file, batch_size, expected)
+}
+
+/// Scan the same verified descriptor, instead of reopening a mutable path.
+pub(crate) fn scan_checked_open_file(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+) -> Result<ParquetScan> {
+    scan_with_expected_file(file, batch_size, Some(expected))
+}
+
+fn scan_with_expected_file(
+    file: File, batch_size: usize, expected: Option<&crate::schema::Schema>,
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
     if let Some(expected) = expected {
