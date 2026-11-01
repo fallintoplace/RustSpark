@@ -7,6 +7,18 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
+    // Plain start-anchored identifiers cannot match anywhere else. Avoid
+    // compiling a regex for a common token-extraction predicate.
+    if let Some(prefix) = pattern.strip_prefix('^')
+        && prefix.len() <= 4095
+        && prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+    {
+        return Ok(if text.starts_with(prefix) {
+            Value::Text(prefix.to_owned())
+        } else {
+            Value::Null
+        });
+    }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
         // Byte-wise digit searches preserve UTF-8 boundaries because all
         // matched bytes are ASCII. Only copy the resulting match.
@@ -191,5 +203,22 @@ mod unicode_literal_substring_optimization_tests {
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text("東京".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod anchored_literal_substr_differential_tests {
+    use super::*;
+
+    #[test]
+    fn matches_regex_semantics_for_ascii_unicode_and_empty_anchors() {
+        for text in ["", "foo", "foobar", "xfoo", "\nfoo", "éfoo", "東京start", "foo\nfoo"] {
+            for pattern in ["^", "^foo", "^foobar", "^é", "^東京", "^foo_bar", "^f.o", "(?m)^foo"] {
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or(Value::Null, |matched| Value::Text(matched.as_str().into()));
+                let actual = evaluate(&[Value::Text(text.into()), Value::Text(pattern.into())]).unwrap();
+                assert_eq!(actual, expected, "text={text:?} pattern={pattern:?}");
+            }
+        }
     }
 }

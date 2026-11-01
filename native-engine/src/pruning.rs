@@ -111,6 +111,12 @@ fn can_skip_in_list(
 }
 
 pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> bool {
+    // Over-budget trees cannot safely prove a partition empty.
+    if predicate.validate_budget().is_err() { return false; }
+    can_skip_inner(stats, column, predicate)
+}
+
+fn can_skip_inner(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> bool {
     if !trustworthy(stats) { return false; }
     if stats.rows == 0 {
         return true;
@@ -177,10 +183,10 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
             false
         }
         Expr::Binary { left, op: BinaryOp::And, right } => {
-            can_skip(stats, column, left) || can_skip(stats, column, right)
+            can_skip_inner(stats, column, left) || can_skip_inner(stats, column, right)
         }
         Expr::Binary { left, op: BinaryOp::Or, right } => {
-            can_skip(stats, column, left) && can_skip(stats, column, right)
+            can_skip_inner(stats, column, left) && can_skip_inner(stats, column, right)
         }
         Expr::Binary { left, op, right } => can_skip_binary(stats, column, left, *op, right),
         _ => false,
@@ -314,6 +320,7 @@ pub fn can_skip_columns(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
     predicate: &Expr,
 ) -> bool {
+    if predicate.validate_budget().is_err() { return false; }
     // Constants do not require a statistics lookup, even on empty metadata.
     if matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) ||
         matches!(predicate, Expr::Not(inner)
@@ -962,5 +969,28 @@ mod normalized_membership_pruning_tests {
         let mut missing = HashMap::new();
         missing.insert("other".into(), stats["account_id"].clone());
         assert!(!can_skip_columns(&missing, &membership(&[1, 2], false)));
+    }
+}
+
+#[cfg(test)]
+mod direct_pruning_expression_budget_tests {
+    use super::*;
+
+    #[test]
+    fn deep_boolean_trees_fall_back_to_safe_no_prune() {
+        let summary = ColumnStatistics {
+            rows: 4, nulls: 0,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(4)),
+        };
+        let mut predicate = Expr::Literal(Value::Boolean(false));
+        for _ in 0..80 {
+            predicate = Expr::binary(predicate, BinaryOp::And,
+                Expr::Literal(Value::Boolean(false)));
+        }
+        assert!(!can_skip(&summary, "n", &predicate));
+        let stats = std::collections::HashMap::from([("n".into(), summary)]);
+        assert!(!can_skip_columns(&stats, &predicate));
+        assert!(can_skip(&stats["n"], "n",
+            &Expr::Literal(Value::Boolean(false))));
     }
 }

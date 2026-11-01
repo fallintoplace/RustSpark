@@ -47,6 +47,24 @@ impl HyperLogLog {
         if old == 0 { self.nonempty += 1; }
     }
 
+    // Use one accumulator adjustment for dense sketches. The register-wise
+    // max operation is shared by local and worker-wire merges.
+    fn merge_registers(&mut self, incoming: &[u8]) {
+        let mut replaced_weight = 0u128;
+        let mut merged_weight = 0u128;
+        let mut new_nonempty = 0usize;
+        for (current, &rank) in self.registers.iter_mut().zip(incoming) {
+            if rank > *current {
+                replaced_weight += harmonic_weight(*current);
+                merged_weight += harmonic_weight(rank);
+                new_nonempty += usize::from(*current == 0);
+                *current = rank;
+            }
+        }
+        self.harmonic_scaled = self.harmonic_scaled - replaced_weight + merged_weight;
+        self.nonempty += new_nonempty;
+    }
+
     pub fn new() -> Self {
         Self { registers: [0; REGISTERS], nonempty: 0,
             harmonic_scaled: REGISTERS as u128 * HARMONIC_SCALE }
@@ -120,9 +138,21 @@ impl HyperLogLog {
             .any(|&rank| u32::from(rank) > 65 - PRECISION) {
             return Err(Error::Parse("invalid HLL register rank".into()));
         }
-        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
-            if rank != 0 { self.update_register(index, rank); }
+        self.merge_registers(&bytes[WIRE_HEADER.len()..]);
+        Ok(())
+    }
+
+    /// Apply a window of worker sketches as a single commit. A late corrupt
+    /// payload must not publish partial aggregate state to downstream stages.
+    /// The shadow sketch costs a fixed 4 KiB regardless of window length.
+    pub fn merge_wire_batch<'a>(
+        &mut self, sketches: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        for encoded in sketches {
+            next.merge_wire_bytes(encoded)?;
         }
+        *self = next;
         Ok(())
     }
 
@@ -163,22 +193,7 @@ impl HyperLogLog {
             self.harmonic_scaled = other.harmonic_scaled;
             return;
         }
-        // Merge the 4 KiB register arrays with one harmonic adjustment.
-        // Updating the fixed-point accumulator per changed register creates
-        // an unnecessary dependency chain on dense distributed sketches.
-        let mut replaced_weight = 0u128;
-        let mut merged_weight = 0u128;
-        let mut new_nonempty = 0usize;
-        for (current, &incoming) in self.registers.iter_mut().zip(other.registers.iter()) {
-            if incoming > *current {
-                replaced_weight += harmonic_weight(*current);
-                merged_weight += harmonic_weight(incoming);
-                new_nonempty += usize::from(*current == 0);
-                *current = incoming;
-            }
-        }
-        self.harmonic_scaled = self.harmonic_scaled - replaced_weight + merged_weight;
-        self.nonempty += new_nonempty;
+        self.merge_registers(&other.registers);
     }
 
     pub fn estimate(&self) -> f64 {
@@ -203,6 +218,46 @@ impl HyperLogLog {
 impl Default for HyperLogLog {
     fn default() -> Self { Self::new() }
 }
+
+#[cfg(test)]
+mod transactional_hll_worker_window_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_sparse_and_dense_worker_windows_match_regular_merges() {
+        let mut sparse = HyperLogLog::new();
+        for n in 0..120 { sparse.add(&Value::Integer(n)); }
+        let mut dense = HyperLogLog::new();
+        for n in 0..20_000 { dense.add(&Value::Integer(n)); }
+        let sparse_wire = sparse.to_wire_bytes();
+        let dense_wire = dense.to_wire_bytes();
+        assert!(sparse_wire.starts_with(SPARSE_WIRE_HEADER));
+        assert!(dense_wire.starts_with(WIRE_HEADER));
+        let mut expected = HyperLogLog::new();
+        expected.merge(&sparse);
+        expected.merge(&dense);
+        let mut actual = HyperLogLog::new();
+        actual.merge_wire_batch([sparse_wire.as_slice(), dense_wire.as_slice()]).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.to_wire_bytes(), expected.to_wire_bytes());
+    }
+
+    #[test]
+    fn late_malformed_worker_sketch_rolls_back_every_register() {
+        let mut sketch = HyperLogLog::new();
+        sketch.add(&Value::Text("previous worker".into()));
+        let before = sketch.clone();
+        let mut valid = HyperLogLog::new();
+        valid.add(&Value::Integer(123));
+        let wire = valid.to_wire_bytes();
+        let bad: &[u8] = b"RSH2\0";
+        assert!(sketch.merge_wire_batch([wire.as_slice(), bad]).is_err());
+        assert_eq!(sketch, before);
+        sketch.merge_wire_batch(std::iter::empty::<&[u8]>()).unwrap();
+        assert_eq!(sketch, before);
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -772,5 +827,33 @@ mod selected_hll_update_tests {
         assert_eq!(sketch, before);
         assert!(sketch.add_selected(&values, &[usize::MAX]).is_err());
         assert_eq!(sketch, before);
+    }
+}
+
+#[cfg(test)]
+mod dense_wire_merge_accumulator_tests {
+    use super::*;
+
+    #[test]
+    fn dense_worker_merges_match_local_registerwise_max_and_are_idempotent() {
+        let mut incoming = HyperLogLog::new();
+        let mut target = HyperLogLog::new();
+        for number in 0..80_000 {
+            incoming.add(&Value::Integer(number));
+            if number % 2 == 0 {
+                target.add(&Value::Integer(number + 50_000));
+            }
+        }
+        let frame = incoming.to_wire_bytes();
+        assert!(frame.starts_with(WIRE_HEADER));
+        let mut expected = target.clone();
+        expected.merge(&incoming);
+        target.merge_wire_bytes(&frame).unwrap();
+        assert_eq!(target, expected);
+        assert_eq!(target.harmonic_scaled,
+            target.registers.iter().map(|&rank| harmonic_weight(rank)).sum::<u128>());
+        target.merge_wire_bytes(&frame).unwrap();
+        assert_eq!(target, expected);
+        assert_eq!(HyperLogLog::from_wire_bytes(&frame).unwrap(), incoming);
     }
 }

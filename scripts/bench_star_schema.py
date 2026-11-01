@@ -102,8 +102,7 @@ def command(binary, inputs, sql):
     arguments = [str(binary)]
     for name in ("facts", "products", "regions"):
         arguments.extend(["--csv-table", f"{name}={inputs[name]}"])
-    return [*arguments, "--csv-schema", "id:int64,dim:int64,amount:int64",
-            "--sql", sql, "--stdout-format", "json"]
+    return [*arguments, "--sql", sql, "--stdout-format", "json"]
 
 
 def measure(binary, inputs, sql, expected_hash, repeat, warmup, timeout):

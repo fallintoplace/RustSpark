@@ -280,8 +280,22 @@ impl StageGraph {
             }
             return ranges;
         }
+        // Worker snapshots can retain large numbers of attempts from stages
+        // whose dependencies have not completed, or which have completed.
+        // Only ready stages need an exclusion index for this dispatch.
+        // Build the eligibility set only when enough running tasks exist to
+        // amortize it. Small windows retain the original allocation-free path.
+        let ready = (running.len() >= 256).then(|| order.iter()
+            .filter_map(|&index| {
+                let stage = &self.stages[index];
+                Self::dependency_ready(stage, completed).then_some(stage.id)
+            })
+            .collect::<HashSet<u64>>());
         let mut excluded: HashMap<u64, Vec<usize>> = HashMap::new();
         for &(stage, partition) in running {
+            if ready.as_ref().is_some_and(|ready| !ready.contains(&stage)) {
+                continue;
+            }
             excluded.entry(stage).or_default().push(partition);
         }
         for positions in excluded.values_mut() {
@@ -828,5 +842,55 @@ mod dependency_edge_budget_tests {
         }));
         let error = StageGraph::new(dense).unwrap_err();
         assert!(error.to_string().contains("dependency edge budget"));
+    }
+}
+
+#[cfg(test)]
+mod ready_task_ranges_unready_exclusion_tests {
+    use super::*;
+
+    #[test]
+    fn large_ineligible_attempt_sets_do_not_change_ready_partition_windows() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 1024 },
+            Stage { id: 2, dependencies: vec![1], partitions: 65_536 },
+            Stage { id: 3, dependencies: vec![], partitions: 16 },
+        ]).unwrap();
+        let completed = HashSet::new();
+        let mut running = (0..65_536).map(|partition| (2, partition))
+            .collect::<HashSet<_>>();
+        running.extend((0..400).map(|partition| (99, partition)));
+        running.extend([(1, 0), (1, 1), (1, 511), (3, 0)]);
+        for critical_path in [false, true] {
+            for window in [1, 2, 16, 128] {
+                let ranges = graph.ready_task_ranges_excluding(
+                    &completed, &running, window, critical_path);
+                let actual = ranges.into_iter()
+                    .flat_map(|(stage, range)| range.map(move |partition| (stage, partition)))
+                    .collect::<Vec<_>>();
+                let reference = if critical_path {
+                    graph.ready_tasks_by_critical_path_excluding(&completed, &running, window)
+                } else {
+                    graph.ready_tasks_excluding(&completed, &running, window)
+                };
+                assert_eq!(actual, reference,
+                    "critical_path={critical_path}, window={window}");
+                assert!(actual.iter().all(|&(stage, _)| stage != 2));
+            }
+        }
+    }
+
+    #[test]
+    fn partial_completion_changes_eligible_stages_without_resending_running_tasks() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 10, dependencies: vec![], partitions: 2 },
+            Stage { id: 20, dependencies: vec![10], partitions: 3 },
+        ]).unwrap();
+        let running = (0..400).map(|partition| (999, partition))
+            .chain([(20, 0), (20, 2)]).collect::<HashSet<_>>();
+        assert_eq!(graph.ready_task_ranges_excluding(&HashSet::new(), &running, 8, false),
+            vec![(10, 0..2)]);
+        assert_eq!(graph.ready_task_ranges_excluding(&HashSet::from([10]), &running, 8, false),
+            vec![(20, 1..2)]);
     }
 }

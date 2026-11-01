@@ -208,6 +208,19 @@ class BoundedProcessCaptureTests(unittest.TestCase):
                 timeout=5, max_output_bytes=1024, max_error_bytes=1024,
             )
 
+    def test_live_stdout_and_stderr_limits_kill_before_child_exit(self):
+        # A buffered read(65536) waits for EOF instead of noticing 2 KiB
+        # written by a child that remains alive.
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream), self.assertRaisesRegex(ValueError, "limit"):
+                script = (
+                    "import sys,time;"
+                    f"sys.{stream}.buffer.write(b'x'*2048);"
+                    f"sys.{stream}.flush();time.sleep(8)"
+                )
+                run_bounded([sys.executable, "-c", script], timeout=2,
+                            max_output_bytes=32, max_error_bytes=32)
+
     def test_direct_capture_rejects_invalid_budgets_before_spawn(self):
         import rustspark_local.subprocess_budget as capture
 

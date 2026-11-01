@@ -355,7 +355,8 @@ impl<R: BufRead> CsvStream<R> {
         if row_count == 0 { return None; }
         // Preserve nullable and type validation while skipping row-major
         // buffering and a second row-to-column transposition.
-        let result = Batch::new_with_row_count(self.schema.clone(), columns, row_count);
+        // read_row_into already checked column types and NULL constraints.
+        let result = Batch::from_validated_columns(self.schema.clone(), columns, row_count);
         if result.is_err() { self.exhausted = true; }
         Some(result)
     }
@@ -810,5 +811,40 @@ mod blank_line_csv_stream_differential_tests {
     fn thousands_of_blank_rows_do_not_create_spurious_batches() {
         let input = format!("n\n{}42\n{}43\n", "\r\n".repeat(2048), "\n".repeat(2048));
         differential(&input, 1);
+    }
+}
+
+#[cfg(test)]
+mod streamed_validated_columns_perf_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn preserves_typed_nullable_rows_across_output_batches() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("name", DataType::Text, true),
+        ]).unwrap();
+        let input = "n,name\n1,alpha\n,世界\n-3,\n";
+        let batches = CsvStream::new_typed(Cursor::new(input), 2, 1024, schema)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("alpha".into())],
+            vec![Value::Null, Value::Text("世界".into())],
+        ]);
+        assert_eq!(batches[1].row(0).unwrap(),
+            vec![Value::Integer(-3), Value::Null]);
+    }
+
+    #[test]
+    fn invalid_typed_values_still_reject_rows() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let mut stream = CsvStream::new_typed(
+            Cursor::new("n\nnot-a-number\n"), 4, 1024, schema,
+        ).unwrap();
+        assert!(stream.next().unwrap().is_err());
     }
 }
