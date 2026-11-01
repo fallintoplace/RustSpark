@@ -33,8 +33,15 @@ class RetryTests(unittest.TestCase):
                 "queries_dir": Path(tmp), "parquet_dir": Path(tmp),
                 "repeat": 1, "timeout": 10,
             })()
-            with mock.patch.object(retry.subprocess, "run", return_value=mock.Mock(returncode=0)):
-                with self.assertRaises(ValueError):
+            def emit_invalid_retry(*_args, **_kwargs):
+                # The retry runner writes after execute_retry deletes any
+                # stale output. Exercise validation of the newly written file.
+                path.write_text('{"results":[{"id":1,"status":"ok"}],"results":[]}',
+                                encoding="utf-8")
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(retry.subprocess, "run", side_effect=emit_invalid_retry):
+                with self.assertRaisesRegex(ValueError, "Duplicate"):
                     retry.execute_retry(args)
 
     def test_selects_only_failures(self):
