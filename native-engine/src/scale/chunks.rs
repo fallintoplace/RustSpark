@@ -6,7 +6,7 @@ const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
     row.iter().fold(base, |used, value| {
         used.saturating_add(match value {
-            Value::Text(text) => text.len(),
+            Value::Text(text) => text.capacity(),
             _ => 0,
         })
     })
@@ -161,7 +161,26 @@ impl Iterator for BatchChunks<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
     }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.0.nth(n)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+
+    fn count(self) -> usize {
+        self.0.count()
+    }
+
+    fn last(self) -> Option<Self::Item> {
+        self.0.last()
+    }
 }
+
+impl ExactSizeIterator for BatchChunks<'_> {}
+impl std::iter::FusedIterator for BatchChunks<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -457,5 +476,102 @@ mod precomputed_row_batch_limits_tests {
         assert!(RowBatcher::with_byte_budget(
             std::iter::empty(), schema, 10, width - 1,
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod retained_capacity_admission_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn large_retained_text_capacity_fails_after_valid_rows() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let mut oversized = String::with_capacity(4096);
+        oversized.push('x');
+        let rows = vec![
+            Ok(vec![Value::Text("ok".into())]),
+            Ok(vec![Value::Text(oversized)]),
+            Ok(vec![Value::Text("unreachable".into())]),
+        ];
+        let mut batches = RowBatcher::with_byte_budget(rows.into_iter(), schema, 8, 128).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Text("ok".into())]]);
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
+    }
+
+    #[test]
+    fn capacity_equal_to_budget_is_accepted() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let mut text = String::with_capacity(64);
+        text.push('x');
+        let minimum = std::mem::size_of::<Value>();
+        let capacity = text.capacity();
+        let batches = RowBatcher::with_byte_budget(
+            [Ok(vec![Value::Text(text)])].into_iter(), schema, 4,
+            minimum + capacity,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+    }
+}
+
+#[cfg(test)]
+mod scale_chunk_iterator_adaptor_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn wrapper_preserves_exact_size_and_skip_behavior() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..23)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut chunks = BatchChunks::new(&input, 4).unwrap();
+        assert_eq!(chunks.len(), 6);
+        assert_eq!(chunks.size_hint(), (6, Some(6)));
+        assert_eq!(chunks.nth(2).unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(8)]);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.last().unwrap().unwrap().row(0).unwrap(), vec![Value::Integer(20)]);
+        assert_eq!(BatchChunks::new(&input, 4).unwrap().count(), 6);
+        let mut exhausted = BatchChunks::new(&input, 4).unwrap();
+        assert!(exhausted.nth(usize::MAX).is_none());
+        assert!(exhausted.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod row_batch_retained_capacity_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn text_schema() -> Schema {
+        Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap()
+    }
+
+    fn sparse_text(capacity: usize) -> Vec<Value> {
+        let mut text = String::with_capacity(capacity);
+        text.push('x');
+        vec![Value::Text(text)]
+    }
+
+    #[test]
+    fn splits_sparse_strings_by_retained_allocation_not_string_length() {
+        let input = (0..3).map(|_| Ok(sparse_text(60)));
+        let batches = RowBatcher::with_byte_budget(input, text_schema(), 10, 100)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [1, 1, 1]);
+        assert!(batches.iter().all(|batch| batch.value(0, 0).unwrap()
+            == &Value::Text("x".into())));
+    }
+
+    #[test]
+    fn oversized_retained_allocation_reports_error_after_valid_prefix() {
+        let rows = vec![Ok(sparse_text(1)), Ok(sparse_text(200))];
+        let mut stream = RowBatcher::with_byte_budget(rows.into_iter(), text_schema(), 10, 100)
+            .unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next().unwrap().unwrap_err().to_string().contains("byte budget"));
+        assert!(stream.next().is_none());
     }
 }

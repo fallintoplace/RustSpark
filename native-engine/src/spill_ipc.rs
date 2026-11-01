@@ -1,6 +1,6 @@
 //! Temporary Arrow IPC spill files for memory-bounded native operators.
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     path::{Path, PathBuf},
     sync::{Arc, atomic::{AtomicU64, Ordering}},
     time::{SystemTime, UNIX_EPOCH},
@@ -30,16 +30,12 @@ impl SpillFile {
         let file = File::open(self.path())?;
         let inner = FileReader::try_new(file, None)
             .map_err(|e| Error::Execution(format!("open Arrow spill: {e}")))?;
-        Ok(SpillReader {
-            inner,
-            failed: false,
-            _owner: Arc::clone(&self.owner),
-        })
+        Ok(SpillReader { inner, failed: false, _owner: Arc::clone(&self.owner) })
     }
 }
 
 pub struct SpillReader {
-    // Drop the open file before the last ownership token can delete it.
+    // Drop file handle before removing scratch file
     inner: FileReader<File>,
     failed: bool,
     _owner: Arc<SpillPath>,
@@ -71,7 +67,7 @@ pub fn spill(dir: impl AsRef<Path>, schema: &Schema, batches: &[Batch]) -> Resul
         "rustspark-spill-{}-{timestamp}-{identifier}.arrow",
         std::process::id()
     ));
-    let output = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    let output = crate::scale::private_files::create_private(&path)?;
     let temporary = SpillFile { owner: Arc::new(SpillPath(path)) };
     let arrow_schema = arrow_bridge::to_arrow(&Batch::empty(schema.clone()))?.schema();
     let mut writer = FileWriter::try_new(output, &arrow_schema)
@@ -132,7 +128,6 @@ mod malformed_ipc_reader_tests {
         assert!(reader.next().is_none());
     }
 }
-
 #[cfg(test)]
 mod spill_reader_ownership_regressions {
     use super::*;
@@ -155,3 +150,4 @@ mod spill_reader_ownership_regressions {
         assert!(!path.exists(), "last reader must remove the scratch file");
     }
 }
+
