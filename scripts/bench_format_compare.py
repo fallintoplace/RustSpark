@@ -64,8 +64,9 @@ def measure(binary, kind, file, sql, expected_hash, repeat, warmup, timeout):
 
 
 def benchmark(binary, rows=100000, repeat=3, warmup=1, timeout=120):
-    if min(rows, repeat, timeout) < 1 or warmup < 0:
-        raise ValueError("rows/repeat/timeout must be positive; warmup must be nonnegative")
+    if (any(type(value) is not int for value in (rows, repeat, warmup, timeout))
+            or min(rows, repeat, timeout) < 1 or warmup < 0):
+        raise ValueError("rows/repeat/timeout must be positive integers; warmup must be nonnegative")
     with tempfile.TemporaryDirectory(prefix="rustspark-formats-") as folder:
         root = Path(folder)
         csv, parquet = root / "input.csv", root / "input.parquet"

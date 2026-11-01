@@ -8,6 +8,19 @@ const MAX_BUILD_ROWS: usize = 100_000;
 const MAX_BUILD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OUTPUT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
+// A cloned output row retains at least its TEXT lengths, not the source
+// String capacities. Use this lower bound to reject oversized rows before
+// cloning and to avoid charging unused capacity in the left input.
+fn cloned_row_lower_bound(columns: &[&[Value]], row: usize) -> usize {
+    let fixed = 64usize.saturating_add(
+        columns.len().saturating_mul(std::mem::size_of::<Value>()),
+    );
+    columns.iter().fold(fixed, |total, column| match &column[row] {
+        Value::Text(value) => total.saturating_add(value.len()),
+        _ => total,
+    })
+}
+
 pub struct CrossJoinStream {
     left: BatchStream,
     left_schema: Schema,
@@ -45,10 +58,18 @@ impl CrossJoinStream {
             if batch.schema() != &right_schema {
                 return Err(Error::Schema("stream cross join right schema changed".into()));
             }
+            let source_columns = (0..right_schema.len())
+                .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
             for row in 0..batch.num_rows() {
                 if row % 1024 == 0 { control.check()?; }
                 if right_rows.len() >= MAX_BUILD_ROWS {
                     return Err(Error::Execution("stream cross join build row budget exceeded".into()));
+                }
+                // Do not clone a potentially enormous right row if even its
+                // minimum retained size exceeds the build memory budget.
+                let minimum = cloned_row_lower_bound(&source_columns, row);
+                if size.checked_add(minimum).is_none_or(|next| next > MAX_BUILD_BYTES) {
+                    return Err(Error::Execution("stream cross join build byte budget exceeded".into()));
                 }
                 let values = batch.row(row)?;
                 let footprint = super::row_footprint::footprint(values.iter());
@@ -105,9 +126,8 @@ impl CrossJoinStream {
                             let columns = (0..self.left_schema.len())
                                 .map(|index| batch.column(index))
                                 .collect::<Result<Vec<_>>>()?;
-                            self.current_left_bytes = super::row_footprint::footprint(
-                                columns.iter().map(|column| &column[self.left_row])
-                            );
+                            self.current_left_bytes =
+                                cloned_row_lower_bound(&columns, self.left_row);
                             self.left_ready = true;
                             self.right_row = 0;
                             break;
@@ -398,5 +418,50 @@ mod trusted_cross_join_output_tests {
         assert_eq!(parts.iter().flat_map(|b| b.rows().unwrap())
             .collect::<Vec<_>>(), expected.rows().unwrap());
         assert!(parts.iter().all(|b| b.schema() == expected.schema()));
+    }
+}
+
+
+#[cfg(test)]
+mod cloned_stream_cross_join_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn large_unused_left_string_capacity_does_not_reject_small_output() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let mut source = String::with_capacity(MAX_OUTPUT_BATCH_BYTES + 1024);
+        source.push_str("tiny");
+        let left = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text(source)]]).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Text("right".into())]]).unwrap();
+        let mut stream = CrossJoinStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            schema.clone(), schema, 2, QueryControl::default(),
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Text("tiny".into()), Value::Text("right".into())]
+        ]);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn genuinely_oversized_output_is_rejected_before_cloning() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(MAX_OUTPUT_BATCH_BYTES + 1024))]
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("right".into())]
+        ]).unwrap();
+        let mut stream = CrossJoinStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            schema.clone(), schema, 1, QueryControl::default(),
+        ).unwrap();
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
     }
 }

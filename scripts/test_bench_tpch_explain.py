@@ -16,6 +16,19 @@ class ExplainTests(unittest.TestCase):
         self.assertEqual(cmd[-1], "--explain")
         self.assertNotIn("--explain-analyze", cmd)
 
+    def test_invalid_timeout_and_partitions_fail_before_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            output = folder / "plans"
+            queries = [(1, folder / "01.sql")]
+            for invalid in (True, 0, 1.5, float("nan"), float("inf"), "12"):
+                with self.subTest(timeout=invalid), self.assertRaises(ValueError):
+                    explain.capture("rs", folder, queries, output, timeout=invalid)
+                self.assertFalse(output.exists())
+                with self.subTest(partitions=invalid), self.assertRaises(ValueError):
+                    explain.capture("rs", folder, queries, output, partitions=invalid)
+                self.assertFalse(output.exists())
+
     def test_failed_and_successful_plans(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

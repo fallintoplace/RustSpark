@@ -17,5 +17,19 @@ class AbbaTimeoutTests(unittest.TestCase):
             measure.assert_not_called()
 
 
+    def test_invalid_benchmark_options_reject_before_hashing_binaries(self):
+        with mock.patch.object(abba, "binary_sha256") as sha:
+            for settings in (
+                {"repeat": 0}, {"repeat": True}, {"warmup": -1},
+                {"warmup": 1.5}, {"timeout": float("nan")},
+                {"timeout": float("inf")}, {"timeout": True},
+                {"partitions": 0}, {"partitions": True},
+                {"partitions": 1.5},
+            ):
+                with self.subTest(settings=settings), self.assertRaises(ValueError):
+                    abba.benchmark("old", "new", "parquet", [], **settings)
+            sha.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
