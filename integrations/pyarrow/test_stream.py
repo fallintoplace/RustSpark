@@ -32,6 +32,16 @@ class ArrowStreamCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", query_timeout=0)
 
+    def test_rejects_invalid_unnamed_and_database_paths_early(self):
+        for invalid in ("", b"data.csv", 123):
+            for flag in ("csv", "parquet", "json_input"):
+                with self.subTest(flag=flag, value=invalid), self.assertRaisesRegex(
+                        ValueError, "Unnamed input paths"):
+                    build_command("SELECT 1", **{flag: invalid})
+            with self.subTest(database_dir=invalid), self.assertRaisesRegex(
+                    ValueError, "database_dir"):
+                build_command("SELECT 1", database_dir=invalid)
+
     def test_named_tables_enable_multi_file_queries(self):
         command = build_command("SELECT * FROM users JOIN orders ON users.id = orders.uid",
                                 csv_tables={"users": "/a b/users.csv"},
