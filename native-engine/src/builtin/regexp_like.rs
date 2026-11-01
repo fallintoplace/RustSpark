@@ -18,14 +18,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     // Anchored identifier literals only need a prefix check.
     if let Some(prefix) = pattern.strip_prefix('^') {
-        if prefix.len() <= 4095 && prefix.bytes().all(|byte|
-            byte.is_ascii_alphanumeric() || byte == b'_') {
+        if prefix.len() <= 4095 && prefix.chars().all(|ch|
+            ch.is_alphanumeric() || ch == '_') {
             return Ok(Value::Boolean(text.starts_with(prefix)));
         }
     }
     // Plain ASCII identifiers have no regex metacharacters.
-    if pattern.len() <= 4096 && pattern.bytes().all(|byte|
-        byte.is_ascii_alphanumeric() || byte == b'_') {
+    if pattern.len() <= 4096 && pattern.chars().all(|ch|
+        ch.is_alphanumeric() || ch == '_') {
         return Ok(Value::Boolean(text.contains(pattern)));
     }
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
@@ -167,5 +167,26 @@ mod dot_star_regexp_like_regressions {
             Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
             Value::Text(".*".into()),
         ]).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod unicode_literal_predicate_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_literals_and_anchors_agree_with_regex_engine() {
+        for text in ["", "café", "東京東京", "αβγ", "é🙂東京", "FOOé", "\n東京"] {
+            for pattern in ["é", "東京", "αβ", "café", "^é", "^東京", "^αβ", "é+", "é$"] {
+                let expected = regex_support::compile(pattern).unwrap().is_match(text);
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), Value::Boolean(expected),
+                    "text={text:?}, pattern={pattern:?}");
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("é".into())]).unwrap(),
+            Value::Null);
     }
 }

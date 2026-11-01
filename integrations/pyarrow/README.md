@@ -45,3 +45,5 @@ Use `process_timeout=30` with `iter_arrow_batches` to enforce a wall-clock
 deadline even when the native process stalls before completing Arrow IPC output.
 The iterator terminates the process group on timeout and raises `TimeoutError`.
 `query_timeout` still controls the native SQL deadline independently.
+
+Typed SQL bindings are supported with `named_params={"min": "int64:7"}`. Parameters are passed as CLI arguments without a shell. Names must be ASCII SQL identifiers, values require a type prefix, and each value is limited to 8192 UTF-8 bytes (64 bindings maximum).

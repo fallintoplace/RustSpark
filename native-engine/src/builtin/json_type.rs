@@ -1,7 +1,7 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
 use serde::{Deserialize, de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor}};
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 // Root JSON_TYPE only needs the shape, not an allocated value tree.
 struct RootJsonType(&'static str);
@@ -143,28 +143,81 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 }
 
 
+// Depth only depends on the shape of each value. Keep per-object field
+// depths to preserve serde_json::Map's last-write-wins duplicate-key rule.
+struct StreamingJsonDepth(usize);
+
+impl<'de> Deserialize<'de> for StreamingJsonDepth {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct DepthVisitor;
+        impl<'de> Visitor<'de> for DepthVisitor {
+            type Value = StreamingJsonDepth;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(StreamingJsonDepth(1))
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
+                Ok(StreamingJsonDepth(1))
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
+                Ok(StreamingJsonDepth(1))
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
+                Ok(StreamingJsonDepth(1))
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
+                Ok(StreamingJsonDepth(1))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Self::Value, E> {
+                Ok(StreamingJsonDepth(1))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                let mut depth = 1usize;
+                while let Some(child) = seq.next_element::<StreamingJsonDepth>()? {
+                    depth = depth.max(child.0 + 1);
+                }
+                Ok(StreamingJsonDepth(depth))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<Self::Value, A::Error>
+            {
+                let mut members = HashMap::<String, usize>::new();
+                while let Some((name, child)) =
+                    map.next_entry::<String, StreamingJsonDepth>()?
+                {
+                    members.insert(name, child.0);
+                }
+                Ok(StreamingJsonDepth(
+                    members.into_values().max().unwrap_or(0) + 1
+                ))
+            }
+        }
+        deserializer.deserialize_any(DepthVisitor)
+    }
+}
+
 fn json_depth_type(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Integer)
 }
 fn json_depth(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let document = json_path::parse(text)?;
-    if !matches!(document, serde_json::Value::Array(_) | serde_json::Value::Object(_)) {
-        return Ok(Value::Integer(1));
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
     }
-    // serde_json enforces a bounded nesting depth while parsing. Visit that
-    // tree directly instead of allocating a heap stack for each wide object.
-    fn depth(node: &serde_json::Value) -> i64 {
-        match node {
-            serde_json::Value::Array(items) =>
-                1 + items.iter().map(depth).max().unwrap_or(0),
-            serde_json::Value::Object(fields) =>
-                1 + fields.values().map(depth).max().unwrap_or(0),
-            _ => 1,
-        }
-    }
-    Ok(Value::Integer(depth(&document)))
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let depth = StreamingJsonDepth::deserialize(&mut deserializer)
+        .and_then(|result| deserializer.end().map(|()| result.0))
+        .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
+    Ok(Value::Integer(i64::try_from(depth)
+        .map_err(|_| Error::Execution("JSON_DEPTH overflow".into()))?))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -334,5 +387,52 @@ mod streaming_json_root_member_type_tests {
                 Value::Text(invalid.into()), Value::Text("$.target".into()),
             ]).is_err(), "{invalid}");
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_json_depth_differential_tests {
+    use super::*;
+
+    fn reference(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Array(items) =>
+                1 + items.iter().map(reference).max().unwrap_or(0),
+            serde_json::Value::Object(items) =>
+                1 + items.values().map(reference).max().unwrap_or(0),
+            _ => 1,
+        }
+    }
+
+    #[test]
+    fn streams_large_arrays_and_nested_objects_without_a_value_tree() {
+        let wide = (0..10_000).map(|n|
+            format!(r#"{{"id":{n},"nested":[null,{{"value":"🙂"}}]}}"#)
+        ).collect::<Vec<_>>().join(",");
+        for document in [
+            format!("[{wide}]"),
+            r#"{"a":1,"b":[null,{"x":[true]}]}"#.to_string(),
+            r#"{"x":{"deep":{"ignored":5}},"x":0}"#.to_string(),
+            r#"{"x":0,"x":{"deep":{"kept":5}}}"#.to_string(),
+            r#"{"\u0061":[1],"a":null}"#.to_string(),
+            "null".to_string(), "true".to_string(), r#""é🙂""#.to_string(),
+            "[]".to_string(), "{}".to_string(),
+        ] {
+            let parsed = serde_json::from_str::<serde_json::Value>(&document).unwrap();
+            assert_eq!(json_depth(&[Value::Text(document)]).unwrap(),
+                Value::Integer(reference(&parsed) as i64));
+        }
+    }
+
+    #[test]
+    fn malformed_documents_and_byte_limits_are_preserved() {
+        for invalid in ["", "[1,2", "[1] trailing", r#"{"x":[}"#, "1e999"] {
+            assert!(json_depth(&[Value::Text(invalid.into())]).is_err(),
+                "invalid={invalid:?}");
+        }
+        assert!(matches!(json_depth(&[
+            Value::Text(" ".repeat(16 * 1024 * 1024 + 1)),
+        ]), Err(Error::Execution(_))));
+        assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
     }
 }

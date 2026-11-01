@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use super::Function;
-use crate::{scalar::Value, schema::DataType, Result};
+use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
@@ -52,6 +52,9 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
         None if right => text.trim_end_matches(' '),
         _ => text,
     };
+    if value.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("TRIM result exceeds native 16 MiB budget".into()));
+    }
     Ok(Value::Text(value.into()))
 }
 
@@ -64,6 +67,9 @@ fn normalize_space_type(types: &[DataType]) -> Result<DataType> {
 }
 fn normalize_space(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("NORMALIZE_SPACE input exceeds native 16 MiB budget".into()));
+    }
     if input.is_ascii() {
         let mut output = Vec::with_capacity(input.len());
         let mut pending = false;
@@ -255,6 +261,28 @@ mod ascii_normalize_byte_output_regressions {
         }
         assert_eq!(normalize_space(&[Value::Text("é\u{00A0}界".into())]).unwrap(),
             Value::Text("é 界".into()));
+        assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_trim_normalize_tests {
+    use super::*;
+    #[test]
+    fn permits_short_trimmed_results_but_rejects_large_retained_text() {
+        let huge = "a".repeat(16 * 1024 * 1024 + 1);
+        assert!(matches!(btrim(&[Value::Text(huge.clone())]),
+            Err(Error::Execution(_))));
+        let padded = format!("{}ok{}", " ".repeat(8 * 1024 * 1024), " ".repeat(8 * 1024 * 1024));
+        assert_eq!(btrim(&[Value::Text(padded)]).unwrap(), Value::Text("ok".into()));
+        assert_eq!(btrim(&[Value::Null]).unwrap(), Value::Null);
+    }
+    #[test]
+    fn limits_whitespace_normalization_before_large_allocations() {
+        assert!(matches!(normalize_space(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1))]),
+            Err(Error::Execution(_))));
+        assert_eq!(normalize_space(&[Value::Text(" a\t b ".into())]).unwrap(),
+            Value::Text("a b".into()));
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
     }
 }
