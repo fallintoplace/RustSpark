@@ -33,7 +33,7 @@ fn getbit(args: &[Value]) -> Result<Value> {
     let bit = u32::try_from(position)
         .ok().filter(|bit| *bit < 64)
         .ok_or_else(|| Error::Execution("GETBIT position must be within [0, 63]".into()))?;
-    Ok(Value::Integer(i64::from(((value as u64) >> bit) & 1)))
+    Ok(Value::Integer(((value as u64) >> bit & 1) as i64))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
