@@ -137,6 +137,17 @@ class ProcessGroupCleanupTests(unittest.TestCase):
 
 
 class PinnedTemplateTests(unittest.TestCase):
+    def test_fifo_template_is_rejected_without_waiting_for_a_writer(self):
+        import os
+        if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
+            self.skipTest("FIFO and nonblocking open require POSIX")
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "waiting.sql"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_template(fifo):
+                    pass
+
     def test_snapshot_does_not_follow_a_replaced_template(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
