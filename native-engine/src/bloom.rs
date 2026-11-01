@@ -84,8 +84,14 @@ impl BloomFilter {
     pub fn insert_batch(&mut self, keys: &[Value]) {
         // Inserting into a saturated filter cannot change membership.
         if self.occupied_bits == self.bits && self.populated { return; }
+        let mut previous: Option<&Value> = None;
         for key in keys {
-            self.insert(key);
+            // Sorted join keys often contain long equal runs. Membership is
+            // idempotent, so only the first key in each run needs hashing.
+            if previous != Some(key) {
+                self.insert(key);
+            }
+            previous = Some(key);
             if self.occupied_bits == self.bits { break; }
         }
     }
@@ -621,5 +627,41 @@ mod saturated_bloom_union_regressions {
         assert_eq!(full.bits_set(), 64);
         assert!(full.might_contain(&Value::Integer(10_000_000)));
         assert!(full.union_with(&BloomFilter::new(128, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod batch_run_hash_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_wide_keys_match_individual_insertions() {
+        let mut keys = vec![
+            Value::Null, Value::Null,
+            Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(f64::NAN), Value::Float(f64::NAN),
+        ];
+        for index in 0..500 {
+            let value = Value::Text(format!("{index:04}-{}", "界🙂".repeat(128)));
+            keys.extend(std::iter::repeat_n(value, 4));
+        }
+        let mut reference = BloomFilter::new(131_072, 7).unwrap();
+        for key in &keys { reference.insert(key); }
+        let mut batched = BloomFilter::new(131_072, 7).unwrap();
+        batched.insert_batch(&keys);
+        assert_eq!(batched.words, reference.words);
+        assert_eq!(batched.bits_set(), reference.bits_set());
+        for key in &keys { assert!(batched.might_contain(key)); }
+    }
+
+    #[test]
+    fn empty_and_saturated_batches_keep_filter_state() {
+        let mut filter = BloomFilter::new(1, 1).unwrap();
+        filter.insert_batch(&[]);
+        assert!(!filter.populated);
+        filter.insert_batch(&[Value::Null, Value::Null, Value::Integer(1)]);
+        assert!(filter.populated);
+        assert_eq!(filter.bits_set(), 1);
+        assert!(filter.might_contain(&Value::Text("anything".into())));
     }
 }
