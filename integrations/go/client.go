@@ -24,10 +24,14 @@ var errOutputLimit = errors.New("RustSpark stdout exceeded MaxOutputBytes")
 type boundedOutput struct {
     bytes.Buffer
     limit int
+    onLimit func()
+    exceeded bool
 }
 
 func (output *boundedOutput) Write(chunk []byte) (int, error) {
     if len(chunk) > output.limit-output.Len() {
+        output.exceeded = true
+        if output.onLimit != nil { output.onLimit() }
         return 0, errOutputLimit
     }
     return output.Buffer.Write(chunk)
@@ -137,13 +141,17 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     if err != nil { return nil, err }
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
-    command := exec.CommandContext(ctx, binary, args...)
-    output := boundedOutput{limit: opts.MaxOutputBytes}
+    childCtx, cancel := context.WithCancel(ctx)
+    defer cancel()
+    command := exec.CommandContext(childCtx, binary, args...)
+    output := boundedOutput{limit: opts.MaxOutputBytes, onLimit: cancel}
     if output.limit == 0 { output.limit = 64 * 1024 * 1024 }
     stderr := boundedStderr()
+    stderr.onLimit = cancel
     command.Stdout, command.Stderr = &output, &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return nil, ctx.Err() }
+        if output.exceeded || stderr.exceeded { return nil, errOutputLimit }
         return nil, fmt.Errorf("RustSpark query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
     }
     return decodeRows(&output)
@@ -264,16 +272,22 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     }
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
-    command := exec.CommandContext(ctx, binary, args...)
+    childCtx, cancel := context.WithCancel(ctx)
+    defer cancel()
+    command := exec.CommandContext(childCtx, binary, args...)
+    var limited *ndjsonByteLimit
     if opts.MaxOutputBytes > 0 {
-        command.Stdout = &ndjsonByteLimit{output: output, remaining: opts.MaxOutputBytes}
+        limited = &ndjsonByteLimit{output: output, remaining: opts.MaxOutputBytes, onLimit: cancel}
+        command.Stdout = limited
     } else {
         command.Stdout = output
     }
     stderr := boundedStderr()
+    stderr.onLimit = cancel
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
         if ctx.Err() != nil { return ctx.Err() }
+        if (limited != nil && limited.exceeded) || stderr.exceeded { return errOutputLimit }
         return fmt.Errorf("RustSpark NDJSON query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
     }
     return nil

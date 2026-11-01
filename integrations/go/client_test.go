@@ -243,3 +243,17 @@ func TestDecodeRowsFailsClosedOnTruncatedOrTrailingArrays(t *testing.T) {
         }
     }
 }
+
+func TestOutputBudgetCancelsChildBeforeWaitingForMoreStdout(t *testing.T) {
+    callbacks := 0
+    output := boundedOutput{limit: 2, onLimit: func() { callbacks++ }}
+    if _, err := output.Write([]byte("abc")); !errors.Is(err, errOutputLimit) {
+        t.Fatalf("unexpected limit failure: %v", err)
+    }
+    if !output.exceeded || callbacks != 1 {
+        t.Fatalf("budget callback not invoked: exceeded=%v, callbacks=%d", output.exceeded, callbacks)
+    }
+    if output.Len() != 0 {
+        t.Fatal("overflow must not append any bytes")
+    }
+}

@@ -73,3 +73,18 @@ func TestQueryNDJSONLimitsProcessOutputWhenRequested(t *testing.T) {
         t.Fatal("unlimited stream was truncated")
     }
 }
+
+func TestNDJSONBudgetCancelsChildOnOverflow(t *testing.T) {
+    var capture bytes.Buffer
+    cancellations := 0
+    writer := &ndjsonByteLimit{output: &capture, remaining: 4,
+        onLimit: func() { cancellations++ }}
+    if _, err := writer.Write([]byte("abcd")); err != nil { t.Fatal(err) }
+    if _, err := writer.Write([]byte("e")); !errors.Is(err, errOutputLimit) {
+        t.Fatalf("unexpected overflow result: %v", err)
+    }
+    if !writer.exceeded || cancellations != 1 {
+        t.Fatalf("overflow did not notify process owner: %+v, calls=%d", writer, cancellations)
+    }
+    if capture.String() != "abcd" { t.Fatalf("written beyond budget: %q", capture.String()) }
+}
