@@ -55,11 +55,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 
 
 fn common_suffix_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
-fn common_suffix(args: &[Value]) -> Result<Value> {
-    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+fn common_suffix_bounded(left: &str, right: &str, max_bytes: usize) -> Result<String> {
+    // This extension previously cloned arbitrarily large identical inputs,
+    // bypassing the text result limit used by other scalar functions.
+    if left.len() > max_bytes || right.len() > max_bytes {
+        return Err(Error::Execution("COMMON_SUFFIX input exceeds native byte budget".into()));
+    }
     if left == right {
-        return Ok(Value::Text(left.to_owned()));
+        return Ok(left.to_owned());
     }
     let common_bytes = left.as_bytes().iter().rev().zip(right.as_bytes().iter().rev())
         .take_while(|(first, second)| first == second).count();
@@ -67,7 +70,12 @@ fn common_suffix(args: &[Value]) -> Result<Value> {
     // Equal trailing UTF-8 continuation bytes do not imply equal characters.
     // Discard any leading fragment before slicing at a scalar boundary.
     while !left.is_char_boundary(start) { start += 1; }
-    Ok(Value::Text(left[start..].to_string()))
+    Ok(left[start..].to_owned())
+}
+fn common_suffix(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    Ok(Value::Text(common_suffix_bounded(left, right, 16 * 1024 * 1024)?))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -209,5 +217,32 @@ mod utf8_common_suffix_byte_scan_tests {
         let long = "xyz".repeat(100_000);
         assert_eq!(suffix(&format!("A{long}"), &format!("B{long}")), Value::Text(long));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("abc".into())]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod common_suffix_memory_budget_tests {
+    use super::*;
+
+    #[test]
+    fn exact_utf8_budget_preserves_character_boundaries_and_identity() {
+        assert_eq!(common_suffix_bounded("a🙂", "b🙂", 5).unwrap(), "🙂");
+        assert_eq!(common_suffix_bounded("a🙂", "a🙂", 5).unwrap(), "a🙂");
+        assert_eq!(common_suffix_bounded("abcde", "xyzde", 5).unwrap(), "de");
+        assert_eq!(common_suffix_bounded("é", "ê", 2).unwrap(), "");
+        assert_eq!(common_suffix_bounded("", "", 0).unwrap(), "");
+    }
+
+    #[test]
+    fn input_limits_prevent_unbounded_identical_string_clones() {
+        assert!(matches!(common_suffix_bounded("abcdef", "abcdef", 5),
+            Err(Error::Execution(_))));
+        assert!(matches!(common_suffix_bounded("a", "abcdef", 5),
+            Err(Error::Execution(_))));
+        assert!(matches!(common_suffix_bounded("abcdef", "a", 5),
+            Err(Error::Execution(_))));
+        assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(),
+            Value::Null);
     }
 }
