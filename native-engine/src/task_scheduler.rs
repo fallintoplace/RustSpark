@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, BTreeSet, hash_map::Entry}, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet, BTreeSet, hash_map::Entry}, time::{Duration, Instant}};
 
 use crate::{Error, Result};
 
@@ -43,6 +43,9 @@ pub struct TaskScheduler {
     // The queue and deadline index mirror the corresponding TaskStatus entries.
     ready: BTreeSet<u64>,
     deadlines: BTreeSet<(Instant, u64)>,
+    // Track only live attempts. Worker disconnect recovery is O(leased tasks)
+    // instead of scanning the full bounded task table.
+    worker_tasks: HashMap<u64, HashSet<u64>>,
     max_attempts: u32,
     counts: TaskCounts,
 }
@@ -87,7 +90,8 @@ impl TaskScheduler {
         }
         let queued = entries.len();
         let ready = entries.keys().copied().collect();
-        Ok(Self { tasks: entries, ready, deadlines: BTreeSet::new(), max_attempts,
+        Ok(Self { tasks: entries, ready, deadlines: BTreeSet::new(),
+            worker_tasks: HashMap::new(), max_attempts,
             counts: TaskCounts { queued, ..TaskCounts::default() } })
     }
 
@@ -99,6 +103,7 @@ impl TaskScheduler {
         self.counts.queued -= 1;
         self.counts.leased += 1;
         self.deadlines.insert((until, id));
+        self.worker_tasks.entry(worker).or_default().insert(id);
         Some(Lease { task: id, worker, attempt: task.attempts })
     }
 
@@ -139,9 +144,21 @@ impl TaskScheduler {
             if until > now { break; }
             self.deadlines.pop_first();
             let task = self.tasks.get_mut(&id).expect("deadline task exists");
-            if task.expire_if_needed(now, self.max_attempts) {
+            let owner = match &task.status {
+                TaskStatus::Leased { worker, .. } => Some(*worker),
+                _ => None,
+            };
+            let expired = task.expire_if_needed(now, self.max_attempts);
+            let queued = task.status == TaskStatus::Queued;
+            if expired {
+                if let Some(worker) = owner {
+                    if let Some(active) = self.worker_tasks.get_mut(&worker) {
+                        active.remove(&id);
+                        if active.is_empty() { self.worker_tasks.remove(&worker); }
+                    }
+                }
                 self.counts.leased -= 1;
-                if task.status == TaskStatus::Queued {
+                if queued {
                     self.counts.queued += 1;
                     self.ready.insert(id);
                 } else {
@@ -213,6 +230,10 @@ impl TaskScheduler {
             _ => return false,
         };
         self.deadlines.remove(&(until, lease.task));
+        if let Some(active) = self.worker_tasks.get_mut(&lease.worker) {
+            active.remove(&lease.task);
+            if active.is_empty() { self.worker_tasks.remove(&lease.worker); }
+        }
         self.counts.leased -= 1;
         if now >= until {
             task.status = if task.attempts >= self.max_attempts {
@@ -248,17 +269,17 @@ impl TaskScheduler {
     /// Reclaim leases owned by a disconnected worker without waiting for TTL.
     ///
     /// Retry attempts already consumed stay consumed, and late completions
-    /// from the disconnected worker cannot commit. This is an infrequent
-    /// recovery operation, so scanning the bounded task table avoids a
-    /// persistent worker-to-task index on every ordinary lease operation.
+    /// from the disconnected worker cannot commit. An active-worker index
+    /// makes recovery proportional to that worker's leases.
     pub fn reclaim_worker(&mut self, worker: u64) -> usize {
-        let leased = self.tasks.iter().filter_map(|(&id, task)| {
-            match &task.status {
-                TaskStatus::Leased { worker: owner, until, .. } if *owner == worker =>
-                    Some((id, *until)),
-                _ => None,
-            }
-        }).collect::<Vec<_>>();
+        let leased = self.worker_tasks.remove(&worker).unwrap_or_default()
+            .into_iter().map(|id| {
+                let task = self.tasks.get(&id).expect("indexed task exists");
+                let TaskStatus::Leased { worker: owner, until, .. } = &task.status
+                    else { unreachable!("worker index contains only live leases") };
+                debug_assert_eq!(*owner, worker);
+                (id, *until)
+            }).collect::<Vec<_>>();
 
         for &(id, until) in &leased {
             self.deadlines.remove(&(until, id));
@@ -283,8 +304,12 @@ impl TaskScheduler {
             else { self.counts.leased -= 1; }
             self.counts.failed += 1;
             self.ready.remove(&id);
-            if let TaskStatus::Leased { until, .. } = &task.status {
+            if let TaskStatus::Leased { worker, until, .. } = &task.status {
                 self.deadlines.remove(&(*until, id));
+                if let Some(active) = self.worker_tasks.get_mut(worker) {
+                    active.remove(&id);
+                    if active.is_empty() { self.worker_tasks.remove(worker); }
+                }
             }
             task.status = TaskStatus::Failed;
             return true;
@@ -378,6 +403,7 @@ impl TaskScheduler {
         self.counts.leased = 0;
         self.ready.clear();
         self.deadlines.clear();
+        self.worker_tasks.clear();
         cancelled
     }
 }
@@ -774,5 +800,59 @@ mod worker_disconnect_recovery_tests {
         assert_eq!(retry.attempt, 2);
         assert!(!scheduler.finish_at(&original, true, now));
         assert!(scheduler.finish_at(&retry, true, now + Duration::from_secs(2)));
+    }
+}
+
+#[cfg(test)]
+mod indexed_worker_reclamation_regressions {
+    use super::*;
+
+    fn verify_index(scheduler: &TaskScheduler) {
+        let mut expected: HashMap<u64, HashSet<u64>> = HashMap::new();
+        for (&id, task) in &scheduler.tasks {
+            if let TaskStatus::Leased { worker, .. } = task.status {
+                expected.entry(worker).or_default().insert(id);
+            }
+        }
+        assert_eq!(scheduler.worker_tasks, expected);
+    }
+
+    #[test]
+    fn tracks_only_live_worker_leases_through_all_terminal_paths() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::with_task_limit(0..1_000, 3, 1_000).unwrap();
+        let first = scheduler.lease_many(11, now, Duration::from_secs(30), 200).unwrap();
+        let second = scheduler.lease_many(22, now, Duration::from_secs(30), 200).unwrap();
+        verify_index(&scheduler);
+        assert!(scheduler.renew(&first[0], now, Duration::from_secs(60)).unwrap());
+        assert!(scheduler.cancel_task(first[1].task));
+        assert!(scheduler.finish_at(&second[0], true, now));
+        verify_index(&scheduler);
+        assert_eq!(scheduler.reclaim_worker(11), 199);
+        assert_eq!(scheduler.reclaim_worker(11), 0);
+        assert!(!scheduler.finish_at(&first[0], true, now));
+        verify_index(&scheduler);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(31)), 199);
+        verify_index(&scheduler);
+        scheduler.cancel_pending();
+        verify_index(&scheduler);
+        assert!(scheduler.worker_tasks.is_empty());
+    }
+
+    #[test]
+    fn repeated_retry_and_worker_churn_preserve_indexes_and_task_counts() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::with_task_limit(0..100, 2, 100).unwrap();
+        for worker in 1..=10 {
+            scheduler.lease_many(worker, now, Duration::from_secs(1), 5).unwrap();
+        }
+        verify_index(&scheduler);
+        assert_eq!(scheduler.reclaim_worker(2), 5);
+        assert_eq!(scheduler.reclaim_worker(3), 5);
+        verify_index(&scheduler);
+        scheduler.lease_many(99, now, Duration::from_secs(1), 7).unwrap();
+        verify_index(&scheduler);
+        scheduler.expire_leases(now + Duration::from_secs(2));
+        verify_index(&scheduler);
     }
 }
