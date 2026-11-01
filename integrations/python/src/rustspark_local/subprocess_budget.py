@@ -50,7 +50,7 @@ def run_bounded(
 
         def collect(pipe, target: bytearray, limit: int):
             while True:
-                chunk = pipe.read(65536)
+                chunk = pipe.read1(min(65536, limit - len(target) + 1))
                 if not chunk:
                     return
                 if len(target) + len(chunk) > limit:
