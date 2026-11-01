@@ -9,7 +9,6 @@ import re
 import subprocess
 import signal
 import threading
-import tempfile
 
 from .subprocess_budget import run_bounded
 from dataclasses import dataclass
@@ -211,10 +210,9 @@ class RustSpark:
         max_row_bytes: int = 16 * 1024 * 1024,
         **options: Any,
     ) -> Iterator[dict[str, Any]]:
-        """Stream strict JSON object rows with a hard deadline and byte budgets.
+        """Stream checked JSON rows with bounded stdout, stderr and a deadline.
 
         Call close() when ending iteration early to stop the native process.
-        No result rows are held beyond the current line.
         """
         if type(max_row_bytes) is not int or not 1 <= max_row_bytes <= 64 * 1024 * 1024:
             raise ValueError("max_row_bytes must be within 1 and 64 MiB")
@@ -224,79 +222,104 @@ class RustSpark:
         )
         output_flag = command.index("--stdout-format")
         command[output_flag + 1] = "json"
-        with tempfile.TemporaryFile() as error_log:
-            try:
-                process = subprocess.Popen(
-                    command, stdout=subprocess.PIPE, stderr=error_log,
-                    start_new_session=(os.name == "posix"),
-                )
-            except OSError as error:
-                raise RustSparkError("Unable to start RustSpark NDJSON stream") from error
+        try:
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
+        except OSError as error:
+            raise RustSparkError("Unable to start RustSpark NDJSON stream") from error
 
-            expired = threading.Event()
-            finished = threading.Event()
+        expired = threading.Event()
+        finished = threading.Event()
+        stderr_tail = bytearray()
+        max_stderr_tail = 8192
 
-            def stop_child() -> None:
-                if os.name == "posix":
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                elif process.poll() is None:
-                    process.kill()
+        def drain_stderr() -> None:
+            # Never spool untrusted diagnostics to an unbounded disk file.
+            assert process.stderr is not None
+            while True:
+                chunk = process.stderr.read(65536)
+                if not chunk:
+                    return
+                if len(chunk) >= max_stderr_tail:
+                    stderr_tail[:] = chunk[-max_stderr_tail:]
+                else:
+                    excess = max(0, len(stderr_tail) + len(chunk) - max_stderr_tail)
+                    if excess:
+                        del stderr_tail[:excess]
+                    stderr_tail.extend(chunk)
 
-            def on_timeout() -> None:
-                if not finished.is_set() and process.poll() is None:
-                    expired.set()
-                    stop_child()
+        stderr_worker = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_worker.start()
 
-            watchdog = None
-            if process_timeout is not None:
-                watchdog = threading.Timer(process_timeout, on_timeout)
-                watchdog.daemon = True
-                watchdog.start()
-            total = 0
-            try:
-                assert process.stdout is not None
-                while True:
-                    line = process.stdout.readline(max_row_bytes + 1)
-                    if not line:
-                        break
-                    total += len(line)
-                    if len(line) > max_row_bytes:
-                        raise RustSparkError("RustSpark NDJSON row exceeds max_row_bytes")
-                    if total > max_output_bytes:
-                        raise RustSparkError("RustSpark NDJSON output exceeds max_output_bytes")
-                    try:
-                        row = json.loads(
-                            line.decode("utf-8"), object_pairs_hook=_unique_json_keys,
-                            parse_constant=_reject_nonfinite, parse_float=_finite_json_float,
-                        )
-                    except (ValueError, RecursionError, UnicodeDecodeError) as error:
-                        raise RustSparkError("Invalid RustSpark NDJSON row") from error
-                    if not isinstance(row, dict):
-                        raise RustSparkError("RustSpark NDJSON row must be an object")
-                    if expired.is_set():
-                        raise RustSparkError("RustSpark NDJSON process timeout")
-                    yield row
+        def stop_child() -> None:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                process.kill()
 
-                status = process.wait()
+        def on_timeout() -> None:
+            if not finished.is_set():
+                expired.set()
+                stop_child()
+
+        watchdog = None
+        if process_timeout is not None:
+            watchdog = threading.Timer(process_timeout, on_timeout)
+            watchdog.daemon = True
+            watchdog.start()
+        total = 0
+        try:
+            assert process.stdout is not None
+            while True:
+                # Include the line terminator without counting it as row data.
+                line = process.stdout.readline(max_row_bytes + 2)
+                if not line:
+                    break
+                total += len(line)
+                row_size = len(line) - int(line.endswith(b"\n"))
+                if row_size > max_row_bytes:
+                    raise RustSparkError("RustSpark NDJSON row exceeds max_row_bytes")
+                if total > max_output_bytes:
+                    raise RustSparkError("RustSpark NDJSON output exceeds max_output_bytes")
+                try:
+                    row = json.loads(
+                        line.decode("utf-8"), object_pairs_hook=_unique_json_keys,
+                        parse_constant=_reject_nonfinite, parse_float=_finite_json_float,
+                    )
+                except (ValueError, RecursionError, UnicodeDecodeError) as error:
+                    raise RustSparkError("Invalid RustSpark NDJSON row") from error
+                if not isinstance(row, dict):
+                    raise RustSparkError("RustSpark NDJSON row must be an object")
                 if expired.is_set():
                     raise RustSparkError("RustSpark NDJSON process timeout")
-                if status != 0:
-                    error_log.seek(0, os.SEEK_END)
-                    error_log.seek(max(0, error_log.tell() - 8192))
-                    detail = error_log.read().decode("utf-8", errors="replace").strip()
-                    raise RustSparkError(detail or f"RustSpark exited with {status}")
-            finally:
-                finished.set()
-                if watchdog is not None:
-                    watchdog.cancel()
-                if process.poll() is None:
-                    stop_child()
-                if process.stdout is not None:
-                    process.stdout.close()
-                process.wait()
+                yield row
+
+            status = process.wait()
+            finished.set()
+            if expired.is_set():
+                raise RustSparkError("RustSpark NDJSON process timeout")
+            if status != 0:
+                stderr_worker.join(timeout=1)
+                detail = bytes(stderr_tail).decode("utf-8", errors="replace").strip()
+                raise RustSparkError(detail or f"RustSpark exited with {status}")
+        finally:
+            finished.set()
+            if watchdog is not None:
+                watchdog.cancel()
+            # Reap descendants that inherited either pipe, including when
+            # the parent already exited and a consumer stopped early.
+            stop_child()
+            if process.stdout is not None:
+                process.stdout.close()
+            process.wait()
+            stderr_worker.join(timeout=1)
+            if process.stderr is not None and not stderr_worker.is_alive():
+                process.stderr.close()
 
     def query_one(self, sql: str | None, **options: Any) -> dict[str, Any] | None:
         """Return at most one row. Raise if the result contains multiple rows."""
