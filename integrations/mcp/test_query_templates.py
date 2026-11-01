@@ -88,6 +88,16 @@ class BoundedMcpBackendTests(unittest.TestCase):
             with self.subTest(max_bytes=max_bytes), self.assertRaisesRegex(ValueError, "budget"):
                 run_bounded(command, timeout=1, max_bytes=max_bytes)
 
+    def test_invalid_backend_utf8_is_reported_as_checked_failure(self):
+        import sys
+        from bounded_backend import run_bounded
+
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            run_bounded([
+                sys.executable, "-c",
+                "import sys; sys.stdout.buffer.write(bytes([255]))",
+            ], timeout=5, max_bytes=1024)
+
     def test_output_is_bounded_without_buffering_unlimited_backend_data(self):
         import subprocess
         import sys
