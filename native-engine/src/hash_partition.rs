@@ -259,7 +259,7 @@ pub fn partition_batches_owned(
                 previous_bucket
             } else {
                 let mut hasher = PartitionHasher::default();
-                for column in &columns { column[row].hash(&mut hasher); }
+                for column in columns { column[row].hash(&mut hasher); }
                 let hash = hasher.finish();
                 match mask {
                     Some(mask) => (hash as usize) & mask,
