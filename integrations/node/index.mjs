@@ -62,6 +62,9 @@ export class RustSpark {
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
       throw new RangeError("maxOutputBytes must be positive");
     }
+    if (unsafeIntegers !== "error" && unsafeIntegers !== "bigint") {
+      throw new TypeError("unsafeIntegers must be error or bigint");
+    }
 
     const args = sqlFile !== undefined ? ["--sql-file", sqlFile, "--stdout-format", "json-array"] : ["--sql", sql, "--stdout-format", "json-array"];
     if (this.databaseDir !== null) args.push("--database-dir", String(this.databaseDir));
