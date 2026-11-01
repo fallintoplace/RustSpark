@@ -205,6 +205,28 @@ pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Re
     Ok(reservations)
 }
 
+/// Claim available pool capacity once and distribute the grant among requests
+/// in priority order. Concurrent pool users never see intermediate charges.
+/// Returns zero-byte guards when no budget remains, with no overcommit.
+pub fn reserve_many_up_to(
+    pool: &Arc<MemoryPool>, requests: &[usize],
+) -> Result<Vec<Reservation>> {
+    let requested = requests.iter().try_fold(0usize, |total, &bytes| {
+        total.checked_add(bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
+    })?;
+    let mut grant = pool.reserve_up_to(requested)?;
+    let mut available = grant.bytes();
+    let mut reservations = Vec::with_capacity(requests.len());
+    for &requested_bytes in requests {
+        let bytes = requested_bytes.min(available);
+        reservations.push(grant.split_off(bytes)?);
+        available -= bytes;
+    }
+    debug_assert_eq!(grant.bytes(), 0);
+    Ok(reservations)
+}
+
 #[cfg(test)]
 mod bulk_memory_feature_tests {
     use super::*;
@@ -399,5 +421,50 @@ mod memory_reservation_ownership_transfer_tests {
         drop((first, other));
         assert_eq!(first_pool.used(), 0);
         assert_eq!(second_pool.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod partial_group_memory_reservation_regressions {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn group_grant_never_overcommits_and_honors_priority_order() {
+        let pool = MemoryPool::new(100);
+        let held = pool.reserve(65).unwrap();
+        let portions = reserve_many_up_to(&pool, &[10, 40, 20, 0]).unwrap();
+        assert_eq!(portions.iter().map(Reservation::bytes).collect::<Vec<_>>(),
+            vec![10, 25, 0, 0]);
+        assert_eq!(pool.used(), 100);
+        assert_eq!(reserve_many_up_to(&pool, &[5, 5]).unwrap()
+            .iter().map(Reservation::bytes).collect::<Vec<_>>(), vec![0, 0]);
+        drop(held);
+        drop(portions);
+        assert_eq!(pool.used(), 0);
+        assert!(reserve_many_up_to(&pool, &[usize::MAX, 1]).is_err());
+        assert_eq!(pool.used(), 0);
+    }
+
+    #[test]
+    fn concurrent_partial_claims_remain_linearizable() {
+        let pool = MemoryPool::new(101);
+        let mut totals = Vec::new();
+        thread::scope(|scope| {
+            let handles = (0..12).map(|_| {
+                let pool = Arc::clone(&pool);
+                scope.spawn(move || {
+                    let grants = reserve_many_up_to(&pool, &[11, 11]).unwrap();
+                    let claimed = grants.iter().map(Reservation::bytes).sum::<usize>();
+                    assert!(pool.used() <= pool.limit());
+                    (claimed, grants)
+                })
+            }).collect::<Vec<_>>();
+            for handle in handles { totals.push(handle.join().unwrap()); }
+        });
+        assert!(totals.iter().map(|(claimed, _)| *claimed).sum::<usize>() <= 101);
+        assert_eq!(pool.used(), totals.iter().map(|(claimed, _)| *claimed).sum());
+        drop(totals);
+        assert_eq!(pool.used(), 0);
     }
 }
