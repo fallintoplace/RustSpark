@@ -55,7 +55,7 @@ class CountTests(unittest.TestCase):
 
     def test_invalid_utf8_count_output_returns_validation_error(self):
         command = [sys.executable, "-c",
-                   "import sys; sys.stdout.buffer.write(b'\\\\xff')"]
+                   "import sys; sys.stdout.buffer.write(bytes([255]))"]
         with patch.object(counts, "count_command", return_value=command):
             with self.assertRaisesRegex(ValueError, "UTF-8"):
                 counts.execute_count("rs", Path("."), "customer", 5)
