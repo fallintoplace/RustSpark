@@ -143,6 +143,7 @@ fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value
 
 fn add_to_state(
     state: &mut State, op: &AggregateOp, batch: &Batch, row: usize,
+    direct_column: Option<usize>,
     retained_bytes: &mut usize, max_retained_bytes: usize,
 ) -> Result<()> {
     // A column reference already has its typed value in the decoded batch.
@@ -153,11 +154,9 @@ fn add_to_state(
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) | AggregateOp::SumDistinct(expr) |
-        AggregateOp::AvgDistinct(expr) => match expr {
-            Expr::Column(name) => Cow::Borrowed(
-                batch.value(row, batch.schema().column(name)?)?
-            ),
-            _ => Cow::Owned(expr.evaluate(batch, row)?),
+        AggregateOp::AvgDistinct(expr) => match direct_column {
+            Some(index) => Cow::Borrowed(batch.value(row, index)?),
+            None => Cow::Owned(expr.evaluate(batch, row)?),
         },
     };
     if value.is_null() { return Ok(()); }
@@ -194,6 +193,22 @@ fn add_to_state(
         }
     }
     Ok(())
+}
+
+// Every partition uses the same schema. Resolve direct aggregate columns
+// once rather than paying for a case-folding hash lookup for every row.
+fn bind_aggregate_column(op: &AggregateOp, schema: &Schema) -> Result<Option<usize>> {
+    let expression = match op {
+        AggregateOp::CountAll => return Ok(None),
+        AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) |
+        AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) |
+        AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) |
+        AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr,
+    };
+    match expression {
+        Expr::Column(name) => Ok(Some(schema.column(name)?)),
+        _ => Ok(None),
+    }
 }
 
 fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[AggregateItem]) -> Result<Schema> {
@@ -248,6 +263,9 @@ fn aggregate_shard_with_budget(
 ) -> Result<Batch> {
     let mut reader = SpillReader::new(BufReader::new(File::open(path)?), io_rows)?;
     if reader.schema() != input { return Err(Error::Schema("group shard schema mismatch".into())); }
+    let direct_columns = items.iter().map(|item|
+        bind_aggregate_column(&item.op, input)
+    ).collect::<Result<Vec<_>>>()?;
     // Fingerprint borrowed keys on each row and materialize an owned key
     // only for the first occurrence of a group. Position vectors preserve
     // correctness under hash collisions without cloning duplicate TEXT keys.
@@ -292,8 +310,9 @@ fn aggregate_shard_with_budget(
                 retained_key_state_bytes = next_bytes;
                 position
             };
-            for (state, item) in groups[position].1.iter_mut().zip(items) {
-                add_to_state(state, &item.op, &batch, row,
+            for ((state, item), &direct_column) in groups[position].1.iter_mut()
+                .zip(items).zip(&direct_columns) {
+                add_to_state(state, &item.op, &batch, row, direct_column,
                     &mut retained_key_state_bytes, max_key_state_bytes)?;
             }
         }
@@ -905,5 +924,55 @@ mod borrowed_group_aggregate_regressions {
         let mut state = new_state(&op).unwrap();
         let mut bytes = 0;
         assert!(add_to_state(&mut state, &op, &batch, 0, &mut bytes, 1024).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bound_group_aggregate_columns_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field}};
+    use std::{fs, io::BufReader};
+
+    #[test]
+    fn direct_and_computed_aggregates_match_over_repeated_spill_batches() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-bound-aggregate-{}-{}", std::process::id(),
+            GROUP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("GroupID", DataType::Integer, false),
+            Field::new("Number", DataType::Integer, true),
+        ]).unwrap();
+        let rows = (0..64).flat_map(|_| [
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Integer(5)],
+        ]).collect();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let n = Expr::Column("NUMBER".into());
+        let items = [
+            AggregateItem::new(AggregateOp::Sum(n.clone()), "sum_n"),
+            AggregateItem::new(AggregateOp::CountDistinct(n.clone()), "distinct_n"),
+            AggregateItem::new(AggregateOp::Sum(Expr::binary(
+                n, BinaryOp::Add, Expr::Literal(Value::Integer(1)),
+            )), "sum_plus_one"),
+        ];
+        let result = grouped_aggregate(
+            [Ok(batch)], schema, &[("GROUPID".into(), "g".into())],
+            &items, &directory, 4, 4, 3, &QueryControl::default(),
+        ).unwrap();
+        let mut rows = Vec::new();
+        for path in result.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 3).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() { rows.extend(batch.rows().unwrap()); }
+        }
+        rows.sort_by(|a, b| a[0].sql_compare(&b[0]).unwrap().unwrap());
+        assert_eq!(rows, vec![
+            vec![Value::Integer(1), Value::Integer(128), Value::Integer(1), Value::Integer(192)],
+            vec![Value::Integer(2), Value::Integer(320), Value::Integer(1), Value::Integer(384)],
+        ]);
+        drop(result);
+        fs::remove_dir(directory).unwrap();
     }
 }
