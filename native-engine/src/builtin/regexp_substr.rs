@@ -7,6 +7,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
+    if pattern == "[0-9]" || pattern == "[0-9]+" {
+        // Byte-wise digit searches preserve UTF-8 boundaries because all
+        // matched bytes are ASCII. Only copy the resulting match.
+        let Some(start) = text.bytes().position(|byte| byte.is_ascii_digit())
+            else { return Ok(Value::Null); };
+        let width = if pattern == "[0-9]" { 1 } else {
+            text[start..].bytes().take_while(u8::is_ascii_digit).count()
+        };
+        return Ok(Value::Text(text[start..start + width].to_owned()));
+    }
     if pattern == ".+" {
         // The first greedy nonempty dot run ends before the next LF.
         return Ok(text.split('\n').find(|part| !part.is_empty())
@@ -138,5 +148,27 @@ mod greedy_dot_plus_substr_differential_tests {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text(".+".into()),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_digit_substring_regressions {
+    use super::*;
+
+    #[test]
+    fn extracts_same_digit_runs_as_regex_on_unicode_inputs() {
+        for text in [
+            "", "00033more1", "abc-4.50", "é🙂99🦀01", "١٢٣",
+            "a\n123\n4", "東京7界88", "𝟡x9",
+        ] {
+            for pattern in ["[0-9]", "[0-9]+"] {
+                let re = regex_support::compile(pattern).unwrap();
+                let expected = re.find(text)
+                    .map_or(Value::Null, |matched| Value::Text(matched.as_str().to_owned()));
+                assert_eq!(evaluate(&[
+                    Value::Text(text.to_owned()), Value::Text(pattern.to_owned()),
+                ]).unwrap(), expected, "{text:?} {pattern}");
+            }
+        }
     }
 }
