@@ -252,30 +252,30 @@ fn simple_predicate_column(predicate: &Expr) -> Option<&str> {
 /// not repeatedly clone entire expression subtrees for De Morgan rewrites.
 fn can_skip_columns_inner(
     stats: &std::collections::HashMap<String, ColumnStatistics>,
-    predicate: &Expr, negated: bool,
+    predicate: &Expr, negated: bool, mixed_case_keys: bool,
 ) -> bool {
     match predicate {
         Expr::Literal(Value::Null) => true,
         Expr::Literal(Value::Boolean(value)) => *value == negated,
-        Expr::Not(inner) => can_skip_columns_inner(stats, inner, !negated),
+        Expr::Not(inner) => can_skip_columns_inner(stats, inner, !negated, mixed_case_keys),
         Expr::Binary { left, op: BinaryOp::And, right } => {
             if negated {
                 // NOT (A AND B) is NOT A OR NOT B.
-                can_skip_columns_inner(stats, left, true)
-                    && can_skip_columns_inner(stats, right, true)
+                can_skip_columns_inner(stats, left, true, mixed_case_keys)
+                    && can_skip_columns_inner(stats, right, true, mixed_case_keys)
             } else {
-                can_skip_columns_inner(stats, left, false)
-                    || can_skip_columns_inner(stats, right, false)
+                can_skip_columns_inner(stats, left, false, mixed_case_keys)
+                    || can_skip_columns_inner(stats, right, false, mixed_case_keys)
             }
         }
         Expr::Binary { left, op: BinaryOp::Or, right } => {
             if negated {
                 // NOT (A OR B) is NOT A AND NOT B.
-                can_skip_columns_inner(stats, left, true)
-                    || can_skip_columns_inner(stats, right, true)
+                can_skip_columns_inner(stats, left, true, mixed_case_keys)
+                    || can_skip_columns_inner(stats, right, true, mixed_case_keys)
             } else {
-                can_skip_columns_inner(stats, left, false)
-                    && can_skip_columns_inner(stats, right, false)
+                can_skip_columns_inner(stats, left, false, mixed_case_keys)
+                    && can_skip_columns_inner(stats, right, false, mixed_case_keys)
             }
         }
         _ => {
@@ -299,7 +299,7 @@ fn can_skip_columns_inner(
             }
             // External statistics maps may use mixed-case keys. Preserve
             // case-insensitive lookup and conservative fallback behavior.
-            stats.iter().any(|(column, summary)| can_skip(summary, column, leaf))
+            mixed_case_keys && stats.iter().any(|(column, summary)| can_skip(summary, column, leaf))
         }
     }
 }
@@ -324,7 +324,12 @@ pub fn can_skip_columns(
             return false;
         }
     }
-    can_skip_columns_inner(stats, predicate, false)
+    // Standard Parquet column statistics keys are normalized ASCII lowercase.
+    // Avoid a linear scan of every column for each missing predicate leaf.
+    // External/mixed-case maps retain the legacy case-insensitive fallback.
+    let mixed_case_keys = stats.keys().any(|name|
+        name.bytes().any(|byte| byte.is_ascii_uppercase()));
+    can_skip_columns_inner(stats, predicate, false, mixed_case_keys)
 }
 
 #[cfg(test)]
@@ -827,6 +832,54 @@ mod direct_statistics_lookup_regressions {
         };
         assert!(can_skip_columns(&stats, &distinct));
         assert!(!can_skip_columns(&stats, &Expr::Not(Box::new(is_null))));
+    }
+}
+
+#[cfg(test)]
+mod normalized_pruning_lookup_tests {
+    use super::*;
+
+    fn impossible(name: &str) -> Expr {
+        Expr::binary(
+            Expr::Column(name.to_owned()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(1000)),
+        )
+    }
+
+    #[test]
+    fn normalized_wide_summaries_preserve_boolean_pruning() {
+        let summary = ColumnStatistics {
+            rows: 100, nulls: 1,
+            min: Some(Value::Integer(1)),
+            max: Some(Value::Integer(20)),
+        };
+        let mut columns = std::collections::HashMap::new();
+        for index in 0..1500 {
+            columns.insert(format!("field_{index}"), summary.clone());
+        }
+        let missing = impossible("unknown_field");
+        let existing = impossible("FIELD_1499");
+        let disjunction = Expr::binary(existing.clone(), BinaryOp::Or, missing.clone());
+        assert!(!can_skip_columns(&columns, &disjunction));
+        let conjunction = Expr::binary(existing.clone(), BinaryOp::And, missing);
+        assert!(can_skip_columns(&columns, &conjunction));
+        assert!(can_skip_columns(&columns, &existing));
+        columns.insert("MiXeD".to_owned(), summary);
+        assert!(can_skip_columns(&columns, &impossible("mixed")));
+        assert!(can_skip_columns(&columns, &impossible("FIELD_1499")));
+        assert!(!can_skip_columns(&columns, &impossible("absent")));
+    }
+
+    #[test]
+    fn contradictory_and_unknown_metadata_do_not_prune() {
+        let valid = ColumnStatistics {
+            rows: 5, nulls: 0,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(3)),
+        };
+        let mut stats = std::collections::HashMap::from([("FIELD".into(), valid.clone())]);
+        assert!(can_skip_columns(&stats, &impossible("field")));
+        stats.insert("other".into(), ColumnStatistics { rows: 6, ..valid });
+        assert!(!can_skip_columns(&stats, &impossible("field")));
     }
 }
 
