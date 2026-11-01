@@ -60,8 +60,11 @@ def run_scale(prepare, run, report):
     subprocess.run(prepare, check=True, timeout=1800)
     # Never consume a report left by an earlier invocation.
     report.unlink(missing_ok=True)
+    # Scale runs can produce large logs; success is determined by the JSON report.
+    # Do not buffer subprocess output that this runner never consumes.
     process = subprocess.run(
-        run, check=False, capture_output=True, text=True, timeout=7200,
+        run, check=False, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, timeout=7200,
     )
     rows = json.loads(report.read_text())["results"]
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):

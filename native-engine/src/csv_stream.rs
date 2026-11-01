@@ -241,6 +241,9 @@ impl<R: BufRead> CsvStream<R> {
         row.clear();
         for (text, field) in fields.into_iter().zip(self.schema.fields()) {
             let value = if text.is_empty() {
+                if !field.nullable {
+                    return Err(Error::Type(format!("NULL in required column {}", field.name)));
+                }
                 Value::Null
             } else {
                 match field.data_type {
@@ -691,3 +694,21 @@ mod csv_retained_capacity_budget_regressions {
         assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [1, 1]);
     }
 }
+#[cfg(test)]
+mod required_null_prefix_regression_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn required_null_after_valid_rows_preserves_prefix_then_errors() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Cursor::new(b"n\n1\n2\n\n3\n");
+        let mut stream = CsvStream::new_typed(input, 16, 1024, schema).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]);
+        assert!(matches!(stream.next(), Some(Err(Error::Type(_)))));
+        assert!(stream.next().is_none());
+    }
+}
+
