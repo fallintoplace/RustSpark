@@ -76,6 +76,44 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(list_query_templates(queries), ["first", "second"])
 
 
+class PinnedGatewayTemplateTests(unittest.TestCase):
+    def test_template_snapshot_stays_immutable_after_source_replacement(self):
+        from server import pinned_query_template
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "approved.sql"
+            other = root / "other.sql"
+            approved.write_text("SELECT 1", encoding="utf-8")
+            other.write_text("SELECT 999", encoding="utf-8")
+            with pinned_query_template(approved) as copy:
+                approved.unlink()
+                approved.symlink_to(other)
+                self.assertEqual(copy.read_text(encoding="utf-8"), "SELECT 1")
+                self.assertEqual(copy.stat().st_mode & 0o077, 0)
+            with self.assertRaises(ValueError):
+                with pinned_query_template(approved):
+                    pass
+
+    def test_nonregular_and_oversized_templates_are_rejected(self):
+        from server import pinned_query_template, MAX_TEMPLATE_BYTES
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_query_template(root):
+                    pass
+            large = root / "large.sql"
+            large.write_bytes(b"x" * (MAX_TEMPLATE_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_query_template(large):
+                    pass
+            if hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"):
+                fifo = root / "fifo.sql"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "regular file"):
+                    with pinned_query_template(fifo):
+                        pass
+
+
 class InvalidBackendJSONTests(unittest.TestCase):
     def test_excessively_nested_backend_rows_are_invalid(self):
         deep = '[{"value":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
@@ -100,6 +138,13 @@ class BoundedBackendTests(unittest.TestCase):
         for size in (float("nan"), float("inf"), -1, 0, True, 1.5, "1024"):
             with self.subTest(max_bytes=size), self.assertRaisesRegex(ValueError, "budget"):
                 run_bounded_backend(command, timeout=5, max_bytes=size)
+
+    def test_backend_invalid_utf8_is_checked_before_result_parsing(self):
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            run_bounded_backend([
+                sys.executable, "-c",
+                "import sys; sys.stdout.buffer.write(bytes([255]))",
+            ], timeout=5, max_bytes=1024)
 
     def test_backend_output_budget_and_timeout(self):
         valid = run_bounded_backend(
@@ -134,6 +179,48 @@ class BackendDescendantCleanupTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3.0)
 
 
+class BoundedGatewayResponsesTests(unittest.TestCase):
+    def test_json_encoder_rejects_escaped_output_expansion(self):
+        from server import encode_response_bounded
+        self.assertEqual(encode_response_bounded({"rows": [{"value": "ok"}]}, 100),
+                         b'{"rows":[{"value":"ok"}]}')
+        with self.assertRaisesRegex(ValueError, "output budget"):
+            encode_response_bounded({"rows": [{"text": "\\u0000" * 100}]}, 200)
+
+    def test_gateway_rejects_oversized_escaped_success_responses(self):
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(
+                secret="token-" * 5, queries=root, database=root,
+                binary="rustspark", max_rows=10, timeout=1,
+            ))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                body = b'{"params":{}}'
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/query/safe",
+                    data=body,
+                    headers={"Authorization": "Bearer " + "token-" * 5,
+                             "Content-Type": "application/json"},
+                )
+                with patch("server.run_bounded_backend",
+                           return_value=subprocess.CompletedProcess(
+                               [], 0, '[{"text":"' + "é" * 2_000_000 + '"}]', "",
+                           )):
+                    with self.assertRaises(HTTPError) as raised:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(raised.exception.code, 502)
+                    self.assertIn("output budget", raised.exception.read().decode())
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+
 class RequestFramingTests(unittest.TestCase):
     def test_ambiguous_content_length_and_chunked_encoding_are_rejected(self):
         with tempfile.TemporaryDirectory() as root:
@@ -158,6 +245,7 @@ class RequestFramingTests(unittest.TestCase):
                     b"Transfer-Encoding: chunked\r\n",
                     b"Content-Length: +2\r\n",
                     b"Content-Length: 2, 2\r\n",
+                    b"Content-Length: " + b"9" * 5000 + b"\r\n",
                 ):
                     with self.subTest(framing=framing), socket.create_connection(
                         server.server_address, timeout=2,
@@ -165,7 +253,7 @@ class RequestFramingTests(unittest.TestCase):
                         connection.settimeout(2)
                         connection.sendall(headers + framing + b"\r\n{}")
                         response = connection.recv(4096).split(b"\r\n", 1)[0]
-                        self.assertIn(b"400", response)
+                        self.assertTrue(b"400" in response or b"413" in response)
             finally:
                 server.shutdown()
                 server.server_close()

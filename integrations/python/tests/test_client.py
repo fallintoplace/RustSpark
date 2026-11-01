@@ -208,6 +208,22 @@ class BoundedProcessCaptureTests(unittest.TestCase):
                 timeout=5, max_output_bytes=1024, max_error_bytes=1024,
             )
 
+    def test_direct_capture_rejects_invalid_budgets_before_spawn(self):
+        import rustspark_local.subprocess_budget as capture
+
+        command = [sys.executable, "-c", "print('should not run')"]
+        with patch.object(capture.subprocess, "Popen") as spawn:
+            for invalid in (True, 0, -1, 1.5):
+                with self.subTest(output_limit=invalid), self.assertRaises(ValueError):
+                    run_bounded(command, timeout=5, max_output_bytes=invalid)
+                with self.subTest(error_limit=invalid), self.assertRaises(ValueError):
+                    run_bounded(command, timeout=5, max_output_bytes=1024,
+                                max_error_bytes=invalid)
+            for invalid in (True, 0, -1, float("nan"), float("inf"), "5"):
+                with self.subTest(timeout=invalid), self.assertRaisesRegex(ValueError, "timeout"):
+                    run_bounded(command, timeout=invalid, max_output_bytes=1024)
+            spawn.assert_not_called()
+
     def test_deadline_kills_descendants_holding_stdout_open(self):
         if os.name != "posix":
             self.skipTest("requires POSIX process groups")
@@ -248,6 +264,78 @@ class BoundedProcessCaptureTests(unittest.TestCase):
                     )
         self.assertEqual(len(started), 1)
         self.assertIsNotNone(started[0].poll(), "interrupted SQL child must be reaped")
+
+
+
+class StreamingPythonQueryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "helper binary requires POSIX shell")
+    def test_streams_typed_rows_without_buffering_the_result(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text(
+                """#!/bin/sh
+printf '%s\\n' '{"id":9223372036854775807}' '{"id":2}'
+""",
+                encoding="utf-8",
+            )
+            script.chmod(0o700)
+            rows = list(RustSpark(binary=str(script)).iter_rows("SELECT 1"))
+            self.assertEqual(rows, [{"id": 9223372036854775807}, {"id": 2}])
+
+    @unittest.skipUnless(os.name == "posix", "helper binary requires POSIX shell")
+    def test_invalid_rows_and_max_bytes_reject_without_hanging(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text(
+                """#!/bin/sh
+printf '%s\\n' '{"x":1,"x":2}'
+""",
+                encoding="utf-8",
+            )
+            script.chmod(0o700)
+            with self.assertRaisesRegex(RustSparkError, "Invalid"):
+                list(RustSpark(binary=str(script)).iter_rows("SELECT 1"))
+            script.write_text(
+                """#!/bin/sh
+printf '%s\\n' '{"x":123456789}'
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RustSparkError, "max_row_bytes"):
+                list(RustSpark(binary=str(script)).iter_rows("SELECT 1", max_row_bytes=5))
+
+    def test_invalid_streaming_budgets_reject_before_spawn(self):
+        for invalid in (-1, 0, True, 1.5, 64 * 1024 * 1024 + 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                list(RustSpark().iter_rows("SELECT 1", max_row_bytes=invalid))
+
+
+class SourcePathPreflightTests(unittest.TestCase):
+    def test_rejects_invalid_binary_sql_file_and_input_paths(self):
+        for value in ("", b"bytes", 42):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    RustSpark(binary=value)._command("SELECT 1")
+                with self.assertRaises(ValueError):
+                    RustSpark()._command(None, sql_file=value)
+                with self.assertRaises(ValueError):
+                    RustSpark(database_dir=value)._command("SELECT 1")
+                for source in ("input", "csv", "parquet", "json_input"):
+                    with self.assertRaises(ValueError):
+                        RustSpark()._command("SELECT 1", **{source: value})
+
+    def test_pathlib_sources_remain_supported(self):
+        from pathlib import Path
+        args = RustSpark(binary=Path("rustspark"), database_dir=Path("db"))._command(
+            "SELECT 1", csv=Path("rows.csv"))
+        self.assertIn("rows.csv", args)
+        self.assertIn("db", args)
 
 
 if __name__ == "__main__":

@@ -84,9 +84,7 @@ def verify_reports(actual: dict, reference: dict) -> list[str]:
         raise ValueError("SQL workload hash differs between reports")
     rows = index_queries(actual, "Actual")
     expected = index_queries(reference, "Reference")
-    if (actual.get("queries_total") is not None
-            and reference.get("queries_total") is not None
-            and actual["queries_total"] != reference["queries_total"]):
+    if actual.get("queries_total") != reference.get("queries_total"):
         raise ValueError("SQL report query totals differ")
     issues = []
     for number in sorted(expected.keys() - rows.keys()):

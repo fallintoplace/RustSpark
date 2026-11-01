@@ -20,9 +20,16 @@ def streamed_sha256(path):
 def profile_table(fixture, manifest, table):
     path = inside(fixture, manifest["tables"][table])
     rows = manifest["rows"][table]
-    size = path.stat().st_size
+    before = path.stat()
+    digest = streamed_sha256(path)
+    after = path.stat()
+    identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size,
+                             stat.st_mtime_ns, stat.st_ctime_ns)
+    if identity(before) != identity(after) or digest != manifest["table_sha256"][table]:
+        raise ValueError(f"Parquet fixture changed while profiling: {table}")
+    size = after.st_size
     return {
-        "rows": rows, "physical_bytes": size, "sha256": streamed_sha256(path),
+        "rows": rows, "physical_bytes": size, "sha256": digest,
         "physical_bytes_per_row": round(size / rows, 3) if rows else None,
     }
 

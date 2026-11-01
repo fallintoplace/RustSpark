@@ -40,3 +40,12 @@ numbers and cannot be converted to BigInt. Without source-context support,
 the client raises an error instead of returning a rounded value.
 
 Note: BigInt values need a custom serializer before passing them to JSON.stringify.
+
+## Backpressure-aware NDJSON streaming
+
+Use `for await (const row of client.queryRows(sql, options))` to consume
+validated JSON object rows without buffering the whole output. The reader
+enforces a 16 MiB row cap and the `maxOutputBytes` total output budget.
+Breaking out of the iterator terminates the exporter process group.
+`processTimeoutMs` sets a hard execution deadline. Unlike `query`, this
+method starts a real subprocess and does not use a custom synchronous runner.
