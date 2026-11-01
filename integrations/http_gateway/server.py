@@ -30,6 +30,26 @@ MAX_BACKEND_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_RESPONSE_BYTES = MAX_BACKEND_OUTPUT_BYTES
 
 
+def read_body_with_deadline(stream, connection, length: int, timeout: float) -> bytes:
+    """Enforce one wall-clock budget even if a peer trickles a few bytes at a time."""
+    deadline = time.monotonic() + timeout
+    chunks = []
+    remaining = length
+    while remaining:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("HTTP request body deadline exceeded")
+        connection.settimeout(left)
+        # BufferedReader.read(n) can retry recv indefinitely while a slow
+        # peer supplies one byte per socket timeout. read1 does one raw read.
+        chunk = stream.read1(min(remaining, 8192))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _reject_duplicate_json_fields(pairs):
     result = {}
     for key, value in pairs:
@@ -332,11 +352,15 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.send_json(415, {"error": "application/json required"})
                 return
             try:
-                request_body = self.rfile.read(length)
+                request_body = read_body_with_deadline(
+                    self.rfile, self.connection, length, read_timeout,
+                )
             except (TimeoutError, socket.timeout):
                 self.close_connection = True
                 self.send_json(408, {"error": "Request body timeout"})
                 return
+            finally:
+                self.connection.settimeout(read_timeout)
             if len(request_body) != length:
                 self.close_connection = True
                 self.send_json(400, {"error": "Incomplete request body"})

@@ -343,5 +343,45 @@ class BackendInterruptReapTests(unittest.TestCase):
         self.assertIsNotNone(started[0].poll())
 
 
+
+class AbsoluteBodyDeadlineTests(unittest.TestCase):
+    def test_byte_trickle_cannot_keep_request_thread_alive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queries = Path(directory)
+            (queries / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = BoundedThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                make_handler(
+                    secret="secret-token-" * 3, queries=queries, database=queries,
+                    binary="nonexistent-rustspark", max_rows=10, timeout=1,
+                    read_timeout=0.6,
+                ),
+                max_clients=2,
+            )
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(server.server_address, timeout=2) as connection:
+                    connection.settimeout(3)
+                    connection.sendall(
+                        b"POST /v1/query/safe HTTP/1.1\r\nHost: localhost\r\n"
+                        b"Authorization: Bearer " + b"secret-token-" * 3 +
+                        b"\r\nContent-Type: application/json\r\n"
+                        b"Content-Length: 12\r\n\r\n{"
+                    )
+                    for byte in [b'"', b'a', b'"']:
+                        time.sleep(0.2)
+                        try:
+                            connection.sendall(byte)
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                    response = connection.recv(4096).split(b"\r\n", 1)[0]
+                    self.assertIn(b"408", response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+
 if __name__ == "__main__":
     unittest.main()
