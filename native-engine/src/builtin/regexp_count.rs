@@ -20,8 +20,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     // An anchored identifier literal can match at most once.
     if let Some(prefix) = pattern.strip_prefix('^') {
-        if prefix.len() <= 4095 && prefix.bytes().all(|byte|
-            byte.is_ascii_alphanumeric() || byte == b'_') {
+        if prefix.len() <= 4095 && prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
             return Ok(Value::Integer(i64::from(text.starts_with(prefix))));
         }
     }
@@ -58,8 +57,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(i64::try_from(count)
             .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
     }
-    if pattern.len() <= 4096 && pattern.bytes().all(|byte|
-        byte.is_ascii_alphanumeric() || byte == b'_') {
+    if pattern.len() <= 4096 && pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
         let count = text.match_indices(pattern).count();
         return Ok(Value::Integer(i64::try_from(count)
             .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
@@ -198,6 +196,35 @@ mod dot_plus_regexp_count_differential_tests {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text(".+".into()),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod unicode_literal_count_regressions {
+    use super::*;
+    use regex::Regex;
+
+    #[test]
+    fn unicode_and_anchored_identifiers_match_regex_reference() {
+        let inputs = ["", "café", "ééé", "東京東京a東京", "αβγδ αβγδ", "🙂é🙂"];
+        let patterns = ["é", "東京", "αβγ", "^é", "^東京", "café", "éé", "a", "éx"];
+        for input in inputs {
+            for pattern in patterns {
+                let expected = Regex::new(pattern).unwrap().find_iter(input).count() as i64;
+                assert_eq!(evaluate(&[Value::Text(input.into()), Value::Text(pattern.into())])
+                    .unwrap(), Value::Integer(expected),
+                    "input={input:?}, pattern={pattern:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn literal_unicode_patterns_stay_nonoverlapping() {
+        assert_eq!(evaluate(&[Value::Text("ééé".into()), Value::Text("éé".into())])
+            .unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[Value::Text("ééé".into()), Value::Text("^é".into())])
+            .unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("é".into())]).unwrap(), Value::Null);
     }
 }
 

@@ -20,7 +20,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if group > 100 { return Err(Error::Execution("REGEXP_EXTRACT group budget exceeded".into())); }
     regex_support::check_input(text)?;
     if group == 0 && !pattern.is_empty() && pattern.len() <= 4096 &&
-        pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
     {
         return Ok(Value::Text(text.find(pattern).map_or("", |_| pattern).to_owned()));
     }
@@ -120,5 +120,34 @@ mod regexp_extract_group_zero_literal_tests {
             Value::Text("hello".into())]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Text("hello".into()),
             Value::Integer(0)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod unicode_literal_extract_regressions {
+    use super::*;
+    use regex::Regex;
+
+    #[test]
+    fn group_zero_literal_matches_unicode_regex_capture() {
+        for input in ["", "abc東京def", "ééé", "αβγ αβγ", "🙂café"] {
+            for pattern in ["é", "東京", "αβ", "café", "no", "éé"] {
+                let expected = Regex::new(pattern).unwrap()
+                    .find(input).map_or("", |found| found.as_str()).to_owned();
+                let args = [Value::Text(input.into()), Value::Text(pattern.into()), Value::Integer(0)];
+                assert_eq!(evaluate(&args).unwrap(), Value::Text(expected),
+                    "input={input:?}, pattern={pattern:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn capture_groups_still_use_regex_and_retain_utf8() {
+        assert_eq!(evaluate(&[
+            Value::Text("xééy".into()), Value::Text("(é+)".into()), Value::Integer(1),
+        ]).unwrap(), Value::Text("éé".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("xééy".into()), Value::Text("é".into()), Value::Integer(0),
+        ]).unwrap(), Value::Text("é".into()));
     }
 }
