@@ -775,7 +775,7 @@ mod transactional_hll_worker_window_tests {
         let mut valid = HyperLogLog::new();
         valid.add(&Value::Integer(123));
         let wire = valid.to_wire_bytes();
-        let bad = b"RSH2\0".as_slice();
+        let bad: &[u8] = b"RSH2\0";
         assert!(sketch.merge_wire_batch([wire.as_slice(), bad]).is_err());
         assert_eq!(sketch, before);
         sketch.merge_wire_batch(std::iter::empty::<&[u8]>()).unwrap();
