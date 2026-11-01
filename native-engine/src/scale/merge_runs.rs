@@ -21,6 +21,22 @@ fn output_buffer_capacity(requested: usize, columns: usize) -> usize {
     requested.min(256).min((MAX_OUTPUT_BATCH_BYTES / fixed_row_bytes.max(1)).max(1))
 }
 
+fn allocate_output_columns(width: usize, capacity: usize) -> Result<Vec<Vec<Value>>> {
+    // An external sort can carry a very wide metadata schema. Reserve both
+    // the column headers and each Value buffer fallibly before advancing an
+    // input cursor, so resource failure cannot silently skip merge rows.
+    let mut columns = Vec::new();
+    columns.try_reserve_exact(width)
+        .map_err(|_| Error::Execution("external merge column allocation failed".into()))?;
+    for _ in 0..width {
+        let mut cells = Vec::new();
+        cells.try_reserve_exact(capacity)
+            .map_err(|_| Error::Execution("external merge row buffer allocation failed".into()))?;
+        columns.push(cells);
+    }
+    Ok(columns)
+}
+
 enum AppendStatus { Added, Full, Exhausted }
 
 struct InputRun {
@@ -255,10 +271,20 @@ impl Iterator for RunMerger {
                 Err(error) => Some(Err(error)),
             };
         }
-        // Keep even the initial column capacity within the output byte budget.
+        // Do not reserve wide column arrays after cancellation or an
+        // expired deadline. No spill cursor has been advanced yet.
+        if let Err(error) = self.control.check() {
+            self.stopped = true;
+            return Some(Err(error));
+        }
         let capacity = output_buffer_capacity(self.output_batch_rows, self.schema.len());
-        let mut columns: Vec<Vec<Value>> =
-            (0..self.schema.len()).map(|_| Vec::with_capacity(capacity)).collect();
+        let mut columns = match allocate_output_columns(self.schema.len(), capacity) {
+            Ok(columns) => columns,
+            Err(error) => {
+                self.stopped = true;
+                return Some(Err(error));
+            }
+        };
         let mut rows = 0usize;
         let mut output_bytes = 0usize;
         while rows < self.output_batch_rows {
@@ -723,5 +749,35 @@ mod cancellable_empty_run_draining {
         let error = RunMerger::new(
             &[missing], schema, &[key], 8, 8, control).err().unwrap();
         assert!(error.to_string().contains("cancelled"));
+    }
+}
+
+#[cfg(test)]
+mod fallible_external_merge_output_admission {
+    use super::*;
+
+    #[test]
+    fn rejects_impossible_output_width_before_reserving_spill_buffers() {
+        assert!(allocate_output_columns(usize::MAX, 1)
+            .unwrap_err().to_string().contains("allocation"));
+        let columns = allocate_output_columns(3, 8).unwrap();
+        assert_eq!(columns.len(), 3);
+        assert!(columns.iter().all(|column| column.capacity() >= 8));
+        assert!(allocate_output_columns(0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancellation_is_terminal_before_opening_output_buffers() {
+        let schema = Schema::new(vec![crate::schema::Field::new(
+            "key", crate::schema::DataType::Integer, false,
+        )]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let control = QueryControl::default();
+        let mut merger = RunMerger::new(
+            &[] as &[&str], schema, &keys, 1, 1, control.clone(),
+        ).unwrap();
+        control.cancel();
+        assert!(merger.next().unwrap().unwrap_err().to_string().contains("cancelled"));
+        assert!(merger.next().is_none());
     }
 }
