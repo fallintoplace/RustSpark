@@ -32,7 +32,8 @@ fn word_count(args: &[Value]) -> Result<Value> {
         let mut count = 0_i64;
         let mut in_word = false;
         for byte in input.bytes() {
-            if byte.is_ascii_whitespace() { in_word = false; }
+            // Unlike Unicode whitespace, Rust's ASCII predicate excludes vertical tab.
+            if byte.is_ascii_whitespace() || byte == b'\x0b' { in_word = false; }
             else if !in_word { count += 1; in_word = true; }
         }
         return Ok(Value::Integer(count));

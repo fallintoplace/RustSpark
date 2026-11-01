@@ -35,6 +35,12 @@ jobs:
         run: cargo check --all-targets
       - name: Check native engine targets
         run: cargo check --manifest-path native-engine/Cargo.toml --all-targets
+      # The full native suite still has unrelated failures. Keep a focused
+      # word-boundary regression gate on pull requests and main pushes.
+      - name: Test native text word boundaries
+        run: |
+          cargo test --manifest-path native-engine/Cargo.toml --lib builtin::char_length::
+          cargo test --manifest-path native-engine/Cargo.toml --lib builtin::initcap::
 
   native:
     if: github.event_name != 'push' && github.ref == 'refs/heads/main'
