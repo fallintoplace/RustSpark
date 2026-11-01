@@ -30,6 +30,14 @@ class JSONLTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 benchmark.write_jsonl(Path(tmp) / "data", 0)
 
+    def test_invalid_row_types_do_not_create_fixture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "data.jsonl"
+            for invalid in (True, False, 1.5, float("nan"), "4", None):
+                with self.subTest(rows=invalid), self.assertRaises(ValueError):
+                    benchmark.write_jsonl(path, invalid)
+                self.assertFalse(path.exists())
+
     def test_selects_one_workload_without_running_other_queries(self):
         with patch.object(benchmark, "measure", return_value={"median_ms": 1.0}) as measured:
             report = benchmark.benchmark("rustspark", rows=4, repeat=1, warmup=0,

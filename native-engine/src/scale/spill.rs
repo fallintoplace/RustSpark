@@ -78,6 +78,8 @@ fn type_code(data_type: DataType) -> u8 {
 pub struct SpillWriter<W: Write> {
     output: W,
     schema: Schema,
+    // Reuse the cell encoder between successive spill batches.
+    encoded: Vec<u8>,
 }
 
 impl<W: Write> SpillWriter<W> {
@@ -95,13 +97,13 @@ impl<W: Write> SpillWriter<W> {
             output.write_all(field.name.as_bytes())?;
             output.write_all(&[type_code(field.data_type), u8::from(field.nullable)])?;
         }
-        Ok(Self { output, schema })
+        Ok(Self { output, schema, encoded: Vec::new() })
     }
 
     // Continue a file whose schema header was already written and finalized.
     // Only internal scratch-file owners may reopen an existing stream.
     pub(crate) fn resume(output: W, schema: Schema) -> Self {
-        Self { output, schema }
+        Self { output, schema, encoded: Vec::new() }
     }
 
     pub fn write_batch(&mut self, batch: &Batch) -> Result<()> {
@@ -160,7 +162,12 @@ impl<W: Write> SpillWriter<W> {
         // Buffer cells to avoid a virtual Write call per numeric value.
         // Text larger than the scratch buffer is streamed directly to
         // avoid duplicating multi-megabyte values in memory.
-        let mut encoded = Vec::with_capacity(ENCODE_BUFFER_BYTES);
+        let encoded = &mut self.encoded;
+        if encoded.capacity() == 0 {
+            encoded.reserve(ENCODE_BUFFER_BYTES);
+        }
+        // The previous write's final flush does not consume this buffer.
+        encoded.clear();
         for row in rows {
             for column in &columns {
                 match &column[row] {
@@ -182,12 +189,12 @@ impl<W: Write> SpillWriter<W> {
                             .map_err(|_| Error::Execution("spill text length exceeds u32".into()))?;
                         encoded.extend_from_slice(&len.to_le_bytes());
                         if value.len() >= ENCODE_BUFFER_BYTES {
-                            self.output.write_all(&encoded)?;
+                            self.output.write_all(encoded.as_slice())?;
                             encoded.clear();
                             self.output.write_all(value.as_bytes())?;
                         } else {
                             if encoded.len() + value.len() > ENCODE_BUFFER_BYTES {
-                                self.output.write_all(&encoded)?;
+                                self.output.write_all(encoded.as_slice())?;
                                 encoded.clear();
                             }
                             encoded.extend_from_slice(value.as_bytes());
@@ -195,13 +202,13 @@ impl<W: Write> SpillWriter<W> {
                     }
                 }
                 if encoded.len() >= ENCODE_BUFFER_BYTES {
-                    self.output.write_all(&encoded)?;
+                    self.output.write_all(encoded.as_slice())?;
                     encoded.clear();
                 }
             }
         }
         if !encoded.is_empty() {
-            self.output.write_all(&encoded)?;
+            self.output.write_all(encoded.as_slice())?;
         }
         Ok(())
     }
@@ -828,6 +835,41 @@ mod untrusted_spill_preallocation_regressions {
         let wire = writer.finish().unwrap();
         let mut reader = SpillReader::new(Cursor::new(wire), 4_096).unwrap();
         assert_eq!(reader.next_batch().unwrap(), Some(expected));
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod reusable_spill_encoding_buffer_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn reuses_scratch_across_full_selected_and_empty_batches() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("hello".into())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("🙂".repeat(5000))],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        assert_eq!(writer.encoded.capacity(), 0);
+        writer.write_batch(&batch).unwrap();
+        let scratch = writer.encoded.as_ptr();
+        assert!(writer.encoded.capacity() >= ENCODE_BUFFER_BYTES);
+        writer.write_batch_indices(&batch, &[2, 0, 2]).unwrap();
+        assert_eq!(writer.encoded.as_ptr(), scratch);
+        writer.write_batch_range(&batch, 1, 2).unwrap();
+        writer.write_batch_indices(&batch, &[]).unwrap();
+        let data = writer.finish().unwrap();
+        let mut reader = SpillReader::new(Cursor::new(data), 10).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(batch.clone()));
+        assert_eq!(reader.next_batch().unwrap(), Some(batch.take(&[2, 0, 2]).unwrap()));
+        assert_eq!(reader.next_batch().unwrap(), Some(batch.slice_rows(1, 2).unwrap()));
+        assert_eq!(reader.next_batch().unwrap(), Some(Batch::empty(schema)));
         assert!(reader.next_batch().unwrap().is_none());
     }
 }

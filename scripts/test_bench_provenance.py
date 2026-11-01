@@ -9,6 +9,18 @@ import bench_provenance as provenance
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_report_loader_rejects_ambiguous_or_nonfinite_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "source.json"
+            for contents in ('{"metric": 1, "metric": 2}',
+                             '{"latency_ms": 1e999}',
+                             '{"latency_ms": NaN}'):
+                report.write_text(contents, encoding="utf-8")
+                with self.subTest(contents=contents), self.assertRaises(ValueError):
+                    provenance.load_report(report)
+            report.write_text('{"metric": 1.25}', encoding="utf-8")
+            self.assertEqual(provenance.load_report(report), {"metric": 1.25})
+
     def test_sha256_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "rs"

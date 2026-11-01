@@ -5,6 +5,7 @@ import math
 import os
 import re
 import subprocess
+import signal
 import tempfile
 from pathlib import Path
 from typing import Mapping
@@ -67,10 +68,31 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
         raise ValueError("Invalid SQL parameter name or parameter count")
     for name in sorted(params):
         value = params[name]
-        if not isinstance(value, str) or ":" not in value or len(value) > 8192:
+        if not isinstance(value, str) or ":" not in value or len(value.encode("utf-8")) > 8192:
             raise ValueError("SQL parameters must be bounded typed values")
         command.extend(["--named-param", f"{name}={value}"])
     return command
+
+
+def _export_arrow(command: list[str], error_log, process_timeout: float | None) -> int:
+    """Reap the entire exporter group when an export fails or is interrupted."""
+    process = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=error_log,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        return process.wait(timeout=process_timeout)
+    except BaseException:
+        if process.poll() is None:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            process.wait()
+        raise
 
 
 def query_dataframe(sql: str, *, binary: str = "rustspark",
@@ -104,13 +126,19 @@ def query_dataframe(sql: str, *, binary: str = "rustspark",
             parquet_tables=parquet_tables, json_tables=json_tables,
             named_params=named_params,
         )
-        try:
-            result = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE, text=True,
-                                    check=False, timeout=process_timeout)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
-        if result.returncode:
-            raise RuntimeError(result.stderr.strip() or "RustSpark query failed")
+        # Spool diagnostics to disk rather than retaining unbounded stderr
+        # in memory during an Arrow export that produces no stdout.
+        with tempfile.TemporaryFile() as error_log:
+            try:
+                status = _export_arrow(command, error_log, process_timeout)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
+            except OSError as error:
+                raise RuntimeError("Unable to start RustSpark Arrow export") from error
+            if status:
+                error_log.seek(0, os.SEEK_END)
+                error_log.seek(max(0, error_log.tell() - 65_536))
+                detail = error_log.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "RustSpark query failed")
         with pa.memory_map(str(output), "r") as source:
             return pa.ipc.open_file(source).read_all().to_pandas()

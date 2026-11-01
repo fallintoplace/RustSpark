@@ -174,6 +174,25 @@ mod tests {
 }
 
  
+/// Identify a simple predicate's column without searching every summary.
+/// Complex trees are handled separately by can_skip_columns_inner.
+fn simple_predicate_column(predicate: &Expr) -> Option<&str> {
+    match predicate {
+        Expr::Not(inner) => simple_predicate_column(inner),
+        Expr::IsNull(inner) => match inner.as_ref() {
+            Expr::Column(name) => Some(name),
+            _ => None,
+        },
+        Expr::Binary { left, right, .. }
+        | Expr::IsDistinctFrom { left, right, .. } => match (left.as_ref(), right.as_ref()) {
+            (Expr::Column(name), Expr::Literal(_))
+            | (Expr::Literal(_), Expr::Column(name)) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Conservative pruning across column statistics and boolean predicates.
 /// Missing statistics never cause a data partition to be discarded.
 /// Conservatively decide whether a boolean tree is impossible using a
@@ -212,6 +231,22 @@ fn can_skip_columns_inner(
             // column or ancestor in the boolean expression tree.
             let inverse = negated.then(|| Expr::Not(Box::new(predicate.clone())));
             let leaf = inverse.as_ref().unwrap_or(predicate);
+            if let Some(name) = simple_predicate_column(leaf) {
+                // Normalized schema statistics use lowercase ASCII names.
+                // A direct match avoids scanning unrelated columns for every
+                // partition and expression leaf.
+                if let Some(summary) = stats.get(name) {
+                    return can_skip(summary, name, leaf);
+                }
+                if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    let lowered = name.to_ascii_lowercase();
+                    if let Some(summary) = stats.get(&lowered) {
+                        return can_skip(summary, &lowered, leaf);
+                    }
+                }
+            }
+            // External statistics maps may use mixed-case keys. Preserve
+            // case-insensitive lookup and conservative fallback behavior.
             stats.iter().any(|(column, summary)| can_skip(summary, column, leaf))
         }
     }
@@ -619,5 +654,56 @@ mod borrowed_negated_comparisons_tests {
         );
         assert!(can_skip(&stats, "x", &Expr::Not(Box::new(comparison.clone()))));
         assert!(!can_skip(&stats, "y", &Expr::Not(Box::new(comparison))));
+    }
+}
+
+#[cfg(test)]
+mod direct_statistics_lookup_regressions {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn wide_statistics_maps_prune_only_proven_impossible_ranges() {
+        let mut stats = (0..1500).map(|index| {
+            (format!("unused_{index}"), ColumnStatistics {
+                rows: 20, nulls: 0,
+                min: Some(Value::Integer(0)),
+                max: Some(Value::Integer(100)),
+            })
+        }).collect::<HashMap<_, _>>();
+        stats.insert("revenue".into(), ColumnStatistics {
+            rows: 20, nulls: 0,
+            min: Some(Value::Integer(1000)),
+            max: Some(Value::Integer(2000)),
+        });
+        for name in ["revenue", "Revenue", "REVENUE"] {
+            let predicate = Expr::binary(Expr::Column(name.into()),
+                BinaryOp::Less, Expr::Literal(Value::Integer(1000)));
+            assert!(can_skip_columns(&stats, &predicate));
+            let possible = Expr::binary(Expr::Column(name.into()),
+                BinaryOp::LessEqual, Expr::Literal(Value::Integer(1000)));
+            assert!(!can_skip_columns(&stats, &possible));
+        }
+        let missing = Expr::binary(Expr::Column("unknown".into()),
+            BinaryOp::Equal, Expr::Literal(Value::Integer(5)));
+        assert!(!can_skip_columns(&stats, &missing));
+    }
+
+    #[test]
+    fn null_and_null_safe_leaves_preserve_case_insensitive_pruning() {
+        let stats = HashMap::from([("Value".to_string(), ColumnStatistics {
+            rows: 10, nulls: 0,
+            min: Some(Value::Integer(1)),
+            max: Some(Value::Integer(1)),
+        })]);
+        let is_null = Expr::IsNull(Box::new(Expr::Column("value".into())));
+        assert!(can_skip_columns(&stats, &is_null));
+        let distinct = Expr::IsDistinctFrom {
+            left: Box::new(Expr::Literal(Value::Integer(1))),
+            right: Box::new(Expr::Column("VALUE".into())),
+            negated: false,
+        };
+        assert!(can_skip_columns(&stats, &distinct));
+        assert!(!can_skip_columns(&stats, &Expr::Not(Box::new(is_null))));
     }
 }

@@ -38,3 +38,10 @@ SQL table names in the query. Named inputs cannot be mixed with
 unnamed `csv`, `parquet` or `json_input` paths.
 
 Pass `database_dir="/path/to/db"` to stream registered tables without a file source. `max_rows` must be a nonnegative integer and `query_timeout` a positive integer. Child-process stderr is spooled to temporary disk storage while Arrow stdout streams, preventing a full diagnostic pipe from blocking the query. Only the trailing 8 KiB of diagnostics is read on failures.
+
+## Process deadlines
+
+Use `process_timeout=30` with `iter_arrow_batches` to enforce a wall-clock
+deadline even when the native process stalls before completing Arrow IPC output.
+The iterator terminates the process group on timeout and raises `TimeoutError`.
+`query_timeout` still controls the native SQL deadline independently.

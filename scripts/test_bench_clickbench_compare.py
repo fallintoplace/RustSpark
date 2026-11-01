@@ -29,6 +29,18 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differ"):
             comparison.compare(report([(1, 5, "a")]), report([(2, 5, "a")]))
 
+    def test_small_finite_ratio_remains_positive(self):
+        baseline = report([(1, 1e9, "a")])
+        candidate = report([(1, 1.0, "a")])
+        comparison_result = comparison.compare(baseline, candidate)
+        self.assertEqual(comparison_result["results"][0]["median_ratio"], 1e-9)
+
+    def test_underflowed_ratio_is_rejected_instead_of_reporting_zero(self):
+        baseline = report([(1, 1e308, "a")])
+        candidate = report([(1, 5e-324, "a")])
+        with self.assertRaisesRegex(ValueError, "underflowed"):
+            comparison.compare(baseline, candidate)
+
     def test_rejects_overflowed_latency_ratio(self):
         baseline = report([(1, 1e-308, "a")])
         candidate = report([(1, 1e308, "a")])

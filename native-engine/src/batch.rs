@@ -164,6 +164,43 @@ impl Batch {
         Ok(Self { schema: self.schema.clone(), columns, rows: indices.len() })
     }
 
+    /// Gather arbitrary row indices from an owned batch, retaining order and
+    /// duplicates. The final use of each source cell moves its allocation.
+    /// Duplicate earlier uses must still clone the value.
+    pub fn take_owned(self, indices: &[usize]) -> Result<Self> {
+        let mut last_positions = vec![usize::MAX; self.rows];
+        let mut has_duplicates = false;
+        for (position, &index) in indices.iter().enumerate() {
+            if index >= self.rows {
+                return Err(Error::Execution(format!("row index out of bounds: {index}")));
+            }
+            if last_positions[index] != usize::MAX { has_duplicates = true; }
+            last_positions[index] = position;
+        }
+        // Full permutations can swap column entries in place, preserving
+        // the original column allocations without any per-cell containers.
+        if indices.len() == self.rows && !has_duplicates {
+            return self.permute_rows_owned(indices);
+        }
+        if indices.windows(2).all(|pair| pair[0] < pair[1]) {
+            return self.take_sorted_owned(indices);
+        }
+        let columns = self.columns.into_iter().map(|source| {
+            let mut cells = source.into_iter().map(Some).collect::<Vec<_>>();
+            let mut output = Vec::with_capacity(indices.len());
+            for (position, &index) in indices.iter().enumerate() {
+                let value = if last_positions[index] == position {
+                    cells[index].take().expect("last source reference")
+                } else {
+                    cells[index].as_ref().expect("live source reference").clone()
+                };
+                output.push(value);
+            }
+            output
+        }).collect();
+        Ok(Self { schema: self.schema, columns, rows: indices.len() })
+    }
+
     /// Select rows from a columnar batch using a boolean mask.
     pub fn take_mask(&self, mask: &[bool]) -> Result<Self> {
         if mask.len() != self.rows {
@@ -203,6 +240,24 @@ impl Batch {
             columns.push(values);
         }
         Ok(Self { schema: self.schema, columns, rows: indices.len() })
+    }
+
+    /// Transfer an already selected row into output columns without cloning
+    /// heap-backed TEXT. The removed source slots are never revisited by the
+    /// consuming merge cursor.
+    pub(crate) fn move_row_to_columns(
+        &mut self, row: usize, output: &mut [Vec<Value>],
+    ) -> Result<()> {
+        if row >= self.rows {
+            return Err(Error::Execution(format!("row index out of bounds: {row}")));
+        }
+        if output.len() != self.columns.len() {
+            return Err(Error::Schema("row append column count mismatch".into()));
+        }
+        for (target, source) in output.iter_mut().zip(&mut self.columns) {
+            target.push(std::mem::replace(&mut source[row], Value::Null));
+        }
+        Ok(())
     }
 
     /// Append a validated source row to owned column builders without making
@@ -618,5 +673,92 @@ mod owned_empty_slice_fast_path_tests {
         }
         let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 10).unwrap();
         assert_eq!(zero.slice_rows_owned(5, 5).unwrap().num_rows(), 0);
+    }
+}
+
+
+#[cfg(test)]
+mod owned_row_transfer_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn moves_text_out_of_merge_input_without_copying_payload() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Text, false)]).unwrap();
+        let mut input = Batch::from_rows(schema, vec![
+            vec![Value::Text("x".repeat(8192))],
+            vec![Value::Text("tail".into())],
+        ]).unwrap();
+        let pointer = match input.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let mut columns = vec![Vec::new()];
+        input.move_row_to_columns(0, &mut columns).unwrap();
+        assert_eq!(match &columns[0][0] {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        }, pointer);
+        assert_eq!(input.value(0, 0).unwrap(), &Value::Null);
+        assert_eq!(input.value(1, 0).unwrap(), &Value::Text("tail".into()));
+        assert!(input.move_row_to_columns(2, &mut columns).is_err());
+    }
+}
+
+#[cfg(test)]
+mod arbitrary_owned_gather_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn arbitrary_gather_preserves_duplicates_nulls_and_last_use_ownership() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("number", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("first🙂".repeat(512)), Value::Integer(0)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text("last東京".repeat(512)), Value::Integer(2)],
+        ]).unwrap();
+        let ptr0 = match input.value(0, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        };
+        let ptr2 = match input.value(2, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        };
+        let order = [2, 0, 2, 1, 0];
+        let expected = input.take(&order).unwrap();
+        let result = input.take_owned(&order).unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(match result.value(2, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        }, ptr2);
+        assert_eq!(match result.value(4, 0).unwrap() {
+            Value::Text(s) => s.as_ptr(), _ => unreachable!(),
+        }, ptr0);
+    }
+
+    #[test]
+    fn full_permutations_and_increasing_selections_match_borrowed_gathers() {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("name", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("a".repeat(8192))],
+                 vec![Value::Null], vec![Value::Text("z".repeat(8192))]],
+        ).unwrap();
+        for indices in [&[2, 0, 1][..], &[1, 2][..], &[0, 1, 2][..],
+                        &[0, 0, 2][..], &[][..]] {
+            assert_eq!(batch.clone().take_owned(indices).unwrap(), batch.take(indices).unwrap());
+        }
+        assert!(batch.clone().take_owned(&[3]).is_err());
+        assert!(batch.take_owned(&[usize::MAX]).is_err());
+    }
+
+    #[test]
+    fn zero_width_batches_keep_duplicate_and_permuted_cardinality() {
+        let source = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        for indices in [&[2, 0, 2, 0][..], &[1, 0, 2][..], &[0, 2][..], &[][..]] {
+            assert_eq!(source.clone().take_owned(indices).unwrap(), source.take(indices).unwrap());
+        }
     }
 }
