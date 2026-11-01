@@ -166,9 +166,12 @@ def run_bounded_backend(command: list[str], timeout: float,
         raise ValueError("Invalid query execution budget")
     output = bytearray()
     exceeded = threading.Event()
-    with subprocess.Popen(command, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL,
-                          start_new_session=(os.name == "posix")) as process:
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=(os.name == "posix"),
+    )
+    thread = None
+    try:
         assert process.stdout is not None
 
         def drain():
@@ -205,6 +208,15 @@ def run_bounded_backend(command: list[str], timeout: float,
         return subprocess.CompletedProcess(
             command, process.returncode, stdout, ""
         )
+    finally:
+        # Popen.__exit__ only waits on KeyboardInterrupt. Reap the backend
+        # and its inherited-pipe descendants before leaving the request.
+        _kill_backend_group(process)
+        process.wait()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1)
+        if process.stdout is not None and (thread is None or not thread.is_alive()):
+            process.stdout.close()
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Keep slow local clients from blocking other requests or spawning unlimited threads."""
