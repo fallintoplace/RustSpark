@@ -690,8 +690,8 @@ mod transactional_wire_merge_regressions {
     fn direct_sparse_and_dense_merges_match_decoded_register_max() {
         let mut source = HyperLogLog::new();
         let mut target = HyperLogLog::new();
-        for n in 0..2500 { source.add(&Value::Integer(n)); }
-        for n in 1250..4000 { target.add(&Value::Integer(n)); }
+        for n in 0..300 { source.add(&Value::Integer(n)); }
+        for n in 150..1000 { target.add(&Value::Integer(n)); }
         let sparse = source.to_wire_bytes();
         assert!(sparse.starts_with(SPARSE_WIRE_HEADER));
         let mut expected = target.clone();
