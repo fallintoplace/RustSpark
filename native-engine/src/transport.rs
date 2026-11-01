@@ -105,6 +105,20 @@ impl AttemptTracker {
             }
         }
     }
+
+    /// Release a completed task after its exchange stream has been fully
+    /// committed and closed. Do not call while delayed frames can still arrive.
+    pub fn retire_task(&mut self, stage: u64, task: u64) -> bool {
+        self.attempts.remove(&(stage, task)).is_some()
+    }
+
+    /// Reclaim all attempt records for a finished stage. Stage IDs must not
+    /// be reused while frames from an earlier incarnation are in flight.
+    pub fn retire_stage(&mut self, stage: u64) -> usize {
+        let before = self.attempts.len();
+        self.attempts.retain(|&(existing, _), _| existing != stage);
+        before - self.attempts.len()
+    }
 }
 
 pub fn write_frame(output: &mut impl Write, frame: &Frame, max_bytes: usize) -> Result<()> {
@@ -837,5 +851,32 @@ mod iterator_exchange_writer_tests {
         assert_eq!(write_frame_stream_limited(
             &mut Vec::new(), std::iter::empty::<Result<Frame>>(), 0, 0, 0,
         ).unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod exchange_attempt_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn completed_tasks_and_stages_release_exact_tracking_capacity() {
+        let mut tracker = AttemptTracker::new(3).unwrap();
+        let frame = |stage, task, attempt| Frame {
+            stage, task, attempt, payload: Vec::new(),
+        };
+        for (stage, task) in [(7, 1), (7, 2), (8, 3)] {
+            assert!(tracker.accept(&frame(stage, task, 2)).unwrap());
+        }
+        assert!(tracker.accept(&frame(9, 4, 1)).is_err());
+        assert!(tracker.retire_task(7, 1));
+        assert!(!tracker.retire_task(7, 1));
+        assert!(tracker.accept(&frame(9, 4, 1)).unwrap());
+        assert_eq!(tracker.retire_stage(7), 1);
+        assert_eq!(tracker.retire_stage(7), 0);
+        assert!(!tracker.accept(&frame(8, 3, 1)).unwrap());
+        assert!(tracker.accept(&frame(10, 5, 1)).unwrap());
+        assert_eq!(tracker.retire_stage(8), 1);
+        assert_eq!(tracker.retire_stage(9), 1);
+        assert_eq!(tracker.retire_stage(10), 1);
     }
 }
