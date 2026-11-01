@@ -261,6 +261,41 @@ pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if k >= batch.num_rows() { return crate::sort::sort_owned(batch, keys); }
 
+    if k == 1 && keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        // LIMIT 1 never needs a heap, even with composite ORDER BY keys.
+        // Compare borrowed cells and transfer the winning owned row once.
+        let columns = keys.iter().map(|key| match &key.expression {
+            Expr::Column(name) => batch.column(batch.schema().column(name)?),
+            _ => unreachable!("direct column keys"),
+        }).collect::<Result<Vec<_>>>()?;
+        let options = keys.iter().map(|key| (key.descending, key.nulls_first))
+            .collect::<Vec<_>>();
+        let mut best = 0usize;
+        for row in 1..batch.num_rows() {
+            let candidate = ColumnCandidate { row, columns: &columns, options: &options };
+            let previous = ColumnCandidate { row: best, columns: &columns, options: &options };
+            if candidate < previous { best = row; }
+        }
+        return batch.take_unique_owned(&[best]);
+    }
+
+    if k == 1 && keys.len() == 1 {
+        // Evaluate even nonwinning computed keys to preserve expression errors.
+        let key = &keys[0];
+        let mut best = 0usize;
+        let mut value = key.expression.evaluate(&batch, 0)?;
+        for row in 1..batch.num_rows() {
+            let next = key.expression.evaluate(&batch, row)?;
+            if crate::sort::compare_values(
+                &next, &value, key.descending, key.nulls_first,
+            ) == Ordering::Less {
+                value = next;
+                best = row;
+            }
+        }
+        return batch.take_unique_owned(&[best]);
+    }
+
     if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         let columns = keys.iter().map(|key| match &key.expression {
             Expr::Column(name) => batch.column(batch.schema().column(name)?),
@@ -906,5 +941,54 @@ mod owned_mixed_key_topk_regressions {
             assert_eq!(top_k_owned(source.clone(), &keys, limit).unwrap(),
                 top_k(&source, &keys, limit).unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod owned_top_one_heap_elision_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn composite_columns_preserve_ties_nulls_and_owned_wide_payload() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("rank", DataType::Float, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..101).map(|id| vec![
+            if id % 11 == 0 { Value::Null } else { Value::Integer(id % 9) },
+            if id % 17 == 0 { Value::Null } else { Value::Float((id % 3) as f64) },
+            Value::Text(format!("{id}-{}", "🦀".repeat(2_048))),
+        ]).collect()).unwrap();
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let keys = [
+                    SortKey { expression: Expr::Column("score".into()), descending, nulls_first },
+                    SortKey::ascending(Expr::Column("rank".into())),
+                ];
+                let expected = crate::sort::sort(&input, &keys).unwrap()
+                    .slice_rows(0, 1).unwrap();
+                assert_eq!(top_k_owned(input.clone(), &keys, 1).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn computed_singleton_reports_late_errors_and_matches_stable_sort() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let normal = Batch::from_rows(schema.clone(), (0..81)
+            .map(|id| vec![Value::Integer(id % 7)]).collect()).unwrap();
+        let key = SortKey::ascending(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)),
+        ));
+        assert_eq!(top_k_owned(normal.clone(), &[key.clone()], 1).unwrap(),
+            crate::sort::sort(&normal, &[key.clone()]).unwrap()
+                .slice_rows(0, 1).unwrap());
+        let invalid = Batch::from_rows(schema, vec![
+            vec![Value::Integer(0)], vec![Value::Integer(i64::MAX)],
+        ]).unwrap();
+        assert!(top_k_owned(invalid, &[key], 1).is_err());
     }
 }

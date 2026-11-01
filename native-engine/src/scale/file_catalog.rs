@@ -3,6 +3,16 @@ use std::{borrow::Cow, collections::HashMap, fs::File, io::BufReader, path::{Pat
 use crate::{schema::Schema, Error, Result};
 use super::csv_scan::{CsvRows, open_csv};
 
+// Do not open a pre-existing FIFO, socket or device as a file-backed table.
+// A blocking open on a FIFO can hang query startup before the byte limits apply.
+fn require_regular_source(path: &Path) -> Result<()> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(Error::Execution("native table source must be a regular file".into()));
+    }
+    Ok(())
+}
+
+
 #[derive(Clone, Debug)]
 pub struct CsvTable {
     path: PathBuf,
@@ -15,6 +25,7 @@ impl CsvTable {
     pub fn path(&self) -> &Path { &self.path }
     pub fn max_record_bytes(&self) -> usize { self.max_record_bytes }
     pub fn open(&self) -> Result<CsvRows<BufReader<File>>> {
+        require_regular_source(&self.path)?;
         open_csv(&self.path, self.schema.clone(), self.max_record_bytes)
     }
 }
@@ -29,8 +40,24 @@ impl ParquetTable {
     pub fn schema(&self) -> &Schema { &self.schema }
     pub fn path(&self) -> &Path { &self.path }
     pub fn open(&self, batch_rows: usize) -> Result<crate::parquet_scan::ParquetScan> {
+        require_regular_source(&self.path)?;
         crate::parquet_scan::scan_checked(&self.path, batch_rows, &self.schema)
     }
+}
+
+/// Source descriptor for an all-or-nothing catalog registration window.
+#[derive(Debug)]
+pub enum FileRegistration {
+    Csv {
+        name: String,
+        path: PathBuf,
+        schema: Schema,
+        max_record_bytes: usize,
+    },
+    Parquet {
+        name: String,
+        path: PathBuf,
+    },
 }
 
 #[derive(Default, Debug)]
@@ -84,6 +111,7 @@ impl FileCatalog {
             return Err(Error::Schema(format!("file-backed table already exists: {name}")));
         }
         let path = path.as_ref();
+        require_regular_source(path)?;
         let file = File::open(path)?;
         let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|err| Error::Execution(format!("Parquet metadata: {err}")))?;
@@ -93,6 +121,41 @@ impl FileCatalog {
             path: path.to_path_buf(), schema,
         });
         Ok(())
+    }
+
+    /// Register multiple CSV and Parquet sources as one logical update.
+    /// Stage metadata and file checks separately so a late collision,
+    /// missing Parquet file, or malformed schema never publishes a prefix.
+    pub fn register_many(
+        &mut self, entries: impl IntoIterator<Item = FileRegistration>,
+    ) -> Result<usize> {
+        let mut staged = Self::new();
+        for entry in entries {
+            match entry {
+                FileRegistration::Csv { name, path, schema, max_record_bytes } => {
+                    let key = normalized(&name)?;
+                    if self.contains_key(key.as_ref()) {
+                        return Err(Error::Schema(format!(
+                            "file-backed table already exists: {name}"
+                        )));
+                    }
+                    staged.register_csv(&name, path, schema, max_record_bytes)?;
+                }
+                FileRegistration::Parquet { name, path } => {
+                    let key = normalized(&name)?;
+                    if self.contains_key(key.as_ref()) {
+                        return Err(Error::Schema(format!(
+                            "file-backed table already exists: {name}"
+                        )));
+                    }
+                    staged.register_parquet(&name, path)?;
+                }
+            }
+        }
+        let count = staged.tables.len() + staged.parquet.len();
+        self.tables.extend(staged.tables);
+        self.parquet.extend(staged.parquet);
+        Ok(count)
     }
 
     pub fn schema(&self, name: &str) -> Result<&Schema> {
@@ -311,5 +374,89 @@ mod replaced_parquet_schema_regressions {
         let error = catalog.get_parquet("events").unwrap().unwrap().open(4).err().unwrap();
         assert!(error.to_string().contains("schema changed"));
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod regular_source_guards {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn schema() -> Schema {
+        Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap()
+    }
+
+    #[test]
+    fn directory_cannot_be_registered_as_parquet_or_opened_as_csv() {
+        let directory = std::env::temp_dir();
+        let mut catalog = FileCatalog::new();
+        assert!(catalog.register_parquet("events", &directory).unwrap_err()
+            .to_string().contains("regular file"));
+        assert!(catalog.list().is_empty());
+
+        // CSV registration intentionally does not open the input until queried.
+        catalog.register_csv("events", &directory, schema(), 1024).unwrap();
+        assert!(catalog.get("events").unwrap().open().err().unwrap()
+            .to_string().contains("regular file"));
+        assert_eq!(catalog.list(), vec!["events"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn character_devices_are_rejected_before_stream_open() {
+        let device = Path::new("/dev/null");
+        if !device.exists() { return; }
+        let mut catalog = FileCatalog::new();
+        assert!(catalog.register_parquet("events", device).unwrap_err()
+            .to_string().contains("regular file"));
+        catalog.register_csv("events", device, schema(), 1024).unwrap();
+        assert!(catalog.get("events").unwrap().open().err().unwrap()
+            .to_string().contains("regular file"));
+    }
+}
+
+#[cfg(test)]
+mod atomic_catalog_registration_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn csv(name: &str) -> FileRegistration {
+        FileRegistration::Csv {
+            name: name.into(), path: format!("{name}.csv").into(),
+            schema: Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            max_record_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn stages_many_sources_without_loading_csv_files() {
+        let mut catalog = FileCatalog::new();
+        assert_eq!(catalog.register_many([csv("alpha"), csv("beta")]).unwrap(), 2);
+        assert_eq!(catalog.list(), vec!["alpha", "beta"]);
+        assert_eq!(catalog.get("ALPHA").unwrap().path(), Path::new("alpha.csv"));
+        assert_eq!(catalog.register_many(Vec::new()).unwrap(), 0);
+        assert_eq!(catalog.list(), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn late_cross_format_and_casefold_collisions_publish_nothing() {
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("existing", "source.csv", Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), 256).unwrap();
+
+        assert!(catalog.register_many([csv("candidate"), csv("EXISTING")]).is_err());
+        assert!(catalog.get("candidate").is_err());
+        assert!(catalog.register_many([csv("duplicate"), csv("DUPLICATE")]).is_err());
+        assert!(catalog.get("duplicate").is_err());
+        // Parquet metadata must be validated before any staged CSV is visible.
+        assert!(catalog.register_many([
+            csv("candidate"),
+            FileRegistration::Parquet {
+                name: "parquet".into(),
+                path: "this-file-must-not-exist-20261101.parquet".into(),
+            },
+        ]).is_err());
+        assert_eq!(catalog.list(), vec!["existing"]);
     }
 }
