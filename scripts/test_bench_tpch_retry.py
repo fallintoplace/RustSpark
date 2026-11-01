@@ -6,6 +6,37 @@ import bench_tpch_retry as retry
 
 
 class RetryTests(unittest.TestCase):
+    def test_rejects_duplicate_json_keys_in_previous_and_retry_reports(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "retry.json"
+            for body in (
+                '{"results":[{"id":1,"status":"error"}],"results":[]}',
+                '{"results":[{"id":1,"id":2,"status":"ok"}]}',
+                '{"results":[{"id":1,"status":"ok","median_ms":NaN}]}',
+            ):
+                with self.subTest(body=body):
+                    path.write_text(body, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        retry.load_retry_report(path)
+
+            previous = Path(tmp) / "previous.json"
+            previous.write_text('{"results":[{"id":1,"status":"error"}]}',
+                                encoding="utf-8")
+            path.write_text('{"results":[{"id":1,"status":"ok"}],"results":[]}',
+                            encoding="utf-8")
+            args = type("Args", (), {
+                "previous": previous, "json_out": path, "binary": "rustspark",
+                "queries_dir": Path(tmp), "parquet_dir": Path(tmp),
+                "repeat": 1, "timeout": 10,
+            })()
+            with mock.patch.object(retry.subprocess, "run", return_value=mock.Mock(returncode=0)):
+                with self.assertRaises(ValueError):
+                    retry.execute_retry(args)
+
     def test_selects_only_failures(self):
         report = {"results": [{"id": 3, "status": "error"},
                               {"id": 1, "status": "ok"},
