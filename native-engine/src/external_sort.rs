@@ -12,6 +12,13 @@ use crate::{
 
 const MAX_OUTPUT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
+// Reserve at most the fixed Value slots that the output budget can hold.
+// This avoids allocating columns * 256 slots for very wide result schemas.
+fn output_buffer_capacity(requested: usize, columns: usize) -> usize {
+    let fixed_row = columns.max(1).saturating_mul(std::mem::size_of::<Value>());
+    requested.min(256).min((MAX_OUTPUT_BATCH_BYTES / fixed_row.max(1)).max(1))
+}
+
 struct Run {
     _spill: SpillFile,
     reader: SpillReader,
@@ -188,8 +195,9 @@ impl Iterator for ExternalSort {
             self.finished = true;
             return None;
         }
+        let capacity = output_buffer_capacity(self.output_rows, self.schema.len());
         let mut columns = (0..self.schema.len())
-            .map(|_| Vec::with_capacity(self.output_rows.min(256))).collect::<Vec<_>>();
+            .map(|_| Vec::with_capacity(capacity)).collect::<Vec<_>>();
         let mut row_count = 0usize;
         let mut output_bytes = 0usize;
         while row_count < self.output_rows {
@@ -584,3 +592,26 @@ mod external_sort_output_byte_budget_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod external_sort_wide_output_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn initial_buffers_never_reserve_more_than_output_value_budget() {
+        for width in [1, 2, 16, 1024, 4096, 65_536] {
+            let capacity = output_buffer_capacity(65_536, width);
+            assert!((1..=256).contains(&capacity));
+            let fixed_bytes = width * capacity * std::mem::size_of::<Value>();
+            assert!(fixed_bytes <= MAX_OUTPUT_BATCH_BYTES);
+        }
+        assert_eq!(output_buffer_capacity(3, 256), 3);
+    }
+
+    #[test]
+    fn narrow_outputs_keep_the_small_batch_fast_path() {
+        assert_eq!(output_buffer_capacity(65_536, 1), 256);
+        assert_eq!(output_buffer_capacity(5, 1), 5);
+        assert_eq!(output_buffer_capacity(1, 4096), 1);
+    }
+}
