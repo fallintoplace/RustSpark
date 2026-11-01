@@ -203,6 +203,46 @@ impl Default for HyperLogLog {
 }
 
 #[cfg(test)]
+mod transactional_hll_worker_window_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_sparse_and_dense_worker_windows_match_regular_merges() {
+        let mut sparse = HyperLogLog::new();
+        for n in 0..120 { sparse.add(&Value::Integer(n)); }
+        let mut dense = HyperLogLog::new();
+        for n in 0..20_000 { dense.add(&Value::Integer(n)); }
+        let sparse_wire = sparse.to_wire_bytes();
+        let dense_wire = dense.to_wire_bytes();
+        assert!(sparse_wire.starts_with(SPARSE_WIRE_HEADER));
+        assert!(dense_wire.starts_with(WIRE_HEADER));
+        let mut expected = HyperLogLog::new();
+        expected.merge(&sparse);
+        expected.merge(&dense);
+        let mut actual = HyperLogLog::new();
+        actual.merge_wire_batch([sparse_wire.as_slice(), dense_wire.as_slice()]).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.to_wire_bytes(), expected.to_wire_bytes());
+    }
+
+    #[test]
+    fn late_malformed_worker_sketch_rolls_back_every_register() {
+        let mut sketch = HyperLogLog::new();
+        sketch.add(&Value::Text("previous worker".into()));
+        let before = sketch.clone();
+        let mut valid = HyperLogLog::new();
+        valid.add(&Value::Integer(123));
+        let wire = valid.to_wire_bytes();
+        let bad: &[u8] = b"RSH2\0";
+        assert!(sketch.merge_wire_batch([wire.as_slice(), bad]).is_err());
+        assert_eq!(sketch, before);
+        sketch.merge_wire_batch(std::iter::empty::<&[u8]>()).unwrap();
+        assert_eq!(sketch, before);
+    }
+}
+
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -741,44 +781,5 @@ mod transactional_wire_merge_regressions {
         *dense.last_mut().unwrap() = u8::MAX;
         assert!(target.merge_wire_bytes(&dense).is_err());
         assert_eq!(target, original);
-    }
-}
-
-#[cfg(test)]
-mod transactional_hll_worker_window_tests {
-    use super::*;
-
-    #[test]
-    fn mixed_sparse_and_dense_worker_windows_match_regular_merges() {
-        let mut sparse = HyperLogLog::new();
-        for n in 0..120 { sparse.add(&Value::Integer(n)); }
-        let mut dense = HyperLogLog::new();
-        for n in 0..20_000 { dense.add(&Value::Integer(n)); }
-        let sparse_wire = sparse.to_wire_bytes();
-        let dense_wire = dense.to_wire_bytes();
-        assert!(sparse_wire.starts_with(SPARSE_WIRE_HEADER));
-        assert!(dense_wire.starts_with(WIRE_HEADER));
-        let mut expected = HyperLogLog::new();
-        expected.merge(&sparse);
-        expected.merge(&dense);
-        let mut actual = HyperLogLog::new();
-        actual.merge_wire_batch([sparse_wire.as_slice(), dense_wire.as_slice()]).unwrap();
-        assert_eq!(actual, expected);
-        assert_eq!(actual.to_wire_bytes(), expected.to_wire_bytes());
-    }
-
-    #[test]
-    fn late_malformed_worker_sketch_rolls_back_every_register() {
-        let mut sketch = HyperLogLog::new();
-        sketch.add(&Value::Text("previous worker".into()));
-        let before = sketch.clone();
-        let mut valid = HyperLogLog::new();
-        valid.add(&Value::Integer(123));
-        let wire = valid.to_wire_bytes();
-        let bad: &[u8] = b"RSH2\0";
-        assert!(sketch.merge_wire_batch([wire.as_slice(), bad]).is_err());
-        assert_eq!(sketch, before);
-        sketch.merge_wire_batch(std::iter::empty::<&[u8]>()).unwrap();
-        assert_eq!(sketch, before);
     }
 }
