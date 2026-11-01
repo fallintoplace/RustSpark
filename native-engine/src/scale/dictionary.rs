@@ -148,6 +148,13 @@ impl DictionaryColumn {
     /// final use when this is the last owner of the dictionary table.
     /// Earlier repeated uses still require independent TEXT allocations.
     pub fn into_decoded_with_budget(self, max_bytes: usize) -> Result<Vec<Value>> {
+        // Shared dictionaries cannot move strings out of their Arc. Use the
+        // borrowed decoder directly, without allocating a per-code reference
+        // table and scanning all indices twice on this common clone path.
+        // That decoder still enforces the exact output budget and code checks.
+        if Arc::strong_count(&self.dictionary) != 1 {
+            return self.decode_with_budget(max_bytes);
+        }
         // Keep the same admission and invalid-code checks as borrowed decode,
         // without allocating output strings on the failing path.
         let mut used = self.indices.len()
@@ -166,9 +173,6 @@ impl DictionaryColumn {
             used = used.checked_add(value.len())
                 .filter(|bytes| *bytes <= max_bytes)
                 .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
-        }
-        if Arc::strong_count(&self.dictionary) != 1 {
-            return self.decode_with_budget(max_bytes);
         }
         let Self { dictionary, indices, .. } = self;
         let table = Arc::try_unwrap(dictionary)
@@ -704,5 +708,38 @@ mod dictionary_retained_heap_accounting_regressions {
         assert_eq!(encoded.encoded_string_bytes(), 9);
         assert!(encoded.estimated_bytes() >= payload_only + 2 * std::mem::size_of::<String>());
         assert_eq!(encoded.decode().unwrap().as_slice(), input.column(0).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod shared_dictionary_decode_fast_path_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn shared_large_dictionary_decodes_with_the_same_bounds_and_rows() {
+        let values = (0..4096).map(|i| match i % 7 {
+            0 => Value::Null,
+            1 | 2 => Value::Text("repeated".into()),
+            _ => Value::Text(format!("key-{i:04}")),
+        }).collect::<Vec<_>>();
+        let schema = Schema::new(vec![
+            Field::new("value", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, values.iter().cloned()
+            .map(|value| vec![value]).collect()).unwrap();
+        let encoded = DictionaryColumn::from_batch(
+            &batch, "value", 4096, 100_000, 4096,
+        ).unwrap();
+        let shared = encoded.clone();
+        assert_eq!(Arc::strong_count(&encoded.dictionary), 2);
+        let budget = 4096 * std::mem::size_of::<Value>()
+            + values.iter().map(|value| match value {
+                Value::Text(value) => value.len(),
+                _ => 0,
+            }).sum::<usize>();
+        assert_eq!(shared.clone().into_decoded_with_budget(budget).unwrap(), values);
+        assert!(shared.into_decoded_with_budget(budget - 1).is_err());
+        assert_eq!(encoded.decode_with_budget(budget).unwrap(), values);
     }
 }
