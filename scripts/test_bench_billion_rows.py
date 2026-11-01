@@ -10,6 +10,21 @@ import bench_billion_rows as bench
 
 
 class BillionRowBenchmarkTests(unittest.TestCase):
+    def test_query_subprocess_stdout_is_bounded_before_json_parsing(self):
+        code = "import sys;sys.stdout.write('x' * 70000)"
+        with mock.patch.object(bench, "query_command",
+                               return_value=[sys.executable, "-c", code]):
+            with self.assertRaisesRegex(RuntimeError, "64 KiB"):
+                bench.run_query("rs", pathlib.Path("."), "SELECT 1", 5, None)
+
+    def test_query_results_reject_duplicate_fields_and_nonfinite_numbers(self):
+        for text in (
+            '{"n":1,"n":2}', '{"n":NaN}', '{"n":1e999}', '["not an object"]',
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                bench.parse_query_rows(text)
+        self.assertEqual(bench.parse_query_rows('{"n":12}\\n'), [{"n": 12}])
+
     def test_oracles_match_brute_force_at_boundaries(self):
         for rows in (1, 10, 42, 43, 364, 365, 366, 729_999, 730_000, 730_001):
             for day in (0, 42, 364):
