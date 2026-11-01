@@ -76,8 +76,17 @@ impl HyperLogLog {
     }
 
     /// Reject duplicate, out-of-order, zero, or unreachable sparse entries.
-    /// Cached population and harmonic state are always derived from registers.
+    /// Decode the same wire format used by distributed worker sketches.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut sketch = Self::new();
+        sketch.merge_wire_bytes(bytes)?;
+        Ok(sketch)
+    }
+
+    /// Merge a worker sketch without constructing another dense 4 KiB sketch.
+    /// Validate the *entire* payload before modifying any register, so
+    /// corrupt input cannot leave a partially updated aggregate.
+    pub fn merge_wire_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         if bytes.starts_with(SPARSE_WIRE_HEADER) {
             if bytes.len() < SPARSE_HEADER_BYTES {
                 return Err(Error::Parse("truncated sparse HLL header".into()));
@@ -86,7 +95,6 @@ impl HyperLogLog {
             if count > REGISTERS || bytes.len() != SPARSE_HEADER_BYTES + count * 3 {
                 return Err(Error::Parse("invalid sparse HLL entry count".into()));
             }
-            let mut sketch = Self::new();
             let mut previous = None;
             for entry in bytes[SPARSE_HEADER_BYTES..].chunks_exact(3) {
                 let index = u16::from_le_bytes([entry[0], entry[1]]) as usize;
@@ -97,22 +105,25 @@ impl HyperLogLog {
                 if rank == 0 || u32::from(rank) > 65 - PRECISION {
                     return Err(Error::Parse("invalid HLL register rank".into()));
                 }
-                sketch.update_register(index, rank);
                 previous = Some(index);
             }
-            return Ok(sketch);
+            for entry in bytes[SPARSE_HEADER_BYTES..].chunks_exact(3) {
+                let index = u16::from_le_bytes([entry[0], entry[1]]) as usize;
+                self.update_register(index, entry[2]);
+            }
+            return Ok(());
         }
         if bytes.len() != WIRE_BYTES || !bytes.starts_with(WIRE_HEADER) {
             return Err(Error::Parse("unsupported HLL sketch wire layout".into()));
         }
-        let mut sketch = Self::new();
-        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
-            if u32::from(rank) > 65 - PRECISION {
-                return Err(Error::Parse("invalid HLL register rank".into()));
-            }
-            if rank != 0 { sketch.update_register(index, rank); }
+        if bytes[WIRE_HEADER.len()..].iter()
+            .any(|&rank| u32::from(rank) > 65 - PRECISION) {
+            return Err(Error::Parse("invalid HLL register rank".into()));
         }
-        Ok(sketch)
+        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
+            if rank != 0 { self.update_register(index, rank); }
+        }
+        Ok(())
     }
 
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
@@ -668,5 +679,53 @@ mod sparse_worker_wire_tests {
             HyperLogLog::from_wire_bytes(&encode(&[(1, 2), (9, 3)]))
                 .unwrap().nonempty_registers(), 2,
         );
+    }
+}
+
+#[cfg(test)]
+mod transactional_wire_merge_regressions {
+    use super::*;
+
+    #[test]
+    fn direct_sparse_and_dense_merges_match_decoded_register_max() {
+        let mut source = HyperLogLog::new();
+        let mut target = HyperLogLog::new();
+        for n in 0..2500 { source.add(&Value::Integer(n)); }
+        for n in 1250..4000 { target.add(&Value::Integer(n)); }
+        let sparse = source.to_wire_bytes();
+        assert!(sparse.starts_with(SPARSE_WIRE_HEADER));
+        let mut expected = target.clone();
+        expected.merge(&HyperLogLog::from_wire_bytes(&sparse).unwrap());
+        target.merge_wire_bytes(&sparse).unwrap();
+        assert_eq!(target, expected);
+        // Merge the same worker's dense sketch after it has filled registers.
+        for n in 4000..30000 { source.add(&Value::Integer(n)); }
+        let dense = source.to_wire_bytes();
+        assert!(dense.starts_with(WIRE_HEADER));
+        expected.merge(&HyperLogLog::from_wire_bytes(&dense).unwrap());
+        target.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(target, expected);
+        target.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(target, expected, "repeated worker frames are idempotent");
+    }
+
+    #[test]
+    fn invalid_late_registers_leave_all_accumulators_unchanged() {
+        let mut original = HyperLogLog::new();
+        for n in 0..500 { original.add(&Value::Integer(n)); }
+        let mut bad_sparse = HyperLogLog::new();
+        for n in 0..100 { bad_sparse.add(&Value::Integer(n + 5000)); }
+        let mut sparse = bad_sparse.to_wire_bytes();
+        assert!(sparse.starts_with(SPARSE_WIRE_HEADER));
+        *sparse.last_mut().unwrap() = u8::MAX;
+        let mut target = original.clone();
+        assert!(target.merge_wire_bytes(&sparse).is_err());
+        assert_eq!(target, original);
+        let mut dense = vec![0; WIRE_BYTES];
+        dense[..4].copy_from_slice(WIRE_HEADER);
+        dense[4] = 1;
+        *dense.last_mut().unwrap() = u8::MAX;
+        assert!(target.merge_wire_bytes(&dense).is_err());
+        assert_eq!(target, original);
     }
 }
