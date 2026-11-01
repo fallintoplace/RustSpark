@@ -5,6 +5,13 @@ fn output(types: &[DataType]) -> Result<DataType> {
     if types == [DataType::Text, DataType::Text, DataType::Integer] { Ok(DataType::Text) }
     else { Err(Error::Type("SUBSTRING_INDEX requires text, delimiter, integer count".into())) }
 }
+fn bounded_substring_index_result(text: &str) -> Result<Value> {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("SUBSTRING_INDEX result exceeds native 16 MiB budget".into()));
+    }
+    Ok(Value::Text(text.to_owned()))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -14,10 +21,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // Skip scanning if the requested occurrence cannot exist.
     let max_matches = text.len() / delimiter.len();
     if count.unsigned_abs() > u64::try_from(max_matches).unwrap_or(u64::MAX) {
-        return Ok(Value::Text(text.to_owned()));
+        return bounded_substring_index_result(text);
     }
     if count == 1 {
-        return Ok(Value::Text(text.split_once(delimiter).map_or(text, |(head, _)| head).to_owned()));
+        return bounded_substring_index_result(text.split_once(delimiter).map_or(text, |(head, _)| head));
     }
     if count == -1 {
         // Reversing a non-overlapping search changes the matches for
@@ -25,7 +32,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         // SUBSTRING_INDEX must agree with the forward split fields.
         let tail = text.match_indices(delimiter).last()
             .map_or(text, |(position, _)| &text[position + delimiter.len()..]);
-        return Ok(Value::Text(tail.to_owned()));
+        return bounded_substring_index_result(tail);
     }
     if (-16..=-2).contains(&count) {
         // Track only the requested trailing delimiter positions. Forward
@@ -43,7 +50,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         } else {
             &text[recent[seen % from_end] + delimiter.len()..]
         };
-        return Ok(Value::Text(suffix.to_owned()));
+        return bounded_substring_index_result(suffix);
     }
     let index = usize::try_from(count.unsigned_abs() - 1).ok();
     let result = match index {
@@ -62,7 +69,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             }
         },
     };
-    Ok(Value::Text(result.to_string()))
+    bounded_substring_index_result(result)
 }
 
 fn split_count_type(types: &[DataType]) -> Result<DataType> {
@@ -238,6 +245,23 @@ mod overlapping_substring_index_regressions {
     }
 }
 
+#[cfg(test)]
+mod bounded_substring_index_regressions {
+    use super::*;
+    #[test]
+    fn large_source_keeps_small_results_but_rejects_large_outputs() {
+        let source = format!("short,{}", "x".repeat(16 * 1024 * 1024 + 1));
+        let args = |count| [Value::Text(source.clone()),
+            Value::Text(",".into()), Value::Integer(count)];
+        assert_eq!(evaluate(&args(1)).unwrap(), Value::Text("short".into()));
+        assert!(matches!(evaluate(&args(-1)), Err(Error::Execution(_))));
+        assert!(matches!(evaluate(&args(i64::MAX)), Err(Error::Execution(_))));
+        assert!(matches!(evaluate(&args(-2)), Err(Error::Execution(_))));
+        assert_eq!(evaluate(&args(0)).unwrap(), Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Null, Value::Text(",".into()),
+            Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
 
 #[cfg(test)]
 mod bounded_negative_index_ring_tests {

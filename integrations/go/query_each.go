@@ -8,6 +8,7 @@ import (
     "errors"
     "fmt"
     "io"
+    "unicode/utf8"
 )
 
 const maxNDJSONRowBytes = 16 * 1024 * 1024
@@ -25,6 +26,9 @@ func scanNDJSONRows(input io.Reader, visit func(map[string]any) error) error {
             return fmt.Errorf("RustSpark NDJSON row %d exceeds %d bytes", index, maxNDJSONRowBytes)
         }
         line := bytes.TrimSpace(scanner.Bytes())
+        if !utf8.Valid(line) {
+            return fmt.Errorf("RustSpark NDJSON row %d is not valid UTF-8", index)
+        }
         if len(line) == 0 {
             return fmt.Errorf("RustSpark NDJSON row %d is blank", index)
         }
