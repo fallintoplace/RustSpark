@@ -247,7 +247,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                     .map_or(text.len(), |(offset, _)| offset);
                 let end_byte = text[start_byte..].char_indices().nth(count)
                     .map_or(text.len(), |(offset, _)| start_byte + offset);
-                Ok(Value::Text(text[start_byte..end_byte].into()))
+                let selected = &text[start_byte..end_byte];
+                if selected.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("SUBSTRING result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(selected.into()))
             }
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
@@ -489,5 +493,25 @@ mod reverse_result_budget_regressions {
         let exact = "x".repeat(16 * 1024 * 1024);
         assert_eq!(evaluate("REVERSE", &[Value::Text(exact.clone())]).unwrap(),
             Value::Text(exact));
+    }
+}
+
+#[cfg(test)]
+mod substring_result_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn limits_cloned_result_but_allows_small_slices_of_large_text() {
+        let source = "a".repeat(16 * 1024 * 1024 + 1);
+        assert!(evaluate("SUBSTRING", &[
+            Value::Text(source.clone()), Value::Integer(1),
+            Value::Integer(i64::MAX),
+        ]).is_err());
+        assert_eq!(evaluate("SUBSTRING", &[
+            Value::Text(source), Value::Integer(1), Value::Integer(1),
+        ]).unwrap(), Value::Text("a".into()));
+        assert_eq!(evaluate("SUBSTRING", &[
+            Value::Text("é🙂z".into()), Value::Integer(2), Value::Integer(1),
+        ]).unwrap(), Value::Text("🙂".into()));
     }
 }
