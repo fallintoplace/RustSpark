@@ -26,6 +26,25 @@ impl Catalog {
         }
     }
 
+    /// Register several in-memory tables as one operation. Validate all
+    /// normalized names before mutating the catalog, including conflicts within
+    /// the incoming set and against existing tables.
+    pub fn register_many(
+        &mut self, tables: impl IntoIterator<Item = (String, Batch)>,
+    ) -> Result<()> {
+        let mut staged = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        for (name, batch) in tables {
+            let key = normalize(&name)?.into_owned();
+            if self.tables.contains_key(&key) || !names.insert(key.clone()) {
+                return Err(Error::Schema(format!("table already exists: {name}")));
+            }
+            staged.push((key, batch));
+        }
+        self.tables.extend(staged);
+        Ok(())
+    }
+
     pub fn replace(&mut self, name: &str, batch: Batch) -> Result<()> {
         let normalized = normalize(name)?;
         let _ = self.tables.insert(normalized.into_owned(), batch);
@@ -172,5 +191,48 @@ mod borrowed_catalog_key_tests {
         assert!(catalog.get("Sales").is_ok());
         assert!(catalog.get("unknown").is_err());
         assert!(normalize("has space").is_err());
+    }
+}
+
+#[cfg(test)]
+mod atomic_catalog_batch_registration_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    fn table(value: i64) -> Batch {
+        Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(value)]],
+        ).unwrap()
+    }
+
+    #[test]
+    fn commits_all_tables_with_case_insensitive_names() {
+        let mut catalog = Catalog::new();
+        catalog.register_many(vec![
+            ("Sales".into(), table(11)), ("Returns".into(), table(22)),
+        ]).unwrap();
+        assert_eq!(catalog.list(), vec!["returns", "sales"]);
+        assert_eq!(catalog.get("SALES").unwrap().value(0, 0).unwrap(), &Value::Integer(11));
+        assert_eq!(catalog.get("returns").unwrap().value(0, 0).unwrap(), &Value::Integer(22));
+        catalog.register_many(Vec::<(String, Batch)>::new()).unwrap();
+    }
+
+    #[test]
+    fn duplicate_invalid_and_existing_names_rollback_the_whole_batch() {
+        let mut catalog = Catalog::new();
+        catalog.register("existing", table(7)).unwrap();
+        for candidate in [
+            vec![("one".into(), table(1)), ("ONE".into(), table(2))],
+            vec![("one".into(), table(1)), ("EXISTING".into(), table(2))],
+            vec![("one".into(), table(1)), ("bad table".into(), table(2))],
+        ] {
+            assert!(catalog.register_many(candidate).is_err());
+            assert_eq!(catalog.list(), vec!["existing"]);
+            assert_eq!(catalog.get("existing").unwrap().value(0, 0).unwrap(),
+                &Value::Integer(7));
+        }
+        catalog.register_many(vec![("one".into(), table(1))]).unwrap();
+        assert_eq!(catalog.get("one").unwrap().value(0, 0).unwrap(), &Value::Integer(1));
     }
 }

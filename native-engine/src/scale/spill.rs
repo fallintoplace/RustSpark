@@ -387,6 +387,25 @@ impl<R: Read> SpillReader<R> {
         Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
     }
 
+    // TEXT-only spill streams are common for DISTINCT and sorted runs.
+    // Decode a single validated column without the per-cell schema/column
+    // dispatch used by general multi-column batches.
+    fn read_single_text_column(
+        &mut self, rows: usize, mut bytes_seen: usize,
+    ) -> Result<Batch> {
+        let nullable = self.schema.field(0)?.nullable;
+        let mut values = Vec::with_capacity(rows.min(1024));
+        for _ in 0..rows {
+            let value = match read_byte(&mut self.input)? {
+                0 if nullable => Value::Null,
+                5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
+                _ => return Err(Error::Parse("spill value does not match schema".into())),
+            };
+            values.push(value);
+        }
+        Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
+    }
+
     fn read_batch(&mut self) -> Result<Option<Batch>> {
         let mut first = [0u8; 1];
         // Interrupted at a batch boundary is not EOF or a corrupt spill file.
@@ -427,6 +446,9 @@ impl<R: Read> SpillReader<R> {
                 DataType::Integer | DataType::Float | DataType::Boolean)
         {
             return Ok(Some(self.read_single_scalar_column(rows, bytes_seen)?));
+        }
+        if self.schema.len() == 1 && self.schema.field(0)?.data_type == DataType::Text {
+            return Ok(Some(self.read_single_text_column(rows, bytes_seen)?));
         }
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(initial_capacity)).collect::<Vec<_>>();
@@ -1250,5 +1272,51 @@ mod spill_bounded_writer_partial_admission_tests {
         assert!(writer.write_batch_bounded_with_budget(&oversized, 1, 64).is_err());
         writer.write_batch_bounded_with_budget(&valid, 1, 64).unwrap();
         assert!(writer.finish().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod single_text_spill_decoder_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn nullable_unicode_and_long_text_roundtrip_in_multiple_batches() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let original = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂東京".into())],
+            vec![Value::Null],
+            vec![Value::Text("ab".repeat(8192))],
+            vec![Value::Text("".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::<u8>::new(), schema).unwrap();
+        writer.write_batch_range(&original, 0, 2).unwrap();
+        writer.write_batch_range(&original, 2, 4).unwrap();
+        let bytes = writer.finish().unwrap();
+        let mut reader = SpillReader::new(std::io::Cursor::new(bytes), 4).unwrap();
+        let first = reader.next_batch().unwrap().unwrap();
+        let second = reader.next_batch().unwrap().unwrap();
+        let rows = first.rows().unwrap().into_iter()
+            .chain(second.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, original.rows().unwrap());
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn required_text_rejects_null_tag_and_stops_after_error() {
+        let required = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let nullable = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let mut writer = SpillWriter::new(Vec::<u8>::new(), nullable).unwrap();
+        writer.write_batch(&Batch::from_rows(
+            Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Null]],
+        ).unwrap()).unwrap();
+        let bytes = writer.finish().unwrap();
+        // The decoder must reject a nullable wire schema mismatch even before
+        // cell decoding in normal consumers.
+        let mut reader = SpillReader::new(std::io::Cursor::new(bytes), 2).unwrap();
+        assert_ne!(reader.schema(), &required);
+        assert_eq!(reader.next_batch().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Null]]);
     }
 }

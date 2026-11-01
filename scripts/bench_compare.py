@@ -55,8 +55,7 @@ finally:
 
 def command_for(engine, binary, csv, sql):
     if engine == "rustspark":
-        return [binary, "--csv", str(csv), "--csv-schema",
-                "id:int64,city:utf8,amount:int64", "--sql", sql,
+        return [binary, "--csv", str(csv), "--sql", sql,
                 "--stdout-format", "json"]
     if engine == "duckdb":
         return [sys.executable, "-c", DUCKDB_WORKER, str(csv), sql]

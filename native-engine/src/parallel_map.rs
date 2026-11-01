@@ -7,8 +7,23 @@ const MAX_OS_WORKERS: usize = 256;
 // Amortize task queue synchronization for pipelines with tiny partitions.
 const TASK_CLAIM_BATCH: usize = 16;
 
+fn worker_count_for_parallelism(
+    partitions: usize, requested: usize, logical_cpus: usize,
+) -> usize {
+    // Thread spawning has a real cost, and the operators running here are
+    // CPU-heavy. Keep a little headroom for workers waiting on storage while
+    // respecting the process's reported CPU quota.
+    partitions.min(requested)
+        .min(logical_cpus.saturating_mul(2).max(1))
+        .min(MAX_OS_WORKERS)
+}
+
 fn worker_count(partitions: usize, requested: usize) -> usize {
-    partitions.min(requested).min(MAX_OS_WORKERS)
+    // available_parallelism honors CPU affinity and container quotas where
+    // supported. Keep the existing 256-thread ceiling if detection fails.
+    let cpus = std::thread::available_parallelism()
+        .map_or(MAX_OS_WORKERS, std::num::NonZeroUsize::get);
+    worker_count_for_parallelism(partitions, requested, cpus)
 }
 
 // Keep enough work available for other workers when the input is small.
@@ -75,7 +90,8 @@ where
     let mut output: Vec<OnceLock<Result<Batch>>> =
         std::iter::repeat_with(OnceLock::new).take(count).collect();
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        // Keep the caller busy as one worker and spawn only the remainder.
+        for _ in 1..workers {
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
@@ -88,10 +104,12 @@ where
                 ))
                 .is_err()
             {
-                drain_tasks(tasks, output, failed, operator, claim_size);
+                // A failed spawn does not reduce correctness or admission:
+                // the caller drains any remaining partitions below.
                 break;
             }
         }
+        drain_tasks(&tasks, &output, &failed, &operator, claim_size);
     });
     // A cancelled task may precede the failed task in input order.
     // Return the actual operator error instead of a missing-result error.
@@ -123,9 +141,14 @@ mod tests {
 
     #[test]
     fn bounds_worker_spawns_for_untrusted_concurrency_settings() {
-        assert_eq!(worker_count(1_000_000, usize::MAX), MAX_OS_WORKERS);
-        assert_eq!(worker_count(4, usize::MAX), 4);
-        assert_eq!(worker_count(100, 3), 3);
+        let cpus = std::thread::available_parallelism()
+            .map_or(MAX_OS_WORKERS, std::num::NonZeroUsize::get);
+        assert_eq!(worker_count(1_000_000, usize::MAX),
+            cpus.saturating_mul(2).min(MAX_OS_WORKERS));
+        assert_eq!(worker_count(4, usize::MAX), 4.min(
+            cpus.saturating_mul(2).min(MAX_OS_WORKERS)));
+        assert_eq!(worker_count(100, 3), 3.min(
+            cpus.saturating_mul(2).min(MAX_OS_WORKERS)));
     }
 
     #[test]
@@ -434,5 +457,69 @@ mod scoped_spawn_fallback_regressions {
         assert!(failed.load(Ordering::Acquire));
         assert!(output[0].get().unwrap().as_ref().unwrap_err().to_string()
             .contains("fallback operator failure"));
+    }
+}
+
+#[cfg(test)]
+mod quota_aware_partition_worker_tests {
+    use super::*;
+
+    #[test]
+    fn huge_requests_do_not_spawn_hundreds_of_workers_on_small_hosts() {
+        assert_eq!(worker_count_for_parallelism(1_000_000, usize::MAX, 1), 2);
+        assert_eq!(worker_count_for_parallelism(1_000_000, usize::MAX, 4), 8);
+        assert_eq!(worker_count_for_parallelism(1_000_000, usize::MAX, 16), 32);
+        assert_eq!(worker_count_for_parallelism(1_000_000, usize::MAX, 512), MAX_OS_WORKERS);
+    }
+
+    #[test]
+    fn respects_requested_limit_partition_count_and_saturating_math() {
+        assert_eq!(worker_count_for_parallelism(2, 64, 1), 2);
+        assert_eq!(worker_count_for_parallelism(10, 3, 8), 3);
+        assert_eq!(worker_count_for_parallelism(10, 20, 8), 10);
+        assert_eq!(worker_count_for_parallelism(1, 64, 1), 1);
+        assert_eq!(worker_count_for_parallelism(100, 100, 0), 1);
+        assert_eq!(worker_count_for_parallelism(1000, usize::MAX, usize::MAX), MAX_OS_WORKERS);
+    }
+
+    #[test]
+    fn quota_aware_workers_preserve_result_order_and_error_propagation() {
+        let input = (0..128).map(|n| {
+            let schema = crate::schema::Schema::new(vec![crate::schema::Field::new(
+                "n", crate::schema::DataType::Integer, false,
+            )]).unwrap();
+            crate::batch::Batch::from_rows(schema,
+                vec![vec![crate::scalar::Value::Integer(n)]]).unwrap()
+        }).collect::<Vec<_>>();
+        let output = map_partitions(input.clone(), usize::MAX, Ok).unwrap();
+        assert_eq!(output, input);
+        let result = map_partitions(input, usize::MAX, |batch| {
+            if batch.value(0, 0)? == &crate::scalar::Value::Integer(3) {
+                Err(Error::Execution("worker failure".into()))
+            } else { Ok(batch) }
+        });
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod caller_worker_parallel_map_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn caller_worker_preserves_order_and_error_propagation() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = (0..37).map(|n| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(n)]]).unwrap()).collect::<Vec<_>>();
+        let actual = map_partitions(input.clone(), 7, Ok).unwrap();
+        assert_eq!(actual, input);
+        let failure = map_partitions(input, 7, |batch| {
+            if batch.value(0, 0)? == &Value::Integer(16) {
+                return Err(Error::Execution("caller worker failure".into()));
+            }
+            Ok(batch)
+        }).unwrap_err();
+        assert!(failure.to_string().contains("caller worker failure"));
     }
 }
