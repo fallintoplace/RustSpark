@@ -126,12 +126,19 @@ impl<'de> serde::de::DeserializeSeed<'de> for RootHasKey<'_> {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A)
                 -> std::result::Result<Self::Value, A::Error>
             {
-                let mut found = false;
                 while let Some(key) = map.next_key::<String>()? {
-                    found |= key == self.0;
+                    let matching = key == self.0;
                     map.next_value::<serde::de::IgnoredAny>()?;
+                    if matching {
+                        // A key match cannot bypass syntax validation. Consume
+                        // the remaining members without allocating their names.
+                        while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                        return Ok(true);
+                    }
                 }
-                Ok(found)
+                Ok(false)
             }
         }
         deserializer.deserialize_map(KeyVisitor(self.0))
@@ -310,3 +317,48 @@ mod streamed_json_keys_duplicate_regressions {
         assert_eq!(evaluate(&[Value::Text("[]".into())]).unwrap(), Value::Null);
     }
 }
+#[cfg(test)]
+mod json_has_key_early_match_validation_regressions {
+    use super::*;
+
+    #[test]
+    fn validates_every_member_after_an_early_match() {
+        let mut input = String::from(r#"{"target":1"#);
+        for index in 0..10_000 {
+            input.push_str(&format!(r#","unrelated_{index}":{{"nested":[1,2,3]}}"#));
+        }
+        input.push('}');
+        assert_eq!(json_has_key(&[
+            Value::Text(input.clone()), Value::Text("target".into()),
+        ]).unwrap(), Value::Boolean(true));
+        assert_eq!(json_has_key(&[
+            Value::Text(input), Value::Text("missing".into()),
+        ]).unwrap(), Value::Boolean(false));
+
+        for invalid in [
+            r#"{"target":1,"broken":[1,]}"#,
+            r#"{"target":1,"broken":"#,
+            r#"{"target":1} trailing"#,
+        ] {
+            assert!(json_has_key(&[
+                Value::Text(invalid.into()), Value::Text("target".into()),
+            ]).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn escaped_keys_duplicates_and_nulls_keep_their_semantics() {
+        assert_eq!(json_has_key(&[
+            Value::Text(r#"{"\\u0061":1,"missing":2}"#.replace("\\\\u", "\\u").into()),
+            Value::Text("a".into()),
+        ]).unwrap(), Value::Boolean(true));
+        assert_eq!(json_has_key(&[
+            Value::Text(r#"{"x":null,"x":1,"z":0}"#.into()),
+            Value::Text("x".into()),
+        ]).unwrap(), Value::Boolean(true));
+        assert_eq!(json_has_key(&[
+            Value::Null, Value::Text("x".into()),
+        ]).unwrap(), Value::Null);
+    }
+}
+
