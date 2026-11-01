@@ -107,9 +107,15 @@ impl BloomFilter {
     pub fn insert_batch(&mut self, keys: &[Value]) {
         // Inserting into a saturated filter cannot change membership.
         if self.occupied_bits == self.bits && self.populated { return; }
+        // Sorted join partitions often contain long runs of the same key.
+        // Equality uses the same canonical NaN / signed-zero semantics as Hash.
+        let mut previous: Option<&Value> = None;
         for key in keys {
-            self.insert(key);
-            if self.occupied_bits == self.bits { break; }
+            if previous != Some(key) {
+                self.insert(key);
+                if self.occupied_bits == self.bits { break; }
+            }
+            previous = Some(key);
         }
     }
 
@@ -118,7 +124,19 @@ impl BloomFilter {
     pub fn probe_batch(&self, keys: &[Value]) -> Vec<bool> {
         if !self.populated { return vec![false; keys.len()]; }
         if self.occupied_bits == self.bits { return vec![true; keys.len()]; }
-        keys.iter().map(|key| self.might_contain(key)).collect()
+        // Reuse the exact result across adjacent equal values. Do not infer
+        // membership from equality alone: a Bloom hit can be a false positive.
+        let mut output = Vec::with_capacity(keys.len());
+        let mut previous: Option<&Value> = None;
+        let mut previous_result = false;
+        for key in keys {
+            if previous != Some(key) {
+                previous_result = self.might_contain(key);
+            }
+            output.push(previous_result);
+            previous = Some(key);
+        }
+        output
     }
 
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
@@ -644,6 +662,58 @@ mod saturated_bloom_union_regressions {
         assert_eq!(full.bits_set(), 64);
         assert!(full.might_contain(&Value::Integer(10_000_000)));
         assert!(full.union_with(&BloomFilter::new(128, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_consecutive_key_run_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_runs_match_elementwise_insert_probe_and_occupancy() {
+        let wide = "é🙂".repeat(4096);
+        let mut keys = Vec::new();
+        for key in [
+            Value::Text(wide), Value::Null, Value::Float(-0.0),
+            Value::Float(0.0), Value::Float(f64::NAN),
+            Value::Float(-f64::NAN), Value::Integer(17),
+        ] {
+            keys.extend(std::iter::repeat_n(key, 71));
+        }
+        let mut scalar = BloomFilter::new(32_769, 5).unwrap();
+        let mut batched = BloomFilter::new(32_769, 5).unwrap();
+        for key in &keys { scalar.insert(key); }
+        batched.insert_batch(&keys);
+        assert_eq!(batched.words, scalar.words);
+        assert_eq!(batched.bits_set(), scalar.bits_set());
+        assert_eq!(batched.probe_batch(&keys),
+            keys.iter().map(|key| scalar.might_contain(key)).collect::<Vec<_>>());
+
+        let probes = [
+            Value::Integer(-1), Value::Integer(-1), Value::Integer(17),
+            Value::Float(f64::NAN), Value::Float(-f64::NAN),
+            Value::Null, Value::Text("missing".into()),
+        ];
+        assert_eq!(batched.probe_batch(&probes),
+            probes.iter().map(|value| batched.might_contain(value))
+                .collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn empty_saturated_and_power_of_two_filters_keep_bulk_contract() {
+        for bits in [1, 64, 1024] {
+            let mut batch = BloomFilter::new(bits, 5).unwrap();
+            assert_eq!(batch.probe_batch(&[Value::Null, Value::Integer(1)]),
+                vec![false, false]);
+            batch.insert_batch(&[]);
+            assert!(!batch.might_contain(&Value::Null));
+            let keys = vec![Value::Text("hot".into()); 400];
+            batch.insert_batch(&keys);
+            assert!(batch.probe_batch(&keys).into_iter().all(|hit| hit));
+            let mut scalar = BloomFilter::new(bits, 5).unwrap();
+            for key in &keys { scalar.insert(key); }
+            assert_eq!(batch.bits_set(), scalar.bits_set());
+        }
     }
 }
 
