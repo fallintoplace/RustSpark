@@ -161,9 +161,11 @@ pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Res
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
     })?;
     let mut combined = budget.reserve(total)?;
-    // Transfer ownership incrementally. If collecting the guards unwinds,
-    // only the untransferred remainder stays with the parent reservation.
-    let mut reservations = Vec::with_capacity(requests.len());
+    // Admit guard storage fallibly; the combined reservation rolls back
+    // on error before any partial guard transfers can escape.
+    let mut reservations = Vec::new();
+    reservations.try_reserve_exact(requests.len())
+        .map_err(|_| Error::Execution("memory reservation list allocation failed".into()))?;
     for &bytes in requests {
         reservations.push(combined.split_off(bytes)?);
     }
@@ -361,5 +363,21 @@ mod adaptive_memory_claim_tests {
         assert_eq!(budget.used(), 1);
         drop((full, zero));
         assert_eq!(budget.remaining(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fallible_scale_guard_vector_tests {
+    use super::*;
+
+    #[test]
+    fn many_small_guards_do_not_leak_shared_budget() {
+        let budget = MemoryBudget::new(4096).unwrap();
+        let requests = vec![1usize; 4096];
+        let guards = reserve_many(&budget, &requests).unwrap();
+        assert_eq!(guards.len(), 4096);
+        assert_eq!(budget.remaining(), 0);
+        drop(guards);
+        assert_eq!(budget.used(), 0);
     }
 }
