@@ -36,7 +36,14 @@ pub(super) fn eval(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
         if number.abs() > f64::MAX / factor { number }
         else { (number * factor).round() / factor }
     } else {
-        (number / factor).round() * factor
+        // At this magnitude, consecutive f64 values are farther apart than
+        // the requested decimal unit. A divide/multiply round trip can
+        // introduce an unrelated one-ULP error.
+        if number.abs() >= factor * ((1u64 << 53) as f64) {
+            number
+        } else {
+            (number / factor).round() * factor
+        }
     };
     if !result.is_finite() {
         return Err(Error::Execution("ROUND non-finite result".into()));
@@ -78,5 +85,30 @@ mod finite_round_extreme_tests {
             Expr::Literal(Value::Integer(-2)),
         ];
         assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Float(100.0));
+    }
+}
+
+#[cfg(test)]
+mod negative_scale_large_float_regressions {
+    use super::*;
+
+    #[test]
+    fn already_rounded_large_doubles_do_not_change_bits() {
+        let batch = Batch::empty(Schema::new(vec![]).unwrap());
+        for (value, precision) in [
+            (-3.3036582842864976e239, -1),
+            (2.4560805462934964e260, -3),
+            (6.765823898994833e96, -8),
+            (f64::MAX, -15),
+            (-f64::MAX, -15),
+        ] {
+            let args = [Expr::Literal(Value::Float(value)),
+                Expr::Literal(Value::Integer(precision))];
+            assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Float(value),
+                "value={value}, precision={precision}");
+        }
+        let args = [Expr::Literal(Value::Float(-155.0)),
+            Expr::Literal(Value::Integer(-1))];
+        assert_eq!(eval(&args, &batch, 0).unwrap(), Value::Float(-160.0));
     }
 }
