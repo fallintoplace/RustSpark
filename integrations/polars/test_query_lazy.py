@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 import os
 import signal
 import sys
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 from pathlib import Path
-from query_lazy import build_command, rustspark_lazy_frame
+from query_lazy import build_command, rustspark_lazy_frame, _export_arrow
 
 
 class PolarsCommandTests(unittest.TestCase):
@@ -135,6 +136,37 @@ class FailedPolarsExportStartupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Unable to start"):
                 with rustspark_lazy_frame("SELECT 1"):
                     pass
+
+
+class PolarsArrowDiskBudgetTests(unittest.TestCase):
+    def test_rejects_invalid_disk_limits(self):
+        for invalid in (0, -1, True, 1.5, "1024"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "max_arrow_bytes"):
+                with rustspark_lazy_frame("SELECT 1", max_arrow_bytes=invalid):
+                    pass
+
+    @unittest.skipUnless(os.name == "posix", "process group cleanup requires POSIX")
+    def test_terminates_exporter_that_exceeds_disk_budget(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as diagnostics:
+            output = Path(directory) / "result.arrow"
+            script = (
+                "from pathlib import Path; import sys, time;"
+                "Path(sys.argv[1]).write_bytes(b'x' * 8192);time.sleep(3)"
+            )
+            with self.assertRaisesRegex(RuntimeError, "max_arrow_bytes"):
+                _export_arrow([sys.executable, "-c", script, str(output)],
+                              diagnostics, 2, output, 1024)
+
+    def test_allows_exact_file_budget(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as diagnostics:
+            output = Path(directory) / "result.arrow"
+            script = (
+                "from pathlib import Path; import sys;"
+                "Path(sys.argv[1]).write_bytes(b'x' * 128)"
+            )
+            self.assertEqual(_export_arrow([sys.executable, "-c", script, str(output)],
+                                           diagnostics, 2, output, 128), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
