@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { TextDecoder } from "node:util";
 import { parseStrictJSON } from "./strict-json.mjs";
 
 export class RustSparkError extends Error {
@@ -153,8 +154,12 @@ export class RustSpark {
     let outputBytes = 0;
     let segments = [];
     let segmentBytes = 0;
+    const utf8 = new TextDecoder("utf-8", { fatal: true });
     const parseRow = () => {
-      const row = parseStrictJSON(Buffer.concat(segments, segmentBytes).toString("utf8"), { unsafeIntegers });
+      // Buffer.toString silently substitutes U+FFFD for malformed UTF-8.
+      // Preserve byte-exact SQL results by rejecting invalid row encoding.
+      const source = utf8.decode(Buffer.concat(segments, segmentBytes));
+      const row = parseStrictJSON(source, { unsafeIntegers });
       if (row === null || typeof row !== "object" || Array.isArray(row)) {
         throw new RustSparkError("RustSpark NDJSON row must be an object");
       }

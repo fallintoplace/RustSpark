@@ -45,6 +45,18 @@ shellTest("queryRows rejects duplicate nested keys and oversized output", async 
   });
 });
 
+shellTest("queryRows rejects malformed UTF-8 instead of replacing SQL text", async () => {
+  await withScript(String.raw`printf '{"value":"\377"}\n'` + "\n", async (client) => {
+    await assert.rejects(async () => {
+      for await (const _row of client.queryRows("SELECT 1")) {}
+    }, /Invalid RustSpark NDJSON/);
+  });
+  await withScript(`printf '%s\\n' '{"value":"é"}'\n`, async (client) => {
+    const rows = [];
+    for await (const row of client.queryRows("SELECT 1")) rows.push(row);
+    assert.deepEqual(rows, [{ value: "é" }]);
+  });
+});
 shellTest("breaking async iteration closes the exporter instead of hanging", async () => {
   await withScript("printf '%s\\n' '{\"n\":1}'\nwhile :; do printf '%s\\n' '{\"n\":2}'; done\n", async (client) => {
     let count = 0;
