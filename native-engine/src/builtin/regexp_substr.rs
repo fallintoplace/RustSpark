@@ -7,6 +7,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
+    if pattern == ".+" {
+        // The first greedy nonempty dot run ends before the next LF.
+        return Ok(text.split('\n').find(|part| !part.is_empty())
+            .map_or(Value::Null, |part| Value::Text(part.to_owned())));
+    }
     if pattern == ".*" {
         // A greedy unanchored dot-star match starts at zero and stops at LF.
         return Ok(Value::Text(text.split('\n').next().unwrap_or("").to_owned()));
@@ -108,5 +113,30 @@ mod greedy_dot_star_substr_regressions {
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text(".*".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod greedy_dot_plus_substr_differential_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_first_greedy_run_with_unicode_and_empty_lines() {
+        let regex = regex_support::compile(".+").unwrap();
+        for input in ["", "\n", "\n\n", "abc\ndef", "\nabc\n", "é🙂\n東京", "\r\n", "\n\n🙂é\n"] {
+            let expected = regex.find(input)
+                .map_or(Value::Null, |found| Value::Text(found.as_str().to_owned()));
+            assert_eq!(evaluate(&[
+                Value::Text(input.into()), Value::Text(".+".into()),
+            ]).unwrap(), expected, "{input:?}");
+        }
+        let long = format!("\n\n{}\ntrailing", "é🙂".repeat(100_000));
+        assert_eq!(evaluate(&[
+            Value::Text(long), Value::Text(".+".into()),
+        ]).unwrap(), Value::Text("é🙂".repeat(100_000)));
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text(".+".into()),
+        ]).unwrap(), Value::Null);
     }
 }
