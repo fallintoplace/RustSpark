@@ -67,9 +67,14 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Text)
         },
-        "SUBSTRING" => {
-            if args.len() != 3 { return Err(Error::Parse("SUBSTRING requires text, start, and length".into())); }
-            if args[0].output_type(schema)? != DataType::Text || args[1].output_type(schema)? != DataType::Integer || args[2].output_type(schema)? != DataType::Integer {
+        "SUBSTRING" | "SUBSTR" => {
+            if !(2..=3).contains(&args.len()) {
+                return Err(Error::Parse("SUBSTRING expects text, start, and optional length".into()));
+            }
+            if args[0].output_type(schema)? != DataType::Text
+                || args[1].output_type(schema)? != DataType::Integer
+                || (args.len() == 3 && args[2].output_type(schema)? != DataType::Integer)
+            {
                 return Err(Error::Type("SUBSTRING requires text and integer positions".into()));
             }
             Ok(DataType::Text)
@@ -152,6 +157,16 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(kind.unwrap_or(DataType::Text))
         },
+        "FORMAT_STRING" | "PRINTF" => {
+            if args.is_empty() || args.len() > 128 {
+                return Err(Error::Parse("FORMAT_STRING expects 1..=128 arguments".into()));
+            }
+            if args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("FORMAT_STRING format must be text".into()));
+            }
+            for arg in &args[1..] { arg.output_type(schema)?; }
+            Ok(DataType::Text)
+        },
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -176,6 +191,92 @@ fn replace_bounded(text: &str, pattern: &str, replacement: &str) -> Result<Strin
         return Err(Error::Execution("REPLACE result exceeds native 16 MiB budget".into()));
     }
     Ok(text.replace(pattern, replacement))
+}
+
+/// Bounded subset of Java Formatter's SQL format conversions.
+fn format_string_bounded(args: &[Value]) -> Result<Value> {
+    const LIMIT: usize = 1024 * 1024;
+    let format = match args.first() {
+        Some(Value::Text(text)) => text.as_str(),
+        Some(Value::Null) => return Ok(Value::Null),
+        _ => return Err(Error::Type("FORMAT_STRING format must be text".into())),
+    };
+    if format.len() > 4096 {
+        return Err(Error::Execution("FORMAT_STRING format exceeds 4096 bytes".into()));
+    }
+    let mut rendered = String::new();
+    let mut parts = format.chars().peekable();
+    let mut position = 1usize;
+    while let Some(character) = parts.next() {
+        if character != '%' {
+            if character.len_utf8() > LIMIT.saturating_sub(rendered.len()) {
+                return Err(Error::Execution("FORMAT_STRING output exceeds 1 MiB".into()));
+            }
+            rendered.push(character);
+            continue;
+        }
+        let mut specifier = parts.next().ok_or_else(||
+            Error::Parse("FORMAT_STRING has an incomplete format specifier".into()))?;
+        if specifier == '%' || specifier == 'n' {
+            let constant = if specifier == '%' { "%" } else { "\n" };
+            if constant.len() > LIMIT.saturating_sub(rendered.len()) {
+                return Err(Error::Execution("FORMAT_STRING output exceeds 1 MiB".into()));
+            }
+            rendered.push_str(constant);
+            continue;
+        }
+        let mut precision = None;
+        if specifier == '.' {
+            let mut digits = 0usize;
+            while let Some(&digit) = parts.peek() {
+                if !digit.is_ascii_digit() { break; }
+                let decimal = digit.to_digit(10).expect("ASCII digit") as usize;
+                digits = digits.checked_mul(10).and_then(|n| n.checked_add(decimal))
+                    .filter(|value| *value <= 12)
+                    .ok_or_else(|| Error::Execution("FORMAT_STRING precision exceeds 12".into()))?;
+                parts.next();
+                precision = Some(digits);
+            }
+            if precision.is_none() {
+                return Err(Error::Parse("FORMAT_STRING precision needs digits".into()));
+            }
+            specifier = parts.next().ok_or_else(||
+                Error::Parse("FORMAT_STRING precision missing conversion".into()))?;
+        }
+        if !matches!(specifier, 's' | 'd' | 'f') || (precision.is_some() && specifier != 'f') {
+            return Err(Error::Unsupported(format!(
+                "unsupported FORMAT_STRING conversion: %{specifier}"
+            )));
+        }
+        let value = args.get(position).ok_or_else(||
+            Error::Execution("FORMAT_STRING has too few arguments".into()))?;
+        position += 1;
+        let formatted: Cow<'_, str> = match (specifier, value) {
+            (_, Value::Null) => Cow::Borrowed("null"),
+            ('s', Value::Text(text)) => Cow::Borrowed(text),
+            ('s', Value::Boolean(value)) => Cow::Owned(value.to_string()),
+            ('s', Value::Integer(value)) => Cow::Owned(value.to_string()),
+            ('s', Value::Float(value)) => Cow::Owned(
+                match Value::Float(*value).cast_to(DataType::Text)? {
+                    Value::Text(text) => text,
+                    _ => unreachable!("float to text cast"),
+                }
+            ),
+            ('d', Value::Integer(value)) => Cow::Owned(value.to_string()),
+            ('f', Value::Float(value)) => {
+                let precision = precision.unwrap_or(6);
+                Cow::Owned(format!("{value:.precision$}"))
+            }
+            _ => return Err(Error::Type(format!(
+                "FORMAT_STRING %{specifier} received incompatible value"
+            ))),
+        };
+        if formatted.len() > LIMIT.saturating_sub(rendered.len()) {
+            return Err(Error::Execution("FORMAT_STRING output exceeds 1 MiB".into()));
+        }
+        rendered.push_str(&formatted);
+    }
+    Ok(Value::Text(rendered))
 }
 
 pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
@@ -231,7 +332,22 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             }
             Ok(Value::Text(text))
         },
-        "SUBSTRING" => match args {
+        "SUBSTRING" | "SUBSTR" => match args {
+            [Value::Text(text), Value::Integer(start)] => {
+                let begin = if *start > 0 {
+                    usize::try_from(start - 1).unwrap_or(usize::MAX)
+                } else if *start < 0 {
+                    text.chars().count().saturating_sub(
+                        usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
+                } else { 0 };
+                let start_byte = text.char_indices().nth(begin)
+                    .map_or(text.len(), |(offset, _)| offset);
+                let result = &text[start_byte..];
+                if result.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("SUBSTRING result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(result.to_owned()))
+            }
             [Value::Text(text), Value::Integer(start), Value::Integer(length)] => {
                 if *length < 0 { return Err(Error::Execution("SUBSTRING length must be nonnegative".into())); }
                 // Convert character offsets into UTF-8 slice boundaries without
@@ -253,6 +369,7 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 }
                 Ok(Value::Text(selected.into()))
             }
+            [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
         },
@@ -359,6 +476,7 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             }
             Ok(best.cloned().unwrap_or(Value::Null))
         },
+        "FORMAT_STRING" | "PRINTF" => format_string_bounded(args),
         _ => Err(Error::Unsupported(format!("unknown native SQL function: {name}"))),
     }
 }
@@ -513,5 +631,54 @@ mod substring_result_budget_regressions {
         assert_eq!(evaluate("SUBSTRING", &[
             Value::Text("é🙂z".into()), Value::Integer(2), Value::Integer(1),
         ]).unwrap(), Value::Text("🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod spark_optional_substring_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn two_argument_substring_and_substr_alias_keep_unicode_positions() {
+        let query = "SELECT SUBSTRING('Spark SQL', 5), SUBSTR('é🙂abc', -3), SUBSTR('abc', 9)";
+        let rows = executor::execute(&sql::parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Text("k SQL".into()), Value::Text("abc".into()), Value::Text("".into()),
+        ]]);
+        assert_eq!(evaluate("substr", &[Value::Text("abc".into()), Value::Integer(0)]).unwrap(),
+            Value::Text("abc".into()));
+        assert_eq!(evaluate("substring", &[Value::Text("abc".into()), Value::Null]).unwrap(),
+            Value::Null);
+        assert_eq!(evaluate("substr", &[Value::Text("abc".into()), Value::Integer(2), Value::Integer(1)]).unwrap(),
+            Value::Text("b".into()));
+        assert!(return_type("substr", &[], &crate::schema::Schema::new(vec![]).unwrap()).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod spark_format_string_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn formats_common_spark_interpolations() {
+        let run = |query| executor::execute(&sql::parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(run("SELECT FORMAT_STRING('Hello %d %s', 100, 'days')"),
+            vec![vec![Value::Text("Hello 100 days".into())]]);
+        assert_eq!(run("SELECT PRINTF('%.2f%%', 3.5)"),
+            vec![vec![Value::Text("3.50%".into())]]);
+        assert_eq!(evaluate("format_string", &[Value::Text("%s %d".into()),
+            Value::Null, Value::Integer(-7)]).unwrap(), Value::Text("null -7".into()));
+        assert_eq!(evaluate("printf", &[Value::Null, Value::Integer(7)]).unwrap(), Value::Null);
+        assert!(evaluate("printf", &[Value::Text("%d".into()), Value::Text("x".into())]).is_err());
+        assert!(evaluate("format_string", &[Value::Text("%f".into())]).is_err());
+        assert!(evaluate("printf", &[Value::Text("%q".into()), Value::Integer(1)]).is_err());
+        assert!(evaluate("printf", &[Value::Text("a".repeat(4097))]).is_err());
+        assert!(evaluate("printf", &[Value::Text("%s".into()),
+            Value::Text("x".repeat(1024 * 1024 + 1))]).is_err());
     }
 }
