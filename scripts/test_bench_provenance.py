@@ -9,6 +9,40 @@ import bench_provenance as provenance
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_report_loader_rejects_ambiguous_or_nonfinite_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "source.json"
+            for contents in ('{"metric": 1, "metric": 2}',
+                             '{"latency_ms": 1e999}',
+                             '{"latency_ms": NaN}'):
+                report.write_text(contents, encoding="utf-8")
+                with self.subTest(contents=contents), self.assertRaises(ValueError):
+                    provenance.load_report(report)
+            report.write_text('{"metric": 1.25}', encoding="utf-8")
+            self.assertEqual(provenance.load_report(report), {"metric": 1.25})
+
+    def test_report_output_never_follows_dangling_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            target = directory / "private.json"
+            output = directory / "report.json"
+            try:
+                output.symlink_to(target)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlinks unavailable")
+            with self.assertRaises(FileExistsError):
+                provenance.write_new_report(output, {"ok": True})
+            self.assertFalse(target.exists())
+
+    def test_new_report_is_created_once_and_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "reports" / "output.json"
+            provenance.write_new_report(output, {"ok": True})
+            self.assertEqual(provenance.load_report(output), {"ok": True})
+            with self.assertRaises(FileExistsError):
+                provenance.write_new_report(output, {"ok": False})
+            self.assertEqual(provenance.load_report(output), {"ok": True})
+
     def test_sha256_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "rs"

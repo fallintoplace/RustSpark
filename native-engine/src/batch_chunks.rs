@@ -54,6 +54,62 @@ impl Iterator for BatchChunks<'_> {
 impl ExactSizeIterator for BatchChunks<'_> {}
 impl std::iter::FusedIterator for BatchChunks<'_> {}
 
+/// Chunk an owned columnar batch without cloning heap-backed values.
+pub struct OwnedBatchChunks {
+    schema: crate::schema::Schema,
+    columns: Vec<std::vec::IntoIter<Value>>,
+    remaining: usize,
+    size: usize,
+}
+
+pub fn chunks_owned(batch: Batch, size: usize) -> Result<OwnedBatchChunks> {
+    if size == 0 {
+        return Err(Error::Execution("batch chunk size must be positive".into()));
+    }
+    let remaining = batch.num_rows();
+    let schema = batch.schema().clone();
+    let columns = batch.into_columns().into_iter().map(Vec::into_iter).collect();
+    Ok(OwnedBatchChunks { schema, columns, remaining, size })
+}
+
+impl Iterator for OwnedBatchChunks {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 { return None; }
+        let rows = self.remaining.min(self.size);
+        let columns = self.columns.iter_mut().map(|column|
+            column.by_ref().take(rows).collect::<Vec<Value>>()
+        ).collect();
+        self.remaining -= rows;
+        Some(Batch::from_validated_columns(self.schema.clone(), columns, rows))
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        let skip = self.size.saturating_mul(n).min(self.remaining);
+        for column in &mut self.columns {
+            column.by_ref().take(skip).for_each(drop);
+        }
+        self.remaining -= skip;
+        self.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let batches = self.remaining.div_ceil(self.size);
+        (batches, Some(batches))
+    }
+
+    fn count(self) -> usize { self.size_hint().0 }
+
+    fn last(mut self) -> Option<Self::Item> {
+        let batches = self.len();
+        if batches == 0 { None } else { self.nth(batches - 1) }
+    }
+}
+
+impl ExactSizeIterator for OwnedBatchChunks {}
+impl std::iter::FusedIterator for OwnedBatchChunks {}
+
 pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
     // A single input is already a valid batch. Avoid allocating fresh
@@ -316,5 +372,70 @@ mod owned_batch_concatenation_tests {
             Field::new("n", DataType::Integer, true)
         ]).unwrap());
         assert!(concatenate_owned(vec![left, other]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod owned_batch_chunk_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn moves_wide_unicode_and_nullable_payloads_across_boundaries() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("value", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..9).map(|i| vec![
+            if i % 3 == 0 { Value::Null } else {
+                Value::Text(format!("{i}-{}", "東京🙂".repeat(1024)))
+            },
+            Value::Integer(i),
+        ]).collect()).unwrap();
+        let pointers = (0..batch.num_rows()).map(|row|
+            match batch.value(row, 0).unwrap() {
+                Value::Text(s) => Some(s.as_ptr()),
+                _ => None,
+            }).collect::<Vec<_>>();
+        let expected = batch.clone();
+        let chunks = chunks_owned(batch, 4).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(), vec![4, 4, 1]);
+        assert_eq!(concatenate(&chunks).unwrap(), expected);
+        for (row, old) in pointers.into_iter().enumerate() {
+            let chunk = &chunks[row / 4];
+            let local = row % 4;
+            let actual = match chunk.value(local, 0).unwrap() {
+                Value::Text(s) => Some(s.as_ptr()),
+                _ => None,
+            };
+            assert_eq!(actual, old);
+        }
+    }
+
+    #[test]
+    fn zero_column_rows_and_skip_paths_keep_cardinality() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 11).unwrap();
+        let mut iter = chunks_owned(batch.clone(), 4).unwrap();
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.nth(1).unwrap().unwrap().num_rows(), 4);
+        assert_eq!(iter.next().unwrap().unwrap().num_rows(), 3);
+        assert_eq!(iter.len(), 0);
+        assert!(iter.next().is_none());
+        assert_eq!(chunks_owned(batch.clone(), 4).unwrap().count(), 3);
+        assert_eq!(chunks_owned(batch, 4).unwrap().last().unwrap().unwrap().num_rows(), 3);
+        assert_eq!(chunks_owned(Batch::empty(schema), 4).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn large_nth_saturates_without_panicking_or_building_chunks() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap(),
+            (0..5).map(|n| vec![Value::Integer(n)]).collect(),
+        ).unwrap();
+        assert!(chunks_owned(input.clone(), 0).is_err());
+        let mut iter = chunks_owned(input, 2).unwrap();
+        assert!(iter.nth(usize::MAX).is_none());
+        assert_eq!(iter.len(), 0);
     }
 }

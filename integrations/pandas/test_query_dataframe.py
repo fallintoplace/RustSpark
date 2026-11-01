@@ -1,4 +1,6 @@
 import subprocess
+import os
+import signal
 import sys
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -24,6 +26,14 @@ class DataFrameCommandTests(unittest.TestCase):
             build_command("SELECT 1", Path("r.arrow"), max_rows=0)
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")
+
+    def test_invalid_text_paths_are_rejected_before_export(self):
+        for option in ("csv", "parquet", "json_input", "database_dir"):
+            for value in ("", b"bytes.csv", 42):
+                with self.subTest(option=option, value=value), self.assertRaises(ValueError):
+                    build_command("SELECT 1", Path("out.arrow"), **{option: value})
+        command = build_command("SELECT 1", Path("out.arrow"), csv=Path("input.csv"))
+        self.assertEqual(command[command.index("--csv") + 1], "input.csv")
 
     def test_persistent_database_path_is_forwarded(self):
         args = build_command("SELECT * FROM sales", Path("result.arrow"),
@@ -79,15 +89,22 @@ class DataFrameCommandTests(unittest.TestCase):
                 SimpleNamespace(read_all=lambda: mock_table)),
         )
         with patch.dict(sys.modules, {"pyarrow": fake_pa}), \
-             patch("query_dataframe.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+             patch("query_dataframe.subprocess.Popen") as spawn:
+            proc = spawn.return_value
+            proc.wait.return_value = 0
+            proc.poll.return_value = 0
             self.assertEqual(query_dataframe("SELECT 1", process_timeout=3), "frame")
-            self.assertEqual(run.call_args.kwargs["timeout"], 3)
-            self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
-            self.assertNotEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
-            run.side_effect = subprocess.TimeoutExpired("rustspark", 3)
-            with self.assertRaisesRegex(RuntimeError, "process timeout"):
-                query_dataframe("SELECT 1", process_timeout=3)
+            self.assertEqual(proc.wait.call_args.kwargs["timeout"], 3)
+            self.assertEqual(spawn.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertNotEqual(spawn.call_args.kwargs["stderr"], subprocess.PIPE)
+            self.assertEqual(spawn.call_args.kwargs["start_new_session"], os.name == "posix")
+            proc.wait.side_effect = [subprocess.TimeoutExpired("rustspark", 3), -9]
+            proc.poll.return_value = None
+            with patch("query_dataframe.os.killpg") as kill_group:
+                with self.assertRaisesRegex(RuntimeError, "process timeout"):
+                    query_dataframe("SELECT 1", process_timeout=3)
+                if os.name == "posix":
+                    kill_group.assert_called_once_with(proc.pid, signal.SIGKILL)
 
 
 class BoundedPandasErrorTests(unittest.TestCase):
@@ -96,10 +113,10 @@ class BoundedPandasErrorTests(unittest.TestCase):
         def backend_failure(command, *, stderr, **kwargs):
             self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
             stderr.write(b"verbose log" * 16_000 + b"\\nFINAL SQL ERROR")
-            return subprocess.CompletedProcess(command, 1)
+            return SimpleNamespace(wait=lambda timeout=None: 1)
 
         with patch.dict(sys.modules, {"pyarrow": fake_pa}), patch(
-            "query_dataframe.subprocess.run", side_effect=backend_failure
+            "query_dataframe.subprocess.Popen", side_effect=backend_failure
         ):
             with self.assertRaisesRegex(RuntimeError, "FINAL SQL ERROR") as raised:
                 query_dataframe("SELECT 1")
@@ -118,6 +135,16 @@ class NamedJsonPandasTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("out.arrow"),
                           json_tables={"invalid-name": "events.json"})
+
+
+
+class FailedPandasExportStartupTests(unittest.TestCase):
+    def test_missing_binary_is_a_readable_runtime_error(self):
+        with patch.dict(sys.modules, {"pyarrow": SimpleNamespace()}), patch(
+            "query_dataframe.subprocess.Popen", side_effect=FileNotFoundError("no executable")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Unable to start"):
+                query_dataframe("SELECT 1")
 
 
 if __name__ == "__main__":
