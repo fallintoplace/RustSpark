@@ -46,9 +46,7 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         // push_str rather than decoding and appending each scalar.
         let padding = target - size;
         let full_runs = padding / pad.len();
-        for _ in 0..full_runs {
-            result.push_str(pad);
-        }
+        append_repeated_pattern(&mut result, pad, full_runs);
         result.push_str(&pad[..padding % pad.len()]);
     } else {
         // Repeat whole UTF-8 patterns instead of pushing every Unicode
@@ -56,9 +54,7 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         let pattern_chars = pad.chars().count();
         let padding = target - size;
         let complete = padding / pattern_chars;
-        for _ in 0..complete {
-            result.push_str(pad);
-        }
+        append_repeated_pattern(&mut result, pad, complete);
         let remainder = padding % pattern_chars;
         if remainder != 0 {
             let end = pad.char_indices().nth(remainder)
@@ -69,6 +65,20 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if left { result.push_str(text); }
     Ok(Value::Text(result))
 }
+// Append a whole pad pattern in logarithmically many chunks rather than
+// making one push_str call per run. The caller has bounded output length.
+fn append_repeated_pattern(output: &mut String, pattern: &str, mut count: usize) {
+    if count == 0 { return; }
+    let mut block = pattern.to_owned();
+    loop {
+        if count & 1 != 0 { output.push_str(&block); }
+        count >>= 1;
+        if count == 0 { break; }
+        let duplicated = block.clone();
+        block.push_str(&duplicated);
+    }
+}
+
 fn lpad(args: &[Value]) -> Result<Value> { pad(args, true) }
 fn rpad(args: &[Value]) -> Result<Value> { pad(args, false) }
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -225,5 +235,43 @@ mod unicode_padding_run_regressions {
         let Value::Text(result) = rpad(&large).unwrap() else { panic!("text"); };
         assert_eq!(result.chars().count(), 10_001);
         assert!(result.starts_with("é🙂界🙂界"));
+    }
+}
+
+#[cfg(test)]
+mod exponential_padding_regressions {
+    use super::*;
+
+    #[test]
+    fn massive_multi_character_padding_matches_reference_repetition() {
+        for (seed, pattern) in [("Z", "ab"), ("é", "🙂界"), ("x", "xyz"), ("🙂", "éz")] {
+            let original_chars = seed.chars().count();
+            let target = 200_001usize;
+            let missing = target - original_chars;
+            let width = pattern.chars().count();
+            let mut expected = pattern.repeat(missing / width);
+            expected.extend(pattern.chars().take(missing % width));
+            assert_eq!(lpad(&[
+                Value::Text(seed.into()), Value::Integer(target as i64),
+                Value::Text(pattern.into()),
+            ]).unwrap(), Value::Text(format!("{expected}{seed}")));
+            assert_eq!(rpad(&[
+                Value::Text(seed.into()), Value::Integer(target as i64),
+                Value::Text(pattern.into()),
+            ]).unwrap(), Value::Text(format!("{seed}{expected}")));
+        }
+    }
+
+    #[test]
+    fn zero_runs_one_run_and_unicode_truncation_stay_exact() {
+        assert_eq!(lpad(&[
+            Value::Text("é".into()), Value::Integer(2), Value::Text("🙂界".into()),
+        ]).unwrap(), Value::Text("🙂é".into()));
+        assert_eq!(rpad(&[
+            Value::Text("界🙂".into()), Value::Integer(1), Value::Text("ab".into()),
+        ]).unwrap(), Value::Text("界".into()));
+        assert_eq!(rpad(&[
+            Value::Text("é".into()), Value::Integer(1), Value::Text("xyz".into()),
+        ]).unwrap(), Value::Text("é".into()));
     }
 }
