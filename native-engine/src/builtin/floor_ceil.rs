@@ -26,11 +26,18 @@ fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
     let factor = 10_f64.powi(scale.unsigned_abs() as i32);
     let round = |value: f64| if round_up { value.ceil() } else { value.floor() };
     let result = if scale >= 0 {
-        // A sub-ULP decimal scale cannot change a large finite number.
-        // Avoid overflowing the intermediate multiplication to infinity.
-        if number.abs() > f64::MAX / factor { return super::finite(number); }
+        // When f64 spacing is at least the decimal unit, a multiply/divide
+        // round-trip only introduces 1-ULP noise. It cannot improve precision.
+        if number.abs() >= (1u64 << 53) as f64 / factor {
+            return super::finite(number);
+        }
         round(number * factor) / factor
     } else {
+        // At large magnitudes, existing f64 values already have coarser
+        // spacing than the requested integer decimal position.
+        if number.abs() >= factor * (1u64 << 53) as f64 {
+            return super::finite(number);
+        }
         round(number / factor) * factor
     };
     super::finite(result)
@@ -97,5 +104,45 @@ mod large_finite_scaled_rounding_tests {
             ceil(&[Value::Float(3.1411), Value::Integer(3)]).unwrap(),
             Value::Float(3.142),
         );
+    }
+}
+
+#[cfg(test)]
+mod exact_large_scaled_floor_ceil_regressions {
+    use super::*;
+
+    #[test]
+    fn large_doubles_do_not_drift_across_decimal_roundtrips() {
+        for (value, scale) in [
+            (3.343065230161571e137, 8),
+            (-3.343065230161571e137, 8),
+            (4.1631639220658464e77, 11),
+            (-3.3036582842864976e239, -1),
+            (2.4560805462934964e260, -3),
+            (f64::MAX, 15),
+            (-f64::MAX, -15),
+        ] {
+            let args = [Value::Float(value), Value::Integer(scale)];
+            assert_eq!(floor(&args).unwrap(), Value::Float(value),
+                "FLOOR value={value}, scale={scale}");
+            assert_eq!(ceil(&args).unwrap(), Value::Float(value),
+                "CEIL value={value}, scale={scale}");
+        }
+    }
+
+    #[test]
+    fn ordinary_fractional_scales_still_round_in_correct_direction() {
+        assert_eq!(floor(&[Value::Float(123.456), Value::Integer(2)]).unwrap(),
+            Value::Float(123.45));
+        assert_eq!(ceil(&[Value::Float(123.456), Value::Integer(2)]).unwrap(),
+            Value::Float(123.46));
+        assert_eq!(floor(&[Value::Float(-123.456), Value::Integer(2)]).unwrap(),
+            Value::Float(-123.46));
+        assert_eq!(ceil(&[Value::Float(-123.456), Value::Integer(2)]).unwrap(),
+            Value::Float(-123.45));
+        assert_eq!(floor(&[Value::Float(149.0), Value::Integer(-2)]).unwrap(),
+            Value::Float(100.0));
+        assert_eq!(ceil(&[Value::Float(149.0), Value::Integer(-2)]).unwrap(),
+            Value::Float(200.0));
     }
 }
