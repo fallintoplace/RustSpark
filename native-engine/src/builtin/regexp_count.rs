@@ -207,8 +207,10 @@ mod regex_digit_class_count_regressions {
 
     #[test]
     fn digit_class_fast_path_matches_regex_on_utf8_and_newlines() {
+        let long_run = format!("{}-{}-{}", "0".repeat(25_000),
+            "a".repeat(1_000), "12345".repeat(8_000));
         let samples = ["", "123", "a12b345", "é12🙂34", "١٢٣",
-            "line1\n22\nend333", "123-456-000", "0".repeat(4096).as_str()];
+            "line1\n22\nend333", "123-456-000", long_run.as_str()];
         for input in samples {
             for pattern in ["[0-9]", "[0-9]+"] {
                 let regex = regex_support::compile(pattern).unwrap();
