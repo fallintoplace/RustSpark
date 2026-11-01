@@ -285,10 +285,15 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 columns.len().hash(&mut hasher);
                 for column in &columns { column[row].hash(&mut hasher); }
                 let fingerprint = hasher.finish();
-                if self.seen.get(&fingerprint).is_some_and(|entries|
-                    entries.iter().any(|key| key.iter().zip(&columns)
-                        .all(|(value, column)| value == &column[row]))) {
-                    continue;
+                // Hold the map entry through admission. Unique composite
+                // rows previously hashed/probed the fingerprint map a second
+                // time when inserting the retained key.
+                let slot = self.seen.entry(fingerprint);
+                if let std::collections::hash_map::Entry::Occupied(existing) = &slot {
+                    if existing.get().iter().any(|key| key.iter().zip(&columns)
+                        .all(|(value, column)| value == &column[row])) {
+                        continue;
+                    }
                 }
                 if self.unique_keys >= self.max_keys {
                     self.pending_error = Some(Error::Execution("UNION DISTINCT memory budget exceeded".into()));
@@ -326,7 +331,13 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 };
                 self.retained_bytes = next_total;
                 self.unique_keys += 1;
-                self.seen.entry(fingerprint).or_default().push(key);
+                match slot {
+                    std::collections::hash_map::Entry::Occupied(mut existing) =>
+                        existing.get_mut().push(key),
+                    std::collections::hash_map::Entry::Vacant(empty) => {
+                        empty.insert(vec![key]);
+                    }
+                }
                 selected.push(row);
             }
             // Preserve successful rows when a later key exceeds admission.
@@ -858,6 +869,40 @@ mod union_single_column_hashset_regressions {
             vec![Value::Text("alpha".into())], vec![Value::Text("beta".into())],
         ]);
         assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod composite_union_single_entry_lookup_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn collisions_are_checked_by_full_key_and_cloned_once() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let new_row = vec![Value::Integer(7), Value::Text("🦀".repeat(512))];
+        let other_row = vec![Value::Integer(-9), Value::Text("other".into())];
+        let batch = Batch::from_rows(schema.clone(), vec![
+            new_row.clone(), new_row.clone(), other_row.clone(),
+        ]).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            [Ok(batch)].into_iter(), std::iter::empty::<Result<Batch>>(),
+            schema, QueryControl::default(), 4, 100_000,
+        ).unwrap();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        new_row.len().hash(&mut hasher);
+        for value in &new_row { value.hash(&mut hasher); }
+        // A forced fingerprint collision still needs exact row comparison.
+        stream.seen.insert(hasher.finish(), vec![other_row.clone()]);
+        stream.unique_keys = 1;
+        stream.retained_bytes = super::super::row_footprint::footprint(other_row.iter());
+        let rows = stream.next().unwrap().unwrap().rows().unwrap();
+        assert_eq!(rows, vec![new_row, other_row]);
         assert!(stream.next().is_none());
     }
 }

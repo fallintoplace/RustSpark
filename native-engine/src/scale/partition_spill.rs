@@ -89,6 +89,7 @@ pub struct PartitionWriter {
     initialized: Vec<bool>,
     key_columns: Vec<usize>,
     batch_rows: usize,
+    failed: bool,
 }
 
 #[cfg(test)]
@@ -232,11 +233,22 @@ impl PartitionWriter {
         Ok(Self {
             writers: Some(writers), owned: Some(owned),
             open_order: WriterLru::new(count), initialized: vec![false; count],
-            key_columns, batch_rows,
+            key_columns, batch_rows, failed: false,
         })
     }
 
     pub fn write_batch(&mut self, batch: &Batch, control: &QueryControl) -> Result<()> {
+        if self.failed {
+            return Err(Error::Execution("partition writer poisoned by earlier failure".into()));
+        }
+        // A late shard error may follow previously persisted shard windows.
+        // Never allow finish() to publish a partial partition exchange.
+        let result = self.write_batch_inner(batch, control);
+        if result.is_err() { self.failed = true; }
+        result
+    }
+
+    fn write_batch_inner(&mut self, batch: &Batch, control: &QueryControl) -> Result<()> {
         let owned = self.owned.as_ref().ok_or_else(|| Error::Execution("writer finalized".into()))?;
         if batch.schema() != &owned.schema { return Err(Error::Schema("partition schema mismatch".into())); }
         let writers = self.writers.as_mut().ok_or_else(|| Error::Execution("writer finalized".into()))?;
@@ -320,6 +332,9 @@ impl PartitionWriter {
     }
 
     pub fn finish(mut self) -> Result<PartitionFiles> {
+        if self.failed {
+            return Err(Error::Execution("partition writer poisoned by earlier failure".into()));
+        }
         // Keep path ownership until every file is finalized. If a flush or
         // create_new fails, dropping self removes the incomplete spill files.
         let owned = self.owned.as_ref().expect("active partition writer");
@@ -866,5 +881,32 @@ mod consecutive_shuffle_key_run_regressions {
             drop(files);
         }
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod partition_writer_transactional_failure_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn invalid_later_shard_window_cannot_be_finalized_as_partial_result() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-partition-poison-{}-{}", std::process::id(),
+            PARTITION_ID.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("valid".into())],
+            vec![Value::Text("x".repeat(8 * 1024 * 1024 + 1))],
+        ]).unwrap();
+        let mut writer = PartitionWriter::new(&directory, schema, &["key"], 1, 1).unwrap();
+        assert!(writer.write_batch(&input, &QueryControl::default()).is_err());
+        assert!(writer.write_batch(&input, &QueryControl::default()).is_err());
+        assert!(writer.finish().is_err());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(directory).unwrap();
     }
 }

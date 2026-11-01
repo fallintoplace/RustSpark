@@ -90,7 +90,8 @@ where
     let mut output: Vec<OnceLock<Result<Batch>>> =
         std::iter::repeat_with(OnceLock::new).take(count).collect();
     std::thread::scope(|scope| {
-        for _ in 0..workers {
+        // Keep the caller busy as one worker and spawn only the remainder.
+        for _ in 1..workers {
             let tasks = &tasks;
             let output = &output;
             let operator = &operator;
@@ -103,10 +104,12 @@ where
                 ))
                 .is_err()
             {
-                drain_tasks(tasks, output, failed, operator, claim_size);
+                // A failed spawn does not reduce correctness or admission:
+                // the caller drains any remaining partitions below.
                 break;
             }
         }
+        drain_tasks(&tasks, &output, &failed, &operator, claim_size);
     });
     // A cancelled task may precede the failed task in input order.
     // Return the actual operator error instead of a missing-result error.
@@ -496,5 +499,27 @@ mod quota_aware_partition_worker_tests {
             } else { Ok(batch) }
         });
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod caller_worker_parallel_map_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn caller_worker_preserves_order_and_error_propagation() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = (0..37).map(|n| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(n)]]).unwrap()).collect::<Vec<_>>();
+        let actual = map_partitions(input.clone(), 7, Ok).unwrap();
+        assert_eq!(actual, input);
+        let failure = map_partitions(input, 7, |batch| {
+            if batch.value(0, 0)? == &Value::Integer(16) {
+                return Err(Error::Execution("caller worker failure".into()));
+            }
+            Ok(batch)
+        }).unwrap_err();
+        assert!(failure.to_string().contains("caller worker failure"));
     }
 }

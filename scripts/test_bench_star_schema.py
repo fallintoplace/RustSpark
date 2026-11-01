@@ -27,7 +27,7 @@ class StarSchemaTests(unittest.TestCase):
             self.assertEqual(len(files["regions"].read_text().splitlines()), 3)
             command = bench.command("rs", files, "SELECT 1")
             self.assertEqual(command.count("--csv-table"), 3)
-            self.assertIn("--csv-schema", command)
+            self.assertNotIn("--csv-schema", command)
             self.assertEqual(command[command.index("--sql") + 1], "SELECT 1")
 
     def test_rejects_noninteger_dimensions_before_creating_tables(self):
