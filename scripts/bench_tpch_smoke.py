@@ -12,7 +12,14 @@ SCRIPTS = Path(__file__).resolve().parent
 
 
 def commands(binary, fixture, report, scale, partitions, timeout):
-    if not math.isfinite(scale) or scale <= 0 or partitions < 1 or timeout < 1:
+    if (type(scale) not in (int, float) or type(partitions) is not int
+            or type(timeout) is not int or partitions < 1 or timeout < 1):
+        raise ValueError("Invalid scale factor, partition count or timeout")
+    try:
+        valid_scale = math.isfinite(scale) and scale > 0
+    except OverflowError:
+        valid_scale = False
+    if not valid_scale:
         raise ValueError("Invalid scale factor, partition count or timeout")
     prepare = [sys.executable, str(SCRIPTS / "tpch_prepare.py"),
                "--scale-factor", str(scale), "--output", str(fixture)]

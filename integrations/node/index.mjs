@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { TextDecoder } from "node:util";
 import { parseStrictJSON } from "./strict-json.mjs";
 
 export class RustSparkError extends Error {
@@ -24,11 +25,12 @@ export class RustSpark {
     this.runner = runner;
   }
 
-  query(sql, {
+  _command(sql, {
     input, csv, parquet, json,
     csvTables, parquetTables, jsonTables,
     namedParams, sqlFile, maxRows, queryTimeout, processTimeoutMs,
     maxOutputBytes = 64 * 1024 * 1024,
+    unsafeIntegers = "error",
   } = {}) {
     const hasInlineSQL = typeof sql === "string" && sql.trim().length > 0;
     const hasSQLFile = sqlFile !== undefined;
@@ -60,6 +62,9 @@ export class RustSpark {
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
       throw new RangeError("maxOutputBytes must be positive");
     }
+    if (unsafeIntegers !== "error" && unsafeIntegers !== "bigint") {
+      throw new TypeError("unsafeIntegers must be error or bigint");
+    }
 
     const args = sqlFile !== undefined ? ["--sql-file", sqlFile, "--stdout-format", "json-array"] : ["--sql", sql, "--stdout-format", "json-array"];
     if (this.databaseDir !== null) args.push("--database-dir", String(this.databaseDir));
@@ -81,6 +86,11 @@ export class RustSpark {
     if (maxRows !== undefined) args.push("--max-rows", String(maxRows));
     if (queryTimeout !== undefined) args.push("--query-timeout", String(queryTimeout));
 
+    return { args, maxOutputBytes, processTimeoutMs, unsafeIntegers };
+  }
+
+  query(sql, options = {}) {
+    const { args, maxOutputBytes, processTimeoutMs, unsafeIntegers } = this._command(sql, options);
     const result = this.runner(this.binary, args, {
       encoding: "utf8", shell: false, timeout: processTimeoutMs, maxBuffer: maxOutputBytes,
     });
@@ -90,7 +100,7 @@ export class RustSpark {
     }
     let rows;
     try {
-      rows = parseStrictJSON(result.stdout);
+      rows = parseStrictJSON(result.stdout, { unsafeIntegers });
     }
     catch { throw new RustSparkError("RustSpark returned invalid JSON"); }
     if (!Array.isArray(rows) || rows.some((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
@@ -98,6 +108,111 @@ export class RustSpark {
     }
     return rows;
   }
+
+  // Stream validated row objects with backpressure and bounded line storage.
+  // This API launches a real child process; the synchronous custom runner only
+  // affects query() and queryOne().
+  async *queryRows(sql, options = {}) {
+    const { args, maxOutputBytes, processTimeoutMs, unsafeIntegers } = this._command(sql, options);
+    const flag = args.indexOf("--stdout-format");
+    args[flag + 1] = "json";
+
+    const child = spawn(this.binary, args, {
+      shell: false, detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let launchError = null;
+    let timedOut = false;
+    let stderr = Buffer.alloc(0);
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < 65536) {
+        stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
+      }
+    });
+    const finished = new Promise((resolve) => {
+      child.on("error", (error) => {
+        launchError = error;
+        resolve({ code: null, signal: null });
+      });
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    const stopChild = () => {
+      if (child.pid && process.platform !== "win32") {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+          return;
+        } catch (error) {
+          if (error?.code !== "ESRCH") child.kill("SIGKILL");
+        }
+      } else {
+        child.kill("SIGKILL");
+      }
+    };
+    const deadline = processTimeoutMs === undefined ? null : setTimeout(() => {
+      timedOut = true;
+      stopChild();
+    }, processTimeoutMs);
+
+    const maxLineBytes = 16 * 1024 * 1024;
+    let outputBytes = 0;
+    let segments = [];
+    let segmentBytes = 0;
+    const utf8 = new TextDecoder("utf-8", { fatal: true });
+    const parseRow = () => {
+      // Buffer.toString silently substitutes U+FFFD for malformed UTF-8.
+      // Preserve byte-exact SQL results by rejecting invalid row encoding.
+      const source = utf8.decode(Buffer.concat(segments, segmentBytes));
+      const row = parseStrictJSON(source, { unsafeIntegers });
+      if (row === null || typeof row !== "object" || Array.isArray(row)) {
+        throw new RustSparkError("RustSpark NDJSON row must be an object");
+      }
+      segments = [];
+      segmentBytes = 0;
+      return row;
+    };
+    try {
+      for await (const chunk of child.stdout) {
+        outputBytes += chunk.length;
+        if (outputBytes > maxOutputBytes) {
+          throw new RustSparkError("RustSpark NDJSON stdout exceeded maxOutputBytes");
+        }
+        let from = 0;
+        while (from < chunk.length) {
+          const newline = chunk.indexOf(10, from);
+          const until = newline < 0 ? chunk.length : newline;
+          const part = chunk.subarray(from, until);
+          if (segmentBytes + part.length > maxLineBytes) {
+            throw new RustSparkError("RustSpark NDJSON row exceeded 16 MiB");
+          }
+          segments.push(part);
+          segmentBytes += part.length;
+          if (newline >= 0) {
+            yield parseRow();
+            from = newline + 1;
+          } else {
+            from = chunk.length;
+          }
+        }
+      }
+      if (segmentBytes > 0) yield parseRow();
+      const { code } = await finished;
+      if (timedOut) throw new RustSparkError("RustSpark NDJSON process timeout");
+      if (launchError) throw new RustSparkError(`Unable to launch RustSpark: ${launchError.message}`);
+      if (code !== 0) {
+        throw new RustSparkError(stderr.toString("utf8").trim() || `RustSpark exited with ${code}`);
+      }
+    } catch (error) {
+      if (timedOut) throw new RustSparkError("RustSpark NDJSON process timeout");
+      if (launchError) throw new RustSparkError(`Unable to launch RustSpark: ${launchError.message}`);
+      if (error instanceof RustSparkError) throw error;
+      throw new RustSparkError(`Invalid RustSpark NDJSON: ${error.message}`);
+    } finally {
+      if (deadline !== null) clearTimeout(deadline);
+      if (child.exitCode === null && child.signalCode === null) stopChild();
+      await finished;
+    }
+  }
+
   queryOne(sql, options = {}) {
     if (options.maxRows !== undefined) {
       throw new TypeError("queryOne sets maxRows automatically");

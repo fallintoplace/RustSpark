@@ -14,7 +14,8 @@ from bench_tpch_verify import reference_connection
 
 
 def measure_query(connection, sql, warmup, repeat):
-    if warmup < 0 or repeat < 1:
+    if (type(warmup) is not int or warmup < 0
+            or type(repeat) is not int or repeat < 1):
         raise ValueError("Invalid warmup or repeat")
     samples = []
     fingerprint = None
@@ -46,6 +47,9 @@ def measure_query(connection, sql, warmup, repeat):
 
 
 def benchmark(parquet, queries, warmup=1, repeat=5, threads=2):
+    if (type(warmup) is not int or warmup < 0
+            or type(repeat) is not int or repeat < 1):
+        raise ValueError("Invalid warmup or repeat")
     if type(threads) is not int or threads < 1:
         raise ValueError("Threads must be a positive integer")
     # DuckDB is an optional dependency; unit tests can use a fake connection.

@@ -48,6 +48,9 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
                     .map(|(_, rest)| rest).unwrap_or("");
                 after_scheme.strip_prefix(authority).unwrap_or("")
             }
+            // Hierarchical absolute URIs such as file:/tmp do not use ://.
+            // Their parsed path must not include the scheme prefix.
+            None if parsed.is_some() => parsed.as_ref().expect("checked above").path(),
             None => without_query,
         })
     };
@@ -146,6 +149,18 @@ mod tests {
         assert_eq!(get(source, "QUERY", Some("absent")).unwrap(), Value::Null);
         assert_eq!(get("not-a-url", "PATH", None).unwrap(),
             Value::Text("not-a-url".into()));
+    }
+
+    #[test]
+    fn absolute_file_uris_without_authority_keep_only_the_path() {
+        assert_eq!(get("file:/tmp/data.csv?q=1", "PATH", None).unwrap(),
+            Value::Text("/tmp/data.csv".into()));
+        assert_eq!(get("file:/tmp/data.csv?q=1", "FILE", None).unwrap(),
+            Value::Text("/tmp/data.csv?q=1".into()));
+        assert_eq!(get("file:///tmp/data.csv", "PATH", None).unwrap(),
+            Value::Text("/tmp/data.csv".into()));
+        assert_eq!(get("relative/data.csv", "PATH", None).unwrap(),
+            Value::Text("relative/data.csv".into()));
     }
 
     #[test]

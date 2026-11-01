@@ -134,3 +134,13 @@ test("named parameter length is measured in UTF-8 bytes", () => {
   assert.deepEqual(client.query("SELECT 1", { namedParams: { p: largest } }), []);
   assert.ok(argv.includes("p=" + largest));
 });
+
+test("invalid unsafe integer policy is rejected before spawning", () => {
+  let calls = 0;
+  const client = new RustSpark({ runner: () => { calls++; return { status: 0, stdout: "[]" }; } });
+  assert.throws(() => client.query("SELECT 1", { unsafeIntegers: "round" }), TypeError);
+  assert.throws(() => client.query("SELECT 1", { unsafeIntegers: null }), TypeError);
+  assert.equal(calls, 0);
+  assert.deepEqual(client.query("SELECT 1", { unsafeIntegers: "bigint" }), []);
+  assert.equal(calls, 1);
+});

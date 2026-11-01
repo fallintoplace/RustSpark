@@ -15,5 +15,8 @@ func (w *ndjsonByteLimit) Write(data []byte) (int, error) {
     }
     written, err := w.output.Write(data)
     w.remaining -= written
+    if written < len(data) && err == nil {
+        return written, io.ErrShortWrite
+    }
     return written, err
 }

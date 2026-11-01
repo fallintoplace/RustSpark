@@ -63,6 +63,48 @@ fn can_skip_binary(
     }
 }
 
+// Only constant membership expressions are safe to prove from min/max.
+// Unknown or incomparable types keep the row group.
+fn can_skip_in_list(
+    stats: &ColumnStatistics, column: &str, needle: &Expr,
+    choices: &[Expr], negated: bool,
+) -> bool {
+    let Expr::Column(name) = needle else { return false; };
+    if !name.eq_ignore_ascii_case(column) { return false; }
+    let mut literals = Vec::with_capacity(choices.len());
+    for choice in choices {
+        let Expr::Literal(value) = choice else { return false; };
+        literals.push(value);
+    }
+    if stats.rows == stats.nulls { return true; }
+    let has_null = literals.iter().any(|value| value.is_null());
+    if negated && has_null { return true; }
+    if !negated && literals.iter().all(|value| value.is_null()) {
+        return true;
+    }
+    let (Some(min), Some(max)) = (&stats.min, &stats.max) else {
+        return false;
+    };
+    if negated {
+        // When every non-NULL value is the same listed literal, NOT IN
+        // cannot admit even one row. NULL rows are UNKNOWN.
+        if min.sql_compare(max).ok().flatten() != Some(Ordering::Equal) {
+            return false;
+        }
+        literals.iter().filter(|value| !value.is_null()).any(|value|
+            min.sql_equal(value).ok().flatten() == Some(true))
+    } else {
+        // No choice falls inside the inclusive min/max range.
+        literals.iter().filter(|value| !value.is_null()).all(|value| {
+            match (min.sql_compare(value), max.sql_compare(value)) {
+                (Ok(Some(low)), Ok(Some(high))) =>
+                    low == Ordering::Greater || high == Ordering::Less,
+                _ => false,
+            }
+        })
+    }
+}
+
 pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> bool {
     if !trustworthy(stats) { return false; }
     if stats.rows == 0 {
@@ -80,6 +122,8 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
             if matches!(&**value, Expr::Column(name) if name.eq_ignore_ascii_case(column))) => {
             stats.rows == stats.nulls
         }
+        Expr::InList { needle, choices, negated } =>
+            can_skip_in_list(stats, column, needle, choices, *negated),
         Expr::IsDistinctFrom { left, right, negated } => {
             let literal = match (left.as_ref(), right.as_ref()) {
                 (Expr::Column(name), Expr::Literal(value)) |
@@ -108,6 +152,9 @@ pub fn can_skip(stats: &ColumnStatistics, column: &str, predicate: &Expr) -> boo
             }
         }
         Expr::Not(inner) => {
+            if let Expr::InList { needle, choices, negated } = inner.as_ref() {
+                return can_skip_in_list(stats, column, needle, choices, !negated);
+            }
             if let Expr::Binary { left, op, right } = inner.as_ref() {
                 let inverted = match op {
                     BinaryOp::Equal => Some(BinaryOp::NotEqual),
@@ -174,6 +221,25 @@ mod tests {
 }
 
  
+/// Identify a simple predicate's column without searching every summary.
+/// Complex trees are handled separately by can_skip_columns_inner.
+fn simple_predicate_column(predicate: &Expr) -> Option<&str> {
+    match predicate {
+        Expr::Not(inner) => simple_predicate_column(inner),
+        Expr::IsNull(inner) => match inner.as_ref() {
+            Expr::Column(name) => Some(name),
+            _ => None,
+        },
+        Expr::Binary { left, right, .. }
+        | Expr::IsDistinctFrom { left, right, .. } => match (left.as_ref(), right.as_ref()) {
+            (Expr::Column(name), Expr::Literal(_))
+            | (Expr::Literal(_), Expr::Column(name)) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Conservative pruning across column statistics and boolean predicates.
 /// Missing statistics never cause a data partition to be discarded.
 /// Conservatively decide whether a boolean tree is impossible using a
@@ -212,6 +278,22 @@ fn can_skip_columns_inner(
             // column or ancestor in the boolean expression tree.
             let inverse = negated.then(|| Expr::Not(Box::new(predicate.clone())));
             let leaf = inverse.as_ref().unwrap_or(predicate);
+            if let Some(name) = simple_predicate_column(leaf) {
+                // Normalized schema statistics use lowercase ASCII names.
+                // A direct match avoids scanning unrelated columns for every
+                // partition and expression leaf.
+                if let Some(summary) = stats.get(name) {
+                    return can_skip(summary, name, leaf);
+                }
+                if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    let lowered = name.to_ascii_lowercase();
+                    if let Some(summary) = stats.get(&lowered) {
+                        return can_skip(summary, &lowered, leaf);
+                    }
+                }
+            }
+            // External statistics maps may use mixed-case keys. Preserve
+            // case-insensitive lookup and conservative fallback behavior.
             stats.iter().any(|(column, summary)| can_skip(summary, column, leaf))
         }
     }
@@ -619,5 +701,126 @@ mod borrowed_negated_comparisons_tests {
         );
         assert!(can_skip(&stats, "x", &Expr::Not(Box::new(comparison.clone()))));
         assert!(!can_skip(&stats, "y", &Expr::Not(Box::new(comparison))));
+    }
+}
+
+#[cfg(test)]
+mod membership_pruning_differential_tests {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn never_prunes_a_row_group_with_any_matching_row() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        for rows in [
+            vec![Value::Null, Value::Integer(10), Value::Integer(19)],
+            vec![Value::Null, Value::Null],
+            vec![Value::Integer(42), Value::Integer(42), Value::Null],
+            vec![Value::Integer(-5), Value::Integer(0), Value::Integer(8)],
+            vec![Value::Integer(i64::MIN), Value::Integer(i64::MAX)],
+        ] {
+            let input = Batch::from_rows(schema.clone(),
+                rows.into_iter().map(|v| vec![v]).collect()).unwrap();
+            let summary = ColumnStatistics::from_batch(&input, "n").unwrap();
+            for choices in [
+                vec![], vec![Value::Null], vec![Value::Integer(0)],
+                vec![Value::Integer(10), Value::Integer(42)],
+                vec![Value::Integer(9), Value::Integer(20), Value::Null],
+                vec![Value::Integer(i64::MIN), Value::Integer(i64::MAX)],
+            ] {
+                for negated in [false, true] {
+                    let predicate = Expr::InList {
+                        needle: Box::new(Expr::Column("n".into())),
+                        choices: choices.iter().cloned().map(Expr::Literal).collect(),
+                        negated,
+                    };
+                    let matching = (0..input.num_rows()).any(|row|
+                        predicate.evaluate(&input, row).unwrap()
+                            .as_boolean().unwrap() == Some(true));
+                    assert!(!matching || !can_skip(&summary, "n", &predicate),
+                        "pruned a match: {predicate:?}, {summary:?}");
+                    let inverse = Expr::Not(Box::new(predicate.clone()));
+                    let inverted_matches = (0..input.num_rows()).any(|row|
+                        inverse.evaluate(&input, row).unwrap()
+                            .as_boolean().unwrap() == Some(true));
+                    assert!(!inverted_matches || !can_skip(&summary, "n", &inverse));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prunes_out_of_range_null_and_single_value_memberships() {
+        let stats = ColumnStatistics {
+            rows: 10, nulls: 2,
+            min: Some(Value::Integer(10)), max: Some(Value::Integer(19)),
+        };
+        let make = |values: Vec<Value>, negated| Expr::InList {
+            needle: Box::new(Expr::Column("n".into())),
+            choices: values.into_iter().map(Expr::Literal).collect(),
+            negated,
+        };
+        assert!(can_skip(&stats, "n", &make(
+            vec![Value::Integer(1), Value::Integer(30)], false)));
+        assert!(!can_skip(&stats, "n", &make(vec![Value::Integer(15)], false)));
+        assert!(can_skip(&stats, "n", &make(
+            vec![Value::Integer(15), Value::Null], true)));
+        let point = ColumnStatistics {
+            rows: 3, nulls: 1,
+            min: Some(Value::Integer(42)), max: Some(Value::Integer(42)),
+        };
+        assert!(can_skip(&point, "n", &make(vec![Value::Integer(42)], true)));
+        assert!(!can_skip(&point, "n", &make(vec![Value::Integer(41)], true)));
+    }
+}
+
+#[cfg(test)]
+mod direct_statistics_lookup_regressions {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn wide_statistics_maps_prune_only_proven_impossible_ranges() {
+        let mut stats = (0..1500).map(|index| {
+            (format!("unused_{index}"), ColumnStatistics {
+                rows: 20, nulls: 0,
+                min: Some(Value::Integer(0)),
+                max: Some(Value::Integer(100)),
+            })
+        }).collect::<HashMap<_, _>>();
+        stats.insert("revenue".into(), ColumnStatistics {
+            rows: 20, nulls: 0,
+            min: Some(Value::Integer(1000)),
+            max: Some(Value::Integer(2000)),
+        });
+        for name in ["revenue", "Revenue", "REVENUE"] {
+            let predicate = Expr::binary(Expr::Column(name.into()),
+                BinaryOp::Less, Expr::Literal(Value::Integer(1000)));
+            assert!(can_skip_columns(&stats, &predicate));
+            let possible = Expr::binary(Expr::Column(name.into()),
+                BinaryOp::LessEqual, Expr::Literal(Value::Integer(1000)));
+            assert!(!can_skip_columns(&stats, &possible));
+        }
+        let missing = Expr::binary(Expr::Column("unknown".into()),
+            BinaryOp::Equal, Expr::Literal(Value::Integer(5)));
+        assert!(!can_skip_columns(&stats, &missing));
+    }
+
+    #[test]
+    fn null_and_null_safe_leaves_preserve_case_insensitive_pruning() {
+        let stats = HashMap::from([("Value".to_string(), ColumnStatistics {
+            rows: 10, nulls: 0,
+            min: Some(Value::Integer(1)),
+            max: Some(Value::Integer(1)),
+        })]);
+        let is_null = Expr::IsNull(Box::new(Expr::Column("value".into())));
+        assert!(can_skip_columns(&stats, &is_null));
+        let distinct = Expr::IsDistinctFrom {
+            left: Box::new(Expr::Literal(Value::Integer(1))),
+            right: Box::new(Expr::Column("VALUE".into())),
+            negated: false,
+        };
+        assert!(can_skip_columns(&stats, &distinct));
+        assert!(!can_skip_columns(&stats, &Expr::Not(Box::new(is_null))));
     }
 }

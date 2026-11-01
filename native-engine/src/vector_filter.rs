@@ -13,19 +13,31 @@ fn integer_comparison(op: BinaryOp, left: i64, right: i64) -> Option<bool> {
     })
 }
 
-fn fast_text_equality<'a>(
+fn fast_text_comparison<'a>(
     batch: &'a Batch, predicate: &'a Expr,
-) -> Result<Option<(&'a [Value], bool, &'a str)>> {
+) -> Result<Option<(&'a [Value], BinaryOp, &'a str)>> {
     if let Expr::Binary { left, op, right } = predicate {
-        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-            let (name, value) = match (left.as_ref(), right.as_ref()) {
-                (Expr::Column(name), Expr::Literal(Value::Text(value))) |
-                (Expr::Literal(Value::Text(value)), Expr::Column(name)) => (name, value),
+        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual |
+            BinaryOp::Less | BinaryOp::LessEqual |
+            BinaryOp::Greater | BinaryOp::GreaterEqual) {
+            let (name, op, value) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(name), Expr::Literal(Value::Text(value))) =>
+                    (name, *op, value),
+                (Expr::Literal(Value::Text(value)), Expr::Column(name)) => {
+                    let reversed = match op {
+                        BinaryOp::Less => BinaryOp::Greater,
+                        BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+                        BinaryOp::Greater => BinaryOp::Less,
+                        BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+                        other => *other,
+                    };
+                    (name, reversed, value)
+                },
                 _ => return Ok(None),
             };
             let index = batch.schema().column(name)?;
             if batch.schema().field(index)?.data_type == DataType::Text {
-                return Ok(Some((batch.column(index)?, *op == BinaryOp::Equal, value)));
+                return Ok(Some((batch.column(index)?, op, value)));
             }
         }
     }
@@ -364,10 +376,20 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
         }
-    } else if let Some((column, equals, rhs)) = fast_text_equality(batch, predicate)? {
+    } else if let Some((column, op, rhs)) = fast_text_comparison(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
             if let Value::Text(lhs) = value {
-                if (lhs.as_str() == rhs) == equals { selected.push(row); }
+                let order = lhs.as_str().cmp(rhs);
+                let keep = match op {
+                    BinaryOp::Equal => order.is_eq(),
+                    BinaryOp::NotEqual => !order.is_eq(),
+                    BinaryOp::Less => order.is_lt(),
+                    BinaryOp::LessEqual => !order.is_gt(),
+                    BinaryOp::Greater => order.is_gt(),
+                    BinaryOp::GreaterEqual => !order.is_lt(),
+                    _ => unreachable!("matched relational operator"),
+                };
+                if keep { selected.push(row); }
             }
         }
     } else {
@@ -918,5 +940,49 @@ mod float_in_membership_regressions {
             negated: false,
         };
         assert!(select_indices(&batch, &predicate).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_text_ordering_vector_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn all_text_orderings_match_scalar_for_both_operand_orders() {
+        let large = "漢字é🙂".repeat(2048);
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap(),
+            vec![
+                Value::Null, Value::Text("".into()),
+                Value::Text("é".into()), Value::Text("e".into()),
+                Value::Text("東京".into()), Value::Text("🙂".into()),
+                Value::Text(large.clone()), Value::Text(large.clone()),
+            ].into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        for literal in ["", "é", "e", "東京", "🙂", large.as_str(), "missing"] {
+            for op in [
+                BinaryOp::Equal, BinaryOp::NotEqual,
+                BinaryOp::Less, BinaryOp::LessEqual,
+                BinaryOp::Greater, BinaryOp::GreaterEqual,
+            ] {
+                for literal_left in [false, true] {
+                    let (left, right) = if literal_left {
+                        (Expr::Literal(Value::Text(literal.into())),
+                            Expr::Column("text".into()))
+                    } else {
+                        (Expr::Column("text".into()),
+                            Expr::Literal(Value::Text(literal.into())))
+                    };
+                    let predicate = Expr::binary(left, op, right);
+                    let expected = (0..batch.num_rows()).filter(|&row|
+                        predicate.evaluate(&batch, row).unwrap()
+                            .as_boolean().unwrap() == Some(true)
+                    ).collect::<Vec<_>>();
+                    assert_eq!(select_indices(&batch, &predicate).unwrap(), expected,
+                        "operator={op:?}, literal_left={literal_left}");
+                }
+            }
+        }
     }
 }

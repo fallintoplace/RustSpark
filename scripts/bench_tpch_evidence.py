@@ -13,6 +13,33 @@ import math
 from pathlib import Path
 import statistics
 
+def load_evidence(path):
+    """Parse benchmark evidence without silently normalizing invalid JSON."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate evidence JSON key: {key}")
+            result[key] = value
+        return result
+
+    def finite_float(raw):
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("Nonfinite evidence JSON number")
+        return value
+
+    def reject_constant(raw):
+        raise ValueError(f"Nonfinite evidence JSON constant: {raw}")
+
+    return json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=unique_keys,
+        parse_float=finite_float,
+        parse_constant=reject_constant,
+    )
+
+
 TABLES = ("customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier")
 FULL_SUITE = set(range(1, 23))
 
@@ -168,9 +195,9 @@ def main(argv=None):
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
-        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        benchmark = json.loads(args.benchmark.read_text(encoding="utf-8"))
-        verification = json.loads(args.verification.read_text(encoding="utf-8"))
+        manifest = load_evidence(args.manifest)
+        benchmark = load_evidence(args.benchmark)
+        verification = load_evidence(args.verification)
         result = qualify(manifest, benchmark, verification,
                          args.manifest.parent if args.check_files else None)
         rendered = json.dumps(result, indent=2) + "\n"

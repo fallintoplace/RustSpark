@@ -101,6 +101,24 @@ impl<R: BufRead> Records<R> {
                     continue;
                 }
             }
+            // Quoted fields may contain commas, line breaks and UTF-8.
+            // Only a quote changes the parser state, so copy the whole
+            // available run instead of dispatching one byte at a time.
+            if self.pending.is_none() && state == State::Quoted && self.cursor < self.filled {
+                let available = &self.buffer[self.cursor..self.filled];
+                let plain = available.iter().position(|&byte| byte == b'"')
+                    .unwrap_or(available.len());
+                if plain != 0 {
+                    if size.saturating_add(plain) > self.max_record_bytes {
+                        return Err(Error::Execution("CSV record exceeds configured byte limit".into()));
+                    }
+                    field.extend_from_slice(&available[..plain]);
+                    self.cursor += plain;
+                    size += plain;
+                    seen = true;
+                    continue;
+                }
+            }
             let byte = match self.byte()? {
                 Some(byte) => byte,
                 None => {
@@ -223,6 +241,9 @@ impl<R: BufRead> CsvStream<R> {
         row.clear();
         for (text, field) in fields.into_iter().zip(self.schema.fields()) {
             let value = if text.is_empty() {
+                if !field.nullable {
+                    return Err(Error::Type(format!("NULL in required column {}", field.name)));
+                }
                 Value::Null
             } else {
                 match field.data_type {
@@ -605,6 +626,38 @@ mod column_direct_csv_batch_tests {
 }
 
 #[cfg(test)]
+mod quoted_record_bulk_copy_regression {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn quoted_runs_preserve_escaped_quotes_unicode_and_multiline_boundaries() {
+        let prefix = "x".repeat(READ_CHUNK_BYTES * 2 + 3);
+        let suffix = "é".repeat(READ_CHUNK_BYTES / 2 + 1);
+        let csv = format!("text\r\n\"{prefix}\"\"{suffix}\r\nend\"\r\n");
+        let mut input = CsvStream::new(Cursor::new(csv), 2, 64 * 1024).unwrap();
+        let output = input.next().unwrap().unwrap();
+        assert_eq!(output.num_rows(), 1);
+        assert_eq!(
+            output.value(0, 0).unwrap(),
+            &Value::Text(format!("{prefix}\"{suffix}\r\nend"))
+        );
+        assert!(input.next().is_none());
+    }
+
+    #[test]
+    fn quoted_run_still_enforces_raw_record_byte_limit() {
+        let csv = format!("text\n\"{}\"\n", "x".repeat(READ_CHUNK_BYTES + 5));
+        let mut input = CsvStream::new(Cursor::new(csv), 1, 32 * 1024).unwrap();
+        assert!(input.next().unwrap().is_ok());
+        let mut limited = CsvStream::new(Cursor::new(
+            format!("text\n\"{}\"\n", "x".repeat(READ_CHUNK_BYTES + 5))
+        ), 1, READ_CHUNK_BYTES).unwrap();
+        assert!(limited.next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
 mod csv_retained_capacity_budget_regressions {
     use super::*;
     use std::io::Cursor;
@@ -641,3 +694,21 @@ mod csv_retained_capacity_budget_regressions {
         assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(), [1, 1]);
     }
 }
+#[cfg(test)]
+mod required_null_prefix_regression_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn required_null_after_valid_rows_preserves_prefix_then_errors() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = Cursor::new(b"n\n1\n2\n\n3\n");
+        let mut stream = CsvStream::new_typed(input, 16, 1024, schema).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]);
+        assert!(matches!(stream.next(), Some(Err(Error::Type(_)))));
+        assert!(stream.next().is_none());
+    }
+}
+
