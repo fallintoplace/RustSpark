@@ -4,7 +4,7 @@ use rustspark_native::{catalog::Catalog, executor::execute, scalar::Value, sql::
 fn spark_sign_functions_preserve_numeric_types_and_nulls() {
     let catalog = Catalog::new();
     let result = execute(
-        &parse_sql("SELECT POSITIVE(-3) AS p, NEGATIVE(5) AS n, NEGATIVE(2.5) AS f, NEGATIVE(NULL) AS z").unwrap(),
+        &parse_sql("SELECT POSITIVE(-3) AS p, NEGATIVE(5) AS n, NEGATIVE(2.5) AS f, NEGATIVE(CAST(NULL AS BIGINT)) AS z").unwrap(),
         &catalog,
     ).unwrap();
     assert_eq!(result.row(0).unwrap(), vec![
