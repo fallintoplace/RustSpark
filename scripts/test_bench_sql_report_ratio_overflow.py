@@ -28,5 +28,26 @@ class SqlRatioOverflowTests(unittest.TestCase):
         self.assertAlmostEqual(timing["slowdown"], 1.2)
 
 
+
+class TotalMetadataTests(unittest.TestCase):
+    def test_rejects_total_smaller_than_attempted(self):
+        report = {"queries_attempted": 1, "queries_total": 0, "results": [{"id": 1}]}
+        with self.assertRaisesRegex(ValueError, "queries_total"):
+            compare.index_results(report, "Candidate")
+
+    def test_rejects_ids_outside_declared_total(self):
+        report = {"queries_attempted": 1, "queries_total": 1, "results": [{"id": 2}]}
+        with self.assertRaisesRegex(ValueError, "queries_total"):
+            compare.index_results(report, "Candidate")
+
+    def test_different_declared_totals_cannot_compare(self):
+        entry = result(1)
+        entry["id"] = 1
+        base = {"query_file_sha256": "a" * 64, "queries_attempted": 1,
+                "queries_total": 2, "results": [entry]}
+        candidate = {**base, "queries_total": 3}
+        with self.assertRaisesRegex(ValueError, "different queries_total"):
+            compare.compare_reports(base, candidate)
+
 if __name__ == "__main__":
     unittest.main()
