@@ -114,6 +114,7 @@ fn boolean_aggregate_expr(expression: Expr) -> Expr {
     Expr::binary(expression, BinaryOp::Equal, Expr::Literal(Value::Boolean(true)))
 }
 
+
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
         Self {
@@ -588,8 +589,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG",
-                    "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -602,7 +602,7 @@ impl Parser {
             let _ = self.next();
             self.expect_symbol('(')?;
             let distinct = self.take_word("DISTINCT");
-            if distinct && !["COUNT", "SUM", "AVG"].contains(&function.as_str()) {
+            if distinct && !["COUNT", "SUM", "AVG", "MEAN"].contains(&function.as_str()) {
                 return Err(Error::Unsupported("DISTINCT supports COUNT, SUM and AVG".into()));
             }
             let op = if function == "COUNT" && !distinct && self.take_symbol('*') {
@@ -615,8 +615,8 @@ impl Parser {
                     "COUNT_IF" => count_if_aggregate(expr),
                     "SUM" if distinct => AggregateOp::SumDistinct(expr),
                     "SUM" => AggregateOp::Sum(expr),
-                    "AVG" if distinct => AggregateOp::AvgDistinct(expr),
-                    "AVG" => AggregateOp::Avg(expr),
+                    "AVG" | "MEAN" if distinct => AggregateOp::AvgDistinct(expr),
+                    "AVG" | "MEAN" => AggregateOp::Avg(expr),
                     "BOOL_AND" | "EVERY" => AggregateOp::Min(boolean_aggregate_expr(expr)),
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(expr)),
                     "MIN" => AggregateOp::Min(expr),
@@ -1197,8 +1197,7 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "COUNT_IF", "SUM", "AVG", "MIN", "MAX",
-                "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star"]
+            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
@@ -1212,7 +1211,7 @@ fn rewrite_having(
                     "COUNT" => AggregateOp::Count(argument),
                     "COUNT_IF" => count_if_aggregate(argument),
                     "SUM" => AggregateOp::Sum(argument),
-                    "AVG" => AggregateOp::Avg(argument),
+                    "AVG" | "MEAN" => AggregateOp::Avg(argument),
                     "BOOL_AND" | "EVERY" => AggregateOp::Min(boolean_aggregate_expr(argument)),
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(argument)),
                     "MIN" => AggregateOp::Min(argument),
@@ -2006,6 +2005,38 @@ mod spark_filtered_aggregations_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod spark_mean_aggregate_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn values() -> Catalog {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
+        let rows = vec![
+            vec![Value::Integer(2)], vec![Value::Integer(4)],
+            vec![Value::Integer(4)], vec![Value::Null],
+        ];
+        catalog.register("numbers", Batch::from_rows(schema, rows).unwrap()).unwrap();
+        catalog
+    }
+
+    #[test]
+    fn mean_agrees_with_avg_for_distinct_and_having() {
+        let run = |query| executor::execute(&parse_sql(query).unwrap(), &values())
+            .unwrap().rows().unwrap();
+        assert_eq!(run("SELECT MEAN(v) AS average FROM numbers"),
+            vec![vec![Value::Float(10.0 / 3.0)]]);
+        assert_eq!(run("SELECT MEAN(DISTINCT v) AS average FROM numbers"),
+            vec![vec![Value::Float(3.0)]]);
+        assert_eq!(run("SELECT AVG(v) AS average FROM numbers"),
+            run("SELECT MEAN(v) AS average FROM numbers"));
+        assert_eq!(run("SELECT COUNT(*) AS total FROM numbers HAVING MEAN(v) > 3"),
+            vec![vec![Value::Integer(4)]]);
+    }
+}
+
 
 #[cfg(test)]
 mod spark_boolean_aggregate_tests {
