@@ -7,6 +7,31 @@ use crate::{
     Error, Result,
 };
 
+// Reject excessive columns before the general quoted CSV parser allocates
+// one String for each rejected field. A comma inside quoted data is not a
+// separator, and doubled quotes do not end a quoted field.
+fn preflight_record_width(record: &str, max_columns: usize) -> Result<()> {
+    let mut quoted = false;
+    let mut columns = 1usize;
+    let mut bytes = record.as_bytes().iter().peekable();
+    while let Some(&byte) = bytes.next() {
+        if byte == b'"' {
+            if quoted && bytes.peek().is_some_and(|&&next| next == b'"') {
+                bytes.next();
+            } else {
+                quoted = !quoted;
+            }
+        } else if byte == b',' && !quoted {
+            columns = columns.checked_add(1)
+                .ok_or_else(|| Error::Parse("CSV record column count overflow".into()))?;
+            if columns > max_columns {
+                return Err(Error::Parse("CSV row width differs from declared schema".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
 // Decode a borrowed CSV cell directly. Plain numeric fields never need an
 // intermediate String, while TEXT values still retain their own allocation.
 fn parse_cell(value: &str, field: &Field) -> Result<Value> {
@@ -52,6 +77,7 @@ impl<R: BufRead> CsvRows<R> {
         let mut scan = Self { reader, schema, max_record_bytes, finished: false, skip_lf: false };
         let header = scan.read_raw_record()?
             .ok_or_else(|| Error::Parse("CSV input has no header".into()))?;
+        preflight_record_width(&header, scan.schema.len())?;
         let parsed = parse_records(header.trim_start_matches('\u{feff}'))?;
         if parsed.len() != 1 || parsed[0].len() != scan.schema.len() {
             return Err(Error::Schema("CSV header differs from declared schema".into()));
@@ -204,7 +230,8 @@ impl<R: BufRead> CsvRows<R> {
             return Ok(Some(values));
         }
         // Quoted, multiline, and CR-terminated records retain the strict
-        // reference parser and its existing error behavior.
+        // reference parser, but reject impossible widths before field allocation.
+        preflight_record_width(text, self.schema.len())?;
         let records = parse_records(text)?;
         if records.is_empty() { return Ok(None); }
         if records.len() != 1 || records[0].len() != self.schema.len() {
@@ -568,5 +595,35 @@ mod quoted_scale_csv_buffered_run_tests {
         let mut rows = CsvRows::new(reader, schema(), 8192).unwrap();
         assert!(matches!(rows.next(), Some(Err(Error::Execution(_)))));
         assert!(rows.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod streaming_csv_quoted_width_preflight_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Text, false),
+            Field::new("body", DataType::Text, false),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn quoted_payloads_with_embedded_commas_preserve_two_columns() {
+        let input = Cursor::new(b"id,body\n\"a,b\",\"q\"\"r\"\n".to_vec());
+        let mut rows = CsvRows::new(input, schema(), 4096).unwrap();
+        assert_eq!(rows.next().unwrap().unwrap(), vec![
+            Value::Text("a,b".into()), Value::Text("q\"r".into()),
+        ]);
+        assert!(rows.next().is_none());
+    }
+
+    #[test]
+    fn reject_wide_quoted_record_before_allocating_thousands_of_fields() {
+        let input = format!("id,body\n\"x,y\",{}\n", "v,".repeat(4096));
+        let mut rows = CsvRows::new(Cursor::new(input), schema(), 32 * 1024).unwrap();
+        assert!(rows.next().unwrap().unwrap_err().to_string().contains("row width"));
     }
 }

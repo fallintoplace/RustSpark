@@ -8,6 +8,8 @@ import (
     "fmt"
     "reflect"
     "strings"
+    "os"
+    "path/filepath"
     "testing"
 )
 
@@ -255,5 +257,45 @@ func TestOutputBudgetCancelsChildBeforeWaitingForMoreStdout(t *testing.T) {
     }
     if output.Len() != 0 {
         t.Fatal("overflow must not append any bytes")
+    }
+}
+
+
+func TestQueryRejectsInvalidUTF8InsteadOfReplacingSQLText(t *testing.T) {
+    if os.PathSeparator != '/' { t.Skip("test uses a POSIX fake CLI") }
+    script := filepath.Join(t.TempDir(), "invalid-rustspark")
+    if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '[{\"text\":\"\\377\"}]'\n"), 0700); err != nil {
+        t.Fatal(err)
+    }
+    client := Client{Binary: script}
+    if _, err := client.Query(context.Background(), "SELECT text", Options{}); err == nil ||
+        !strings.Contains(err.Error(), "UTF-8") {
+        t.Fatalf("expected strict UTF-8 error, got %v", err)
+    }
+}
+
+func TestRejectsDuplicateNamedTablesAcrossFormats(t *testing.T) {
+    c := Client{}
+    for _, opts := range []Options{
+        {CSVTables: map[string]string{"sales":"a.csv"},
+            ParquetTables: map[string]string{"sales":"b.parquet"}},
+        {ParquetTables: map[string]string{"sales":"b.parquet"},
+            JSONTables: map[string]string{"sales":"c.json"}},
+        {CSVTables: map[string]string{"sales":"a.csv"},
+            JSONTables: map[string]string{"sales":"c.json"}},
+    } {
+        if _, err := c.arguments("SELECT 1", opts); err == nil ||
+            !strings.Contains(err.Error(), "duplicate named table") {
+            t.Fatalf("accepted conflicting table sources: %+v err=%v", opts, err)
+        }
+    }
+    args, err := c.arguments("SELECT 1", Options{
+        CSVTables: map[string]string{"sales":"a.csv"},
+        ParquetTables: map[string]string{"events":"b.parquet"},
+        JSONTables: map[string]string{"logs":"c.json"},
+    })
+    if err != nil { t.Fatal(err) }
+    for _, needle := range []string{"sales=a.csv", "events=b.parquet", "logs=c.json"} {
+        if !contains(args, needle) { t.Fatalf("missing %q from %v", needle, args) }
     }
 }

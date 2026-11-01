@@ -73,28 +73,41 @@ where I: IntoIterator<Item = Result<Batch>>
             // into retained state instead of cloning large TEXT values.
             let row_count = batch.num_rows();
             let mut columns = batch.into_columns();
-            for index in 0..row_count {
-                if index % 1024 == 0 { control.check()?; }
+            let mut index = 0usize;
+            while index < row_count {
+                let row = index;
+                if row % 1024 == 0 { control.check()?; }
+                // Detect the whole adjacent duplicate run before moving any
+                // owned cells out of its first row. Once moved, a borrowed
+                // comparison against that first row would be incorrect.
+                let mut next = row + 1;
+                while next < row_count &&
+                    columns.iter().all(|column| column[row] == column[next])
+                {
+                    if next % 1024 == 0 { control.check()?; }
+                    next += 1;
+                }
+                index = next;
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 columns.len().hash(&mut hasher);
-                for column in &columns { column[index].hash(&mut hasher); }
+                for column in &columns { column[row].hash(&mut hasher); }
                 let fingerprint = hasher.finish();
                 if seen.get(&fingerprint).is_some_and(|rows| rows.iter().any(|candidate|
                     candidate.iter().zip(&columns).all(|(value, column)|
-                        value == &column[index]))) {
+                        value == &column[row]))) {
                     continue;
                 }
                 if unique_rows >= max_unique_rows_per_partition {
                     return Err(Error::Execution("DISTINCT partition exceeds state budget".into()));
                 }
                 let footprint = super::row_footprint::footprint(
-                    columns.iter().map(|column| &column[index])
+                    columns.iter().map(|column| &column[row])
                 );
                 let next_bytes = retained_bytes.checked_add(footprint)
                     .filter(|&bytes| bytes <= MAX_DISTINCT_STATE_BYTES)
                     .ok_or_else(|| Error::Execution("DISTINCT partition exceeds memory budget".into()))?;
                 let row = columns.iter_mut()
-                    .map(|column| std::mem::replace(&mut column[index], Value::Null))
+                    .map(|column| std::mem::replace(&mut column[row], Value::Null))
                     .collect();
                 seen.entry(fingerprint).or_default().push(row);
                 unique_rows += 1;
@@ -290,5 +303,51 @@ mod owned_distinct_spill_tests {
         assert!(values.contains(&Value::Text("other".into())));
         drop(files);
         std::fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clustered_disk_distinct_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering as TestOrdering};
+    static ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn clustered_unicode_and_null_rows_survive_disk_exchange_without_duplicate_output() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-clustered-distinct-{}-{}",
+            std::process::id(), ID.fetch_add(1, TestOrdering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("variant", DataType::Integer, true),
+        ]).unwrap();
+        let wide = "é🦀".repeat(1024);
+        let mut rows = vec![vec![Value::Text(wide.clone()), Value::Integer(7)]; 256];
+        rows.extend(vec![vec![Value::Null, Value::Null]; 256]);
+        rows.extend(vec![vec![Value::Text(wide.clone()), Value::Integer(7)]; 128]);
+        rows.push(vec![Value::Text("other".into()), Value::Integer(0)]);
+        let input = Batch::from_rows(schema.clone(), rows).unwrap();
+        let output = distinct_to_disk(
+            [Ok(input)], schema, &directory, 8, 3, 512,
+            &QueryControl::default(),
+        ).unwrap();
+        let mut selected = Vec::new();
+        for path in output.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 512)
+                .unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                selected.extend(batch.rows().unwrap());
+            }
+        }
+        assert_eq!(selected.len(), 3);
+        assert!(selected.contains(&vec![Value::Text(wide), Value::Integer(7)]));
+        assert!(selected.contains(&vec![Value::Null, Value::Null]));
+        assert!(selected.contains(&vec![Value::Text("other".into()), Value::Integer(0)]));
+        drop(output);
+        fs::remove_dir(directory).unwrap();
     }
 }

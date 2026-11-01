@@ -9,6 +9,14 @@ export class RustSparkError extends Error {
   }
 }
 
+function validateNamedTableMap(tables) {
+  if (tables == null) return;
+  if (typeof tables !== "object" || Array.isArray(tables) ||
+      (Object.getPrototypeOf(tables) !== Object.prototype && Object.getPrototypeOf(tables) !== null)) {
+    throw new TypeError("Named table definitions must be a plain object");
+  }
+}
+
 function addNamedTables(args, flag, tables = {}) {
   for (const [table, path] of Object.entries(tables).sort(([a], [b]) => a.localeCompare(b, "en"))) {
     if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table) || typeof path !== "string" || path.length === 0) {
@@ -45,8 +53,18 @@ export class RustSpark {
     if (selected.some((value) => typeof value !== "string" || value.length === 0)) {
       throw new TypeError("Unnamed file paths must be nonempty strings");
     }
-    const hasNamed = [csvTables, parquetTables, jsonTables]
-      .some((tables) => tables && Object.keys(tables).length > 0);
+    const tableMaps = [csvTables, parquetTables, jsonTables];
+    const registeredTables = new Set();
+    for (const tables of tableMaps) {
+      validateNamedTableMap(tables);
+      for (const name of Object.keys(tables ?? {})) {
+        if (registeredTables.has(name)) {
+          throw new TypeError(`Named table "${name}" is configured for multiple formats`);
+        }
+        registeredTables.add(name);
+      }
+    }
+    const hasNamed = registeredTables.size > 0;
     if (selected.length > 1 || (selected.length && hasNamed)) {
       throw new TypeError("Use one unnamed input or named tables");
     }
@@ -92,15 +110,20 @@ export class RustSpark {
   query(sql, options = {}) {
     const { args, maxOutputBytes, processTimeoutMs, unsafeIntegers } = this._command(sql, options);
     const result = this.runner(this.binary, args, {
-      encoding: "utf8", shell: false, timeout: processTimeoutMs, maxBuffer: maxOutputBytes,
+      // Keep stdout as bytes so malformed UTF-8 is never silently replaced.
+      encoding: null, shell: false, timeout: processTimeoutMs, maxBuffer: maxOutputBytes,
     });
     if (result.error) throw new RustSparkError(`Failed to run RustSpark: ${result.error.message}`);
     if (result.status !== 0) {
-      throw new RustSparkError((result.stderr ?? "").trim() || `RustSpark exited with ${result.status}`);
+      const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : (result.stderr ?? "");
+      throw new RustSparkError(stderr.trim() || `RustSpark exited with ${result.status}`);
     }
     let rows;
     try {
-      rows = parseStrictJSON(result.stdout, { unsafeIntegers });
+      const stdout = Buffer.isBuffer(result.stdout)
+        ? new TextDecoder("utf-8", { fatal: true }).decode(result.stdout)
+        : result.stdout;
+      rows = parseStrictJSON(stdout, { unsafeIntegers });
     }
     catch { throw new RustSparkError("RustSpark returned invalid JSON"); }
     if (!Array.isArray(rows) || rows.some((row) => row === null || typeof row !== "object" || Array.isArray(row))) {

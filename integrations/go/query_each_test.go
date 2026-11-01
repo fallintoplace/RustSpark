@@ -2,6 +2,7 @@ package rustsparklocal
 
 import (
     "context"
+    "bytes"
     "encoding/json"
     "errors"
     "fmt"
@@ -90,5 +91,41 @@ func TestScanNDJSONRowsAcceptsExactByteLimit(t *testing.T) {
         return nil
     }); err == nil {
         t.Fatal("expected oversized row to be rejected")
+    }
+}
+
+
+func TestScanNDJSONRowsRejectsInvalidUTF8(t *testing.T) {
+    invalid := append([]byte("{\"text\":\""), 0xff)
+    invalid = append(invalid, []byte("\"}\n")...)
+    called := false
+    err := scanNDJSONRows(bytes.NewReader(invalid), func(map[string]any) error {
+        called = true
+        return nil
+    })
+    if err == nil || !strings.Contains(err.Error(), "UTF-8") || called {
+        t.Fatalf("malformed UTF-8 reached visitor: called=%v error=%v", called, err)
+    }
+    valid := []byte("{\"text\":\"é🙂\"}\n")
+    if err := scanNDJSONRows(bytes.NewReader(valid), func(row map[string]any) error {
+        if row["text"] != "é🙂" { t.Errorf("lost text: %v", row) }
+        return nil
+    }); err != nil { t.Fatal(err) }
+}
+
+func TestScanNDJSONRowsRejectsNonJSONWhitespace(t *testing.T) {
+    for _, raw := range []string{
+        "\u00a0{\"n\":1}\n", "{\"n\":1}\u00a0\n",
+        "\u2028{\"n\":1}\n", "{\"n\":1}\u2003\n",
+    } {
+        if err := scanNDJSONRows(strings.NewReader(raw),
+            func(map[string]any) error { return nil }); err == nil {
+            t.Fatalf("accepted Unicode whitespace outside JSON: %q", raw)
+        }
+    }
+    visits := 0
+    if err := scanNDJSONRows(strings.NewReader(" \t{\"n\":1} \r\n"),
+        func(map[string]any) error { visits++; return nil }); err != nil || visits != 1 {
+        t.Fatalf("rejected valid JSON whitespace: visits=%d err=%v", visits, err)
     }
 }
