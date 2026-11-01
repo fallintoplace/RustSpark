@@ -39,3 +39,9 @@ JSON objects to an `io.Writer` without materializing every row. Choose an
 output writer with an appropriate byte budget for untrusted data.
 
 Use `Options{SQLFile: "report.sql"}` instead of inline SQL for checked-in queries. `QueryOne(ctx, sql, opts)` returns one row, `nil` for no rows, or an error when the query contains multiple rows. `Query` limits buffered JSON stdout to 64 MiB by default; set `Options.MaxOutputBytes` to customize the cap. For larger datasets, prefer `QueryNDJSON` with a bounded writer.
+
+For parsed streaming results, use `QueryEach(ctx, sql, opts, visit)`. It
+validates object rows and duplicate keys, preserves `json.Number`, limits
+individual JSON lines to 16 MiB and cancels the child if a visitor fails.
+This avoids collecting all rows in memory and stops reading immediately
+when the caller no longer wants output.

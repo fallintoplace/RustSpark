@@ -166,13 +166,26 @@ mod tests {
 }
 
  
+// Sorted and run-length encoded columns often contain long runs of equal
+// values. The registers depend on each key's hash, not its multiplicity.
+// Compare the previously seen borrowed value to avoid repeated hashing.
+// SQL equality is not used here: the Value key equality also canonicalizes
+// signed zero and NaNs, just like hashing.
+fn add_value_run<'a>(sketch: &mut HyperLogLog, values: impl Iterator<Item = &'a Value>) {
+    let mut previous: Option<&Value> = None;
+    for value in values {
+        if previous != Some(value) {
+            sketch.add(value);
+        }
+        previous = Some(value);
+    }
+}
+
 /// Estimate non-NULL distinct values in a native column, without materializing a set.
 pub fn approximate_distinct(batch: &crate::batch::Batch, column: &str) -> Result<f64> {
     let index = batch.schema().column(column)?;
     let mut sketch = HyperLogLog::new();
-    for value in batch.column(index)? {
-        sketch.add(value);
-    }
+    add_value_run(&mut sketch, batch.column(index)?.iter());
     Ok(sketch.estimate())
 }
 
@@ -202,10 +215,12 @@ pub fn approximate_distinct_selected(
     let index = batch.schema().column(column)?;
     let values = batch.column(index)?;
     let mut sketch = HyperLogLog::new();
+    let mut previous: Option<&Value> = None;
     for &row in selected {
         let value = values.get(row)
             .ok_or_else(|| Error::Execution("selected HLL row out of bounds".into()))?;
-        sketch.add(value);
+        if previous != Some(value) { sketch.add(value); }
+        previous = Some(value);
     }
     Ok(sketch.estimate())
 }
@@ -224,9 +239,7 @@ pub fn approximate_distinct_batches(
             return Err(Error::Type("approximate distinct column types differ".into()));
         }
         expected_type = Some(kind);
-        for value in batch.column(index)? {
-            combined.add(value);
-        }
+        add_value_run(&mut combined, batch.column(index)?.iter());
     }
     Ok(combined.estimate())
 }
@@ -517,5 +530,47 @@ mod hll_wire_exchange_regressions {
         wire = HyperLogLog::new().to_wire_bytes();
         wire[WIRE_HEADER.len()] = (65 - PRECISION + 1) as u8;
         assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
+    }
+}
+
+#[cfg(test)]
+mod adjacent_hll_run_dedup_regressions {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn adjacent_duplicates_match_reference_updates_including_special_floats() {
+        let values = vec![
+            Value::Null, Value::Null,
+            Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(f64::NAN), Value::Float(-f64::NAN),
+            Value::Float(7.0), Value::Float(7.0),
+            Value::Float(-2.5), Value::Float(7.0),
+        ];
+        let mut expected = HyperLogLog::new();
+        for value in &values { expected.add(value); }
+        let mut actual = HyperLogLog::new();
+        add_value_run(&mut actual, values.iter());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn column_selected_and_multiple_batches_match_naive_hashing() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let values = (0..3000).map(|i| match i % 13 {
+            0 => Value::Null,
+            _ => Value::Text(format!("key-{}", i / 25)),
+        }).collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema, values.iter().cloned().map(|v| vec![v]).collect()).unwrap();
+        let mut expected = HyperLogLog::new();
+        for value in &values { expected.add(value); }
+        assert_eq!(approximate_distinct(&batch, "key").unwrap(), expected.estimate());
+        let selections = (0..values.len()).step_by(3).collect::<Vec<_>>();
+        let mut selected = HyperLogLog::new();
+        for &i in &selections { selected.add(&values[i]); }
+        assert_eq!(approximate_distinct_selected(&batch, "key", &selections).unwrap(), selected.estimate());
+        let first = batch.slice_rows(0, 1700).unwrap();
+        let second = batch.slice_rows(1700, 3000).unwrap();
+        assert_eq!(approximate_distinct_batches(&[first, second], "key").unwrap(), expected.estimate());
     }
 }
