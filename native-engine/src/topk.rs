@@ -253,7 +253,8 @@ pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if k == 0 { return batch.take_unique_owned(&[]); }
     if keys.is_empty() {
-        return batch.slice_rows_owned(0, k.min(batch.num_rows()));
+        let end = k.min(batch.num_rows());
+        return batch.slice_rows_owned(0, end);
     }
     if k >= batch.num_rows() { return crate::sort::sort_owned(batch, keys); }
 
