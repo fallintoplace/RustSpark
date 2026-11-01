@@ -1,6 +1,5 @@
 //! Disk-backed hash exchange for columnar batch iterators.
 use std::{
-    collections::VecDeque,
     fs::{File, OpenOptions},
     hash::{Hash, Hasher},
     io::BufWriter,
@@ -12,6 +11,59 @@ use super::{cancel::QueryControl, spill::SpillWriter};
 
 static PARTITION_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_OPEN_SHARDS: usize = 64;
+
+// A shard has a stable index, so its LRU links can be updated without
+// searching the bounded set of open handles.
+struct WriterLru {
+    previous: Vec<Option<usize>>,
+    next: Vec<Option<usize>>,
+    oldest: Option<usize>,
+    newest: Option<usize>,
+    len: usize,
+}
+impl WriterLru {
+    fn new(capacity: usize) -> Self {
+        Self { previous: vec![None; capacity], next: vec![None; capacity],
+            oldest: None, newest: None, len: 0 }
+    }
+    fn len(&self) -> usize { self.len }
+    fn unlink(&mut self, index: usize) {
+        let previous = self.previous[index];
+        let next = self.next[index];
+        if let Some(prior) = previous { self.next[prior] = next; }
+        else { self.oldest = next; }
+        if let Some(following) = next { self.previous[following] = previous; }
+        else { self.newest = previous; }
+        self.previous[index] = None;
+        self.next[index] = None;
+    }
+    fn push_newest(&mut self, index: usize) {
+        self.previous[index] = self.newest;
+        self.next[index] = None;
+        if let Some(last) = self.newest { self.next[last] = Some(index); }
+        else { self.oldest = Some(index); }
+        self.newest = Some(index);
+    }
+    fn insert(&mut self, index: usize) {
+        self.push_newest(index);
+        self.len += 1;
+    }
+    fn touch(&mut self, index: usize) {
+        if self.newest == Some(index) { return; }
+        self.unlink(index);
+        self.push_newest(index);
+    }
+    fn pop_oldest(&mut self) -> Option<usize> {
+        let index = self.oldest?;
+        self.unlink(index);
+        self.len -= 1;
+        Some(index)
+    }
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = &usize> {
+        std::iter::successors(self.oldest.as_ref(), |index| self.next[**index].as_ref())
+    }
+}
 
 pub struct PartitionFiles {
     paths: Vec<PathBuf>,
@@ -33,7 +85,7 @@ pub struct PartitionWriter {
     // Close buffered output handles before cleanup removes the owned files.
     writers: Option<Vec<Option<SpillWriter<BufWriter<File>>>>>,
     owned: Option<PartitionFiles>,
-    open_order: VecDeque<usize>,
+    open_order: WriterLru,
     initialized: Vec<bool>,
     key_columns: Vec<usize>,
     batch_rows: usize,
@@ -118,12 +170,12 @@ fn write_bounded_windows(
 // batches without emitting a second spill header into the same file.
 fn ensure_open(
     writers: &mut [Option<SpillWriter<BufWriter<File>>>],
-    order: &mut VecDeque<usize>, initialized: &mut [bool],
+    order: &mut WriterLru, initialized: &mut [bool],
     paths: &[PathBuf], schema: &Schema, index: usize,
 ) -> Result<()> {
     if writers[index].is_none() {
         if order.len() == MAX_OPEN_SHARDS {
-            let victim = order.pop_front().expect("open writer order nonempty");
+            let victim = order.pop_oldest().expect("open writer order nonempty");
             writers[victim].take().expect("evicted writer exists").finish()?;
         }
         let writer = if initialized[index] {
@@ -136,21 +188,17 @@ fn ensure_open(
             writer
         };
         writers[index] = Some(writer);
+        order.insert(index);
     } else {
-        // Consecutive writes to a hot shard are common in skewed exchanges.
-        // It is already most-recently-used, so leave the LRU untouched.
-        if order.back() == Some(&index) { return Ok(()); }
-        let position = order.iter().position(|&active| active == index)
-            .expect("open writer must be in LRU order");
-        order.remove(position);
+        // Stable indices let us update the hot-shard order in O(1).
+        order.touch(index);
     }
-    order.push_back(index);
     Ok(())
 }
 
 fn write_shard(
     writers: &mut [Option<SpillWriter<BufWriter<File>>>],
-    order: &mut VecDeque<usize>, initialized: &mut [bool],
+    order: &mut WriterLru, initialized: &mut [bool],
     paths: &[PathBuf], schema: &Schema, index: usize,
     batch: &Batch, rows: &[usize],
 ) -> Result<()> {
@@ -183,7 +231,7 @@ impl PartitionWriter {
         let writers = std::iter::repeat_with(|| None).take(count).collect();
         Ok(Self {
             writers: Some(writers), owned: Some(owned),
-            open_order: VecDeque::new(), initialized: vec![false; count],
+            open_order: WriterLru::new(count), initialized: vec![false; count],
             key_columns, batch_rows,
         })
     }
@@ -664,7 +712,7 @@ mod repeated_shard_lru_tests {
         let path = directory.join(format!("rustspark-hot-lru-{}-{}.rspill",
             std::process::id(), PARTITION_ID.fetch_add(1, Ordering::Relaxed)));
         let mut writers = vec![None];
-        let mut order = VecDeque::new();
+        let mut order = WriterLru::new(1);
         let mut initialized = vec![false];
         let paths = [path.clone()];
         for _ in 0..128 {
@@ -716,6 +764,45 @@ mod partition_wire_budget_regressions {
         assert!(write_bounded_windows(&batch, 1, |i| i, 40,
             |_, _| { emitted = true; Ok(()) }).is_err());
         assert!(!emitted);
+    }
+}
+
+#[cfg(test)]
+mod indexed_shard_lru_regressions {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn evictions_preserve_recency_and_one_entry_per_shard() {
+        let mut lru = WriterLru::new(128);
+        for index in 0..64 { lru.insert(index); }
+        for index in [0, 2, 1, 0, 63] { lru.touch(index); }
+        assert_eq!(lru.len(), 64);
+        assert_eq!(lru.pop_oldest(), Some(3));
+        assert_eq!(lru.pop_oldest(), Some(4));
+        lru.insert(80);
+        lru.insert(81);
+        let entries = lru.iter().copied().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 64);
+        assert_eq!(&entries[entries.len() - 2..], &[80, 81]);
+        assert_eq!(entries.iter().copied().collect::<HashSet<_>>().len(), 64);
+        assert_eq!(entries.iter().position(|&index| index == 0), Some(60));
+        lru.touch(80);
+        assert_eq!(lru.iter().copied().last(), Some(80));
+    }
+
+    #[test]
+    fn repeated_single_shard_hits_leave_links_unchanged() {
+        let mut lru = WriterLru::new(1);
+        lru.insert(0);
+        for _ in 0..1024 {
+            lru.touch(0);
+            assert_eq!(lru.len(), 1);
+            assert_eq!(lru.oldest, Some(0));
+            assert_eq!(lru.newest, Some(0));
+        }
+        assert_eq!(lru.pop_oldest(), Some(0));
+        assert_eq!(lru.pop_oldest(), None);
     }
 }
 
