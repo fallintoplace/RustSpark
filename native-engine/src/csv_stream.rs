@@ -18,6 +18,17 @@ enum State {
 }
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
+// Align streaming record admission with the bounded in-memory CSV parser.
+// Otherwise a comma-heavy row can allocate millions of tiny Strings.
+const MAX_CSV_COLUMNS: usize = 4096;
+
+fn push_field(fields: &mut Vec<String>, field: Vec<u8>) -> Result<()> {
+    if fields.len() >= MAX_CSV_COLUMNS {
+        return Err(Error::Execution("CSV column count exceeds 4096 limit".into()));
+    }
+    fields.push(decode(field)?);
+    Ok(())
+}
 
 // The CSV decoder transfers its Vec allocation into String without shrinking.
 // Charge the allocation retained by an output batch, not just visible bytes.
@@ -128,7 +139,7 @@ impl<R: BufRead> Records<R> {
                     if state == State::Quoted {
                         return Err(Error::Parse("unterminated CSV quote".into()));
                     }
-                    fields.push(decode(field)?);
+                    push_field(&mut fields, field)?;
                     return Ok(Some(fields));
                 }
             };
@@ -146,14 +157,14 @@ impl<R: BufRead> Records<R> {
                 }
                 (State::Quoted, byte) => field.push(byte),
                 (State::Start | State::Unquoted | State::AfterQuote, b',') => {
-                    fields.push(decode(std::mem::take(&mut field))?);
+                    push_field(&mut fields, std::mem::take(&mut field))?;
                     state = State::Start;
                 }
                 (State::Start | State::Unquoted | State::AfterQuote, b'\n' | b'\r') => {
                     if byte == b'\r' {
                         self.skip_lf = true;
                     }
-                    fields.push(decode(field)?);
+                    push_field(&mut fields, field)?;
                     return Ok(Some(fields));
                 }
                 (State::Unquoted, b'"') => {
@@ -712,3 +723,41 @@ mod required_null_prefix_regression_tests {
     }
 }
 
+
+#[cfg(test)]
+mod bounded_csv_field_count_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn refuses_more_than_4096_columns_before_materializing_huge_rows() {
+        let wide = "v,".repeat(MAX_CSV_COLUMNS) + "v\n";
+        assert!(matches!(
+            CsvStream::new(Cursor::new(wide), 2, 100_000),
+            Err(Error::Execution(_)),
+        ));
+        let csv = "a\n".to_string() + &("v,".repeat(MAX_CSV_COLUMNS)) + "v\n";
+        let mut stream = CsvStream::new(Cursor::new(csv), 2, 100_000).unwrap();
+        assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn accepts_boundary_width_and_counts_quoted_commas_as_one_column() {
+        let names = (0..MAX_CSV_COLUMNS)
+            .map(|i| format!("c{i}")).collect::<Vec<_>>().join(",");
+        let values = std::iter::repeat_n("x", MAX_CSV_COLUMNS)
+            .collect::<Vec<_>>().join(",");
+        let csv = format!("{names}\n{values}\n");
+        let mut stream = CsvStream::new(Cursor::new(csv), 2, 100_000).unwrap();
+        let batch = stream.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.schema().len(), MAX_CSV_COLUMNS);
+        assert!(stream.next().is_none());
+
+        let quoted = "col\n\"a,b,c\"\n";
+        let mut stream = CsvStream::new(Cursor::new(quoted), 2, 100).unwrap();
+        let batch = stream.next().unwrap().unwrap();
+        assert_eq!(batch.value(0, 0).unwrap(), &Value::Text("a,b,c".into()));
+    }
+}
