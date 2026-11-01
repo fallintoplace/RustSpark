@@ -164,7 +164,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                                 chars.next();
                                 code = code * 8 + digit;
                             }
-                            value.push(char::from_u32(code).expect("octal byte is valid Unicode"));
+                            // A three-digit octal escape represents one byte,
+                            // not an arbitrary Unicode code point.
+                            if code > u8::MAX as u32 {
+                                return Err(Error::Parse("SQL octal escape exceeds one byte".into()));
+                            }
+                            value.push(char::from_u32(code).expect("validated octal byte"));
                         }
                         'u' | 'U' => {
                             let digits = if escaped == 'u' { 4 } else { 8 };
@@ -174,8 +179,35 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                                     .ok_or_else(|| Error::Parse("invalid SQL Unicode escape".into()))?;
                                 code = (code << 4) | digit;
                             }
-                            value.push(char::from_u32(code).ok_or_else(||
-                                Error::Parse("SQL Unicode escape is not a Unicode scalar".into()))?);
+                            // A \uXXXX high surrogate must be followed by a
+                            // second \uXXXX low surrogate to encode one scalar.
+                            // Rust chars cannot contain isolated UTF-16 surrogates.
+                            if escaped == 'u' && (0xD800..=0xDBFF).contains(&code) {
+                                if chars.next() != Some('\\') || chars.next() != Some('u') {
+                                    return Err(Error::Parse(
+                                        "SQL Unicode high surrogate needs a low surrogate".into()
+                                    ));
+                                }
+                                let mut low = 0u32;
+                                for _ in 0..4 {
+                                    let digit = chars.next().and_then(|ch| ch.to_digit(16))
+                                        .ok_or_else(|| Error::Parse(
+                                            "invalid SQL Unicode low surrogate".into()
+                                        ))?;
+                                    low = (low << 4) | digit;
+                                }
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return Err(Error::Parse(
+                                        "invalid SQL Unicode low surrogate".into()
+                                    ));
+                                }
+                                let scalar = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                value.push(char::from_u32(scalar)
+                                    .expect("validated UTF-16 surrogate pair"));
+                            } else {
+                                value.push(char::from_u32(code).ok_or_else(||
+                                    Error::Parse("SQL Unicode escape is not a Unicode scalar".into()))?);
+                            }
                         }
                         'n' => value.push('\n'),
                         'r' => value.push('\r'),
@@ -421,5 +453,54 @@ mod spark_sql_literal_escape_tests {
         let rows = executor::execute(&sql::parse_sql(query).unwrap(), &catalog)
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("it's ok\n".into())]]);
+    }
+}
+
+#[cfg(test)]
+mod validated_sql_unicode_and_octal_escape_tests {
+    use super::*;
+
+    #[test]
+    fn combines_valid_utf16_surrogate_pairs_into_one_unicode_scalar() {
+        assert_eq!(tokenize(r"SELECT '\uD83D\uDE42' FROM t").unwrap()[1],
+            Token::Text("🙂".into()));
+        assert_eq!(tokenize(r"SELECT '\uD83D\uDE42\u3042' FROM t").unwrap()[1],
+            Token::Text("🙂あ".into()));
+        assert_eq!(tokenize(r"SELECT '\U0001F642' FROM t").unwrap()[1],
+            Token::Text("🙂".into()));
+        assert_eq!(tokenize(r"SELECT r'\uD83D\uDE42' FROM t").unwrap()[1],
+            Token::Text(r"\uD83D\uDE42".into()));
+    }
+
+    #[test]
+    fn rejects_unpaired_surrogates_and_out_of_range_octal_bytes() {
+        for invalid in [
+            r"SELECT '\uD83D' FROM t",
+            r"SELECT '\uDE42' FROM t",
+            r"SELECT '\uD83D\u0041' FROM t",
+            r"SELECT '\uD83D\uD83D' FROM t",
+            r"SELECT '\uD83D\u12' FROM t",
+            r"SELECT '\400' FROM t",
+            r"SELECT '\777' FROM t",
+        ] {
+            assert!(tokenize(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(tokenize(r"SELECT '\101\177' FROM t").unwrap()[1],
+            Token::Text("A\u{7f}".into()));
+        assert_eq!(tokenize(r"SELECT '\377' FROM t").unwrap()[1],
+            Token::Text("ÿ".into()));
+    }
+
+    #[test]
+    fn surrogate_pair_literals_survive_sql_planning_and_execution() {
+        use crate::{batch::Batch, catalog::Catalog, executor, scalar::Value,
+            schema::{DataType, Field, Schema}, sql};
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema,
+            vec![vec![Value::Integer(1)]]).unwrap()).unwrap();
+        let plan = sql::parse_sql(r"SELECT '\uD83D\uDE42' AS emoji FROM t").unwrap();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("🙂".into())]]);
     }
 }
