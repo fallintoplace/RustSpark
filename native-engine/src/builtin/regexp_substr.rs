@@ -31,8 +31,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(text.chars().find(|&ch| ch != '\n')
             .map_or(Value::Null, |ch| Value::Text(ch.to_string())));
     }
-    if pattern.len() <= 4096 && pattern.bytes().all(|byte|
-        byte.is_ascii_alphanumeric() || byte == b'_') {
+    if pattern.len() <= 4096 && pattern.chars().all(|ch|
+        ch.is_alphanumeric() || ch == '_') {
         return Ok(text.find(pattern)
             .map_or(Value::Null, |_| Value::Text(pattern.to_owned())));
     }
@@ -170,5 +170,26 @@ mod ascii_digit_substring_regressions {
                 ]).unwrap(), expected, "{text:?} {pattern}");
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod unicode_literal_substring_optimization_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_literal_results_match_regex_engine() {
+        for text in ["", "é🙂東京東京", "aαβb", "café", "東京abc", "αβγ αβγ"] {
+            for pattern in ["é", "東京", "αβ", "café", "éé", "é+", "^東京", "[0-9]+"] {
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or(Value::Null, |found| Value::Text(found.as_str().to_owned()));
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), expected, "text={text:?}, pattern={pattern:?}");
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("東京".into())]).unwrap(),
+            Value::Null);
     }
 }
