@@ -29,3 +29,7 @@ Use `database_dir="/path/to/rustspark-database"` to export queries
 against registered tables in persistent RustSpark databases.
 
 Use `json_input="events.json"` for JSON input or `csv_tables={"users": "users.csv"}` and `parquet_tables={"orders": "orders.parquet"}` for named-table joins. Named and unnamed sources cannot be mixed. Set `max_rows=10000` to cap exported rows and `process_timeout=30` to bound the full subprocess, in addition to `query_timeout`.
+
+The context manager now terminates and reaps the entire Arrow export process
+group when an export deadline expires or a wait is interrupted. This avoids
+orphaned native workers when a lazy-frame export fails.

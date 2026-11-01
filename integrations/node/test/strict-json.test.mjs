@@ -57,3 +57,18 @@ test("validates large escaped text without decoding it during the pre-scan", () 
   }
   assert.throws(() => parseStrictJSON(String.raw`[{"name":"broken\uZ"}]`), SyntaxError);
 });
+
+test("can retain unsafe JSON int64 results without rounding on supported Node", () => {
+  const output = '[{"id":9223372036854775807,"nested":[-9223372036854775808,5]}]';
+  const hasSource = JSON.parse("1", (_key, _value, ctx) => ctx?.source) === "1";
+  if (!hasSource) {
+    assert.throws(() => parseStrictJSON(output, { unsafeIntegers: "bigint" }), /source context/);
+    return;
+  }
+  const expected = [{ id: 9223372036854775807n, nested: [-9223372036854775808n, 5] }];
+  assert.deepEqual(parseStrictJSON(output, { unsafeIntegers: "bigint" }), expected);
+  const client = new RustSpark({ runner: () => ({ status: 0, stdout: output }) });
+  assert.deepEqual(client.query("SELECT id FROM data", { unsafeIntegers: "bigint" }), expected);
+  assert.throws(() => parseStrictJSON('[{"n":1e20}]', { unsafeIntegers: "bigint" }), /Unsafe/);
+  assert.throws(() => parseStrictJSON("[]", { unsafeIntegers: "string" }), /unsafeIntegers/);
+});

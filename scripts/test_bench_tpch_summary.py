@@ -44,6 +44,16 @@ class SuiteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             suite.summarize(data)
 
+    def test_huge_integer_timing_values_raise_value_error(self):
+        data = report()
+        data["results"][0]["median_ms"] = 10**500
+        with self.assertRaisesRegex(ValueError, "Invalid median"):
+            suite.summarize(data)
+        data["results"][0]["median_ms"] = 1.0
+        data["results"][0]["samples_ms"] = [10**500]
+        with self.assertRaisesRegex(ValueError, "Invalid timing samples"):
+            suite.summarize(data)
+
     def test_nonfinite_median_is_rejected(self):
         data = report()
         data["results"][0]["median_ms"] = float("inf")

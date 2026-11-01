@@ -42,3 +42,11 @@ Test the parser and command construction:
 ```sh
 cd integrations/http_gateway && python3 -m unittest -v test_gateway.py
 ```
+
+## Bounded local HTTP admission
+
+The standalone gateway uses at most 16 concurrent request handlers. Excess
+connections receive HTTP 503 instead of accumulating unbounded worker threads.
+A client that stops sending a request body receives HTTP 408 after a five-second
+socket read timeout. Health requests can proceed while another client is slow.
+These limits do not replace a trusted reverse proxy for remote deployments.

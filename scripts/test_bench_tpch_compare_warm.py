@@ -34,6 +34,19 @@ class CompareWarmTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             compare.compare(report(10, "rs"), report(20, "duckdb"), data)
 
+    def test_finite_extreme_timings_must_not_produce_nonfinite_ratios(self):
+        for rs_ms, duckdb_ms in ((5e-324, 1e308), (1e308, 5e-324)):
+            with self.subTest(rs=rs_ms, duckdb=duckdb_ms):
+                with self.assertRaisesRegex(ValueError, "ratio"):
+                    compare.compare(report(rs_ms, "rs"), report(duckdb_ms, "duckdb"),
+                                    verification())
+
+    def test_small_but_finite_ratio_is_not_rounded_to_zero(self):
+        summary = compare.compare(report(1.0, "rs"), report(1e-7, "duckdb"),
+                                  verification())
+        self.assertEqual(summary["queries"][0]["duckdb_over_rustspark"], 1e-7)
+        self.assertEqual(summary["geometric_mean_duckdb_over_rustspark"], 1e-7)
+
     def test_failed_missing_and_zero_timing_rejected(self):
         rs = report(10, "rs")
         dd = report(20, "duckdb")
@@ -46,6 +59,12 @@ class CompareWarmTests(unittest.TestCase):
         dd["results"].pop()
         with self.assertRaises(ValueError):
             compare.compare(rs, dd, verification())
+
+    def test_rejects_unrepresentable_integer_medians(self):
+        candidate = report(20, "duckdb")
+        candidate["results"][0]["median_ms"] = 10**500
+        with self.assertRaisesRegex(ValueError, "Invalid or incomplete"):
+            compare.compare(report(10, "rs"), candidate, verification())
 
     def test_rejects_fabricated_matching_reference_rows(self):
         for invalid in (2, -1, None, True):

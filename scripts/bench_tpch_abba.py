@@ -85,8 +85,14 @@ def compare_query(commands, ordered, repeat, warmup, timeout):
 
 def benchmark(baseline, candidate, parquet, queries, repeat=3, warmup=1,
               timeout=180, partitions=2):
-    if timeout < 1 or partitions < 1:
-        raise ValueError("Timeout and partitions must be positive")
+    if (type(repeat) is not int or repeat < 1
+            or type(warmup) is not int or warmup < 0):
+        raise ValueError("ABBA repeat and warmup must be valid integers")
+    if (type(timeout) not in (int, float)
+            or not math.isfinite(timeout) or timeout < 1):
+        raise ValueError("ABBA timeout must be positive and finite")
+    if type(partitions) is not int or partitions < 1:
+        raise ValueError("ABBA partitions must be a positive integer")
     hashes = {"baseline_sha256": binary_sha256(baseline),
               "candidate_sha256": binary_sha256(candidate)}
     inputs = input_arguments(parquet)

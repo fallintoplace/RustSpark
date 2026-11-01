@@ -64,6 +64,12 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(partial["full_22_query_suite"])
         self.assertIsNone(partial["geometric_mean_baseline_over_candidate"])
 
+    def test_huge_numeric_inputs_fail_with_validation_errors(self):
+        with self.assertRaisesRegex(ValueError, "Invalid median"):
+            regress.medians(report((1, 10**500)))
+        with self.assertRaisesRegex(ValueError, "Regression threshold"):
+            regress.compare(report((1, 1)), report((1, 2)), max_regression=10**500)
+
     def test_rejects_failed_and_invalid_samples(self):
         with self.assertRaises(ValueError):
             regress.medians({"results": [{"id": 1, "status": "error"}]})

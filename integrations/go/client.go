@@ -202,15 +202,27 @@ func decodeUniqueValue(decoder *json.Decoder, depth int) (any, error) {
 func decodeRows(output io.Reader) ([]map[string]any, error) {
     decoder := json.NewDecoder(output)
     decoder.UseNumber()
-    value, err := decodeUniqueValue(decoder, 0)
+    opening, err := decoder.Token()
     if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
-    values, ok := value.([]any)
-    if !ok { return nil, errors.New("RustSpark JSON result must be an array") }
-    rows := make([]map[string]any, 0, len(values))
-    for index, item := range values {
-        row, ok := item.(map[string]any)
-        if !ok { return nil, fmt.Errorf("RustSpark JSON result row %d must be an object", index) }
+    if opening != json.Delim('[') {
+        return nil, errors.New("RustSpark JSON result must be an array")
+    }
+    // Decode one row at a time instead of constructing a second []any for
+    // the complete result. Keep duplicate-key, depth and number validation.
+    rows := make([]map[string]any, 0)
+    for decoder.More() {
+        value, err := decodeUniqueValue(decoder, 1)
+        if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
+        row, ok := value.(map[string]any)
+        if !ok {
+            return nil, fmt.Errorf("RustSpark JSON result row %d must be an object", len(rows))
+        }
         rows = append(rows, row)
+    }
+    closing, err := decoder.Token()
+    if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
+    if closing != json.Delim(']') {
+        return nil, errors.New("invalid RustSpark JSON array terminator")
     }
     if _, err := decoder.Token(); err != nil {
         if errors.Is(err, io.EOF) { return rows, nil }
