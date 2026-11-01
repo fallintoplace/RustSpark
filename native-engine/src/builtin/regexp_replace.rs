@@ -372,7 +372,7 @@ mod unicode_literal_regex_fast_path_tests {
                     let expected = format!("{}{}", &input[..offset],
                         Regex::new(pattern).unwrap()
                             .replace_all(&input[offset..], replacement));
-                    assert_eq!(call(&input, pattern, replacement, Some(start)).unwrap(),
+                    assert_eq!(call(&input, pattern, replacement, Some(start as i64)).unwrap(),
                         expected, "pattern={pattern:?}, replacement={replacement:?}, start={start}");
                 }
             }
