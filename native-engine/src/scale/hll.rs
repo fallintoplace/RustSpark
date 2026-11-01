@@ -120,9 +120,24 @@ impl HyperLogLog {
             .any(|&rank| u32::from(rank) > 65 - PRECISION) {
             return Err(Error::Parse("invalid HLL register rank".into()));
         }
-        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
-            if rank != 0 { self.update_register(index, rank); }
+        // Dense wire sketches can update thousands of registers. Accumulate
+        // the exact harmonic deltas first instead of serializing every update
+        // through the same 128-bit accumulator. Validation above is atomic.
+        let mut replaced_weight = 0u128;
+        let mut merged_weight = 0u128;
+        let mut newly_nonempty = 0usize;
+        for (current, &rank) in self.registers.iter_mut()
+            .zip(&bytes[WIRE_HEADER.len()..])
+        {
+            if rank > *current {
+                replaced_weight += harmonic_weight(*current);
+                merged_weight += harmonic_weight(rank);
+                newly_nonempty += usize::from(*current == 0);
+                *current = rank;
+            }
         }
+        self.harmonic_scaled = self.harmonic_scaled - replaced_weight + merged_weight;
+        self.nonempty += newly_nonempty;
         Ok(())
     }
 
@@ -727,5 +742,46 @@ mod transactional_wire_merge_regressions {
         *dense.last_mut().unwrap() = u8::MAX;
         assert!(target.merge_wire_bytes(&dense).is_err());
         assert_eq!(target, original);
+    }
+}
+
+#[cfg(test)]
+mod dense_wire_accumulator_regressions {
+    use super::*;
+
+    #[test]
+    fn dense_wire_merge_matches_in_memory_merge_exactly() {
+        let mut left = HyperLogLog::new();
+        let mut right = HyperLogLog::new();
+        for n in 0..120_000 {
+            if n % 3 != 0 { left.add(&Value::Integer(n)); }
+            if n % 2 == 0 { right.add(&Value::Integer(n)); }
+        }
+        let bytes = right.to_wire_bytes();
+        assert!(bytes.starts_with(WIRE_HEADER), "must exercise dense wire path");
+
+        let mut expected = left.clone();
+        expected.merge(&right);
+        let mut actual = left;
+        actual.merge_wire_bytes(&bytes).unwrap();
+        assert_eq!(actual, expected);
+        actual.merge_wire_bytes(&bytes).unwrap();
+        assert_eq!(actual, expected, "merging the same sketch is idempotent");
+
+        let mut fresh = HyperLogLog::new();
+        fresh.merge_wire_bytes(&bytes).unwrap();
+        assert_eq!(fresh, right);
+    }
+
+    #[test]
+    fn invalid_dense_rank_leaves_existing_sketch_unchanged() {
+        let mut sketch = HyperLogLog::new();
+        sketch.add(&Value::Integer(42));
+        let before = sketch.clone();
+        let mut bytes = vec![0u8; WIRE_BYTES];
+        bytes[..WIRE_HEADER.len()].copy_from_slice(WIRE_HEADER);
+        bytes[WIRE_HEADER.len() + REGISTERS - 1] = u8::MAX;
+        assert!(sketch.merge_wire_bytes(&bytes).is_err());
+        assert_eq!(sketch, before);
     }
 }
