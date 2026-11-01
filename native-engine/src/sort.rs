@@ -76,6 +76,7 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
 /// expressions are still evaluated on every row before sorting.
 fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Result<Vec<usize>> {
     for key in keys {
+        key.expression.validate_budget()?;
         key.expression.output_type(batch.schema())?;
     }
     if end - start <= 1 &&
@@ -91,18 +92,19 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         if columns.len() == 1 {
             let column = columns[0];
             let key = &keys[0];
-            indices.sort_by(|&left, &right| {
-                match (&column[left], &column[right]) {
+            indices.sort_unstable_by(|&left, &right| {
+                let order = match (&column[left], &column[right]) {
                     (Value::Integer(a), Value::Integer(b)) => {
                         let ordering = a.cmp(b);
                         if key.descending { ordering.reverse() } else { ordering }
                     }
                     (a, b) => compare_values(a, b, key.descending, key.nulls_first),
-                }
+                };
+                order.then_with(|| left.cmp(&right))
             });
             return Ok(indices);
         }
-        indices.sort_by(|&left, &right| {
+        indices.sort_unstable_by(|&left, &right| {
             for (column, key) in columns.iter().zip(keys) {
                 // Native multi-key sorts spend much of their time comparing
                 // INTEGER columns. Use the total i64 order directly when
@@ -116,7 +118,7 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
                 };
                 if cmp != Ordering::Equal { return cmp; }
             }
-            Ordering::Equal
+            left.cmp(&right)
         });
         return Ok(indices);
     }
@@ -149,14 +151,14 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         }
     }
     let mut indices: Vec<usize> = (0..end - start).collect();
-    indices.sort_by(|&left, &right| {
+    indices.sort_unstable_by(|&left, &right| {
         for (values, key) in key_columns.iter().zip(keys) {
             let comparison = compare_values(
                 &values[left], &values[right], key.descending, key.nulls_first,
             );
             if comparison != Ordering::Equal { return comparison; }
         }
-        Ordering::Equal
+        left.cmp(&right)
     });
     for index in &mut indices { *index += start; }
     Ok(indices)
@@ -541,5 +543,64 @@ mod computed_sort_key_memory_regressions {
         ]).unwrap();
         let sorted = sort_owned(batch, &[SortKey::ascending(Expr::Column("text".into()))]).unwrap();
         assert_eq!(sorted.row(0).unwrap(), vec![Value::Text("a".into())]);
+    }
+}
+
+#[cfg(test)]
+mod index_tiebreak_sort_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn stable_key_ties_survive_in_place_sorting() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let rows = vec![
+            vec![Value::Integer(2), Value::Text("a".into())],
+            vec![Value::Integer(1), Value::Text("b".into())],
+            vec![Value::Integer(1), Value::Text("c".into())],
+            vec![Value::Null, Value::Text("d".into())],
+            vec![Value::Integer(2), Value::Text("e".into())],
+            vec![Value::Null, Value::Text("f".into())],
+        ];
+        let input = Batch::from_rows(schema, rows.clone()).unwrap();
+        let keys = [SortKey {
+            expression: Expr::Column("key".into()),
+            descending: false,
+            nulls_first: false,
+        }];
+        let expected = vec![
+            rows[1].clone(), rows[2].clone(), rows[0].clone(),
+            rows[4].clone(), rows[3].clone(), rows[5].clone(),
+        ];
+        assert_eq!(sort(&input, &keys).unwrap().rows().unwrap(), expected);
+        assert_eq!(sort_owned(input.clone(), &keys).unwrap().rows().unwrap(), expected);
+
+        let constant = [SortKey::ascending(Expr::Literal(Value::Integer(7)))];
+        assert_eq!(sort(&input, &constant).unwrap().rows().unwrap(), rows);
+        assert_eq!(sort_owned(input, &constant).unwrap().rows().unwrap(), rows);
+    }
+}
+
+#[cfg(test)]
+mod direct_sort_expression_budget_tests {
+    use super::*;
+    use crate::schema::Schema;
+
+    #[test]
+    fn oversized_keys_are_rejected_in_all_sort_entry_points() {
+        let empty = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut expression = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { expression = Expr::Not(Box::new(expression)); }
+        let keys = [SortKey::ascending(expression)];
+        for result in [
+            sort(&empty, &keys),
+            sort_owned(empty.clone(), &keys),
+            sort_range(&empty, &keys, 0, 0),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
     }
 }

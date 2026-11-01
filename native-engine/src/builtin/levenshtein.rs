@@ -76,8 +76,22 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             first, second, limit as u8,
         )));
     }
-    let a = first.chars().collect::<Vec<_>>();
-    let b = second.chars().collect::<Vec<_>>();
+    // Reject Unicode work that cannot fit the native edit-distance budget
+    // before decoding either input into heap-backed character vectors.
+    let a_len = first.chars().count();
+    let b_len = second.chars().count();
+    if threshold.is_some_and(|limit| a_len.abs_diff(b_len) > limit) {
+        return Ok(Value::Integer(-1));
+    }
+    check_distance_budget(a_len, b_len, threshold)?;
+    let mut a = Vec::new();
+    a.try_reserve_exact(a_len)
+        .map_err(|_| Error::Execution("LEVENSHTEIN character allocation failed".into()))?;
+    a.extend(first.chars());
+    let mut b = Vec::new();
+    b.try_reserve_exact(b_len)
+        .map_err(|_| Error::Execution("LEVENSHTEIN character allocation failed".into()))?;
+    b.extend(second.chars());
     distance_units(&a, &b, threshold)
 }
 
@@ -160,9 +174,20 @@ fn two_ascii_edits(a: &[u8], b: &[u8]) -> i64 {
     bounded(a, b, 2).map_or(-1, i64::from)
 }
 
+fn check_distance_budget(a_len: usize, b_len: usize, threshold: Option<usize>) -> Result<()> {
+    let (longer, shorter) = (a_len.max(b_len), a_len.min(b_len));
+    let band_width = threshold.map_or(shorter, |limit|
+        limit.saturating_mul(2).saturating_add(1).min(shorter));
+    if longer.checked_mul(band_width).is_none_or(|cells| cells > 2_000_000) {
+        return Err(Error::Execution("LEVENSHTEIN exceeds native edit-distance work budget".into()));
+    }
+    Ok(())
+}
+
 fn distance_units<T: Eq + Copy>(
     a: &[T], b: &[T], threshold: Option<usize>,
-) -> Result<Value> {    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
+) -> Result<Value> {
+    if threshold.is_some_and(|limit| a.len().abs_diff(b.len()) > limit) {
         return Ok(Value::Integer(-1));
     }
     let (longer, shorter) = if a.len() >= b.len() { (a, b) } else { (b, a) };
@@ -171,11 +196,7 @@ fn distance_units<T: Eq + Copy>(
         return Ok(Value::Integer(if threshold.is_some_and(|limit| distance > limit) { -1 }
             else { i64::try_from(distance).map_err(|_| Error::Execution("LEVENSHTEIN result overflow".into()))? }));
     }
-    let band_width = threshold.map_or(shorter.len(), |limit|
-        limit.saturating_mul(2).saturating_add(1).min(shorter.len()));
-    if longer.len().checked_mul(band_width).is_none_or(|cells| cells > 2_000_000) {
-        return Err(Error::Execution("LEVENSHTEIN exceeds native edit-distance work budget".into()));
-    }
+    check_distance_budget(longer.len(), shorter.len(), threshold)?;
     if let Some(limit) = threshold {
         // The thresholded dynamic program needs only the diagonals within
         // edit distance 'limit'. Keep two narrow windows rather than two
@@ -664,5 +685,30 @@ mod bounded_unicode_edit_search_regressions {
         assert_eq!(evaluate(&[
             Value::Text(first), Value::Text(second), Value::Integer(2),
         ]).unwrap(), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod unicode_distance_preallocation_budget_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_large_unicode_dynamic_programming_before_character_allocation() {
+        let long = Value::Text("é".repeat(1_000_001));
+        let short = Value::Text("🙂a".into());
+        assert!(matches!(evaluate(&[long.clone(), short.clone()]),
+            Err(Error::Execution(message)) if message.contains("work budget")));
+        // A tight threshold can reject impossible length differences without
+        // allocating a Unicode DP matrix or changing SQL -1 semantics.
+        assert_eq!(evaluate(&[long, short, Value::Integer(2)]).unwrap(),
+            Value::Integer(-1));
+    }
+
+    #[test]
+    fn bounded_unicode_matches_simple_edits() {
+        let args = [Value::Text("café".into()), Value::Text("cafe".into())];
+        assert_eq!(evaluate(&args).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[args[0].clone(), args[1].clone(), Value::Integer(1)]).unwrap(),
+            Value::Integer(1));
     }
 }

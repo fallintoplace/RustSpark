@@ -196,7 +196,7 @@ def run_bounded_backend(command: list[str], timeout: float,
 
         def drain():
             while True:
-                chunk = process.stdout.read(65536)
+                chunk = process.stdout.read1(min(65536, max_bytes - len(output) + 1))
                 if not chunk:
                     return
                 if len(output) + len(chunk) > max_bytes:
