@@ -39,7 +39,10 @@ class DuckdbWarmTests(unittest.TestCase):
             connect.assert_not_called()
         for settings in ({"warmup": True}, {"repeat": False}, {"repeat": 2.5}):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
-                warm.measure_query(FakeConnection(), "SELECT 42", **settings)
+                warm.measure_query(
+                    FakeConnection(), "SELECT 42",
+                    **{"warmup": 0, "repeat": 1, **settings},
+                )
 
     def test_rejects_duplicates_and_nondeterminism(self):
         con = FakeConnection()
