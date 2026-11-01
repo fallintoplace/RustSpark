@@ -1,15 +1,20 @@
 //! Lightweight file-backed catalog for the DataFusion-free streaming planner.
 use std::{borrow::Cow, collections::HashMap, fs::File, io::BufReader, path::{Path, PathBuf}};
 use crate::{schema::Schema, Error, Result};
-use super::csv_scan::{CsvRows, open_csv};
+use super::csv_scan::CsvRows;
 
-// Do not open a pre-existing FIFO, socket or device as a file-backed table.
-// A blocking open on a FIFO can hang query startup before the byte limits apply.
-fn require_regular_source(path: &Path) -> Result<()> {
+// Reject nonregular sources before opening to avoid waiting on a FIFO.
+// Recheck the opened descriptor so path replacement cannot make a scan read
+// a different kind of file between preflight and actual I/O.
+fn open_regular_source(path: &Path) -> Result<File> {
     if !std::fs::metadata(path)?.is_file() {
         return Err(Error::Execution("native table source must be a regular file".into()));
     }
-    Ok(())
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(Error::Execution("native table source changed during open".into()));
+    }
+    Ok(file)
 }
 
 
@@ -25,8 +30,8 @@ impl CsvTable {
     pub fn path(&self) -> &Path { &self.path }
     pub fn max_record_bytes(&self) -> usize { self.max_record_bytes }
     pub fn open(&self) -> Result<CsvRows<BufReader<File>>> {
-        require_regular_source(&self.path)?;
-        open_csv(&self.path, self.schema.clone(), self.max_record_bytes)
+        let file = open_regular_source(&self.path)?;
+        CsvRows::new(BufReader::new(file), self.schema.clone(), self.max_record_bytes)
     }
 }
 
@@ -40,8 +45,8 @@ impl ParquetTable {
     pub fn schema(&self) -> &Schema { &self.schema }
     pub fn path(&self) -> &Path { &self.path }
     pub fn open(&self, batch_rows: usize) -> Result<crate::parquet_scan::ParquetScan> {
-        require_regular_source(&self.path)?;
-        crate::parquet_scan::scan_checked(&self.path, batch_rows, &self.schema)
+        let file = open_regular_source(&self.path)?;
+        crate::parquet_scan::scan_checked_open_file(file, batch_rows, &self.schema)
     }
 }
 
@@ -111,8 +116,7 @@ impl FileCatalog {
             return Err(Error::Schema(format!("file-backed table already exists: {name}")));
         }
         let path = path.as_ref();
-        require_regular_source(path)?;
-        let file = File::open(path)?;
+        let file = open_regular_source(path)?;
         let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|err| Error::Execution(format!("Parquet metadata: {err}")))?;
         let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
@@ -458,5 +462,35 @@ mod atomic_catalog_registration_regressions {
             },
         ]).is_err());
         assert_eq!(catalog.list(), vec!["existing"]);
+    }
+}
+
+#[cfg(test)]
+mod stable_file_descriptor_catalog_tests {
+    use super::*;
+    use crate::{schema::{DataType, Field, Schema}, scalar::Value};
+
+    #[test]
+    fn csv_catalog_scans_from_validated_regular_file_handle() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-catalog-source-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, "n\n12\n34\n").unwrap();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("values", &path, schema, 1024).unwrap();
+        let rows = catalog.get("values").unwrap().open().unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(12)], vec![Value::Integer(34)]]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn directories_are_rejected_at_registration_or_open() {
+        let dir = std::env::temp_dir();
+        assert!(open_regular_source(&dir).is_err());
     }
 }

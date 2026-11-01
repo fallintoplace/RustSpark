@@ -39,10 +39,20 @@ fn read_byte(input: &mut impl Read) -> Result<u8> {
     Ok(byte[0])
 }
 
+// Length checks bound logical payload size, but the available host memory
+// can be smaller than the budget. Never infallibly allocate untrusted lengths.
+fn allocate_wire_bytes(length: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("spill payload allocation failed".into()))?;
+    bytes.resize(length, 0);
+    Ok(bytes)
+}
+
 fn read_bounded(input: &mut impl Read, bound: usize) -> Result<Vec<u8>> {
     let bytes = read_u32(input)?;
     if bytes > bound { return Err(Error::Execution("spill value exceeds byte limit".into())); }
-    let mut buffer = vec![0; bytes];
+    let mut buffer = allocate_wire_bytes(bytes)?;
     input.read_exact(&mut buffer)?;
     Ok(buffer)
 }
@@ -68,7 +78,7 @@ fn read_text_bounded(
     let next = bytes_seen.checked_add(extra)
         .filter(|total| *total <= MAX_BATCH_BYTES)
         .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
-    let mut buffer = vec![0; length];
+    let mut buffer = allocate_wire_bytes(length)?;
     input.read_exact(&mut buffer)?;
     let text = String::from_utf8(buffer)
         .map_err(|_| Error::Parse("invalid spill UTF-8".into()))?;
@@ -140,6 +150,7 @@ impl<W: Write> SpillWriter<W> {
         let columns = (0..self.schema.len())
             .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
         let mut start = 0;
+        let mut emitted = false;
         while start < batch.num_rows() {
             let mut end = start;
             let mut bytes = 4usize;
@@ -150,6 +161,9 @@ impl<W: Write> SpillWriter<W> {
                         Value::Integer(_) | Value::Float(_) => 8,
                         Value::Text(text) => {
                             if text.len() > MAX_TEXT_BYTES {
+                                // Earlier wire windows may already be on disk.
+                                // Never allow finish() to commit their valid prefix.
+                                if emitted { self.poisoned = true; }
                                 return Err(Error::Execution("spill text value too long".into()));
                             }
                             text.len() + 4
@@ -160,6 +174,7 @@ impl<W: Write> SpillWriter<W> {
                         .ok_or_else(|| Error::Execution("spill batch byte overflow".into()))?;
                 }
                 if row_bytes > max_bytes - 4 {
+                    if emitted { self.poisoned = true; }
                     return Err(Error::Execution("spill row exceeds byte limit".into()));
                 }
                 if row_bytes > max_bytes - bytes { break; }
@@ -167,6 +182,7 @@ impl<W: Write> SpillWriter<W> {
                 end += 1;
             }
             self.write_batch_range(batch, start, end)?;
+            emitted = true;
             start = end;
         }
         Ok(())
@@ -381,6 +397,25 @@ impl<R: Read> SpillReader<R> {
         Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
     }
 
+    // TEXT-only spill streams are common for DISTINCT and sorted runs.
+    // Decode a single validated column without the per-cell schema/column
+    // dispatch used by general multi-column batches.
+    fn read_single_text_column(
+        &mut self, rows: usize, mut bytes_seen: usize,
+    ) -> Result<Batch> {
+        let nullable = self.schema.field(0)?.nullable;
+        let mut values = Vec::with_capacity(rows.min(1024));
+        for _ in 0..rows {
+            let value = match read_byte(&mut self.input)? {
+                0 if nullable => Value::Null,
+                5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
+                _ => return Err(Error::Parse("spill value does not match schema".into())),
+            };
+            values.push(value);
+        }
+        Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
+    }
+
     fn read_batch(&mut self) -> Result<Option<Batch>> {
         let mut first = [0u8; 1];
         // Interrupted at a batch boundary is not EOF or a corrupt spill file.
@@ -421,6 +456,9 @@ impl<R: Read> SpillReader<R> {
                 DataType::Integer | DataType::Float | DataType::Boolean)
         {
             return Ok(Some(self.read_single_scalar_column(rows, bytes_seen)?));
+        }
+        if self.schema.len() == 1 && self.schema.field(0)?.data_type == DataType::Text {
+            return Ok(Some(self.read_single_text_column(rows, bytes_seen)?));
         }
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(initial_capacity)).collect::<Vec<_>>();
@@ -1212,5 +1250,112 @@ mod spill_writer_poisoning_regressions {
         assert!(writer.write_batch(&batch).is_err());
         assert!(writer.write_batch(&batch).unwrap_err().to_string().contains("poisoned"));
         assert!(writer.finish().unwrap_err().to_string().contains("poisoned"));
+    }
+}
+
+#[cfg(test)]
+mod untrusted_spill_payload_admission_tests {
+    use super::*;
+
+    #[test]
+    fn text_length_budget_is_enforced_before_allocation_or_reading() {
+        let oversize = u32::try_from(MAX_TEXT_BYTES + 1).unwrap().to_le_bytes();
+        let mut bytes_seen = 0usize;
+        assert!(matches!(
+            read_text_bounded(&mut oversize.as_slice(), &mut bytes_seen),
+            Err(Error::Execution(_))
+        ));
+        assert_eq!(bytes_seen, 0);
+    }
+
+    #[test]
+    fn truncated_payload_does_not_commit_wire_budget() {
+        let mut payload = (16u32).to_le_bytes().to_vec();
+        payload.extend_from_slice(b"hi");
+        let mut bytes_seen = 5usize;
+        assert!(read_text_bounded(&mut payload.as_slice(), &mut bytes_seen).is_err());
+        assert_eq!(bytes_seen, 5);
+        assert_eq!(
+            read_bounded(&mut [2u8, 0, 0, 0, b'a', b'b'].as_slice(), 2).unwrap(),
+            b"ab"
+        );
+    }
+}
+
+#[cfg(test)]
+mod spill_bounded_writer_partial_admission_tests {
+    use super::*;
+
+    #[test]
+    fn late_oversized_row_poisoned_writer_cannot_commit_a_valid_prefix() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("ok".into())],
+            vec![Value::Text("x".repeat(256))],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        assert!(writer.write_batch_bounded_with_budget(&batch, 1, 64).is_err());
+        assert!(writer.finish().is_err());
+    }
+
+    #[test]
+    fn invalid_first_row_without_emitted_windows_can_be_retried() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let oversized = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(256))],
+        ]).unwrap();
+        let valid = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("ok".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        assert!(writer.write_batch_bounded_with_budget(&oversized, 1, 64).is_err());
+        writer.write_batch_bounded_with_budget(&valid, 1, 64).unwrap();
+        assert!(writer.finish().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod single_text_spill_decoder_tests {
+    use super::*;
+    use crate::schema::Field;
+
+    #[test]
+    fn nullable_unicode_and_long_text_roundtrip_in_multiple_batches() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let original = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂東京".into())],
+            vec![Value::Null],
+            vec![Value::Text("ab".repeat(8192))],
+            vec![Value::Text("".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::<u8>::new(), schema).unwrap();
+        writer.write_batch_range(&original, 0, 2).unwrap();
+        writer.write_batch_range(&original, 2, 4).unwrap();
+        let bytes = writer.finish().unwrap();
+        let mut reader = SpillReader::new(std::io::Cursor::new(bytes), 4).unwrap();
+        let first = reader.next_batch().unwrap().unwrap();
+        let second = reader.next_batch().unwrap().unwrap();
+        let rows = first.rows().unwrap().into_iter()
+            .chain(second.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, original.rows().unwrap());
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn required_text_rejects_null_tag_and_stops_after_error() {
+        let required = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let nullable = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let mut writer = SpillWriter::new(Vec::<u8>::new(), nullable).unwrap();
+        writer.write_batch(&Batch::from_rows(
+            Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Null]],
+        ).unwrap()).unwrap();
+        let bytes = writer.finish().unwrap();
+        // The decoder must reject a nullable wire schema mismatch even before
+        // cell decoding in normal consumers.
+        let mut reader = SpillReader::new(std::io::Cursor::new(bytes), 2).unwrap();
+        assert_ne!(reader.schema(), &required);
+        assert_eq!(reader.next_batch().unwrap().unwrap().rows().unwrap(),
+            vec![vec![Value::Null]]);
     }
 }
