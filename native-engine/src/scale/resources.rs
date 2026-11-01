@@ -35,6 +35,27 @@ impl MemoryBudget {
         Ok(Reservation { budget: self.clone(), bytes })
     }
 
+    /// Claim as much of the requested capacity as is currently free, without
+    /// overcommitting under concurrent claims. A full budget returns a zero-byte
+    /// reservation; callers may retry after another guard is released.
+    pub fn reserve_up_to(&self, requested: usize) -> Result<Reservation> {
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            let granted = requested.min(self.limit.saturating_sub(used));
+            if granted == 0 {
+                return Ok(Reservation { budget: self.clone(), bytes: 0 });
+            }
+            let next = used.checked_add(granted)
+                .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
+            match self.used.compare_exchange_weak(
+                used, next, Ordering::AcqRel, Ordering::Acquire
+            ) {
+                Ok(_) => return Ok(Reservation { budget: self.clone(), bytes: granted }),
+                Err(observed) => used = observed,
+            }
+        }
+    }
+
     // Charge the existing budget directly. Resizing a reservation must not
     // construct and disarm a second guard for every incremental growth.
     fn charge(&self, bytes: usize) -> Result<()> {
@@ -283,3 +304,62 @@ mod reservation_absorb_accounting_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod adaptive_memory_claim_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn partial_claims_and_exact_release_never_overcommit() {
+        let budget = MemoryBudget::new(100).unwrap();
+        let first = budget.reserve(70).unwrap();
+        let partial = budget.reserve_up_to(90).unwrap();
+        assert_eq!(partial.bytes(), 30);
+        assert_eq!(budget.used(), 100);
+        let empty = budget.reserve_up_to(50).unwrap();
+        assert_eq!(empty.bytes(), 0);
+        assert_eq!(budget.used(), 100);
+        drop(first);
+        assert_eq!(budget.reserve_up_to(15).unwrap().bytes(), 15);
+        assert_eq!(budget.used(), 30);
+        drop(partial);
+        drop(empty);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn concurrent_partial_claims_respect_limit_and_reclaim_every_byte() {
+        let budget = MemoryBudget::new(10_003).unwrap();
+        let barrier = Arc::new(Barrier::new(16));
+        std::thread::scope(|scope| {
+            let workers = (0..16).map(|_| {
+                let budget = budget.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    let reservation = budget.reserve_up_to(10_003).unwrap();
+                    assert!(budget.used() <= budget.limit());
+                    reservation
+                })
+            }).collect::<Vec<_>>();
+            let reservations = workers.into_iter()
+                .map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
+            assert_eq!(reservations.iter().map(Reservation::bytes).sum::<usize>(), 10_003);
+            assert_eq!(budget.used(), 10_003);
+            drop(reservations);
+        });
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn zero_request_keeps_a_full_budget_unchanged() {
+        let budget = MemoryBudget::new(1).unwrap();
+        let full = budget.reserve(1).unwrap();
+        let zero = budget.reserve_up_to(0).unwrap();
+        assert_eq!(zero.bytes(), 0);
+        assert_eq!(budget.used(), 1);
+        drop((full, zero));
+        assert_eq!(budget.remaining(), 1);
+    }
+}
