@@ -66,19 +66,6 @@ pub(crate) fn check_arity(name: &str, args: &[Expr], min: usize, max: usize) -> 
     }
 }
 
-pub(crate) fn unified_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
-    let mut result = None;
-    for arg in args {
-        if matches!(arg, Expr::Literal(Value::Null)) { continue; }
-        let next = arg.output_type(schema)?;
-        if result.is_some_and(|previous| previous != next) {
-            return Err(Error::Type("scalar function arguments must share a type".into()));
-        }
-        result = Some(next);
-    }
-    Ok(result.unwrap_or(DataType::Text))
-}
-
 pub(crate) fn numeric_arg(expr: &Expr, schema: &Schema) -> Result<()> {
     if matches!(expr, Expr::Literal(Value::Null)) {
         return Ok(());
@@ -86,17 +73,6 @@ pub(crate) fn numeric_arg(expr: &Expr, schema: &Schema) -> Result<()> {
     match expr.output_type(schema)? {
         DataType::Integer | DataType::Float => Ok(()),
         _ => Err(Error::Type("function requires numeric argument".into())),
-    }
-}
-
-pub(crate) fn text_arg(expr: &Expr, schema: &Schema) -> Result<()> {
-    if matches!(expr, Expr::Literal(Value::Null)) {
-        return Ok(());
-    }
-    if expr.output_type(schema)? == DataType::Text {
-        Ok(())
-    } else {
-        Err(Error::Type("function requires text argument".into()))
     }
 }
 
