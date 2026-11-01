@@ -25,6 +25,21 @@ class JsonValidPerfTests(unittest.TestCase):
             self.assertIn(b"payload", first.read_bytes())
             self.assertGreater(first.stat().st_size, 500)
 
+    def test_invalid_controls_and_fixture_counts_rejected_early(self):
+        cases = [
+            {"rows": True}, {"rows": 1.5}, {"repeat": False},
+            {"warmup": float("nan")}, {"timeout": "120"}, {"timeout": None},
+        ]
+        for controls in cases:
+            with self.subTest(controls=controls), self.assertRaises(ValueError):
+                perf.compare("old", "new", **controls)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.csv"
+            for invalid in (True, 0, 2.5, float("nan"), "10", None):
+                with self.subTest(rows=invalid), self.assertRaises(ValueError):
+                    perf.write_fixture(path, invalid)
+                self.assertFalse(path.exists())
+
     def test_counts_mismatched_sql_output_as_error(self):
         output = mock.Mock(stdout='{"n": 100}\n')
         with mock.patch.object(perf.subprocess, "run", return_value=output):

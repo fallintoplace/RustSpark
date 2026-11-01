@@ -84,7 +84,10 @@ impl BloomFilter {
     pub fn insert_batch(&mut self, keys: &[Value]) {
         // Inserting into a saturated filter cannot change membership.
         if self.occupied_bits == self.bits && self.populated { return; }
-        for key in keys { self.insert(key); }
+        for key in keys {
+            self.insert(key);
+            if self.occupied_bits == self.bits { break; }
+        }
     }
 
     /// Return one membership bit per input key in the original row order.
@@ -549,5 +552,28 @@ mod saturated_bloom_bulk_operations_tests {
         for value in [Value::Integer(777), Value::Text("🙂".into())] {
             assert!(destination.might_contain(&value));
         }
+    }
+}
+
+#[cfg(test)]
+mod saturated_batch_short_circuit_tests {
+    use super::*;
+
+    #[test]
+    fn fully_occupied_bitset_keeps_all_memberships_and_metrics() {
+        let mut filter = BloomFilter::new(1, 3).unwrap();
+        filter.insert_batch(&[Value::Integer(123)]);
+        assert_eq!(filter.bits_set(), 1);
+        let existing = filter.clone();
+        let large = (0..20_000).map(|n| Value::Text(n.to_string())).collect::<Vec<_>>();
+        filter.insert_batch(&large);
+        assert_eq!(filter.bits_set(), existing.bits_set());
+        assert!(large.iter().all(|value| filter.might_contain(value)));
+        assert_eq!(filter.probe_batch(&large), vec![true; large.len()]);
+
+        let mut partial = BloomFilter::new(1024, 3).unwrap();
+        let keys = (0..100).map(Value::Integer).collect::<Vec<_>>();
+        partial.insert_batch(&keys);
+        assert!(keys.iter().all(|key| partial.might_contain(key)));
     }
 }

@@ -57,7 +57,11 @@ def execute_count(binary, fixture, table, timeout):
         if stdout.tell() > MAX_COUNT_OUTPUT_BYTES:
             raise ValueError("COUNT output exceeds 64 KiB budget")
         stdout.seek(0)
-        return parse_count(stdout.read().decode("utf-8"))
+        try:
+            output = stdout.read().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("COUNT output must be valid UTF-8") from error
+        return parse_count(output)
 
 
 def compare_table_count(binary, fixture, timeout, table, expected_count):

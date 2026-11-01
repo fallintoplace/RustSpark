@@ -1,6 +1,8 @@
 """Reject incomplete or misleading billion-row benchmark artifacts."""
 
 import hashlib
+from pathlib import Path
+import tempfile
 import unittest
 
 import bench_tpch_evidence as evidence
@@ -41,6 +43,18 @@ def fixtures():
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_evidence_loader_rejects_duplicate_keys_and_nonfinite_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            for payload in ('{"rows": {}, "rows": {"lineitem": 1}}',
+                            '{"samples_ms": [1e999]}',
+                            '{"samples_ms": [NaN]}'):
+                path.write_text(payload, encoding="utf-8")
+                with self.subTest(payload=payload), self.assertRaises(ValueError):
+                    evidence.load_evidence(path)
+            path.write_text('{"value": 1.5}', encoding="utf-8")
+            self.assertEqual(evidence.load_evidence(path), {"value": 1.5})
+
     def test_valid_report_is_qualified_without_claiming_a_speedup(self):
         report = evidence.qualify(*fixtures())
         self.assertEqual(report["independent_duckdb_result_checks"], 22)

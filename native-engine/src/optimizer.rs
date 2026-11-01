@@ -46,7 +46,9 @@ pub fn optimize(plan: Plan) -> Plan {
         Plan::Sort { input, keys } => {
             let input = optimize(*input);
             if keys.is_empty() ||
-                matches!(&input, Plan::Sort { keys: inner_keys, .. } if inner_keys == &keys) {
+                matches!(&input, Plan::Sort { keys: inner_keys, .. }
+                    if inner_keys == &keys &&
+                        keys.iter().all(|key| repeatable_filter(&key.expression))) {
                 input
             } else {
                 Plan::Sort { input: Box::new(input), keys }
@@ -262,5 +264,42 @@ mod repeated_pure_filter_regressions {
         };
         let nested = Plan::scan("t").filter(uncertain.clone()).filter(uncertain);
         assert_eq!(optimize(nested.clone()), nested);
+    }
+}
+
+#[cfg(test)]
+mod volatile_sort_optimizer_regressions {
+    use super::*;
+    use crate::sort::SortKey;
+
+    #[test]
+    fn duplicate_function_sort_must_remain_in_execution_plan() {
+        let uncertain = Expr::Call {
+            name: "random".into(), args: vec![],
+        };
+        for expression in [
+            uncertain.clone(),
+            Expr::binary(Expr::Literal(Value::Integer(1)),
+                crate::expr::BinaryOp::Add, uncertain),
+        ] {
+            let keys = vec![SortKey::ascending(expression)];
+            let once = Plan::Sort {
+                input: Box::new(Plan::scan("t")), keys: keys.clone(),
+            };
+            let twice = Plan::Sort {
+                input: Box::new(once), keys,
+            };
+            assert_eq!(optimize(twice.clone()), twice);
+        }
+    }
+
+    #[test]
+    fn deterministic_sort_keys_still_deduplicate() {
+        let keys = vec![SortKey::ascending(Expr::Column("v".into()))];
+        let once = Plan::Sort {
+            input: Box::new(Plan::scan("t")), keys: keys.clone(),
+        };
+        let twice = Plan::Sort { input: Box::new(once.clone()), keys };
+        assert_eq!(optimize(twice), once);
     }
 }

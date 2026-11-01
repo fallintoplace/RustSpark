@@ -5,6 +5,11 @@ from pathlib import Path
 import math
 import json
 import re
+import os
+import stat
+import tempfile
+from contextlib import contextmanager
+from typing import Iterator
 
 TEMPLATE_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]{0,63}\Z")
 PARAM_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\Z")
@@ -29,6 +34,40 @@ def template_path(directory: Path, name: str) -> Path:
     if path.resolve().parent != directory.resolve():
         raise ValueError("Template cannot escape configured directory")
     return path
+
+
+MAX_TEMPLATE_BYTES = 1024 * 1024
+
+
+@contextmanager
+def pinned_template(path: Path) -> Iterator[Path]:
+    """Use an immutable private copy after safely opening a reviewed SQL file.
+
+    O_NOFOLLOW pins the inspected inode instead of rechecking an attacker-
+    replaceable path just before the backend opens it.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    # On platforms without O_NOFOLLOW, reject symlinks at the last check.
+    if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
+        raise ValueError("SQL template cannot be a symlink")
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        raise ValueError("Unable to open approved SQL template") from error
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template must be a bounded regular file")
+        sql = source.read(MAX_TEMPLATE_BYTES + 1)
+        if len(sql) > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template exceeds byte limit")
+    with tempfile.TemporaryDirectory(prefix="rustspark-mcp-sql-") as directory:
+        snapshot = Path(directory) / "query.sql"
+        snapshot.write_bytes(sql)
+        snapshot.chmod(0o600)
+        yield snapshot
 
 
 def make_command(binary: str, database_dir: Path, template: Path,

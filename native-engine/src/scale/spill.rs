@@ -294,8 +294,12 @@ impl<R: Read> SpillReader<R> {
         // The schema is immutable across batches. Read its field types
         // directly rather than allocating a copied type/nullability vector
         // for every small spill chunk.
+        // A spill header is untrusted until the payload has been decoded.
+        // A huge claimed row count with a truncated body must not reserve
+        // millions of scalar slots before the first cell is read.
+        let initial_capacity = rows.min(1_024);
         let mut columns = (0..self.schema.len())
-            .map(|_| Vec::with_capacity(rows)).collect::<Vec<_>>();
+            .map(|_| Vec::with_capacity(initial_capacity)).collect::<Vec<_>>();
         for _ in 0..rows {
             for (column, field) in columns.iter_mut().zip(self.schema.fields()) {
                 let (data_type, nullable) = (field.data_type, field.nullable);
@@ -803,6 +807,35 @@ mod borrowed_spill_schema_regressions {
         writer.write_batch(&batch).unwrap();
         let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 8).unwrap();
         assert_eq!(reader.next_batch().unwrap().unwrap().num_rows(), 5);
+    }
+}
+
+#[cfg(test)]
+mod untrusted_spill_preallocation_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn truncated_large_row_header_is_rejected_without_giant_column_reservations() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut wire = SpillWriter::new(Vec::new(), schema).unwrap().finish().unwrap();
+        wire.extend_from_slice(&(MAX_CELLS as u32).to_le_bytes());
+        let mut reader = SpillReader::new(Cursor::new(wire), MAX_CELLS).unwrap();
+        assert!(reader.next_batch().is_err());
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn decoded_columns_grow_beyond_initial_capacity_without_losing_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let rows = (0..4_096).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>();
+        let expected = Batch::from_rows(schema.clone(), rows).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&expected).unwrap();
+        let wire = writer.finish().unwrap();
+        let mut reader = SpillReader::new(Cursor::new(wire), 4_096).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(expected));
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }
 

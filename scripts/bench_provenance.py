@@ -4,11 +4,39 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
 import re
 import subprocess
+
+
+def load_report(path):
+    """Reject ambiguous keys and nonfinite measurements before attaching provenance."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate report key: {key}")
+            result[key] = value
+        return result
+
+    def finite_float(raw):
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("Nonfinite report number")
+        return value
+
+    def reject_constant(value):
+        raise ValueError(f"Nonfinite report constant: {value}")
+
+    return json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=unique_keys,
+        parse_float=finite_float,
+        parse_constant=reject_constant,
+    )
 
 
 def sha256_and_size(path):
@@ -109,8 +137,7 @@ def main(argv=None):
             raise ValueError("Output must differ from source report")
         if args.output.exists():
             raise ValueError("Output already exists")
-        report = enrich(json.loads(args.report.read_text(encoding="utf-8")),
-                        args.binary, args.repo)
+        report = enrich(load_report(args.report), args.binary, args.repo)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError) as error:

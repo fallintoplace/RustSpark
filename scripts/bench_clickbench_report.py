@@ -2,13 +2,20 @@
 """Render ClickBench query coverage and latencies without hiding failures."""
 
 import argparse
+from html import escape
 import json
 import math
 from pathlib import Path
 
 
 def timing(value, label):
-    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
+    if type(value) not in (int, float) or value < 0:
+        raise ValueError(f"Invalid {label} timing")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError(f"Invalid {label} timing")
     return float(value)
 
@@ -24,7 +31,8 @@ def format_result(row):
         a, b = f"{median:.3f}", f"{p95:.3f}"
     elif state in ("error", "nondeterministic"):
         a, b = "-", "-"
-        message = str(row.get("error", state)).replace("\n", " ").replace("|", "/")
+        message = escape(str(row.get("error", state)), quote=False)
+        message = message.replace("\n", " ").replace("\r", " ").replace("|", "\\|")
         failure = f"- Q{row['id']:02}: {message[:250]}"
     else:
         raise ValueError(f"Unknown query status: {state}")

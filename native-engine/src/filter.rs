@@ -114,6 +114,52 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
     batch.take(&keep)
 }
 
+/// Select only the first matches from an owned batch. Matched TEXT payloads
+/// move into the result, and expressions after the requested limit are not run.
+pub fn filter_first_owned(batch: Batch, predicate: &Expr, max_rows: usize) -> Result<Batch> {
+    let kind = predicate.output_type(batch.schema())?;
+    if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
+        return Err(Error::Type("WHERE predicate must be boolean".into()));
+    }
+    if max_rows == 0 ||
+        matches!(predicate, Expr::Literal(Value::Boolean(false) | Value::Null)) {
+        return Ok(Batch::empty(batch.schema().clone()));
+    }
+    if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
+        let end = max_rows.min(batch.num_rows());
+        return batch.slice_rows_owned(0, end);
+    }
+    let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
+    let direct = match predicate {
+        Expr::Column(name) => Some((name.as_str(), true)),
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::Column(name) => Some((name.as_str(), false)),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some((name, wanted)) = direct {
+        let values = batch.column(batch.schema().column(name)?)?;
+        for (row, value) in values.iter().enumerate() {
+            if matches!(value, Value::Boolean(actual) if *actual == wanted) {
+                keep.push(row);
+                if keep.len() == max_rows { break; }
+            }
+        }
+    } else {
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(&batch, row)?.as_boolean()? == Some(true) {
+                keep.push(row);
+                if keep.len() == max_rows { break; }
+            }
+        }
+    }
+    if keep.len() == batch.num_rows() {
+        return Ok(batch);
+    }
+    batch.take_sorted_owned(&keep)
+}
+
 #[cfg(test)]
 mod bounded_filter_feature_tests {
     use super::*;
@@ -356,5 +402,54 @@ mod dense_filter_selection_tests {
         let owned = filter_owned(empty, &predicate).unwrap();
         assert_eq!(borrowed, Batch::empty(schema.clone()));
         assert_eq!(owned, Batch::empty(schema));
+    }
+}
+
+#[cfg(test)]
+mod owned_short_circuit_filter_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn stops_before_unneeded_expression_errors_and_preserves_text_storage() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("🍃".repeat(3000))],
+            vec![Value::Integer(0), Value::Text("bad".into())],
+        ]).unwrap();
+        let address = match input.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        };
+        let predicate = Expr::binary(
+            Expr::binary(Expr::Literal(Value::Integer(10)), BinaryOp::Divide,
+                         Expr::Column("n".into())),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(0)),
+        );
+        let result = filter_first_owned(input.clone(), &predicate, 1).unwrap();
+        assert_eq!(result.num_rows(), 1);
+        assert!(filter_first_owned(input.clone(), &predicate, 2).is_err());
+        let moved = filter_first_owned(input, &predicate, 1).unwrap();
+        assert_eq!(match moved.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, address);
+    }
+
+    #[test]
+    fn nullable_boolean_columns_stop_at_match_budget() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("ok", DataType::Boolean, true),
+        ]).unwrap(), vec![
+            vec![Value::Null], vec![Value::Boolean(true)],
+            vec![Value::Boolean(false)], vec![Value::Boolean(true)],
+        ]).unwrap();
+        let predicate = Expr::Column("ok".into());
+        assert_eq!(filter_first_owned(input.clone(), &predicate, 1).unwrap().num_rows(), 1);
+        assert_eq!(filter_first_owned(input.clone(), &Expr::Not(Box::new(predicate)), 2)
+            .unwrap().rows().unwrap(), vec![vec![Value::Boolean(false)]]);
+        assert_eq!(filter_first_owned(input, &Expr::Literal(Value::Boolean(false)), 1)
+            .unwrap().num_rows(), 0);
     }
 }
