@@ -139,8 +139,10 @@ def render_report(report):
                       "| --- | " + " | ".join("---:" for _ in competitors) + " |"])
         for name in workloads:
             rustspark_ms = results["rustspark"][name]["median_ms"]
-            ratios = [f"{results[engine][name]['median_ms'] / rustspark_ms:.2f}x"
-                      if rustspark_ms > 0 else "n/a" for engine in competitors]
+            ratios = []
+            for engine in competitors:
+                ratio = results[engine][name]["median_ms"] / rustspark_ms if rustspark_ms > 0 else None
+                ratios.append(f"{ratio:.2f}x" if ratio is not None and math.isfinite(ratio) else "n/a")
             lines.append("| " + _cell(name) + " | " + " | ".join(ratios) + " |")
         lines.extend(["", "A ratio above 1.00x means RustSpark was faster **in this run**;",
                       "below 1.00x means RustSpark was slower. Ratios are not distributed benchmarks."])
