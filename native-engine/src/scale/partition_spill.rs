@@ -930,6 +930,8 @@ mod partition_writer_transactional_failure_tests {
 #[cfg(test)]
 mod sparse_partition_finalization_regressions {
     use super::*;
+    use super::super::spill::SpillReader;
+    use std::io::BufReader;
     use crate::schema::{DataType, Field};
     use std::sync::atomic::{AtomicU64, Ordering};
     static CASE_ID: AtomicU64 = AtomicU64::new(1);
