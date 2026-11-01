@@ -45,6 +45,15 @@ def _finite_json_float(value):
     return parsed
 
 
+def _text_path(value, label: str) -> str:
+    if not isinstance(value, (str, os.PathLike)):
+        raise ValueError(f"{label} must be a nonempty text path")
+    path = os.fspath(value)
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{label} must be a nonempty text path")
+    return path
+
+
 @dataclass(frozen=True)
 class RustSpark:
     binary: str | os.PathLike[str] = "rustspark"
@@ -73,9 +82,9 @@ class RustSpark:
             if not isinstance(sql, str) or not sql.strip():
                 raise ValueError("SQL cannot be blank")
         else:
-            if not os.fspath(sql_file) or (sql is not None and
-                (not isinstance(sql, str) or sql.strip())):
+            if sql is not None and (not isinstance(sql, str) or sql.strip()):
                 raise ValueError("Provide exactly one inline SQL statement or sql_file")
+            _text_path(sql_file, "sql_file")
         unnamed = {"input": input, "csv": csv, "parquet": parquet, "json": json_input}
         named = {"csv-table": csv_tables, "parquet-table": parquet_tables, "json-table": json_tables}
         if sum(value is not None for value in unnamed.values()) > 1:
@@ -95,17 +104,17 @@ class RustSpark:
         if type(max_output_bytes) is not int or max_output_bytes <= 0:
             raise ValueError("max_output_bytes must be a positive integer")
 
-        command = [os.fspath(self.binary)]
+        command = [_text_path(self.binary, "binary")]
         if sql_file is None:
             command.extend(["--sql", sql])
         else:
-            command.extend(["--sql-file", os.fspath(sql_file)])
+            command.extend(["--sql-file", _text_path(sql_file, "sql_file")])
         command.extend(["--stdout-format", "json-array"])
         if self.database_dir is not None:
-            command.extend(["--database-dir", os.fspath(self.database_dir)])
+            command.extend(["--database-dir", _text_path(self.database_dir, "database_dir")])
         for flag, value in unnamed.items():
             if value is not None:
-                command.extend([f"--{flag}", os.fspath(value)])
+                command.extend([f"--{flag}", _text_path(value, f"{flag} input")])
         for flag, values in named.items():
             values = values or {}
             for table in values:
