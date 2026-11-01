@@ -180,3 +180,33 @@ class ArrowDiskBudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ExportDiagnosticsBudgetTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process group cleanup requires POSIX")
+    def test_large_stderr_stops_live_export_before_timeout(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as diagnostics:
+            output = Path(directory) / "result.arrow"
+            script = (
+                "import sys,time;"
+                "sys.stderr.write('x'*8192);"
+                "sys.stderr.flush();time.sleep(4)"
+            )
+            with self.assertRaisesRegex(RuntimeError, "max_stderr_bytes"):
+                _export_arrow([sys.executable, "-c", script],
+                              diagnostics, 2, output, 1024, max_stderr_bytes=512)
+
+    @unittest.skipUnless(os.name == "posix", "process group cleanup requires POSIX")
+    def test_failed_size_metadata_check_cancels_export(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as diagnostics:
+            output = Path(directory) / "result.arrow"
+            with patch.object(Path, "stat", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(RuntimeError, "inspect"):
+                    _export_arrow([sys.executable, "-c", "import time;time.sleep(4)"],
+                                  diagnostics, 2, output, 1024)
+
+    def test_invalid_diagnostics_limit_fails_before_launch(self):
+        with tempfile.TemporaryFile() as diagnostics:
+            with self.assertRaisesRegex(ValueError, "max_stderr_bytes"):
+                _export_arrow([sys.executable, "-c", "print('unused')"],
+                              diagnostics, 2, Path("never.arrow"), 1024,
+                              max_stderr_bytes=0)
