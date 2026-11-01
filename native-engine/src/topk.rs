@@ -116,6 +116,55 @@ fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     batch.take(&retained.into_iter().map(|candidate| candidate.row).collect::<Vec<_>>())
 }
 
+// Retain only row IDs so owned execution can move large payloads instead
+// of cloning selected TEXT cells after a mixed-expression heap selection.
+fn mixed_top_k_indices(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Vec<usize>> {
+    let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
+    let key_columns = keys.iter().map(|key| match &key.expression {
+        Expr::Column(name) => {
+            let index = batch.schema().column(name)?;
+            Ok(Some(batch.column(index)?))
+        }
+        _ => Ok(None),
+    }).collect::<Result<Vec<_>>>()?;
+    let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
+    // Only heap members need a key vector and shared options. Reuse the
+    // rejected candidate buffer instead of allocating once per input row.
+    let mut scratch = Vec::with_capacity(keys.len());
+    for row in 0..batch.num_rows() {
+        scratch.clear();
+        for (key, column) in keys.iter().zip(&key_columns) {
+            scratch.push(match column {
+                Some(values) => Cow::Borrowed(&values[row]),
+                None => Cow::Owned(key.expression.evaluate(batch, row)?),
+            });
+        }
+        if heap.len() < k {
+            heap.push(Candidate {
+                row,
+                values: std::mem::replace(&mut scratch, Vec::with_capacity(keys.len())),
+                options: Arc::clone(&options),
+            });
+        } else if let Some(mut worst) = heap.peek_mut() {
+            let order = scratch.iter().zip(&worst.values).zip(options.iter())
+                .map(|((current, retained), (descending, nulls_first))| {
+                    crate::sort::compare_values(current, retained, *descending, *nulls_first)
+                })
+                .find(|order| *order != Ordering::Equal)
+                .unwrap_or(Ordering::Equal);
+            // Later rows lose stable ties. Swapping key storage reuses the
+            // displaced worst candidate on the next input row.
+            if order == Ordering::Less {
+                std::mem::swap(&mut scratch, &mut worst.values);
+                worst.row = row;
+            }
+        }
+    }
+    let mut retained = heap.into_vec();
+    retained.sort();
+    Ok(retained.into_iter().map(|row| row.row).collect())
+}
+
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
         key.expression.output_type(batch.schema())?;
@@ -198,50 +247,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     if keys.len() == 1 {
         return top_k_expression(batch, &keys[0], k);
     }
-    let options = Arc::new(keys.iter().map(|k| (k.descending, k.nulls_first)).collect());
-    let key_columns = keys.iter().map(|key| match &key.expression {
-        Expr::Column(name) => {
-            let index = batch.schema().column(name)?;
-            Ok(Some(batch.column(index)?))
-        }
-        _ => Ok(None),
-    }).collect::<Result<Vec<_>>>()?;
-    let mut heap = BinaryHeap::with_capacity(k.min(batch.num_rows()));
-    // Only heap members need a key vector and shared options. Reuse the
-    // rejected candidate buffer instead of allocating once per input row.
-    let mut scratch = Vec::with_capacity(keys.len());
-    for row in 0..batch.num_rows() {
-        scratch.clear();
-        for (key, column) in keys.iter().zip(&key_columns) {
-            scratch.push(match column {
-                Some(values) => Cow::Borrowed(&values[row]),
-                None => Cow::Owned(key.expression.evaluate(batch, row)?),
-            });
-        }
-        if heap.len() < k {
-            heap.push(Candidate {
-                row,
-                values: std::mem::replace(&mut scratch, Vec::with_capacity(keys.len())),
-                options: Arc::clone(&options),
-            });
-        } else if let Some(mut worst) = heap.peek_mut() {
-            let order = scratch.iter().zip(&worst.values).zip(options.iter())
-                .map(|((current, retained), (descending, nulls_first))| {
-                    crate::sort::compare_values(current, retained, *descending, *nulls_first)
-                })
-                .find(|order| *order != Ordering::Equal)
-                .unwrap_or(Ordering::Equal);
-            // Later rows lose stable ties. Swapping key storage reuses the
-            // displaced worst candidate on the next input row.
-            if order == Ordering::Less {
-                std::mem::swap(&mut scratch, &mut worst.values);
-                worst.row = row;
-            }
-        }
-    }
-    let mut retained = heap.into_vec();
-    retained.sort();
-    batch.take(&retained.into_iter().map(|row| row.row).collect::<Vec<_>>())
+    batch.take(&mixed_top_k_indices(batch, keys, k)?)
 }
 
 /// Top-K for owned input batches. Direct-column and single-expression
@@ -299,7 +305,8 @@ pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
             .collect::<Vec<_>>();
         return batch.take_unique_owned(&indices);
     }
-    top_k(&batch, keys, k)
+    let indices = mixed_top_k_indices(&batch, keys, k)?;
+    batch.take_unique_owned(&indices)
 }
 
 #[cfg(test)]
@@ -840,3 +847,63 @@ mod owned_topk_payload_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod owned_mixed_multikey_topk_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn moves_selected_text_for_computed_and_direct_sort_keys() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap(), (0..128).map(|i| vec![
+            Value::Integer(((i * 17) % 31) as i64),
+            Value::Text(format!("{i}-{}", "é".repeat(2048))),
+        ]).collect()).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::binary(
+                Expr::Column("score".into()), BinaryOp::Add,
+                Expr::Literal(Value::Integer(1)),
+            )),
+            SortKey::ascending(Expr::Column("payload".into())),
+        ];
+        let expected = top_k(&input, &keys, 9).unwrap();
+        let expected_pointer = match input.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let expected_index = expected.rows().unwrap().iter().position(
+            |row| row[1] == *input.value(0, 1).unwrap(),
+        );
+        let result = top_k_owned(input, &keys, 9).unwrap();
+        assert_eq!(result, expected);
+        if let Some(index) = expected_index {
+            let actual = match result.value(index, 1).unwrap() {
+                Value::Text(text) => text.as_ptr(),
+                _ => unreachable!(),
+            };
+            assert_eq!(actual, expected_pointer);
+        }
+    }
+
+    #[test]
+    fn evaluates_later_computed_keys_even_for_discarded_rows() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Integer, false),
+            Field::new("divisor", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(0), Value::Integer(1)],
+            vec![Value::Integer(999), Value::Integer(0)],
+            vec![Value::Integer(1000), Value::Integer(1)],
+        ]).unwrap();
+        let keys = [
+            SortKey::ascending(Expr::Column("score".into())),
+            SortKey::ascending(Expr::binary(
+                Expr::Literal(Value::Integer(10)), BinaryOp::Divide,
+                Expr::Column("divisor".into())),
+        ];
+        assert!(top_k_owned(batch, &keys, 1).is_err());
+    }
+}
