@@ -67,9 +67,14 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(DataType::Text)
         },
-        "SUBSTRING" => {
-            if args.len() != 3 { return Err(Error::Parse("SUBSTRING requires text, start, and length".into())); }
-            if args[0].output_type(schema)? != DataType::Text || args[1].output_type(schema)? != DataType::Integer || args[2].output_type(schema)? != DataType::Integer {
+        "SUBSTRING" | "SUBSTR" => {
+            if !(2..=3).contains(&args.len()) {
+                return Err(Error::Parse("SUBSTRING expects text, start, and optional length".into()));
+            }
+            if args[0].output_type(schema)? != DataType::Text
+                || args[1].output_type(schema)? != DataType::Integer
+                || (args.len() == 3 && args[2].output_type(schema)? != DataType::Integer)
+            {
                 return Err(Error::Type("SUBSTRING requires text and integer positions".into()));
             }
             Ok(DataType::Text)
@@ -231,7 +236,22 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             }
             Ok(Value::Text(text))
         },
-        "SUBSTRING" => match args {
+        "SUBSTRING" | "SUBSTR" => match args {
+            [Value::Text(text), Value::Integer(start)] => {
+                let begin = if *start > 0 {
+                    usize::try_from(start - 1).unwrap_or(usize::MAX)
+                } else if *start < 0 {
+                    text.chars().count().saturating_sub(
+                        usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
+                } else { 0 };
+                let start_byte = text.char_indices().nth(begin)
+                    .map_or(text.len(), |(offset, _)| offset);
+                let result = &text[start_byte..];
+                if result.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("SUBSTRING result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(result.to_owned()))
+            }
             [Value::Text(text), Value::Integer(start), Value::Integer(length)] => {
                 if *length < 0 { return Err(Error::Execution("SUBSTRING length must be nonnegative".into())); }
                 // Convert character offsets into UTF-8 slice boundaries without
@@ -253,6 +273,7 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 }
                 Ok(Value::Text(selected.into()))
             }
+            [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
         },
@@ -513,5 +534,28 @@ mod substring_result_budget_regressions {
         assert_eq!(evaluate("SUBSTRING", &[
             Value::Text("é🙂z".into()), Value::Integer(2), Value::Integer(1),
         ]).unwrap(), Value::Text("🙂".into()));
+    }
+}
+
+#[cfg(test)]
+mod spark_optional_substring_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn two_argument_substring_and_substr_alias_keep_unicode_positions() {
+        let query = "SELECT SUBSTRING('Spark SQL', 5), SUBSTR('é🙂abc', -3), SUBSTR('abc', 9)";
+        let rows = executor::execute(&sql::parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Text("k SQL".into()), Value::Text("abc".into()), Value::Text("".into()),
+        ]]);
+        assert_eq!(evaluate("substr", &[Value::Text("abc".into()), Value::Integer(0)]).unwrap(),
+            Value::Text("abc".into()));
+        assert_eq!(evaluate("substring", &[Value::Text("abc".into()), Value::Null]).unwrap(),
+            Value::Null);
+        assert_eq!(evaluate("substr", &[Value::Text("abc".into()), Value::Integer(2), Value::Integer(1)]).unwrap(),
+            Value::Text("b".into()));
+        assert!(return_type("substr", &[], &crate::schema::Schema::new(vec![]).unwrap()).is_err());
     }
 }
