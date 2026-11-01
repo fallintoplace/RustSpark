@@ -160,10 +160,15 @@ pub fn reserve_many(budget: &MemoryBudget, requests: &[usize]) -> Result<Vec<Res
         sum.checked_add(bytes)
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
     })?;
+    // Even zero-byte requests produce one guard each. Allocate that many
+    // guard slots fallibly before charging shared query memory, so a valid
+    // aggregate byte request cannot cause an allocator abort mid-transfer.
+    let mut reservations = Vec::new();
+    reservations.try_reserve_exact(requests.len())
+        .map_err(|_| Error::Execution("memory reservation guard allocation failed".into()))?;
     let mut combined = budget.reserve(total)?;
     // Transfer ownership incrementally. If collecting the guards unwinds,
     // only the untransferred remainder stays with the parent reservation.
-    let mut reservations = Vec::with_capacity(requests.len());
     for &bytes in requests {
         reservations.push(combined.split_off(bytes)?);
     }
@@ -361,5 +366,34 @@ mod adaptive_memory_claim_tests {
         assert_eq!(budget.used(), 1);
         drop((full, zero));
         assert_eq!(budget.remaining(), 1);
+    }
+}
+
+#[cfg(test)]
+mod bulk_guard_admission_regressions {
+    use super::*;
+
+    #[test]
+    fn many_zero_byte_guards_are_owned_independently() {
+        let budget = MemoryBudget::new(64).unwrap();
+        let mut requests = vec![0usize; 2_000];
+        requests[0] = 10;
+        requests[requests.len() - 1] = 7;
+        let guards = reserve_many(&budget, &requests).unwrap();
+        assert_eq!(guards.len(), requests.len());
+        assert_eq!(budget.used(), 17);
+        assert_eq!(guards.iter().map(Reservation::bytes).sum::<usize>(), 17);
+        drop(guards);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn rejected_batch_keeps_existing_allocations_unchanged() {
+        let budget = MemoryBudget::new(40).unwrap();
+        let existing = budget.reserve(13).unwrap();
+        assert!(reserve_many(&budget, &[10, 20]).is_err());
+        assert_eq!(budget.used(), 13);
+        drop(existing);
+        assert_eq!(budget.used(), 0);
     }
 }
