@@ -438,8 +438,8 @@ mod manifest_column_admission_regressions {
         let oversized = Schema::new(vec![Field::new(
             "x".repeat(MAX_COLUMN_NAME_BYTES + 1), DataType::Text, true,
         )]).unwrap();
-        assert!(encode_fields(&oversized).unwrap_err().to_string()
-            .contains("column name"));
+        assert!(encode_fields(&oversized).err().expect("must reject long name")
+            .to_string().contains("column name"));
         assert_eq!(
             encode_fields(&Schema::new(vec![Field::new(
                 "x".repeat(MAX_COLUMN_NAME_BYTES), DataType::Text, true,
