@@ -148,6 +148,25 @@ impl BloomFilter {
         }
     }
 
+    /// Build from a selection vector without gathering or cloning the
+    /// original key column. Invalid indices fail before any mutation.
+    pub fn insert_selected(&mut self, keys: &[Value], selected: &[usize]) -> Result<()> {
+        if selected.iter().any(|&index| index >= keys.len()) {
+            return Err(Error::Execution("selected Bloom row out of bounds".into()));
+        }
+        if self.occupied_bits == self.bits && self.populated { return Ok(()); }
+        let mut previous: Option<&Value> = None;
+        for &index in selected {
+            let key = &keys[index];
+            if previous != Some(key) {
+                self.insert(key);
+                if self.occupied_bits == self.bits { break; }
+            }
+            previous = Some(key);
+        }
+        Ok(())
+    }
+
     /// Return one membership bit per input key in the original row order.
     /// A true bit means a possible match, never a confirmed exact match.
     pub fn probe_batch(&self, keys: &[Value]) -> Vec<bool> {
@@ -842,5 +861,40 @@ mod fallible_bloom_admission_regressions {
             }
             assert!(filter.bits_set() <= bits);
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_bloom_build_tests {
+    use super::*;
+
+    #[test]
+    fn selection_build_matches_elementwise_hashing_on_irregular_and_power_of_two_bits() {
+        let values = vec![
+            Value::Null, Value::Integer(17), Value::Text("é🙂".into()),
+            Value::Float(-0.0), Value::Float(f64::NAN),
+            Value::Integer(17), Value::Float(0.0), Value::Text("Berlin".into()),
+        ];
+        let selection = [1, 1, 2, 4, 0, 3, 6, 6, 5, 7, 2];
+        for bits in [513, 1024, 8192] {
+            let mut actual = BloomFilter::new(bits, 5).unwrap();
+            let mut reference = BloomFilter::new(bits, 5).unwrap();
+            actual.insert_selected(&values, &selection).unwrap();
+            for &row in &selection { reference.insert(&values[row]); }
+            assert_eq!(actual.words, reference.words);
+            assert_eq!(actual.bits_set(), reference.bits_set());
+            assert_eq!(actual.probe_batch(&values), reference.probe_batch(&values));
+        }
+    }
+
+    #[test]
+    fn malformed_selection_does_not_mutate_an_existing_filter() {
+        let mut filter = BloomFilter::new(513, 7).unwrap();
+        filter.insert(&Value::Integer(42));
+        let before = filter.clone();
+        assert!(filter.insert_selected(&[Value::Integer(4)], &[0, 1]).is_err());
+        assert_eq!(filter.words, before.words);
+        assert_eq!(filter.bits_set(), before.bits_set());
+        assert_eq!(filter.insert_selected(&[], &[]), Ok(()));
     }
 }
