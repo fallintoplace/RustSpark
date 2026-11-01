@@ -26,6 +26,17 @@ class SqlRatioOverflowTests(unittest.TestCase):
         self.assertTrue(compare.is_duration(0))
         self.assertTrue(compare.is_duration(1e308))
 
+    def test_overflowing_json_exponents_are_rejected_during_load(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            path.write_text('{"results":[],"median_ms":1e999}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Non-finite JSON number"):
+                compare.load_report(path)
+            path.write_text('{"results":[],"median_ms":1.25}', encoding="utf-8")
+            self.assertEqual(compare.load_report(path)["median_ms"], 1.25)
+
     def test_normal_ratio_preserved(self):
         timing, error, slowed = compare._compare_query(2, result(10), result(12), 1.3)
         self.assertIsNone(error)
