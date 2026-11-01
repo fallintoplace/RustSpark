@@ -27,8 +27,9 @@ def render_query_row(row):
         p95 = checked_time(row.get("p95_ms"), "p95")
         if p95 + 0.001 < median:
             raise ValueError(f"p95 smaller than median in query {row['id']}")
-        cells = [f"{median:.3f}", f"{p95:.3f}",
-                 f"{p95 / median:.2f}x" if median > 0 else "-"]
+        ratio = p95 / median if median > 0 else None
+        amplification = f"{ratio:.2f}x" if ratio is not None and math.isfinite(ratio) else "-"
+        cells = [f"{median:.3f}", f"{p95:.3f}", amplification]
     elif status == "error":
         cells = ["-", "-", "-"]
     else:
@@ -38,12 +39,15 @@ def render_query_row(row):
 
 def append_latency_concentration(lines, ok, results):
     if len(ok) == 22 and len(results) == 22:
-        total_ms = sum(checked_time(row["median_ms"], "median") for row in ok)
-        if total_ms > 0:
+        # Normalize before summing, so finite per-query timings cannot
+        # overflow the total or hide valid latency concentration.
+        largest = max(checked_time(row["median_ms"], "median") for row in ok)
+        if largest > 0:
+            scaled_total = math.fsum(row["median_ms"] / largest for row in ok)
             slowest = sorted(ok, key=lambda row: row["median_ms"], reverse=True)[:3]
             lines.extend(["", "## Latency concentration", ""])
             for row in slowest:
-                share = checked_time(row["median_ms"], "median") / total_ms * 100
+                share = row["median_ms"] / largest / scaled_total * 100
                 lines.append(f"- Q{row['id']:02}: {share:.1f}% of summed query medians")
 
 
