@@ -316,5 +316,27 @@ printf '%s\\n' '{"x":123456789}'
                 list(RustSpark().iter_rows("SELECT 1", max_row_bytes=invalid))
 
 
+class SourcePathPreflightTests(unittest.TestCase):
+    def test_rejects_invalid_binary_sql_file_and_input_paths(self):
+        for value in ("", b"bytes", 42):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    RustSpark(binary=value)._command("SELECT 1")
+                with self.assertRaises(ValueError):
+                    RustSpark()._command(None, sql_file=value)
+                with self.assertRaises(ValueError):
+                    RustSpark(database_dir=value)._command("SELECT 1")
+                for source in ("input", "csv", "parquet", "json_input"):
+                    with self.assertRaises(ValueError):
+                        RustSpark()._command("SELECT 1", **{source: value})
+
+    def test_pathlib_sources_remain_supported(self):
+        from pathlib import Path
+        args = RustSpark(binary=Path("rustspark"), database_dir=Path("db"))._command(
+            "SELECT 1", csv=Path("rows.csv"))
+        self.assertIn("rows.csv", args)
+        self.assertIn("db", args)
+
+
 if __name__ == "__main__":
     unittest.main()
