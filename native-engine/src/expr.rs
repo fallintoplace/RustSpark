@@ -150,10 +150,15 @@ impl Expr {
                 {
                     if matches!(expr, Expr::Literal(Value::Null)) { continue; }
                     let kind = expr.output_type(schema)?;
-                    if output.is_some_and(|existing| existing != kind) {
-                        return Err(Error::Type("CASE result branches must share a type".into()));
-                    }
-                    output = Some(kind);
+                    output = Some(match (output, kind) {
+                        (None, next) => next,
+                        (Some(previous), next) if previous == next => previous,
+                        (Some(DataType::Integer), DataType::Float)
+                        | (Some(DataType::Float), DataType::Integer) => DataType::Float,
+                        _ => return Err(Error::Type(
+                            "CASE result branches require compatible SQL types".into()
+                        )),
+                    });
                 }
                 Ok(output.unwrap_or(DataType::Text))
             },
@@ -274,15 +279,27 @@ impl Expr {
             Self::Call { name, args } =>
                 crate::functions::evaluate(name, args, batch, row),
             Self::Case { branches, else_expr } => {
+                let mut chosen = None;
                 for (condition, value) in branches {
                     if condition.evaluate(batch, row)?.as_boolean()? == Some(true) {
-                        return value.evaluate(batch, row);
+                        chosen = Some(value.evaluate(batch, row)?);
+                        break;
                     }
                 }
-                match else_expr {
-                    Some(value) => value.evaluate(batch, row),
-                    None => Ok(Value::Null),
-                }
+                let value = match chosen {
+                    Some(value) => value,
+                    None => match else_expr {
+                        Some(value) => value.evaluate(batch, row)?,
+                        None => Value::Null,
+                    },
+                };
+                // All CASE branches share a logical output type, even when
+                // the selected numeric branch stores an integer.
+                Ok(match value {
+                    Value::Integer(number) if self.output_type(batch.schema())? == DataType::Float =>
+                        Value::Float(number as f64),
+                    value => value,
+                })
             },
             Self::Binary { left, op, right } => {
                 // Comparisons and boolean predicates only inspect their
@@ -1062,5 +1079,40 @@ mod exact_like_borrowed_pattern_tests {
         assert!(sql_like_escape("abc", "%b%", '\\').unwrap());
         assert!(sql_like_escape("abc", "a%c", '\\').unwrap());
         assert!(sql_like_escape("ab", "ab!", '!').is_err());
+    }
+}
+
+#[cfg(test)]
+mod mixed_numeric_case_regression_tests {
+    use super::*;
+
+    #[test]
+    fn case_promotes_integer_branches_to_double() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        for (condition, expected) in [
+            (true, Value::Float(7.0)),
+            (false, Value::Float(1.5)),
+        ] {
+            let expression = Expr::Case {
+                branches: vec![(Expr::Literal(Value::Boolean(condition)),
+                    Expr::Literal(Value::Integer(7)))],
+                else_expr: Some(Box::new(Expr::Literal(Value::Float(1.5)))),
+            };
+            assert_eq!(expression.output_type(&schema).unwrap(), DataType::Float);
+            assert_eq!(expression.evaluate(&batch, 0).unwrap(), expected);
+        }
+        let incompatible = Expr::Case {
+            branches: vec![(Expr::Literal(Value::Boolean(true)),
+                Expr::Literal(Value::Text("oops".into())))],
+            else_expr: Some(Box::new(Expr::Literal(Value::Float(0.5)))),
+        };
+        assert!(incompatible.output_type(&schema).is_err());
+        let null_case = Expr::Case {
+            branches: vec![(Expr::Literal(Value::Boolean(false)),
+                Expr::Literal(Value::Integer(7)))],
+            else_expr: None,
+        };
+        assert_eq!(null_case.evaluate(&batch, 0).unwrap(), Value::Null);
     }
 }
