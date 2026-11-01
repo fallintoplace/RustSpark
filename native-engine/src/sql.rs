@@ -94,6 +94,7 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
         AggregateOp::AvgDistinct(expr) => AggregateOp::AvgDistinct(filtered(expr)),
         AggregateOp::Min(expr) => AggregateOp::Min(filtered(expr)),
         AggregateOp::Max(expr) => AggregateOp::Max(filtered(expr)),
+        AggregateOp::First(expr, ignore_nulls) => AggregateOp::First(filtered(expr), ignore_nulls),
         AggregateOp::BitXor(expr) => AggregateOp::BitXor(filtered(expr)),
         AggregateOp::BitOr(expr) => AggregateOp::BitOr(filtered(expr)),
         AggregateOp::BitAnd(expr) => AggregateOp::BitAnd(filtered(expr)),
@@ -592,7 +593,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -612,6 +613,13 @@ impl Parser {
                 AggregateOp::CountAll
             } else {
                 let expr = self.expression(0)?;
+                let ignore_nulls = if function == "FIRST" && self.take_symbol(',') {
+                    match self.next() {
+                        Some(Token::Word(flag)) if flag.eq_ignore_ascii_case("TRUE") => true,
+                        Some(Token::Word(flag)) if flag.eq_ignore_ascii_case("FALSE") => false,
+                        _ => return Err(Error::Parse("FIRST ignoreNulls must be a boolean literal".into())),
+                    }
+                } else { false };
                 match function.as_str() {
                     "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
@@ -624,6 +632,7 @@ impl Parser {
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(expr)),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
+                    "FIRST" => AggregateOp::First(expr, ignore_nulls),
                     "BIT_XOR" => AggregateOp::BitXor(expr),
                     "BIT_OR" => AggregateOp::BitOr(expr),
                     "BIT_AND" => AggregateOp::BitAnd(expr),
@@ -632,6 +641,9 @@ impl Parser {
             };
             self.expect_symbol(')')?;
             let op = if self.take_word("FILTER") {
+                if matches!(&op, AggregateOp::First(_, _)) {
+                    return Err(Error::Unsupported("FIRST with FILTER is not supported".into()));
+                }
                 self.expect_symbol('(')?;
                 self.expect_word("WHERE")?;
                 let predicate = self.expression(0)?;
@@ -1203,16 +1215,24 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR"]
+            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
                 AggregateOp::CountAll
             } else {
-                if args.len() != 1 {
-                    return Err(Error::Parse(format!("HAVING {name} expects one argument")));
+                let accepts_flag = name.eq_ignore_ascii_case("FIRST");
+                let max_args = if accepts_flag { 2 } else { 1 };
+                if args.is_empty() || args.len() > max_args {
+                    return Err(Error::Parse(format!("HAVING {name} expects at most {max_args} arguments")));
                 }
-                let argument = args.into_iter().next().expect("one checked argument");
+                let mut args = args.into_iter();
+                let argument = args.next().expect("nonempty argument list");
+                let ignore_nulls = match args.next() {
+                    None => false,
+                    Some(Expr::Literal(Value::Boolean(flag))) if accepts_flag => flag,
+                    _ => return Err(Error::Parse("FIRST ignoreNulls must be a boolean literal".into())),
+                };
                 match name.to_ascii_uppercase().as_str() {
                     "COUNT" => AggregateOp::Count(argument),
                     "COUNT_IF" => count_if_aggregate(argument),
@@ -1222,6 +1242,7 @@ fn rewrite_having(
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(argument)),
                     "MIN" => AggregateOp::Min(argument),
                     "MAX" => AggregateOp::Max(argument),
+                    "FIRST" => AggregateOp::First(argument, ignore_nulls),
                     "BIT_XOR" => AggregateOp::BitXor(argument),
                     "BIT_OR" => AggregateOp::BitOr(argument),
                     "BIT_AND" => AggregateOp::BitAnd(argument),

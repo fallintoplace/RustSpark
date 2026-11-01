@@ -96,7 +96,8 @@ impl Plan {
                         | AggregateOp::Min(expr) | AggregateOp::Max(expr) 
                         | AggregateOp::BitAnd(expr) 
                         | AggregateOp::BitOr(expr) 
-                        | AggregateOp::BitXor(expr) =>
+                        | AggregateOp::BitXor(expr) 
+                        | AggregateOp::First(expr, _) =>
                             expr.validate_budget()?,
                     }
                 }
