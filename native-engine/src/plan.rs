@@ -76,6 +76,33 @@ pub enum Plan {
 }
 
 impl Plan {
+    /// Shared preflight for the materialized and streaming query engines.
+    pub(crate) fn validate_expressions(&self) -> crate::Result<()> {
+        match self {
+            Self::Filter { predicate, .. } => predicate.validate_budget(),
+            Self::Project { selections, .. } =>
+                selections.iter().try_for_each(|item| item.expression.validate_budget()),
+            Self::Sort { keys, .. } =>
+                keys.iter().try_for_each(|key| key.expression.validate_budget()),
+            Self::Aggregate { group_by, aggregates, .. } => {
+                use crate::aggregate::AggregateOp;
+                for (expr, _) in group_by { expr.validate_budget()?; }
+                for item in aggregates {
+                    match &item.op {
+                        AggregateOp::CountAll => {}
+                        AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
+                        | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
+                        | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
+                        | AggregateOp::Min(expr) | AggregateOp::Max(expr) =>
+                            expr.validate_budget()?,
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn push_children<'a>(&'a self, pending: &mut Vec<&'a Self>) {
         match self {
             Self::OneRow | Self::Scan { .. } | Self::Values { .. } => {}
@@ -154,6 +181,20 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_long_left_associative_expressions_before_cloning() {
+        use crate::expr::{BinaryOp, Expr};
+        use crate::scalar::Value;
+        let mut expr = Expr::Literal(Value::Integer(1));
+        for _ in 0..100 {
+            expr = Expr::binary(expr, BinaryOp::Add, Expr::Literal(Value::Integer(1)));
+        }
+        let plan = Plan::scan("nonexistent").filter(expr);
+        assert!(plan.validate_expressions().is_err());
+        assert!(crate::executor::execute(&plan, &crate::catalog::Catalog::new())
+            .unwrap_err().to_string().contains("expression"));
+    }
 
     #[test]
     fn plans_remain_owned_and_independent_of_the_catalog() {

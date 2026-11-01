@@ -22,6 +22,22 @@ pub enum AggregateOp {
     Max(Expr),
 }
 
+// The engine validates query plans, but public aggregation helpers may be
+// called directly. Check expression complexity before recursive type inference
+// or row-wise evaluation, including for empty inputs.
+fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
+    for item in items {
+        match &item.op {
+            AggregateOp::CountAll => {},
+            AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
+            | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
+            | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
+            | AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.validate_budget()?,
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AggregateItem {
     pub op: AggregateOp,
@@ -318,6 +334,7 @@ pub fn aggregate(
 
 /// Derive the single-row result schema without scanning an input source.
 pub fn global_output_schema(input: &Schema, items: &[AggregateItem]) -> Result<Schema> {
+    validate_aggregate_items(items)?;
     let mut fields = Vec::with_capacity(items.len());
     for item in items {
         if let AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) = &item.op {
@@ -406,6 +423,8 @@ pub fn aggregate_with_limits(
     max_groups: usize,
     max_key_state_bytes: usize,
 ) -> Result<Batch> {
+    for (expr, _) in group_by { expr.validate_budget()?; }
+    validate_aggregate_items(items)?;
     let mut fields = Vec::with_capacity(group_by.len() + items.len());
     for (expr, alias) in group_by {
         fields.push(Field::new(alias, expr.output_type(batch.schema())?, true));
@@ -1021,5 +1040,28 @@ mod clustered_groupby_key_run_regressions {
             Expr::Column("denominator".into()),
         )), "sum")];
         assert!(aggregate(&batch, &[(Expr::Column("key".into()), "key".into())], &items).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_aggregate_expression_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn public_aggregate_apis_preflight_aggregate_and_grouping_trees() {
+        let schema = Schema::new(vec![Field::new("ok", DataType::Boolean, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![Value::Boolean(true)]]).unwrap();
+        let mut deep = Expr::Column("ok".into());
+        for _ in 0..80 { deep = Expr::Not(Box::new(deep)); }
+        let items = [AggregateItem::new(AggregateOp::Count(deep.clone()), "count")];
+        assert!(global_output_schema(batch.schema(), &items).unwrap_err().to_string()
+            .contains("complexity budget"));
+        assert!(aggregate(&batch, &[], &items).unwrap_err().to_string()
+            .contains("complexity budget"));
+        let group = vec![(deep, "group".into())];
+        let rows = [AggregateItem::new(AggregateOp::CountAll, "n")];
+        assert!(aggregate(&batch, &group, &rows).unwrap_err().to_string()
+            .contains("complexity budget"));
     }
 }

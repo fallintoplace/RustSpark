@@ -463,6 +463,7 @@ fn validate_plan_nodes(plan: &Plan) -> Result<()> {
     let mut pending = vec![plan];
     while let Some(node) = pending.pop() {
         visited += 1;
+        node.validate_expressions()?;
         if visited > MAX_PLAN_NODES {
             return Err(Error::Execution(
                 "streaming query exceeds maximum node count".into(),
