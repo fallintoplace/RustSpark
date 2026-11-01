@@ -34,7 +34,13 @@ def parse_report(text):
 def _number(value, field):
     if isinstance(value, bool) or not isinstance(value, (float, int)):
         raise ValueError(f"{field} must be a nonnegative finite number")
-    if not math.isfinite(value) or value < 0:
+    if value < 0:
+        raise ValueError(f"{field} must be a nonnegative finite number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError(f"{field} must be a nonnegative finite number")
     return float(value)
 
