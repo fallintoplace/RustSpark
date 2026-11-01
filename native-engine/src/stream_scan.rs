@@ -29,6 +29,7 @@ pub fn scan<'a>(
         return Err(Error::Execution("scan batch size must be positive".into()));
     }
     if let Some(predicate) = &predicate {
+        predicate.validate_budget()?;
         let kind = predicate.output_type(source.schema())?;
         if kind != crate::schema::DataType::Boolean &&
             !matches!(predicate, Expr::Literal(Value::Null)) {
@@ -664,5 +665,23 @@ mod scan_offset_pushdown_regressions {
         let expected = source.column(1).unwrap()[96..107].iter().cloned()
             .map(|value| vec![value]).collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod direct_scan_expression_budget_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_predicate_fails_before_cursor_construction() {
+        let batch = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut predicate = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { predicate = Expr::Not(Box::new(predicate)); }
+        let direct = scan(&batch, Some(predicate.clone()), &[], 1);
+        assert!(direct.err().expect("deep predicate must fail").to_string()
+            .contains("complexity budget"));
+        let window = scan_window(&batch, Some(predicate), &[], 1, 0, 0);
+        assert!(window.err().expect("deep window predicate must fail").to_string()
+            .contains("complexity budget"));
     }
 }
