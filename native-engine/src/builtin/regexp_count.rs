@@ -24,6 +24,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(i64::from(text.starts_with(prefix))));
         }
     }
+    if pattern == "[A-Za-z]" || pattern == "[A-Za-z]+" {
+        // Character classes are ASCII-only. Count individual bytes or runs
+        // without regex compilation and without decoding Unicode scalars.
+        let runs = pattern == "[A-Za-z]+";
+        let mut count = 0usize;
+        let mut previous_letter = false;
+        for byte in text.bytes() {
+            let letter = byte.is_ascii_alphabetic();
+            if letter && (!runs || !previous_letter) { count += 1; }
+            previous_letter = letter;
+        }
+        return i64::try_from(count).map(Value::Integer)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+    }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
         // These exact classes match ASCII bytes, not Unicode-wide \\d.
         // A single scan can count all digits or maximal digit runs.
@@ -247,5 +261,21 @@ mod regex_digit_class_count_regressions {
                 ]).unwrap(), Value::Integer(expected), "{input:?}, {pattern}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ascii_alpha_class_count_regressions {
+    use super::*;
+    #[test]
+    fn ascii_letter_runs_match_nonoverlapping_regex_counts() {
+        for text in ["", "ABCxyz", "a1b2C", "éabc🙂Z", "東京", "a\nb", "aa--BB", "a".repeat(100_000).as_str()] {
+            for pattern in ["[A-Za-z]", "[A-Za-z]+"] {
+                let actual = evaluate(&[Value::Text(text.into()), Value::Text(pattern.into())]).unwrap();
+                let expected = regex_support::compile(pattern).unwrap().find_iter(text).count() as i64;
+                assert_eq!(actual, Value::Integer(expected), "text length={} pattern={pattern}", text.len());
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("[A-Za-z]+".into())]).unwrap(), Value::Null);
     }
 }
