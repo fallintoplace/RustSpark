@@ -32,10 +32,7 @@ pub fn file_schema(path: impl AsRef<Path>) -> Result<crate::schema::Schema> {
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
-    // Reuse native Arrow type validation with an empty batch. This also handles
-    // empty Parquet files that never yield a record batch.
-    let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
-    Ok(arrow_bridge::from_arrow(&empty)?.schema().clone())
+    arrow_bridge::schema_from_arrow(builder.schema().as_ref())
 }
 
 pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
@@ -74,8 +71,7 @@ fn scan_with_expected_schema(
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
     if let Some(expected) = expected {
-        let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
-        let actual = arrow_bridge::from_arrow(&empty)?.schema().clone();
+        let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
         if &actual != expected {
             return Err(Error::Schema(
                 "registered Parquet table schema changed since registration".into()
