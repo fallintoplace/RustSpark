@@ -2,6 +2,7 @@ use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Re
 
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
+    predicate.validate_budget()?;
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch.clone());
     }
@@ -21,6 +22,7 @@ pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
 
 /// Filter an owned native batch. An always-true predicate can reuse all columns.
 pub fn filter_owned(batch: Batch, predicate: &Expr) -> Result<Batch> {
+    predicate.validate_budget()?;
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         return Ok(batch);
     }
@@ -70,6 +72,7 @@ mod tests {
  
 /// Return at most max_rows matching rows, retaining their source order.
 pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<Batch> {
+    predicate.validate_budget()?;
     let kind = predicate.output_type(batch.schema())?;
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("WHERE predicate must be boolean".into()));
@@ -122,6 +125,7 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
 /// Select only the first matches from an owned batch. Matched TEXT payloads
 /// move into the result, and expressions after the requested limit are not run.
 pub fn filter_first_owned(batch: Batch, predicate: &Expr, max_rows: usize) -> Result<Batch> {
+    predicate.validate_budget()?;
     let kind = predicate.output_type(batch.schema())?;
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("WHERE predicate must be boolean".into()));
@@ -505,5 +509,23 @@ mod full_batch_bounded_filter_tests {
         );
         assert_eq!(filter_first(&batch, &predicate, 1).unwrap().num_rows(), 1);
         assert_eq!(filter_first_owned(batch, &predicate, 1).unwrap().num_rows(), 1);
+    }
+}
+
+#[cfg(test)]
+mod direct_filter_expression_admission_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn library_filter_helpers_reject_deep_expressions_before_recursive_evaluation() {
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, false)]).unwrap();
+        let input = Batch::from_rows(schema, vec![vec![Value::Boolean(true)]]).unwrap();
+        let mut predicate = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { predicate = Expr::Not(Box::new(predicate)); }
+        assert!(filter(&input, &predicate).unwrap_err().to_string().contains("complexity budget"));
+        assert!(filter_owned(input.clone(), &predicate).unwrap_err().to_string().contains("complexity budget"));
+        assert!(filter_first(&input, &predicate, 0).unwrap_err().to_string().contains("complexity budget"));
+        assert!(filter_first_owned(input, &predicate, 0).unwrap_err().to_string().contains("complexity budget"));
     }
 }
