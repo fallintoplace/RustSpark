@@ -32,10 +32,7 @@ pub fn file_schema(path: impl AsRef<Path>) -> Result<crate::schema::Schema> {
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
-    // Reuse native Arrow type validation with an empty batch. This also handles
-    // empty Parquet files that never yield a record batch.
-    let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
-    Ok(arrow_bridge::from_arrow(&empty)?.schema().clone())
+    arrow_bridge::schema_from_arrow(builder.schema().as_ref())
 }
 
 pub fn file_summary(path: impl AsRef<Path>) -> Result<ParquetSummary> {
@@ -71,11 +68,26 @@ fn scan_with_expected_schema(
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
     let file = File::open(path)?;
+    scan_with_expected_file(file, batch_size, expected)
+}
+
+/// Scan the same verified descriptor, instead of reopening a mutable path.
+pub(crate) fn scan_checked_open_file(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+) -> Result<ParquetScan> {
+    scan_with_expected_file(file, batch_size, Some(expected))
+}
+
+fn scan_with_expected_file(
+    file: File, batch_size: usize, expected: Option<&crate::schema::Schema>,
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
     if let Some(expected) = expected {
-        let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
-        let actual = arrow_bridge::from_arrow(&empty)?.schema().clone();
+        let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
         if &actual != expected {
             return Err(Error::Schema(
                 "registered Parquet table schema changed since registration".into()
@@ -168,6 +180,17 @@ fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
     // also prevents a huge untrusted list from preallocating a huge HashSet.
     if indices.len() > available {
         return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+    }
+    // Most pushed-down scans select only one or a few row groups. Avoid
+    // initializing a hash table for a tiny selection. At 16 entries the
+    // bounded linear check is cheaper than hash allocation and probing.
+    if indices.len() <= 16 {
+        for (position, &index) in indices.iter().enumerate() {
+            if index >= available || indices[..position].contains(&index) {
+                return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+            }
+        }
+        return Ok(());
     }
     let mut seen = std::collections::HashSet::with_capacity(indices.len());
     for &index in indices {
@@ -868,5 +891,39 @@ mod ambiguous_parquet_projection_tests {
         let error = projection_indices(&fields, &requested).unwrap_err();
         assert!(error.to_string().contains("ambiguous"));
         assert_eq!(projection_indices(&fields, &["column3"]).unwrap(), [3]);
+    }
+}
+
+#[cfg(test)]
+mod row_group_small_selection_admission_tests {
+    use super::*;
+
+    #[test]
+    fn small_and_large_paths_agree_on_validity() {
+        for length in [0usize, 1, 2, 15, 16, 17, 32] {
+            let distinct = (0..length).collect::<Vec<_>>();
+            assert!(validate_row_groups(&distinct, length).is_ok());
+            if length > 1 {
+                let mut duplicate = distinct.clone();
+                duplicate[length - 1] = duplicate[0];
+                assert!(validate_row_groups(&duplicate, length).is_err());
+            }
+            if length > 0 {
+                let mut out_of_bounds = distinct.clone();
+                out_of_bounds[length - 1] = length;
+                assert!(validate_row_groups(&out_of_bounds, length).is_err());
+            }
+            assert!(validate_row_groups(&distinct, length.saturating_sub(1))
+                .is_err() || length == 0);
+        }
+    }
+
+    #[test]
+    fn noncontiguous_groups_preserve_caller_order() {
+        for count in [2, 16, 17, 64] {
+            let indices = (0..count).rev().map(|index| index * 2)
+                .collect::<Vec<_>>();
+            assert!(validate_row_groups(&indices, count * 2).is_ok());
+        }
     }
 }

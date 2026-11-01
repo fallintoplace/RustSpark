@@ -95,14 +95,19 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
 
 def _export_arrow(command: list[str], error_log, process_timeout: float | None,
-                  output: Path, max_arrow_bytes: int) -> int:
+                  output: Path, max_arrow_bytes: int,
+                  max_stderr_bytes: int = 8 * 1024 * 1024) -> int:
     """Stop an exporter before a temporary Arrow IPC file fills the disk."""
+    if type(max_stderr_bytes) is not int or max_stderr_bytes <= 0:
+        raise ValueError("max_stderr_bytes must be a positive integer")
     process = subprocess.Popen(
         command, stdout=subprocess.DEVNULL, stderr=error_log,
         start_new_session=(os.name == "posix"),
     )
     stop_monitor = threading.Event()
     oversized = threading.Event()
+    excessive_stderr = threading.Event()
+    monitor_errors: list[OSError] = []
     monitor = None
 
     def kill_group():
@@ -119,9 +124,23 @@ def _export_arrow(command: list[str], error_log, process_timeout: float | None,
             try:
                 size = output.stat().st_size
             except FileNotFoundError:
-                continue
+                size = 0
+            except OSError as error:
+                monitor_errors.append(error)
+                kill_group()
+                return
+            try:
+                diagnostics = os.fstat(error_log.fileno()).st_size
+            except OSError as error:
+                monitor_errors.append(error)
+                kill_group()
+                return
             if size > max_arrow_bytes:
                 oversized.set()
+                kill_group()
+                return
+            if diagnostics > max_stderr_bytes:
+                excessive_stderr.set()
                 kill_group()
                 return
 
@@ -129,6 +148,11 @@ def _export_arrow(command: list[str], error_log, process_timeout: float | None,
         monitor = threading.Thread(target=watch_size, daemon=True)
         monitor.start()
         status = process.wait(timeout=process_timeout)
+        if monitor_errors:
+            raise RuntimeError("Unable to inspect RustSpark Arrow export size") from monitor_errors[0]
+        if (excessive_stderr.is_set()
+                or os.fstat(error_log.fileno()).st_size > max_stderr_bytes):
+            raise RuntimeError("RustSpark Arrow diagnostics exceed max_stderr_bytes")
         if oversized.is_set() or (output.exists() and output.stat().st_size > max_arrow_bytes):
             raise RuntimeError("RustSpark Arrow export exceeds max_arrow_bytes")
         return status
