@@ -110,6 +110,22 @@ impl Iterator for OwnedBatchChunks {
 impl ExactSizeIterator for OwnedBatchChunks {}
 impl std::iter::FusedIterator for OwnedBatchChunks {}
 
+
+fn allocate_concatenated_columns(width: usize, rows: usize) -> Result<Vec<Vec<Value>>> {
+    let mut columns = Vec::new();
+    columns.try_reserve_exact(width).map_err(|_| Error::Execution(
+        "batch concat column allocation failed".into(),
+    ))?;
+    for _ in 0..width {
+        let mut values = Vec::new();
+        values.try_reserve_exact(rows).map_err(|_| Error::Execution(
+            "batch concat value allocation failed".into(),
+        ))?;
+        columns.push(values);
+    }
+    Ok(columns)
+}
+
 pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
     let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
     // A single input is already a valid batch. Avoid allocating fresh
@@ -126,9 +142,7 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
         total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
     }
-    let mut columns: Vec<Vec<Value>> = (0..schema.len())
-        .map(|_| Vec::with_capacity(total))
-        .collect();
+    let mut columns = allocate_concatenated_columns(schema.len(), total)?;
     for batch in batches {
         for (index, column) in columns.iter_mut().enumerate() {
             column.extend_from_slice(batch.column(index)?);
@@ -160,8 +174,12 @@ pub fn concatenate_owned(batches: Vec<Batch>) -> Result<Batch> {
     // after validating every input, so reallocations cannot grow per chunk.
     let mut inputs = batches.into_iter();
     let mut columns = inputs.next().expect("nonempty owned batches").into_columns();
+    // Reserve every column before moving any later batch. Allocation failures
+    // return a typed error rather than aborting on an oversized aggregate batch.
     for column in &mut columns {
-        column.reserve(total - column.len());
+        column.try_reserve_exact(total - column.len()).map_err(|_| {
+            Error::Execution("owned batch concat value allocation failed".into())
+        })?;
     }
     for batch in inputs {
         for (target, source) in columns.iter_mut().zip(batch.into_columns()) {
@@ -500,5 +518,45 @@ mod owned_concat_column_buffer_reuse_regressions {
         assert!(concatenate_owned(vec![
             Batch::empty(schema), Batch::empty(mismatched),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_concatenation_reservation_regressions {
+    use super::*;
+
+    #[test]
+    fn impossible_allocations_fail_without_panicking_or_partial_publication() {
+        assert!(matches!(
+            allocate_concatenated_columns(1, usize::MAX),
+            Err(Error::Execution(_))
+        ));
+        assert_eq!(allocate_concatenated_columns(0, usize::MAX).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn both_concat_paths_keep_nullable_unicode_and_zero_width_rows() {
+        let schema = Schema::new(vec![
+            crate::schema::Field::new("t", crate::schema::DataType::Text, true),
+            crate::schema::Field::new("n", crate::schema::DataType::Integer, false),
+        ]).unwrap();
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é🙂".repeat(100)), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        let second = Batch::from_rows(schema, vec![
+            vec![Value::Text("東京".repeat(50)), Value::Integer(3)],
+        ]).unwrap();
+        let original = vec![first, second];
+        assert_eq!(concatenate(&original).unwrap(),
+            concatenate_owned(original.clone()).unwrap());
+
+        let empty = Schema::new(vec![]).unwrap();
+        let parts = vec![
+            Batch::new_with_row_count(empty.clone(), vec![], 4).unwrap(),
+            Batch::new_with_row_count(empty, vec![], 7).unwrap(),
+        ];
+        assert_eq!(concatenate(&parts).unwrap().num_rows(), 11);
+        assert_eq!(concatenate_owned(parts).unwrap().num_rows(), 11);
     }
 }
