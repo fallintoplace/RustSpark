@@ -50,7 +50,12 @@ def index_results(report: dict, label: str) -> dict[int, dict]:
 
 
 def is_duration(value) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def valid_digest(value) -> bool:
