@@ -12,6 +12,20 @@ def report(rows):
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_rejects_non_object_results_and_reports(self):
+        valid = report([(1, 10, "a")])
+        for invalid in [None, [], {"results": ["not an object"]}]:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                comparison.compare(valid, invalid)
+
+    def test_rejects_integer_overflow_without_crashing(self):
+        valid = report([(1, 10, "a")])
+        oversized = report([(1, 10 ** 500, "a")])
+        with self.assertRaisesRegex(ValueError, "median"):
+            comparison.compare(valid, oversized)
+        with self.assertRaisesRegex(ValueError, "Threshold"):
+            comparison.compare(valid, valid, 10 ** 500)
+
     def test_regression_and_mismatch(self):
         old = report([(1, 100, "a"), (2, 100, "b")])
         new = report([(1, 130, "a"), (2, 90, "c")])
