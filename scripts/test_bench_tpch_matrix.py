@@ -59,6 +59,17 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lost its SQL fingerprint"):
             matrix.verify_sql_fingerprints([{"id": 1, "status": "ok"}], known)
 
+    def test_sql_fingerprint_presence_cannot_change_across_partitions(self):
+        known = {}
+        matrix.verify_sql_fingerprints([{"id": 1, "status": "ok"}], known)
+        self.assertIn(1, known)
+        self.assertIsNone(known[1])
+        matrix.verify_sql_fingerprints([{"id": 1, "status": "ok"}], known)
+        with self.assertRaisesRegex(ValueError, "gained an SQL fingerprint"):
+            matrix.verify_sql_fingerprints([
+                {"id": 1, "status": "ok", "sql_sha256": "a" * 64},
+            ], known)
+
     def test_creates_runner_command(self):
         args = matrix.run_command("rs", "queries", "data", 8, "report.json", 2, 1)
         self.assertEqual(args[args.index("--target-partitions") + 1], "8")

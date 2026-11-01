@@ -4,6 +4,8 @@ use crate::{scalar::Value, Error, Result};
 
 const PRECISION: u32 = 12;
 const REGISTERS: usize = 1 << PRECISION;
+const WIRE_HEADER: &[u8; 4] = b"RSH1";
+const WIRE_BYTES: usize = WIRE_HEADER.len() + REGISTERS;
 // Use exact fixed-point harmonic weights. Every reachable HLL rank has
 // a power-of-two reciprocal, so register updates are lossless in u128.
 const HARMONIC_BITS: u32 = 65 - PRECISION;
@@ -46,6 +48,31 @@ impl HyperLogLog {
     pub fn new() -> Self {
         Self { registers: [0; REGISTERS], nonempty: 0,
             harmonic_scaled: REGISTERS as u128 * HARMONIC_SCALE }
+    }
+
+    /// Encode an in-process sketch for exchange with workers using the same
+    /// native hash implementation. This is not a persistent cross-version format.
+    pub fn to_wire_bytes(&self) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(WIRE_BYTES);
+        encoded.extend_from_slice(WIRE_HEADER);
+        encoded.extend_from_slice(&self.registers);
+        encoded
+    }
+
+    /// Decode a bounded sketch, validating every rank before admitting it.
+    /// Derive cached harmonic and population state from the wire registers.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != WIRE_BYTES || &bytes[..WIRE_HEADER.len()] != WIRE_HEADER {
+            return Err(Error::Parse("unsupported HLL sketch wire layout".into()));
+        }
+        let mut sketch = Self::new();
+        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
+            if u32::from(rank) > 65 - PRECISION {
+                return Err(Error::Parse("invalid HLL register rank".into()));
+            }
+            if rank != 0 { sketch.update_register(index, rank); }
+        }
+        Ok(sketch)
     }
 
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
@@ -139,13 +166,26 @@ mod tests {
 }
 
  
+// Sorted and run-length encoded columns often contain long runs of equal
+// values. The registers depend on each key's hash, not its multiplicity.
+// Compare the previously seen borrowed value to avoid repeated hashing.
+// SQL equality is not used here: the Value key equality also canonicalizes
+// signed zero and NaNs, just like hashing.
+fn add_value_run<'a>(sketch: &mut HyperLogLog, values: impl Iterator<Item = &'a Value>) {
+    let mut previous: Option<&Value> = None;
+    for value in values {
+        if previous != Some(value) {
+            sketch.add(value);
+        }
+        previous = Some(value);
+    }
+}
+
 /// Estimate non-NULL distinct values in a native column, without materializing a set.
 pub fn approximate_distinct(batch: &crate::batch::Batch, column: &str) -> Result<f64> {
     let index = batch.schema().column(column)?;
     let mut sketch = HyperLogLog::new();
-    for value in batch.column(index)? {
-        sketch.add(value);
-    }
+    add_value_run(&mut sketch, batch.column(index)?.iter());
     Ok(sketch.estimate())
 }
 
@@ -175,10 +215,12 @@ pub fn approximate_distinct_selected(
     let index = batch.schema().column(column)?;
     let values = batch.column(index)?;
     let mut sketch = HyperLogLog::new();
+    let mut previous: Option<&Value> = None;
     for &row in selected {
         let value = values.get(row)
             .ok_or_else(|| Error::Execution("selected HLL row out of bounds".into()))?;
-        sketch.add(value);
+        if previous != Some(value) { sketch.add(value); }
+        previous = Some(value);
     }
     Ok(sketch.estimate())
 }
@@ -197,9 +239,7 @@ pub fn approximate_distinct_batches(
             return Err(Error::Type("approximate distinct column types differ".into()));
         }
         expected_type = Some(kind);
-        for value in batch.column(index)? {
-            combined.add(value);
-        }
+        add_value_run(&mut combined, batch.column(index)?.iter());
     }
     Ok(combined.estimate())
 }
@@ -449,5 +489,88 @@ mod batched_hll_merge_regressions {
         reference_merge(&mut expected, &b);
         a.merge(&b);
         assert_eq!(a, expected);
+    }
+}
+
+#[cfg(test)]
+mod hll_wire_exchange_regressions {
+    use super::*;
+
+    #[test]
+    fn roundtrips_sparse_dense_and_merged_worker_sketches() {
+        let mut a = HyperLogLog::new();
+        let mut b = HyperLogLog::new();
+        for n in 0..40_000 {
+            a.add(&Value::Integer(n));
+            b.add(&Value::Integer(n + 20_000));
+        }
+        let empty = HyperLogLog::new();
+        for sketch in [&empty, &a, &b] {
+            let wire = sketch.to_wire_bytes();
+            assert_eq!(wire.len(), WIRE_BYTES);
+            assert_eq!(HyperLogLog::from_wire_bytes(&wire).unwrap(), *sketch);
+        }
+        let mut merged = HyperLogLog::from_wire_bytes(&a.to_wire_bytes()).unwrap();
+        merged.merge(&HyperLogLog::from_wire_bytes(&b.to_wire_bytes()).unwrap());
+        a.merge(&b);
+        assert_eq!(merged, a);
+        assert_eq!(merged.nonempty_registers(), a.nonempty_registers());
+        assert_eq!(merged.estimate(), a.estimate());
+    }
+
+    #[test]
+    fn rejects_bad_version_lengths_and_unreachable_register_ranks() {
+        let mut wire = HyperLogLog::new().to_wire_bytes();
+        assert!(HyperLogLog::from_wire_bytes(&wire[..WIRE_BYTES - 1]).is_err());
+        let mut trailing = wire.clone();
+        trailing.push(0);
+        assert!(HyperLogLog::from_wire_bytes(&trailing).is_err());
+        wire[0] ^= 0xff;
+        assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
+        wire = HyperLogLog::new().to_wire_bytes();
+        wire[WIRE_HEADER.len()] = (65 - PRECISION + 1) as u8;
+        assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
+    }
+}
+
+#[cfg(test)]
+mod adjacent_hll_run_dedup_regressions {
+    use super::*;
+    use crate::{batch::Batch, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn adjacent_duplicates_match_reference_updates_including_special_floats() {
+        let values = vec![
+            Value::Null, Value::Null,
+            Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(f64::NAN), Value::Float(-f64::NAN),
+            Value::Float(7.0), Value::Float(7.0),
+            Value::Float(-2.5), Value::Float(7.0),
+        ];
+        let mut expected = HyperLogLog::new();
+        for value in &values { expected.add(value); }
+        let mut actual = HyperLogLog::new();
+        add_value_run(&mut actual, values.iter());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn column_selected_and_multiple_batches_match_naive_hashing() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let values = (0..3000).map(|i| match i % 13 {
+            0 => Value::Null,
+            _ => Value::Text(format!("key-{}", i / 25)),
+        }).collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema, values.iter().cloned().map(|v| vec![v]).collect()).unwrap();
+        let mut expected = HyperLogLog::new();
+        for value in &values { expected.add(value); }
+        assert_eq!(approximate_distinct(&batch, "key").unwrap(), expected.estimate());
+        let selections = (0..values.len()).step_by(3).collect::<Vec<_>>();
+        let mut selected = HyperLogLog::new();
+        for &i in &selections { selected.add(&values[i]); }
+        assert_eq!(approximate_distinct_selected(&batch, "key", &selections).unwrap(), selected.estimate());
+        let first = batch.slice_rows(0, 1700).unwrap();
+        let second = batch.slice_rows(1700, 3000).unwrap();
+        assert_eq!(approximate_distinct_batches(&[first, second], "key").unwrap(), expected.estimate());
     }
 }

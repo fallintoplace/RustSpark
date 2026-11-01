@@ -149,25 +149,82 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     return decodeRows(&output)
 }
 
-// decodeRows validates the complete JSON result instead of accepting null rows
-// or a top-level null as a successful query response.
+// decodeUniqueValue reads a JSON value while rejecting duplicate object keys,
+// including duplicate names expressed using different JSON escape sequences.
+const maxJSONNestingDepth = 256
+
+func decodeUniqueValue(decoder *json.Decoder, depth int) (any, error) {
+    if depth > maxJSONNestingDepth {
+        return nil, errors.New("RustSpark JSON nesting limit exceeded")
+    }
+    token, err := decoder.Token()
+    if err != nil { return nil, err }
+    if number, ok := token.(json.Number); ok && strings.ContainsAny(string(number), ".eE") {
+        if _, err := strconv.ParseFloat(string(number), 64); err != nil {
+            return nil, fmt.Errorf("nonfinite RustSpark JSON number %q: %w", number, err)
+        }
+    }
+    delim, isDelim := token.(json.Delim)
+    if !isDelim { return token, nil }
+    switch delim {
+    case '{':
+        object := make(map[string]any)
+        for decoder.More() {
+            nameToken, err := decoder.Token()
+            if err != nil { return nil, err }
+            name, ok := nameToken.(string)
+            if !ok { return nil, errors.New("invalid RustSpark JSON object key") }
+            if _, exists := object[name]; exists {
+                return nil, fmt.Errorf("duplicate RustSpark JSON key %q", name)
+            }
+            value, err := decodeUniqueValue(decoder, depth+1)
+            if err != nil { return nil, err }
+            object[name] = value
+        }
+        if _, err := decoder.Token(); err != nil { return nil, err }
+        return object, nil
+    case '[':
+        array := make([]any, 0)
+        for decoder.More() {
+            value, err := decodeUniqueValue(decoder, depth+1)
+            if err != nil { return nil, err }
+            array = append(array, value)
+        }
+        if _, err := decoder.Token(); err != nil { return nil, err }
+        return array, nil
+    default:
+        return nil, errors.New("unexpected RustSpark JSON closing delimiter")
+    }
+}
+
+// decodeRows validates every row object and retains json.Number values without
+// silently accepting repeated JSON keys or trailing output.
 func decodeRows(output io.Reader) ([]map[string]any, error) {
     decoder := json.NewDecoder(output)
     decoder.UseNumber()
-    var rows []map[string]any
-    if err := decoder.Decode(&rows); err != nil {
-        return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err)
-    }
-    if rows == nil {
+    opening, err := decoder.Token()
+    if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
+    if opening != json.Delim('[') {
         return nil, errors.New("RustSpark JSON result must be an array")
     }
-    for index, row := range rows {
-        if row == nil {
-            return nil, fmt.Errorf("RustSpark JSON result row %d must be an object", index)
+    // Decode one row at a time instead of constructing a second []any for
+    // the complete result. Keep duplicate-key, depth and number validation.
+    rows := make([]map[string]any, 0)
+    for decoder.More() {
+        value, err := decodeUniqueValue(decoder, 1)
+        if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
+        row, ok := value.(map[string]any)
+        if !ok {
+            return nil, fmt.Errorf("RustSpark JSON result row %d must be an object", len(rows))
         }
+        rows = append(rows, row)
     }
-    var extra any
-    if err := decoder.Decode(&extra); err != nil {
+    closing, err := decoder.Token()
+    if err != nil { return nil, fmt.Errorf("invalid RustSpark JSON output: %w", err) }
+    if closing != json.Delim(']') {
+        return nil, errors.New("invalid RustSpark JSON array terminator")
+    }
+    if _, err := decoder.Token(); err != nil {
         if errors.Is(err, io.EOF) { return rows, nil }
         return nil, fmt.Errorf("unexpected trailing output: %w", err)
     }
@@ -192,9 +249,9 @@ func oneRow(rows []map[string]any) (map[string]any, error) {
     return rows[0], nil
 }
 
-// QueryNDJSON streams newline-delimited JSON rows to output without storing
-// them in memory. The caller is responsible for JSON parsing and byte limits.
-// An output write failure stops the query subprocess.
+// QueryNDJSON streams newline-delimited JSON rows without buffering the result.
+// MaxOutputBytes optionally bounds bytes sent to the output writer; zero means
+// unlimited streaming. An output write failure stops the query subprocess.
 func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, output io.Writer) error {
     if output == nil { return errors.New("NDJSON output writer must not be nil") }
     args, err := c.arguments(sql, opts)
@@ -208,7 +265,11 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     binary := c.Binary
     if binary == "" { binary = "rustspark" }
     command := exec.CommandContext(ctx, binary, args...)
-    command.Stdout = output
+    if opts.MaxOutputBytes > 0 {
+        command.Stdout = &ndjsonByteLimit{output: output, remaining: opts.MaxOutputBytes}
+    } else {
+        command.Stdout = output
+    }
     stderr := boundedStderr()
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
