@@ -105,12 +105,12 @@ macro_rules! decode_text_dictionary {
                 decoded.push(Value::Null);
             } else if let Some(strings) = utf8 {
                 let value = strings.value(key);
-                *$budget = $budget.checked_sub(value.len())
+                *$budget = (*$budget).checked_sub(value.len())
                     .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
                 decoded.push(Value::Text(value.into()));
             } else if let Some(strings) = large_utf8 {
                 let value = strings.value(key);
-                *$budget = $budget.checked_sub(value.len())
+                *$budget = (*$budget).checked_sub(value.len())
                     .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
                 decoded.push(Value::Text(value.into()));
             }
