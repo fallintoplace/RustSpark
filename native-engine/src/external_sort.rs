@@ -72,13 +72,20 @@ pub fn external_sort(
         if input_batch.schema() != schema {
             return Err(Error::Schema("external sort schema mismatch".into()));
         }
-        for start in (0..input_batch.num_rows()).step_by(run_rows) {
+        // Move each owned column through its run windows. Borrowed slicing
+        // cloned every TEXT payload before sorting and writing the spill.
+        let rows = input_batch.num_rows();
+        let mut columns = input_batch.into_columns().into_iter()
+            .map(Vec::into_iter).collect::<Vec<_>>();
+        for start in (0..rows).step_by(run_rows) {
             if runs.len() >= 256 {
                 return Err(Error::Execution("too many external sort runs".into()));
             }
-            let end = start.saturating_add(run_rows).min(input_batch.num_rows());
-            let batch = input_batch.slice_rows(start, end)?;
-            let sorted = sort::sort(&batch, keys)?;
+            let take = (rows - start).min(run_rows);
+            let window = columns.iter_mut()
+                .map(|column| column.by_ref().take(take).collect()).collect();
+            let batch = Batch::from_validated_columns(schema.clone(), window, take)?;
+            let sorted = sort::sort_owned(batch, keys)?;
             let spill = spill_ipc::spill(spill_dir.as_ref(), schema, &[sorted])?;
             let mut reader = spill.read()?;
             let first = reader.next().transpose()?;
@@ -613,5 +620,44 @@ mod external_sort_wide_output_reservation_tests {
         assert_eq!(output_buffer_capacity(65_536, 1), 256);
         assert_eq!(output_buffer_capacity(5, 1), 5);
         assert_eq!(output_buffer_capacity(1, 4096), 1);
+    }
+}
+
+#[cfg(test)]
+mod owned_external_sort_run_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn moves_wide_nullable_text_across_stable_run_windows() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let source = (0..39).rev().map(|index| vec![
+            if index % 13 == 0 { Value::Null } else { Value::Integer(index % 5) },
+            if index % 11 == 0 { Value::Null } else {
+                Value::Text(format!("{index}-{}", "🙂".repeat(4_096)))
+            },
+        ]).collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema.clone(), source).unwrap();
+        let keys = [SortKey::ascending(crate::expr::Expr::Column("key".into()))];
+        let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
+        let result = external_sort([batch], &schema, &keys, std::env::temp_dir(), 5, 7)
+            .unwrap().collect::<Result<Vec<_>>().unwrap();
+        assert!(result.iter().all(|part| part.num_rows() <= 7));
+        assert_eq!(
+            result.iter().flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>(),
+            expected,
+        );
+    }
+
+    #[test]
+    fn empty_typed_batches_create_no_spill_files() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let input = [Batch::empty(schema.clone()), Batch::empty(schema.clone())];
+        let keys = [SortKey::ascending(crate::expr::Expr::Column("n".into()))];
+        assert!(external_sort(input, &schema, &keys, std::env::temp_dir(), 3, 2)
+            .unwrap().next().is_none());
     }
 }
