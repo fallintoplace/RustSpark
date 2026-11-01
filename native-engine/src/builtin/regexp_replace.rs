@@ -34,10 +34,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { 0 };
     let suffix = &text[start..];
 
-    // Literal ASCII patterns do not need regex compilation or captures.
+    // Literal Unicode patterns do not need regex compilation or captures.
     // A dollar in replacement requires the regex capture-expansion path.
     if !pattern.is_empty() && pattern.len() <= 4096 &&
-        pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
+        pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_') &&
         !replacement.contains('$') {
         // Scan once, appending whole unchanged UTF-8 spans. Check the
         // output budget incrementally to reject expansion before allocating it.
@@ -343,5 +343,48 @@ mod oversized_replace_position_regressions {
             Value::Text("abc".into()), Value::Text("(".into()),
             Value::Text("Q".into()), Value::Integer(i64::MAX),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod unicode_literal_regex_fast_path_tests {
+    use super::*;
+    use regex::Regex;
+
+    fn call(input: &str, pattern: &str, replacement: &str, position: Option<i64>) -> Result<String> {
+        let mut args = vec![
+            Value::Text(input.into()), Value::Text(pattern.into()),
+            Value::Text(replacement.into()),
+        ];
+        if let Some(position) = position { args.push(Value::Integer(position)); }
+        let Value::Text(output) = evaluate(&args)? else { panic!("expected text") };
+        Ok(output)
+    }
+
+    #[test]
+    fn unicode_literals_match_regex_reference_at_every_character_position() {
+        for pattern in ["é", "東京", "🙂", "αβ", "１２３", "界", "café"] {
+            let input = format!("before{pattern}middle{pattern}after{pattern}");
+            for replacement in ["x", "é🙂", "", "abcdef"] {
+                for start in [1, 2, 7, 1000] {
+                    let offset = input.char_indices().nth(start - 1)
+                        .map_or(input.len(), |(index, _)| index);
+                    let expected = format!("{}{}", &input[..offset],
+                        Regex::new(pattern).unwrap()
+                            .replace_all(&input[offset..], replacement));
+                    assert_eq!(call(&input, pattern, replacement, Some(start)).unwrap(),
+                        expected, "pattern={pattern:?}, replacement={replacement:?}, start={start}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metacharacters_and_capture_expansion_still_use_regex_engine() {
+        assert_eq!(call("éé", "é", "$0!", None).unwrap(), "é!é!");
+        assert_eq!(call("éé", "(é)", "${1}!", None).unwrap(), "é!é!");
+        assert_eq!(call("aé🙂a", "é🙂", "?", None).unwrap(), "a?a");
+        assert_eq!(call("abc", "a.c", "yes", None).unwrap(), "yes");
+        assert!(call("é", "é", &"x".repeat(1_048_577), None).is_err());
     }
 }
