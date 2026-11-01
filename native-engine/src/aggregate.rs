@@ -33,7 +33,7 @@ fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
             AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
             | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
-            | AggregateOp::Min(expr) | AggregateOp::Max(expr)
+            | AggregateOp::Min(expr) | AggregateOp::Max(expr) 
             | AggregateOp::BitAnd(expr) => expr.validate_budget()?,
         }
     }
@@ -133,7 +133,7 @@ impl State {
             | AggregateOp::Avg(expr)
             | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr)
-            | AggregateOp::Max(expr)
+            | AggregateOp::Max(expr) 
             | AggregateOp::BitAnd(expr) => match expr {
                 Expr::Column(name) =>
                     Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
