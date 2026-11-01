@@ -216,9 +216,11 @@ impl Parser {
     }
 
     fn expression(&mut self, min_precedence: u8) -> Result<Expr> {
-        const MAX_DEPTH: usize = 256;
+        // Recursive parsing has sizable stack frames on all three CI platforms.
+        // Bound nesting well below the smallest native test thread stack.
+        const MAX_DEPTH: usize = 48;
         if self.expression_depth >= MAX_DEPTH {
-            return Err(Error::Parse("SQL expression nesting exceeds 256 levels".into()));
+            return Err(Error::Parse("SQL expression nesting exceeds 48 levels".into()));
         }
         self.expression_depth += 1;
         let result = self.parse_expression(min_precedence);
@@ -1623,6 +1625,22 @@ mod spark_expression_depth_safety_tests {
         let deep = format!("SELECT {}TRUE{} FROM t",
             "NOT (".repeat(350), ")".repeat(350));
         assert!(parse_sql(&deep).is_err());
+    }
+
+    #[test]
+    fn parser_rejects_boundary_depth_before_stack_exhaustion() {
+        // The outer expression call consumes one level in addition to each pair.
+        for parentheses in [0, 16, 47] {
+            let sql = format!("SELECT {}1{} FROM t",
+                "(".repeat(parentheses), ")".repeat(parentheses));
+            assert!(parse_sql(&sql).is_ok(), "{parentheses}");
+        }
+        for parentheses in [48, 64, 400] {
+            let sql = format!("SELECT {}1{} FROM t",
+                "(".repeat(parentheses), ")".repeat(parentheses));
+            let error = parse_sql(&sql).unwrap_err().to_string();
+            assert!(error.contains("nesting"), "{error}");
+        }
     }
 }
 
