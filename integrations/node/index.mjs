@@ -92,15 +92,20 @@ export class RustSpark {
   query(sql, options = {}) {
     const { args, maxOutputBytes, processTimeoutMs, unsafeIntegers } = this._command(sql, options);
     const result = this.runner(this.binary, args, {
-      encoding: "utf8", shell: false, timeout: processTimeoutMs, maxBuffer: maxOutputBytes,
+      // Keep stdout as bytes so malformed UTF-8 is never silently replaced.
+      encoding: null, shell: false, timeout: processTimeoutMs, maxBuffer: maxOutputBytes,
     });
     if (result.error) throw new RustSparkError(`Failed to run RustSpark: ${result.error.message}`);
     if (result.status !== 0) {
-      throw new RustSparkError((result.stderr ?? "").trim() || `RustSpark exited with ${result.status}`);
+      const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : (result.stderr ?? "");
+      throw new RustSparkError(stderr.trim() || `RustSpark exited with ${result.status}`);
     }
     let rows;
     try {
-      rows = parseStrictJSON(result.stdout, { unsafeIntegers });
+      const stdout = Buffer.isBuffer(result.stdout)
+        ? new TextDecoder("utf-8", { fatal: true }).decode(result.stdout)
+        : result.stdout;
+      rows = parseStrictJSON(stdout, { unsafeIntegers });
     }
     catch { throw new RustSparkError("RustSpark returned invalid JSON"); }
     if (!Array.isArray(rows) || rows.some((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
