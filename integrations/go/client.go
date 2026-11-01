@@ -106,6 +106,16 @@ func (c Client) arguments(sql string, opts Options) ([]string, error) {
     if count > 0 && (len(opts.CSVTables)+len(opts.ParquetTables)+len(opts.JSONTables) > 0) {
         return nil, errors.New("named and unnamed inputs cannot be mixed")
     }
+    // A SQL table must have exactly one source format.
+    namedTables := make(map[string]struct{})
+    for _, tables := range []map[string]string{opts.CSVTables, opts.ParquetTables, opts.JSONTables} {
+        for name := range tables {
+            if _, exists := namedTables[name]; exists {
+                return nil, fmt.Errorf("duplicate named table %q across input formats", name)
+            }
+            namedTables[name] = struct{}{}
+        }
+    }
     var err error
     if args, err = addNamed(args, "--csv-table", opts.CSVTables); err != nil { return nil, err }
     if args, err = addNamed(args, "--parquet-table", opts.ParquetTables); err != nil { return nil, err }
