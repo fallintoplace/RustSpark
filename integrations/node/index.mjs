@@ -148,9 +148,11 @@ export class RustSpark {
     let timedOut = false;
     let stderr = Buffer.alloc(0);
     child.stderr.on("data", (chunk) => {
-      if (stderr.length < 65536) {
-        stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
-      }
+      // Backend warnings can precede the actionable failure by megabytes.
+      // Keep the last 64 KiB without ever materializing a huge chunk.
+      const tail = chunk.subarray(Math.max(0, chunk.length - 65536));
+      const previous = stderr.subarray(Math.max(0, stderr.length - (65536 - tail.length)));
+      stderr = Buffer.concat([previous, tail]);
     });
     const finished = new Promise((resolve) => {
       child.on("error", (error) => {

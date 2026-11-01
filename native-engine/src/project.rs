@@ -85,6 +85,7 @@ fn bound_distinct_comparison<'a>(
 }
 
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
+    selections.iter().try_for_each(|item| item.expression.validate_budget())?;
     let schema = Schema::new(
         selections
             .iter()
@@ -149,6 +150,7 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
  * consumes the original column and preserves heap-backed TEXT allocations.
  */
 pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
+    selections.iter().try_for_each(|item| item.expression.validate_budget())?;
     let schema = Schema::new(selections.iter().map(|selection| {
         Ok(Field::new(
             &selection.alias,
@@ -746,5 +748,24 @@ mod projection_computed_memory_budget_regressions {
         let selections = [Selection::new(Expr::Column("name".into()), "original"),
             Selection::new(Expr::Literal(Value::Text("same".into())), "fixed")];
         assert_eq!(project(&input, &selections).unwrap(), project_owned(input, &selections).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod direct_project_expression_budget_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_projection_is_rejected_before_inference_on_empty_input() {
+        let empty = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut expression = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { expression = Expr::Not(Box::new(expression)); }
+        let selection = Selection::new(expression, "deep");
+        for result in [
+            project(&empty, &[selection.clone()]),
+            project_owned(empty.clone(), &[selection]),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
     }
 }

@@ -35,6 +35,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return i64::try_from(count + 1).map(Value::Integer)
             .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
     }
+    if pattern == "[A-Za-z]" || pattern == "[A-Za-z]+" {
+        // ASCII matches are UTF-8 boundaries; convert byte offsets to SQL
+        // one-based Unicode scalar positions only for the matched prefix.
+        let Some(byte_index) = text.bytes().position(|byte| byte.is_ascii_alphabetic())
+            else { return Ok(Value::Integer(0)); };
+        let position = super::char_length::character_count(&text[..byte_index])
+            .checked_add(1)
+            .and_then(|count| i64::try_from(count).ok())
+            .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
+        return Ok(Value::Integer(position));
+    }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
         // An ASCII digit is a UTF-8 scalar boundary, but SQL positions
         // count Unicode characters rather than bytes.
@@ -236,5 +247,25 @@ mod unicode_literal_instr_optimization_tests {
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text("東京".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_alpha_instr_regressions {
+    use super::*;
+    #[test]
+    fn ascii_letter_match_positions_use_unicode_scalar_offsets() {
+        for text in ["", "ABC", "123foo", "é🙂ABC", "東京5a", "🔑9Q", "\n\nZ", "9é🙂0"] {
+            for pattern in ["[A-Za-z]", "[A-Za-z]+"] {
+                let regex = regex_support::compile(pattern).unwrap();
+                let expected = regex.find(text).map_or(0, |m| {
+                    (text[..m.start()].chars().count() + 1) as i64
+                });
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), Value::Integer(expected));
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("[A-Za-z]".into())]).unwrap(), Value::Null);
     }
 }
