@@ -1,6 +1,6 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
-use serde::{Deserialize, de::{IgnoredAny, MapAccess, SeqAccess, Visitor}};
+use serde::{Deserialize, de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor}};
 use std::fmt;
 
 // Root JSON_TYPE only needs the shape, not an allocated value tree.
@@ -53,6 +53,49 @@ impl<'de> Deserialize<'de> for RootJsonType {
 }
 
 
+// Only materialize the shape of the selected member. Last-write-wins
+// matches serde_json::Map for duplicate object keys.
+struct RootMemberType<'a>(&'a str);
+
+impl<'de> DeserializeSeed<'de> for RootMemberType<'_> {
+    type Value = Option<RootJsonType>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self, deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        struct Selector<'a>(&'a str);
+        impl<'de> Visitor<'de> for Selector<'_> {
+            type Value = Option<RootJsonType>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self, mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut selected = None;
+                while let Some(name) = map.next_key::<String>()? {
+                    if name == self.0 {
+                        selected = Some(map.next_value::<RootJsonType>()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(selected)
+            }
+        }
+        deserializer.deserialize_map(Selector(self.0))
+    }
+}
+
+fn direct_root_member(path: &str) -> Option<&str> {
+    let member = path.strip_prefix("$.")?;
+    (path.len() <= 4096 && !member.is_empty() &&
+        member.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_'))
+        .then_some(member)
+}
+
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
@@ -70,6 +113,21 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .and_then(|value| deserializer.end().map(|()| value))
             .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
         return Ok(Value::Text(label.into()));
+    }
+    if let Some(name) = direct_root_member(path)
+        && text.trim_start().starts_with('{')
+    {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let selected = RootMemberType(name).deserialize(&mut deserializer)
+            .and_then(|selected| deserializer.end().map(|()| selected))
+            .map_err(|error| Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        return Ok(selected.map_or(Value::Null,
+            |RootJsonType(label)| Value::Text(label.into())));
     }
     let document = json_path::parse(text)?;
     let Some(found) = json_path::lookup(Some(&document), path)? else { return Ok(Value::Null); };
@@ -229,5 +287,52 @@ mod streaming_root_json_type_tests {
             Value::Text("$[1]".into())]).unwrap(), Value::Text("STRING".into()));
         assert_eq!(evaluate(&[Value::Text("[1,\"x\"]".into()),
             Value::Text("$[99]".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streaming_json_root_member_type_tests {
+    use super::*;
+
+    #[test]
+    fn direct_member_types_match_full_tree_including_last_duplicate() {
+        for (document, path) in [
+            (r#"{"target":null,"wide":[{},[],true,100]}"#, "$.target"),
+            (r#"{"target":[1,null,{"x":2}]}"#, "$.target"),
+            (r#"{"target":{"nested":[1,2]}}"#, "$.target"),
+            (r#"{"target":false}"#, "$.target"),
+            (r#"{"target":1,"target":"last"}"#, "$.target"),
+            (r#"{"t\u0061rget":0}"#, "$.target"),
+            (r#"{"other":42}"#, "$.target"),
+            (r#"{"nested":{"target":5}}"#, "$.nested.target"),
+        ] {
+            let result = evaluate(&[
+                Value::Text(document.into()), Value::Text(path.into()),
+            ]).unwrap();
+            let doc = json_path::parse(document).unwrap();
+            let expected = match json_path::lookup(Some(&doc), path).unwrap() {
+                None => Value::Null,
+                Some(serde_json::Value::Null) => Value::Text("NULL".into()),
+                Some(serde_json::Value::String(_)) => Value::Text("STRING".into()),
+                Some(serde_json::Value::Array(_)) => Value::Text("ARRAY".into()),
+                Some(serde_json::Value::Object(_)) => Value::Text("OBJECT".into()),
+                Some(serde_json::Value::Number(_)) => Value::Text("NUMBER".into()),
+                Some(serde_json::Value::Bool(_)) => Value::Text("BOOLEAN".into()),
+            };
+            assert_eq!(result, expected, "{document} {path}");
+        }
+    }
+
+    #[test]
+    fn selected_field_never_skips_corruption_in_unselected_values() {
+        for invalid in [
+            r#"{"target":1,"broken":[1,,2]}"#,
+            r#"{"target":null} trailing"#,
+            r#"{"broken":[1,],"target":null}"#,
+        ] {
+            assert!(evaluate(&[
+                Value::Text(invalid.into()), Value::Text("$.target".into()),
+            ]).is_err(), "{invalid}");
+        }
     }
 }

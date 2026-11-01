@@ -32,6 +32,41 @@ impl<'de> Deserialize<'de> for RootArrayLength {
 
 // Count unique root object keys, matching serde_json::Map's overwrite
 // behavior for duplicate keys, without retaining nested JSON value trees.
+// Most JSON object keys have no escapes. Borrow them from the input
+// document rather than allocating one String per member.
+struct BorrowedObjectKey<'de>(std::borrow::Cow<'de, str>);
+
+impl<'de> Deserialize<'de> for BorrowedObjectKey<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
+        -> std::result::Result<Self, D::Error>
+    {
+        struct KeyVisitor;
+        impl<'de> Visitor<'de> for KeyVisitor {
+            type Value = BorrowedObjectKey<'de>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object member name")
+            }
+            fn visit_borrowed_str<E: serde::de::Error>(self, value: &'de str)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(BorrowedObjectKey(std::borrow::Cow::Borrowed(value)))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(BorrowedObjectKey(std::borrow::Cow::Owned(value.to_owned())))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String)
+                -> std::result::Result<Self::Value, E>
+            {
+                Ok(BorrowedObjectKey(std::borrow::Cow::Owned(value)))
+            }
+        }
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
 struct RootObjectSize(usize);
 
 impl<'de> Deserialize<'de> for RootObjectSize {
@@ -50,8 +85,8 @@ impl<'de> Deserialize<'de> for RootObjectSize {
                 -> std::result::Result<Self::Value, A::Error>
             {
                 let mut names = HashSet::new();
-                while let Some(name) = map.next_key::<String>()? {
-                    names.insert(name);
+                while let Some(name) = map.next_key::<BorrowedObjectKey<'de>>()? {
+                    names.insert(name.0);
                     map.next_value::<IgnoredAny>()?;
                 }
                 Ok(RootObjectSize(names.len()))
@@ -273,5 +308,32 @@ mod streaming_json_size_tests {
             assert_eq!(json_size(&[Value::Text(text.into())]).unwrap(),
                 Value::Integer(count));
         }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_json_size_object_key_regressions {
+    use super::*;
+
+    #[test]
+    fn escaped_and_unescaped_keys_have_identical_distinct_semantics() {
+        let doc = r#"{"alpha":1,"\\u0061lpha":2,"é":3,"\\u00e9":4,"🙂":5,"\\uD83D\\uDE42":6}"#;
+        // Build actual escaped JSON key literals without changing string contents.
+        let document = doc.replace("\\\\u", "\\u");
+        assert_eq!(json_size(&[Value::Text(document)]).unwrap(), Value::Integer(3));
+        assert_eq!(json_size(&[Value::Text(r#"{"x":1,"x":2,"y":null}"#.into())])
+            .unwrap(), Value::Integer(2));
+    }
+
+    #[test]
+    fn large_flat_objects_match_dom_key_count_without_retaining_value_trees() {
+        let entries = (0..10_000).map(|n| format!(r#""key_{n}":{{"nested":[1,2,3]}}"#))
+            .collect::<Vec<_>>().join(",");
+        let document = format!("{{{entries}}}");
+        let expected = json_path::parse(&document).unwrap().as_object().unwrap().len();
+        assert_eq!(json_size(&[Value::Text(document)]).unwrap(),
+            Value::Integer(expected as i64));
+        assert!(json_size(&[Value::Text(r#"{"x":0} trailing"#.into())]).is_err());
+        assert_eq!(json_size(&[Value::Null]).unwrap(), Value::Null);
     }
 }
