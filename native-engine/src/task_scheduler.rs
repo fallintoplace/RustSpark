@@ -797,8 +797,8 @@ mod worker_reclaim_index_regressions {
     fn assert_active_index_matches_statuses(scheduler: &TaskScheduler) {
         let mut expected = HashMap::<u64, HashSet<u64>>::new();
         for (&id, task) in &scheduler.tasks {
-            if let TaskStatus::Leased { worker, .. } = task.status {
-                expected.entry(worker).or_default().insert(id);
+            if let TaskStatus::Leased { worker, .. } = &task.status {
+                expected.entry(*worker).or_default().insert(id);
             }
         }
         assert_eq!(scheduler.by_worker, expected);
