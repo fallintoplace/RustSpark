@@ -31,6 +31,12 @@ fn round(args: &[Value]) -> Result<Value> {
         if number.abs() > f64::MAX / scale { return super::finite(number); }
         (number * scale).round() / scale
     } else {
+        // Above 2^53 times the decimal unit, every adjacent f64 is
+        // already farther apart than the requested rounding precision.
+        // Divide/multiply would only introduce an unrelated 1-ULP error.
+        if number.abs() >= scale * (1u64 << 53) as f64 {
+            return super::finite(number);
+        }
         (number / scale).round() * scale
     };
     super::finite(result)
@@ -101,5 +107,29 @@ mod large_finite_round_float_tests {
         assert_eq!(round(&[Value::Float(f64::MAX), Value::Integer(2)]).unwrap(), Value::Float(f64::MAX));
         assert_eq!(round(&[Value::Float(-f64::MAX), Value::Integer(15)]).unwrap(), Value::Float(-f64::MAX));
         assert_eq!(round(&[Value::Float(12.345), Value::Integer(2)]).unwrap(), Value::Float(12.35));
+    }
+}
+
+#[cfg(test)]
+mod inexact_large_negative_scale_regressions {
+    use super::*;
+
+    #[test]
+    fn skips_inexact_divide_multiply_when_value_is_already_rounded() {
+        for (value, digits) in [
+            (-3.3036582842864976e239, -1),
+            (2.4560805462934964e260, -3),
+            (6.765823898994833e96, -8),
+            (f64::MAX, -15),
+            (-f64::MAX, -15),
+            (1e100, -2),
+        ] {
+            let result = round(&[Value::Float(value), Value::Integer(digits)]).unwrap();
+            assert_eq!(result, Value::Float(value), "value={value}, digits={digits}");
+        }
+        assert_eq!(round(&[Value::Float(155.0), Value::Integer(-1)]).unwrap(),
+            Value::Float(160.0));
+        assert_eq!(round(&[Value::Float(-155.0), Value::Integer(-1)]).unwrap(),
+            Value::Float(-160.0));
     }
 }
