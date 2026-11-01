@@ -1,5 +1,7 @@
 import unittest
 import io
+import os
+import signal
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -29,6 +31,16 @@ class ArrowStreamCommandTests(unittest.TestCase):
             build_command(" ", csv="a.csv")
         with self.assertRaises(ValueError):
             build_command("SELECT 1", query_timeout=0)
+
+    def test_rejects_invalid_unnamed_and_database_paths_early(self):
+        for invalid in ("", b"data.csv", 123):
+            for flag in ("csv", "parquet", "json_input"):
+                with self.subTest(flag=flag, value=invalid), self.assertRaisesRegex(
+                        ValueError, "Unnamed input paths"):
+                    build_command("SELECT 1", **{flag: invalid})
+            with self.subTest(database_dir=invalid), self.assertRaisesRegex(
+                    ValueError, "database_dir"):
+                build_command("SELECT 1", database_dir=invalid)
 
     def test_named_tables_enable_multi_file_queries(self):
         command = build_command("SELECT * FROM users JOIN orders ON users.id = orders.uid",
@@ -68,7 +80,8 @@ class ArrowStreamCommandTests(unittest.TestCase):
             def wait(self, timeout=None):
                 return 1
 
-        def start(command, *, stdout, stderr):
+        def start(command, *, stdout, stderr, start_new_session):
+            self.assertEqual(start_new_session, os.name == "posix")
             self.assertEqual(stdout, subprocess.PIPE)
             self.assertNotEqual(stderr, subprocess.PIPE)
             self.assertEqual(command[command.index("--database-dir") + 1], "/tmp/my db")
@@ -90,6 +103,37 @@ class ArrowStreamCommandTests(unittest.TestCase):
 
 
 
+class EarlyCloseCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_closing_iterator_kills_child_process_group(self):
+        class FakeProcess:
+            pid = 123456
+            stdout = io.BytesIO()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return -9
+
+        process = FakeProcess()
+        def start(command, *, stdout, stderr, start_new_session):
+            self.assertTrue(start_new_session)
+            self.assertEqual(stdout, subprocess.PIPE)
+            return process
+
+        arrow = SimpleNamespace(ipc=SimpleNamespace(
+            open_stream=lambda stream: nullcontext(iter(["batch"]))
+        ))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", side_effect=start
+        ), patch("stream.os.killpg") as kill_group:
+            batches = iter_arrow_batches("SELECT 1")
+            self.assertEqual(next(batches), "batch")
+            batches.close()
+            kill_group.assert_called_once_with(process.pid, signal.SIGKILL)
+
+
 class NamedInputTextPathTests(unittest.TestCase):
     def test_rejects_bytes_and_empty_named_paths(self):
         for source in (b"events.json", "", None, 123):
@@ -97,6 +141,47 @@ class NamedInputTextPathTests(unittest.TestCase):
                 build_command("SELECT 1", json_tables={"events": source})
         self.assertIn("events=events.json", build_command("SELECT 1", json_tables={"events": "events.json"}))
 
+
+
+class StreamDeadlineTests(unittest.TestCase):
+    def test_process_timeout_is_validated_before_spawning(self):
+        for value in (0, -1, True, float("inf"), float("nan"), "2"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "process_timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=value))
+
+    def test_watchdog_reports_timeout_after_killing_child_group(self):
+        class FakeProcess:
+            pid = 123456
+            stdout = io.BytesIO()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return -9
+
+        class ImmediateTimer:
+            def __init__(self, _timeout, callback):
+                self.callback = callback
+                self.daemon = False
+
+            def start(self):
+                self.callback()
+
+            def cancel(self):
+                pass
+
+        process = FakeProcess()
+        arrow = SimpleNamespace(ipc=SimpleNamespace(open_stream=lambda _stream: nullcontext([])))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", return_value=process
+        ), patch("stream.threading.Timer", ImmediateTimer), patch(
+            "stream.os.killpg"
+        ) as kill_group:
+            with self.assertRaisesRegex(TimeoutError, "process timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=0.01))
+            if os.name == "posix":
+                kill_group.assert_called()
 
 if __name__ == "__main__":
     unittest.main()

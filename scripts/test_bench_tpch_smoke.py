@@ -57,6 +57,19 @@ class SmokeTests(unittest.TestCase):
         rows[0]["median_ms"] = float("nan")
         self.assertFalse(smoke.complete_query_results(rows))
 
+    def test_rejects_non_numeric_and_boolean_smoke_settings(self):
+        invalid = [
+            (True, 2, 120), (float("nan"), 2, 120),
+            (10**500, 2, 120), ("0.01", 2, 120),
+            (0.01, True, 120), (0.01, 2, True),
+            (0.01, 2.0, 120), (0.01, 2, float("nan")),
+        ]
+        for scale, partitions, timeout in invalid:
+            with self.subTest(values=(scale, partitions, timeout)):
+                with self.assertRaises(ValueError):
+                    smoke.commands("rs", Path("fixture"), Path("out.json"),
+                                   scale, partitions, timeout)
+
     def test_rejects_existing_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "must not already exist"):

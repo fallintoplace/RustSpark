@@ -2,8 +2,8 @@ use super::{float_type, Function};
 use crate::{scalar::Value, Error, Result};
 fn positive_argument(value: &Value) -> Result<Option<f64>> {
     let Some(x) = super::number(value)? else { return Ok(None) };
-    if x <= 0.0 {
-        return Err(Error::Execution("logarithm requires positive argument".into()));
+    if !x.is_finite() || x <= 0.0 {
+        return Err(Error::Execution("logarithm requires positive finite argument".into()));
     }
     Ok(Some(x))
 }
@@ -11,7 +11,7 @@ fn positive_argument(value: &Value) -> Result<Option<f64>> {
 fn checked_log(value: &Value, base: Option<f64>) -> Result<Value> {
     let Some(x) = positive_argument(value)? else { return Ok(Value::Null) };
     let result = match base {
-        Some(b) if b > 0.0 && b != 1.0 => x.ln() / b.ln(),
+        Some(b) if b.is_finite() && b > 0.0 && b != 1.0 => x.ln() / b.ln(),
         Some(_) => return Err(Error::Execution("logarithm base must be positive and not one".into())),
         None => x.ln(),
     };
@@ -48,6 +48,27 @@ mod tests {
         assert_eq!(log2(&[Value::Null]).unwrap(), Value::Null);
         assert!(ln(&[Value::Integer(-1)]).is_err());
         assert!(log(&[Value::Integer(1), Value::Integer(8)]).is_err());
+        assert_eq!(log(&[Value::Null, Value::Integer(8)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod nonfinite_logarithm_operand_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_nonfinite_bases_before_returning_a_finite_answer() {
+        for base in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(log(&[Value::Float(base), Value::Float(8.0)]).is_err());
+        }
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(ln(&[Value::Float(value)]).is_err());
+            assert!(log2(&[Value::Float(value)]).is_err());
+        }
+        assert_eq!(
+            log(&[Value::Integer(2), Value::Integer(8)]).unwrap(),
+            Value::Float(3.0),
+        );
         assert_eq!(log(&[Value::Null, Value::Integer(8)]).unwrap(), Value::Null);
     }
 }

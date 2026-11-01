@@ -64,6 +64,12 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(partial["full_22_query_suite"])
         self.assertIsNone(partial["geometric_mean_baseline_over_candidate"])
 
+    def test_huge_numeric_inputs_fail_with_validation_errors(self):
+        with self.assertRaisesRegex(ValueError, "Invalid median"):
+            regress.medians(report((1, 10**500)))
+        with self.assertRaisesRegex(ValueError, "Regression threshold"):
+            regress.compare(report((1, 1)), report((1, 2)), max_regression=10**500)
+
     def test_rejects_failed_and_invalid_samples(self):
         with self.assertRaises(ValueError):
             regress.medians({"results": [{"id": 1, "status": "error"}]})
@@ -80,6 +86,17 @@ class RegressionTests(unittest.TestCase):
         new["results"][0]["result_sha256"] = "b" * 64
         with self.assertRaisesRegex(ValueError, "result_sha256 mismatch"):
             regress.compare(old, new)
+
+    def test_rejects_nonfinite_ratio_even_when_samples_are_finite(self):
+        for baseline, candidate in ((1e-308, 1e308), (1e308, 1e-308)):
+            with self.subTest(baseline=baseline), self.assertRaisesRegex(ValueError, "ratio"):
+                regress.compare(report((1, baseline)), report((1, candidate)))
+
+    def test_rounding_never_erases_small_positive_ratios(self):
+        faster = regress.compare(report((1, 1.0)), report((1, 0.000001)))
+        self.assertEqual(faster["results"][0]["ratio"], 0.000001)
+        slower = regress.compare(report((1, 0.000001)), report((1, 1.0)))
+        self.assertEqual(slower["results"][0]["speedup"], 0.000001)
 
     def test_reports_absolute_latency_delta_and_speedup(self):
         result = regress.compare(report((1, 20.0)), report((1, 5.0)))
