@@ -512,3 +512,39 @@ mod literal_no_match_replace_tests {
         ]).unwrap(), Value::Text("XXX".into()));
     }
 }
+
+#[cfg(test)]
+mod bounded_capture_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_expansion_agrees_with_regex_capture_format() {
+        let re = regex_support::compile(r"(?P<word>[a-z]+)([0-9]+)").unwrap();
+        let captures = re.captures("abc123").unwrap();
+        for replacement in [
+            "", "$0", "$1", "$2", "${1}", "$word", "${word}",
+            "$1a", "${1}a", "$missing", "${missing}", "$$", "$$$1",
+            "$", "${", "${}", "${1", "$-x", "é🙂-$2/$word-$$",
+        ] {
+            let mut expected = String::new();
+            captures.expand(replacement, &mut expected);
+            let mut actual = String::new();
+            append_bounded_expansion(&captures, replacement, &mut actual).unwrap();
+            assert_eq!(actual, expected, "replacement={replacement:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_large_captures_are_stopped_before_expansion_allocations() {
+        let input = "a".repeat(1_000_000);
+        let replacement = "$0".repeat(100);
+        assert!(matches!(evaluate(&[
+            Value::Text(input), Value::Text("(a+)".into()),
+            Value::Text(replacement),
+        ]), Err(Error::Execution(message)) if message.contains("budget")));
+        assert_eq!(evaluate(&[
+            Value::Text("ab12".into()), Value::Text(r"(?P<letters>[a-z]+)([0-9]+)".into()),
+            Value::Text("${letters}:$2:$$: $missing".into()),
+        ]).unwrap(), Value::Text("ab:12:$: ".into()));
+    }
+}
