@@ -139,7 +139,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "GREATEST" => greatest::output_type(args, schema),
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
         "BIT_COUNT" => bit_count::output_type(args, schema),
-        "BIT_GET" => bit_get::output_type(args, schema),
+        "BIT_GET" | "GETBIT" => bit_get::output_type(args, schema),
         "TYPEOF" => {
             check_arity(name, args, 1, 1)?;
             if !matches!(&args[0], Expr::Literal(Value::Null)) {
@@ -181,7 +181,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "GREATEST" => greatest::eval(args, batch, row),
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
         "BIT_COUNT" => bit_count::eval(args, batch, row),
-        "BIT_GET" => bit_get::eval(args, batch, row),
+        "BIT_GET" | "GETBIT" => bit_get::eval(args, batch, row),
         "TYPEOF" => {
             let kind = match &args[0] {
                 Expr::Literal(Value::Null) => "void",

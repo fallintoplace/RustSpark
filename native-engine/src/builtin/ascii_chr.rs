@@ -36,6 +36,7 @@ fn chr(args: &[Value]) -> Result<Value> {
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "ascii", min_args: 1, max_args: 1, result_type: ascii_type, call: ascii },
     Function { name: "chr", min_args: 1, max_args: 1, result_type: chr_type, call: chr },
+    Function { name: "char", min_args: 1, max_args: 1, result_type: chr_type, call: chr },
 ];
 #[cfg(test)]
 mod tests {
@@ -67,5 +68,19 @@ mod zero_alloc_integer_ascii_tests {
             assert_eq!(ascii(&[Value::Integer(value)]).unwrap(), Value::Integer(expected));
         }
         assert_eq!(ascii(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod char_alias_sql_tests {
+    use crate::{catalog::Catalog, executor, scalar::Value, sql};
+    #[test]
+    fn char_matches_chr_in_native_sql() {
+        let plan = sql::parse_sql("SELECT CHAR(65), CHAR(321), CHR(65)").unwrap();
+        let values = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(values, vec![vec![
+            Value::Text("A".into()), Value::Text("A".into()), Value::Text("A".into()),
+        ]]);
+        assert!(crate::builtin::supports("char"));
     }
 }
