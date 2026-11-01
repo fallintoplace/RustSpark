@@ -24,7 +24,9 @@ func scanNDJSONRows(input io.Reader, visit func(map[string]any) error) error {
         if len(scanner.Bytes()) > maxNDJSONRowBytes {
             return fmt.Errorf("RustSpark NDJSON row %d exceeds %d bytes", index, maxNDJSONRowBytes)
         }
-        line := bytes.TrimSpace(scanner.Bytes())
+        // JSON permits only space, tab, LF and CR outside values.
+        // bytes.TrimSpace also removes Unicode whitespace, hiding invalid data.
+        line := bytes.Trim(scanner.Bytes(), " \t\r\n")
         if len(line) == 0 {
             return fmt.Errorf("RustSpark NDJSON row %d is blank", index)
         }
