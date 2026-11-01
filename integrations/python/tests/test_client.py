@@ -340,3 +340,41 @@ class SourcePathPreflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamingStderrBudgetRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "helper uses POSIX shell")
+    def test_large_stderr_keeps_only_the_last_diagnostics(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text("""#!/bin/sh
+i=0
+while [ "$i" -lt 2000 ]; do
+  printf '0123456789abcdefghij' >&2
+  i=$((i + 1))
+done
+printf '\\nLAST-ERROR-MARKER\\n' >&2
+exit 7
+""", encoding="utf-8")
+            script.chmod(0o700)
+            with self.assertRaisesRegex(RustSparkError, "LAST-ERROR-MARKER"):
+                list(RustSpark(binary=str(script)).iter_rows("SELECT 1"))
+
+    @unittest.skipUnless(os.name == "posix", "helper uses POSIX shell")
+    def test_exact_row_budget_excludes_newline_but_total_counts_it(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text("""#!/bin/sh
+printf '%s\\n' '{"a":1}'
+""", encoding="utf-8")
+            script.chmod(0o700)
+            client = RustSpark(binary=str(script))
+            self.assertEqual(list(client.iter_rows("SELECT 1", max_row_bytes=7)), [{"a": 1}])
+            with self.assertRaisesRegex(RustSparkError, "max_row_bytes"):
+                list(client.iter_rows("SELECT 1", max_row_bytes=6))
+            with self.assertRaisesRegex(RustSparkError, "max_output_bytes"):
+                list(client.iter_rows("SELECT 1", max_row_bytes=7, max_output_bytes=7))
