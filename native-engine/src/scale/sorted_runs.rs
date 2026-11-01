@@ -65,7 +65,10 @@ fn flush_pending_run(
     let file = super::private_files::create_private(&path)?;
     runs.files.push(path);
     let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone())?;
-    writer.write_batch(&sorted)?;
+    // A run is bounded by row count, but large TEXT rows can exceed
+    // a single spill record's 64 MiB wire limit. Keep the sorted run in
+    // one file and split only its on-disk batch windows.
+    writer.write_batch_bounded(&sorted, max_rows_per_run)?;
     writer.finish()?;
     Ok(())
 }
@@ -344,5 +347,44 @@ mod owned_large_sorted_run_windows {
         assert_eq!(rows, expected);
         drop(runs);
         fs::remove_dir(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bounded_sorted_spill_run_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use crate::scale::spill::SpillReader;
+    use std::{fs, fs::File, io::BufReader};
+
+    #[test]
+    fn sorted_run_windows_keep_wide_text_and_stable_key_order() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-sort-wire-windows-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..29_i64).rev()
+            .map(|n| vec![
+                Value::Integer(n % 7), Value::Text(format!("id-{n}-{}", "é".repeat(2048))),
+            ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
+        let runs = write_sorted_runs(
+            [Ok(batch)], schema, &keys, &directory, 29, &QueryControl::default(),
+        ).unwrap();
+        assert_eq!(runs.files().len(), 1);
+        let mut reader = SpillReader::new(
+            BufReader::new(File::open(&runs.files()[0]).unwrap()), 29,
+        ).unwrap();
+        let mut rows = Vec::new();
+        while let Some(part) = reader.next_batch().unwrap() { rows.extend(part.rows().unwrap()); }
+        assert_eq!(rows, expected);
+        drop(runs);
+        fs::remove_dir(directory).unwrap();
     }
 }
