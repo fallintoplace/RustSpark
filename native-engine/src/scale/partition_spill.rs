@@ -360,7 +360,7 @@ impl PartitionWriter {
         }
         let mut owned = self.owned.take().expect("active partition writer");
         if !include_empty {
-            owned.paths = owned.paths.into_iter().enumerate()
+            owned.paths = std::mem::take(&mut owned.paths).into_iter().enumerate()
                 .filter_map(|(index, path)| self.initialized[index].then_some(path))
                 .collect();
         }
