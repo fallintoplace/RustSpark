@@ -903,11 +903,11 @@ mod borrowed_group_aggregate_regressions {
         let mut bytes = 0usize;
         for row in 0..batches.num_rows() {
             add_to_state(&mut minimum, &AggregateOp::Min(expression.clone()), &batches, row,
-                &mut bytes, 32 * 1024 * 1024).unwrap();
+                Some(0), &mut bytes, 32 * 1024 * 1024).unwrap();
             add_to_state(&mut maximum, &AggregateOp::Max(expression.clone()), &batches, row,
-                &mut bytes, 32 * 1024 * 1024).unwrap();
+                Some(0), &mut bytes, 32 * 1024 * 1024).unwrap();
             add_to_state(&mut distinct, &AggregateOp::CountDistinct(expression.clone()), &batches, row,
-                &mut bytes, 32 * 1024 * 1024).unwrap();
+                Some(0), &mut bytes, 32 * 1024 * 1024).unwrap();
         }
         assert!(matches!(minimum, State::Min(Some(Value::Text(ref text))) if text.starts_with('a')));
         assert!(matches!(maximum, State::Max(Some(Value::Text(ref text))) if text.starts_with('z')));
@@ -923,7 +923,7 @@ mod borrowed_group_aggregate_regressions {
         let op = AggregateOp::Min(Expr::Column("missing".into()));
         let mut state = new_state(&op).unwrap();
         let mut bytes = 0;
-        assert!(add_to_state(&mut state, &op, &batch, 0, &mut bytes, 1024).is_err());
+        assert!(add_to_state(&mut state, &op, &batch, 0, None, &mut bytes, 1024).is_err());
     }
 }
 
