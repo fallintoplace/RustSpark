@@ -17,6 +17,11 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
     if url.len() > MAX_URL_BYTES {
         return Err(Error::Execution("PARSE_URL input exceeds 16 MiB budget".into()));
     }
+    if part.len() > 64 {
+        // A malformed component must not allocate an unbounded uppercase
+        // diagnostic even when the URL itself is tiny.
+        return Err(Error::Execution("PARSE_URL component exceeds 64-byte budget".into()));
+    }
     let parsed = match Url::parse(url) {
         Ok(parsed) => Some(parsed),
         Err(ParseError::RelativeUrlWithoutBase) => {
@@ -249,5 +254,28 @@ mod opaque_uri_path_regressions {
             Value::Text("relative/file.csv".into()));
         assert_eq!(extract("relative/file.csv?q=1", "FILE", None).unwrap(),
             Value::Text("relative/file.csv?q=1".into()));
+    }
+}
+
+#[cfg(test)]
+mod oversized_component_budget_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_large_component_names_before_error_formatting() {
+        let long = Value::Text("Z".repeat(100_000));
+        for func in [parse_url as fn(&[Value]) -> Result<Value>, try_parse_url] {
+            assert!(matches!(func(&[
+                Value::Text("https://example.com".into()), long.clone(),
+            ]), Err(Error::Execution(_))));
+        }
+        assert_eq!(parse_url(&[
+            Value::Text("https://example.com/path".into()),
+            Value::Text("HOST".into()),
+        ]).unwrap(), Value::Text("example.com".into()));
+        assert!(matches!(parse_url(&[
+            Value::Text("https://example.com".into()),
+            Value::Text("UNKNOWN".into()),
+        ]), Err(Error::Type(_))));
     }
 }

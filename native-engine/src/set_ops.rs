@@ -221,12 +221,19 @@ fn right_counts<'a>(
     columns: &'a [&'a [Value]], rows: usize, max_distinct_keys: usize,
 ) -> Result<HashMap<BorrowedSetRow<'a>, usize>> {
     let mut counts = HashMap::<BorrowedSetRow<'a>, usize>::new();
-    for row in 0..rows {
+    let mut row = 0usize;
+    while row < rows {
         let key = BorrowedSetRow { columns, row };
+        // Count a consecutive run with borrowed comparisons before hashing.
+        let mut end = row + 1;
+        while end < rows && key == (BorrowedSetRow { columns, row: end }) {
+            end += 1;
+        }
+        let multiplicity = end - row;
         let at_limit = counts.len() >= max_distinct_keys;
         match counts.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let next = entry.get().checked_add(1)
+                let next = entry.get().checked_add(multiplicity)
                     .ok_or_else(|| Error::Execution("set row multiplicity overflow".into()))?;
                 *entry.get_mut() = next;
             }
@@ -234,9 +241,10 @@ fn right_counts<'a>(
                 if at_limit {
                     return Err(Error::Execution("multiset distinct-key budget exceeded".into()));
                 }
-                entry.insert(1);
+                entry.insert(multiplicity);
             }
         }
+        row = end;
     }
     Ok(counts)
 }
@@ -731,5 +739,34 @@ mod adaptive_set_membership_regressions {
             intersect_distinct(&left, &reference_right).unwrap());
         assert_eq!(except_distinct(&left, &right).unwrap(),
             except_distinct(&left, &reference_right).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod clustered_multiset_run_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn multi_column_runs_preserve_duplicate_counts_and_first_rows() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("name", DataType::Text, true),
+        ]).unwrap();
+        let a = vec![Value::Integer(1), Value::Text("é".repeat(250))];
+        let b = vec![Value::Null, Value::Null];
+        let c = vec![Value::Integer(2), Value::Text("other".into())];
+        let unseen = vec![Value::Integer(9), Value::Text("absent".into())];
+        let left_rows = [vec![a.clone(); 5], vec![b.clone(); 2], vec![c.clone()]].concat();
+        let right_rows = [
+            vec![a.clone(); 3], vec![b.clone()],
+            vec![unseen; 400],
+        ].concat();
+        let left = Batch::from_rows(schema.clone(), left_rows).unwrap();
+        let right = Batch::from_rows(schema, right_rows).unwrap();
+        assert_eq!(intersect_all(&left, &right).unwrap().rows().unwrap(),
+            [vec![a.clone(); 3], vec![b.clone()]].concat());
+        assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(),
+            [vec![a; 2], vec![b], vec![c]].concat());
     }
 }

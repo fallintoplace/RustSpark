@@ -76,6 +76,7 @@ pub fn sort_range(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> 
 /// expressions are still evaluated on every row before sorting.
 fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Result<Vec<usize>> {
     for key in keys {
+        key.expression.validate_budget()?;
         key.expression.output_type(batch.schema())?;
     }
     if end - start <= 1 &&
@@ -580,5 +581,26 @@ mod index_tiebreak_sort_regressions {
         let constant = [SortKey::ascending(Expr::Literal(Value::Integer(7)))];
         assert_eq!(sort(&input, &constant).unwrap().rows().unwrap(), rows);
         assert_eq!(sort_owned(input, &constant).unwrap().rows().unwrap(), rows);
+    }
+}
+
+#[cfg(test)]
+mod direct_sort_expression_budget_tests {
+    use super::*;
+    use crate::schema::Schema;
+
+    #[test]
+    fn oversized_keys_are_rejected_in_all_sort_entry_points() {
+        let empty = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut expression = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { expression = Expr::Not(Box::new(expression)); }
+        let keys = [SortKey::ascending(expression)];
+        for result in [
+            sort(&empty, &keys),
+            sort_owned(empty.clone(), &keys),
+            sort_range(&empty, &keys, 0, 0),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
     }
 }

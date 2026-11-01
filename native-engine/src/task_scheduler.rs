@@ -191,14 +191,15 @@ impl TaskScheduler {
             TaskStatus::Leased { worker, attempt, until }
                 if *worker == lease.worker && *attempt == lease.attempt && *until > now => {
                 let old_until = *until;
-                let new_until = deadline.max(old_until);
+                // A heartbeat cannot shorten an existing lease. Skip state
+                // mutations entirely when it does not advance the deadline.
+                // Large workers frequently heartbeat before their TTL ends.
+                if deadline <= old_until { return true; }
                 task.status = TaskStatus::Leased {
-                    worker: lease.worker, attempt: lease.attempt, until: new_until,
+                    worker: lease.worker, attempt: lease.attempt, until: deadline,
                 };
-                if new_until != old_until {
-                    self.deadlines.remove(&(old_until, lease.task));
-                    self.deadlines.insert((new_until, lease.task));
-                }
+                self.deadlines.remove(&(old_until, lease.task));
+                self.deadlines.insert((deadline, lease.task));
                 true
             }
             _ => false,
@@ -903,5 +904,46 @@ mod capped_worker_leases_regressions {
         assert_eq!(reclaimed[0].task, 10);
         assert_ne!(stale.attempt, reclaimed[0].attempt);
         assert!(!scheduler.finish_at(&stale, true, now + Duration::from_secs(2)));
+    }
+}
+
+#[cfg(test)]
+mod early_lease_heartbeat_noop_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_early_heartbeats_do_not_modify_deadline_indexes() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new(0..512, 3).unwrap();
+        let leases = scheduler.lease_many_capped(
+            42, now, Duration::from_secs(30), 512, 512,
+        ).unwrap();
+        let original = scheduler.deadlines.clone();
+        for second in 0..10 {
+            let active = scheduler.renew_many(
+                &leases, now + Duration::from_secs(second),
+                Duration::from_secs(2),
+            ).unwrap();
+            assert!(active.into_iter().all(|accepted| accepted));
+            assert_eq!(scheduler.deadlines, original);
+        }
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(29)), 0);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(30)), 512);
+        assert_eq!(scheduler.counts().queued, 512);
+    }
+
+    #[test]
+    fn a_later_heartbeat_extends_once_without_losing_task_state() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([7], 2).unwrap();
+        let lease = scheduler.lease(1, now, Duration::from_secs(5)).unwrap().unwrap();
+        assert!(scheduler.renew(&lease, now + Duration::from_secs(2),
+            Duration::from_secs(12)).unwrap());
+        let extended = scheduler.deadlines.clone();
+        assert!(scheduler.renew(&lease, now + Duration::from_secs(3),
+            Duration::from_secs(2)).unwrap());
+        assert_eq!(scheduler.deadlines, extended);
+        assert_eq!(scheduler.expire_leases(now + Duration::from_secs(6)), 0);
+        assert!(scheduler.finish_at(&lease, true, now + Duration::from_secs(13)));
     }
 }
