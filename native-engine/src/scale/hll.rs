@@ -888,3 +888,33 @@ mod dense_wire_batch_harmonic_tests {
         assert_eq!(empty, incoming);
     }
 }
+
+#[cfg(test)]
+mod dense_wire_batch_accumulator_tests {
+    use super::*;
+
+    #[test]
+    fn dense_payload_merge_matches_sketch_merge_and_is_idempotent() {
+        let mut left = HyperLogLog::new();
+        let mut right = HyperLogLog::new();
+        for value in 0..100_000 {
+            if value % 3 == 0 { left.add(&Value::Integer(value)); }
+            if value % 2 == 0 { right.add(&Value::Integer(value)); }
+        }
+        let mut reference = left.clone();
+        reference.merge(&right);
+        let mut wire = WIRE_HEADER.to_vec();
+        wire.extend_from_slice(&right.registers);
+        let mut actual = left;
+        actual.merge_wire_bytes(&wire).unwrap();
+        assert_eq!(actual, reference);
+        actual.merge_wire_bytes(&wire).unwrap();
+        assert_eq!(actual, reference);
+        assert_eq!(actual.estimate(), reference.estimate());
+
+        // A bad final register cannot apply earlier valid updates.
+        *wire.last_mut().unwrap() = u8::MAX;
+        assert!(actual.merge_wire_bytes(&wire).is_err());
+        assert_eq!(actual, reference);
+    }
+}
