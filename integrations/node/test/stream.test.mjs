@@ -75,7 +75,7 @@ shellTest("queryRows handles many complete rows and a split Unicode row", async 
     'while [ "$n" -lt 1000 ]; do printf \'{"n":%s}\\n\' "$n"; n=$((n + 1)); done',
     String.raw`printf '{"value":"é'`,
     "sleep 0.02",
-    String.raw`printf '🙂"}\\n'`,
+    String.raw`printf '🙂"}\n'`,
   ].join("\n") + "\n";
   await withScript(script, async (client) => {
     const rows = [];
