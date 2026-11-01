@@ -27,6 +27,24 @@ fn should_replace(
 }
 
 impl ColumnStatistics {
+    // Public statistics can be loaded or assembled by callers. Malformed
+    // bounds must not become optimizer pruning hints during a merge.
+    fn validate(&self) -> Result<()> {
+        if self.nulls > self.rows {
+            return Err(Error::Execution("invalid NULL count".into()));
+        }
+        let has_values = self.rows > self.nulls;
+        if self.min.is_some() != has_values || self.max.is_some() != has_values {
+            return Err(Error::Execution("invalid statistics extrema".into()));
+        }
+        if let (Some(min), Some(max)) = (&self.min, &self.max) {
+            if !matches!(min.sql_compare(max)?, Some(Ordering::Less | Ordering::Equal)) {
+                return Err(Error::Execution("invalid statistics bounds".into()));
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_batch(batch: &Batch, name: &str) -> Result<Self> {
         let column = batch.schema().column(name)?;
         let values = batch.column(column)?;
@@ -165,9 +183,8 @@ impl ColumnStatistics {
     pub fn merge(&mut self, other: &Self) -> Result<()> {
         // Combined counters can appear valid even when one input summary
         // reports more NULLs than rows. Reject it before changing state.
-        if self.nulls > self.rows || other.nulls > other.rows {
-            return Err(Error::Execution("invalid NULL count".into()));
-        }
+        self.validate()?;
+        other.validate()?;
         let rows = self.rows.checked_add(other.rows)
             .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
         let nulls = self.nulls.checked_add(other.nulls)
@@ -791,3 +808,48 @@ mod direct_float_multibatch_stats_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod invalid_statistics_merge_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_corrupt_bounds_without_mutating_existing_summary() {
+        let original = ColumnStatistics {
+            rows: 3, nulls: 1,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(9)),
+        };
+        let invalid = [
+            ColumnStatistics { rows: 0, nulls: 0,
+                min: Some(Value::Integer(1)), max: Some(Value::Integer(1)) },
+            ColumnStatistics { rows: 2, nulls: 2,
+                min: Some(Value::Integer(1)), max: Some(Value::Integer(1)) },
+            ColumnStatistics { rows: 2, nulls: 0,
+                min: Some(Value::Integer(7)), max: Some(Value::Integer(3)) },
+            ColumnStatistics { rows: 1, nulls: 0,
+                min: Some(Value::Integer(1)), max: None },
+            ColumnStatistics { rows: 1, nulls: 0,
+                min: Some(Value::Null), max: Some(Value::Null) },
+        ];
+        for source in invalid {
+            let mut target = original.clone();
+            assert!(target.merge(&source).is_err());
+            assert_eq!(target, original);
+        }
+    }
+
+    #[test]
+    fn accepts_empty_all_null_and_populated_statistic_merges() {
+        let mut summary = ColumnStatistics::default();
+        summary.merge(&ColumnStatistics::default()).unwrap();
+        summary.merge(&ColumnStatistics { rows: 3, nulls: 3,
+            min: None, max: None }).unwrap();
+        assert_eq!(summary.rows, 3);
+        assert_eq!(summary.nulls, 3);
+        summary.merge(&ColumnStatistics { rows: 2, nulls: 1,
+            min: Some(Value::Integer(-4)), max: Some(Value::Integer(-4)) }).unwrap();
+        assert_eq!((summary.rows, summary.nulls), (5, 4));
+        assert_eq!(summary.min, Some(Value::Integer(-4)));
+        assert_eq!(summary.max, Some(Value::Integer(-4)));
+    }
+}

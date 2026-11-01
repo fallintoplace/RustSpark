@@ -156,6 +156,28 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
     }
 }
 
+
+/// Calculate REPLACE output bytes before a potentially large allocation.
+fn replace_bounded(text: &str, pattern: &str, replacement: &str) -> Result<String> {
+    const MAX_OUTPUT: usize = 16 * 1024 * 1024;
+    let matches = if pattern.is_empty() {
+        text.chars().count().saturating_add(1)
+    } else {
+        text.match_indices(pattern).count()
+    };
+    let removed = pattern.len().checked_mul(matches)
+        .ok_or_else(|| Error::Execution("REPLACE output length overflow".into()))?;
+    let added = replacement.len().checked_mul(matches)
+        .ok_or_else(|| Error::Execution("REPLACE output length overflow".into()))?;
+    let result_len = text.len().checked_sub(removed)
+        .and_then(|length| length.checked_add(added))
+        .ok_or_else(|| Error::Execution("REPLACE output length overflow".into()))?;
+    if result_len > MAX_OUTPUT {
+        return Err(Error::Execution("REPLACE result exceeds native 16 MiB budget".into()));
+    }
+    Ok(text.replace(pattern, replacement))
+}
+
 pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => Ok(args.iter().find(|value| !value.is_null()).cloned().unwrap_or(Value::Null)),
@@ -225,16 +247,20 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                     .map_or(text.len(), |(offset, _)| offset);
                 let end_byte = text[start_byte..].char_indices().nth(count)
                     .map_or(text.len(), |(offset, _)| start_byte + offset);
-                Ok(Value::Text(text[start_byte..end_byte].into()))
+                let selected = &text[start_byte..end_byte];
+                if selected.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("SUBSTRING result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(selected.into()))
             }
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
         },
         "REPLACE" => match args {
             [Value::Text(text), Value::Text(pattern)] =>
-                Ok(Value::Text(text.replace(pattern.as_str(), ""))),
+                Ok(Value::Text(replace_bounded(text, pattern, "")?)),
             [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] =>
-                Ok(Value::Text(text.replace(pattern.as_str(), replacement))),
+                Ok(Value::Text(replace_bounded(text, pattern, replacement)?)),
             [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("REPLACE requires two or three text arguments".into())),
@@ -300,7 +326,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("CONTAINS requires text".into())),
         },
         "REVERSE" => match args {
-            [Value::Text(value)] => Ok(Value::Text(value.chars().rev().collect())),
+            [Value::Text(value)] => {
+                if value.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("REVERSE result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(value.chars().rev().collect()))
+            },
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("REVERSE requires text".into())),
         },
@@ -427,5 +458,60 @@ mod borrowed_extrema_tests {
         assert_eq!(evaluate("GREATEST", &args).unwrap(), Value::Text("zz".into()));
         assert_eq!(evaluate("LEAST", &args).unwrap(), Value::Text("a".into()));
         assert_eq!(evaluate("GREATEST", &[Value::Null, Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_replace_output_regressions {
+    use super::*;
+    #[test]
+    fn replacement_expansion_is_checked_before_allocation() {
+        assert_eq!(replace_bounded("aéa", "a", "🙂").unwrap(), "🙂é🙂");
+        assert_eq!(replace_bounded("é🙂", "", "X").unwrap(), "XéX🙂X");
+        assert_eq!(replace_bounded("banana", "na", "").unwrap(), "ba");
+        assert_eq!(replace_bounded("abc", "z", "x").unwrap(), "abc");
+        assert!(replace_bounded("a".repeat(1_000_000).as_str(), "a", &"b".repeat(32)).is_err());
+        assert!(replace_bounded("x", "", &"b".repeat(9 * 1024 * 1024)).is_err());
+        assert_eq!(evaluate("REPLACE", &[
+            Value::Text("xy".into()), Value::Text("".into()), Value::Text("-".into()),
+        ]).unwrap(), Value::Text("-x-y-".into()));
+    }
+}
+
+#[cfg(test)]
+mod reverse_result_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn reverse_is_unicode_safe_and_does_not_allocate_oversized_output() {
+        assert_eq!(evaluate("REVERSE", &[Value::Text("a🙂é".into())]).unwrap(),
+            Value::Text("é🙂a".into()));
+        assert_eq!(evaluate("REVERSE", &[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate("REVERSE", &[
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
+        ]).is_err());
+        let exact = "x".repeat(16 * 1024 * 1024);
+        assert_eq!(evaluate("REVERSE", &[Value::Text(exact.clone())]).unwrap(),
+            Value::Text(exact));
+    }
+}
+
+#[cfg(test)]
+mod substring_result_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn limits_cloned_result_but_allows_small_slices_of_large_text() {
+        let source = "a".repeat(16 * 1024 * 1024 + 1);
+        assert!(evaluate("SUBSTRING", &[
+            Value::Text(source.clone()), Value::Integer(1),
+            Value::Integer(i64::MAX),
+        ]).is_err());
+        assert_eq!(evaluate("SUBSTRING", &[
+            Value::Text(source), Value::Integer(1), Value::Integer(1),
+        ]).unwrap(), Value::Text("a".into()));
+        assert_eq!(evaluate("SUBSTRING", &[
+            Value::Text("é🙂z".into()), Value::Integer(2), Value::Integer(1),
+        ]).unwrap(), Value::Text("🙂".into()));
     }
 }

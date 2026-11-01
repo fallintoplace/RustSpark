@@ -216,9 +216,11 @@ impl Parser {
     }
 
     fn expression(&mut self, min_precedence: u8) -> Result<Expr> {
-        const MAX_DEPTH: usize = 256;
+        // Recursive parsing has sizable stack frames on all three CI platforms.
+        // Bound nesting well below the smallest native test thread stack.
+        const MAX_DEPTH: usize = 20;
         if self.expression_depth >= MAX_DEPTH {
-            return Err(Error::Parse("SQL expression nesting exceeds 256 levels".into()));
+            return Err(Error::Parse("SQL expression nesting exceeds 20 levels".into()));
         }
         self.expression_depth += 1;
         let result = self.parse_expression(min_precedence);
@@ -943,12 +945,45 @@ impl Parser {
         Ok(plan)
     }
 
+    // Substituting a CTE clones the logical plan. Reusing a prior CTE twice
+    // per level can grow exponentially despite the token and CTE count limits.
+    fn checked_cte_nodes(plan: &Plan) -> Result<()> {
+        const MAX_CTE_NODES: usize = 4096;
+        let mut nodes = 0usize;
+        let mut pending = vec![plan];
+        while let Some(node) = pending.pop() {
+            nodes += 1;
+            if nodes > MAX_CTE_NODES {
+                return Err(Error::Parse("CTE expansion exceeds 4096 plan nodes".into()));
+            }
+            match node {
+                Plan::OneRow | Plan::Scan { .. } | Plan::Values { .. } => {}
+                Plan::Filter { input, .. } | Plan::Project { input, .. }
+                | Plan::Aggregate { input, .. } | Plan::Sort { input, .. }
+                | Plan::Limit { input, .. } | Plan::Distinct { input } =>
+                    pending.push(input),
+                Plan::Join { left, right, .. } | Plan::CrossJoin { left, right }
+                | Plan::UnionAll { left, right } | Plan::Intersect { left, right }
+                | Plan::IntersectAll { left, right } | Plan::Except { left, right }
+                | Plan::ExceptAll { left, right } => {
+                    pending.push(left);
+                    pending.push(right);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn scan_or_cte(&self, name: String) -> Result<Plan> {
         let normalized = name.to_ascii_lowercase();
         if self.active_cte.as_ref() == Some(&normalized) {
             return Err(Error::Unsupported("recursive CTE references are not supported".into()));
         }
-        Ok(self.ctes.get(&normalized).cloned().unwrap_or_else(|| Plan::scan(name)))
+        if let Some(plan) = self.ctes.get(&normalized) {
+            Self::checked_cte_nodes(plan)?;
+            return Ok(plan.clone());
+        }
+        Ok(Plan::scan(name))
     }
 
     fn parse_ctes(&mut self) -> Result<()> {
@@ -995,6 +1030,7 @@ impl Parser {
                 ).collect();
                 plan = plan.project(renames);
             }
+            Self::checked_cte_nodes(&plan)?;
             self.ctes.insert(normalized, plan);
             if !self.take_symbol(',') { break; }
         }
@@ -1604,6 +1640,33 @@ mod consolidated_sql_numeric_regressions {
 }
 
 #[cfg(test)]
+mod cte_expansion_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_cte_substitution_cannot_expand_exponentially() {
+        let mut sql = String::from("WITH c0 AS (SELECT 1 AS n)");
+        for index in 1..=14 {
+            let prior = index - 1;
+            sql.push_str(&format!(
+                ", c{index} AS (SELECT n FROM c{prior} INTERSECT SELECT n FROM c{prior})"
+            ));
+        }
+        sql.push_str(" SELECT n FROM c14");
+        let error = parse_sql(&sql).unwrap_err().to_string();
+        assert!(error.contains("CTE expansion"), "{error}");
+    }
+
+    #[test]
+    fn small_shared_ctes_remain_usable() {
+        let plan = parse_sql(
+            "WITH c0 AS (SELECT 1 AS n), c1 AS              (SELECT n FROM c0 INTERSECT SELECT n FROM c0)              SELECT n FROM c1"
+        ).unwrap();
+        assert!(matches!(plan, Plan::Project { .. }));
+    }
+}
+
+#[cfg(test)]
 mod spark_expression_depth_safety_tests {
     use super::*;
 
@@ -1623,6 +1686,22 @@ mod spark_expression_depth_safety_tests {
         let deep = format!("SELECT {}TRUE{} FROM t",
             "NOT (".repeat(350), ")".repeat(350));
         assert!(parse_sql(&deep).is_err());
+    }
+
+    #[test]
+    fn parser_rejects_boundary_depth_before_stack_exhaustion() {
+        // The outer expression call consumes one level in addition to each pair.
+        for parentheses in [0, 16, 19] {
+            let sql = format!("SELECT {}1{} FROM t",
+                "(".repeat(parentheses), ")".repeat(parentheses));
+            assert!(parse_sql(&sql).is_ok(), "{parentheses}");
+        }
+        for parentheses in [20, 48, 64, 400] {
+            let sql = format!("SELECT {}1{} FROM t",
+                "(".repeat(parentheses), ")".repeat(parentheses));
+            let error = parse_sql(&sql).unwrap_err().to_string();
+            assert!(error.contains("nesting"), "{error}");
+        }
     }
 }
 

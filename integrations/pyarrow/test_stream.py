@@ -255,5 +255,47 @@ class ArrowIPCByteBudgetTests(unittest.TestCase):
             if os.name == "posix":
                 kill_group.assert_called_once_with(FakeProcess.pid, signal.SIGKILL)
 
+
+class NamedSQLParameterTests(unittest.TestCase):
+    def test_typed_params_have_stable_order_and_bounded_utf8_values(self):
+        build = lambda params: build_command("SELECT $a", named_params=params)
+        command = build({"z": "int64:9", "a": "utf8:hello world"})
+        pairs = [command[i+1] for i, arg in enumerate(command[:-1]) if arg == "--named-param"]
+        self.assertEqual(pairs, ["a=utf8:hello world", "z=int64:9"])
+        self.assertIn("a=utf8:hello world", command)
+        self.assertIn("p=" + "utf8:" + "é" * 4093 + "a",
+                      build({"p": "utf8:" + "é" * 4093 + "a"}))
+        for invalid in (
+            {"bad-name": "int64:1"},
+            {"x": "untyped"},
+            {"x": 123},
+            {"x": "utf8:" + "é" * 4093 + "aa"},
+            {"p" + str(i): "int64:1" for i in range(65)},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                build(invalid)
+
+    def test_stream_forwards_named_parameters(self):
+        captured = []
+        class FakeProcess:
+            stdout = io.BytesIO()
+            def wait(self, timeout=None):
+                return 0
+            def poll(self):
+                return 0
+        def launch(args, **kwargs):
+            captured.extend(args)
+            return FakeProcess()
+        fake_arrow = SimpleNamespace(ipc=SimpleNamespace(
+            open_stream=lambda source: nullcontext([])
+        ))
+        with patch.dict(sys.modules, {"pyarrow": fake_arrow}), patch(
+            "stream.subprocess.Popen", side_effect=launch
+        ):
+            self.assertEqual(list(iter_arrow_batches("SELECT $p",
+                named_params={"p": "int64:7"})), [])
+        self.assertIn("p=int64:7", captured)
+
+
 if __name__ == "__main__":
     unittest.main()

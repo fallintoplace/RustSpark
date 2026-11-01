@@ -39,6 +39,7 @@ fn validate_depth(plan: &Plan, max_depth: usize) -> Result<()> {
     let mut visited = 0usize;
     while let Some((node, depth)) = pending.pop() {
         visited += 1;
+        node.validate_expressions()?;
         if visited > MAX_NODES {
             return Err(Error::Execution("query plan exceeds maximum node count".into()));
         }

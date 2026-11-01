@@ -16,10 +16,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(uppercase_bounded(text, 16 * 1024 * 1024)?))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "ucase", min_args: 1, max_args: 1,
-    result_type: output, call: evaluate,
-}];
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "ucase", min_args: 1, max_args: 1, result_type: output, call: evaluate },
+    Function { name: "upper", min_args: 1, max_args: 1, result_type: output, call: evaluate },
+];
 
 #[cfg(test)]
 mod tests {
@@ -45,5 +45,22 @@ mod bounded_uppercase_tests {
         assert!(uppercase_bounded("straße", 5).is_err());
         assert_eq!(uppercase_bounded("abc", 3).unwrap(), "ABC");
         assert!(uppercase_bounded("abcd", 3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod upper_alias_bound_tests {
+    use super::*;
+    use crate::{batch::Batch, expr::Expr, schema::Schema};
+
+    #[test]
+    fn upper_alias_reuses_bounded_case_expansion() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 1).unwrap();
+        assert_eq!(crate::functions::evaluate("UPPER", &[
+            Expr::Literal(Value::Text("straße".into())),
+        ], &batch, 0).unwrap(), Value::Text("STRASSE".into()));
+        assert!(crate::functions::evaluate("UPPER", &[
+            Expr::Literal(Value::Text("B".repeat(16 * 1024 * 1024 + 1))),
+        ], &batch, 0).is_err());
     }
 }
