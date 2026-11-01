@@ -143,7 +143,17 @@ impl RunMerger {
         for key in &self.keys {
             let left = self.runs[a].peek(key.column).expect("active run has a key");
             let right = self.runs[b].peek(key.column).expect("active run has a key");
-            match compare_value(left, right, key) {
+            // Composite numeric keys are common in ORDER BY and merge joins.
+            // Avoid dynamic SQL scalar comparison for two non-NULL integers.
+            // Nullable and heterogeneous keys retain the generic comparator.
+            let order = match (left, right) {
+                (Value::Integer(x), Value::Integer(y)) => {
+                    let cmp = x.cmp(y);
+                    if key.descending { cmp.reverse() } else { cmp }
+                }
+                _ => compare_value(left, right, key),
+            };
+            match order {
                 Ordering::Less => return true,
                 Ordering::Greater => return false,
                 Ordering::Equal => {}
@@ -612,5 +622,46 @@ mod bounded_merge_output_reservation_regressions {
         assert!(merge.next().is_none());
         assert!(merge.stopped);
         assert!(merge.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod composite_integer_heap_fast_path_tests {
+    use super::*;
+    use crate::{scale::sorted_runs::write_sorted_runs, schema::{DataType, Field}};
+    use std::fs;
+
+    #[test]
+    fn mixed_order_nullable_composite_keys_match_full_sort() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-composite-merge-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("group", DataType::Integer, true),
+            Field::new("rank", DataType::Integer, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..121i64).rev().map(|n| vec![
+            if n % 13 == 0 { Value::Null } else { Value::Integer(n % 7) },
+            if n % 17 == 0 { Value::Null } else { Value::Integer(n % 11) },
+            Value::Integer(n),
+        ]).collect()).unwrap();
+        for (descending, nulls_first) in [(false, true), (true, false)] {
+            let keys = [
+                SortKey::ascending(Expr::Column("group".into())),
+                SortKey { expression: Expr::Column("rank".into()), descending, nulls_first },
+            ];
+            let expected = crate::sort::sort(&input, &keys).unwrap().rows().unwrap();
+            let runs = write_sorted_runs([Ok(input.clone())], schema.clone(), &keys,
+                &dir, 5, &QueryControl::default()).unwrap();
+            let actual = RunMerger::new(runs.files(), schema.clone(), &keys, 3, 8,
+                QueryControl::default()).unwrap().collect::<Result<Vec<_>>().unwrap()
+                .iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            drop(runs);
+        }
+        fs::remove_dir(dir).unwrap();
     }
 }
