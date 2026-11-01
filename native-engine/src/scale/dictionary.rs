@@ -22,15 +22,40 @@ impl DictionaryColumn {
             return Err(Error::Execution("dictionary row limit exceeded".into()));
         }
         let mut seen = HashMap::<&str, u32>::new();
+        // Repeated adjacent values are common after SORT and partitioning.
+        // Remember the borrowed last value to avoid hashing it once per row.
+        let mut previous: Option<(&str, u32)> = None;
         let mut dictionary = Vec::new();
         let mut indices = Vec::with_capacity(batch.num_rows());
         let mut bytes = 0usize;
         for value in batch.column(index)? {
             match value {
-                Value::Null => indices.push(None),
+                Value::Null => {
+                    indices.push(None);
+                    previous = None;
+                }
                 Value::Text(text) => {
-                    let id = if let Some(id) = seen.get(text.as_str()) {
-                        *id
+                    let key = text.as_str();
+                    let id = if let Some((last, code)) = previous {
+                        if last == key {
+                            code
+                        } else if let Some(&code) = seen.get(key) {
+                            code
+                        } else {
+                            if dictionary.len() >= max_distinct {
+                                return Err(Error::Execution("dictionary cardinality limit exceeded".into()));
+                            }
+                            bytes = bytes.checked_add(text.len())
+                                .filter(|total| *total <= max_dictionary_bytes)
+                                .ok_or_else(|| Error::Execution("dictionary byte limit exceeded".into()))?;
+                            let code = u32::try_from(dictionary.len())
+                                .map_err(|_| Error::Execution("dictionary ID overflow".into()))?;
+                            dictionary.push(text.clone());
+                            seen.insert(key, code);
+                            code
+                        }
+                    } else if let Some(&code) = seen.get(key) {
+                        code
                     } else {
                         if dictionary.len() >= max_distinct {
                             return Err(Error::Execution("dictionary cardinality limit exceeded".into()));
@@ -38,12 +63,13 @@ impl DictionaryColumn {
                         bytes = bytes.checked_add(text.len())
                             .filter(|total| *total <= max_dictionary_bytes)
                             .ok_or_else(|| Error::Execution("dictionary byte limit exceeded".into()))?;
-                        let id = u32::try_from(dictionary.len())
+                        let code = u32::try_from(dictionary.len())
                             .map_err(|_| Error::Execution("dictionary ID overflow".into()))?;
                         dictionary.push(text.clone());
-                        seen.insert(text.as_str(), id);
-                        id
+                        seen.insert(key, code);
+                        code
                     };
+                    previous = Some((key, id));
                     indices.push(Some(id));
                 }
                 _ => return Err(Error::Type("dictionary value is not text".into())),
@@ -608,5 +634,43 @@ mod consuming_dictionary_decode_regressions {
             .unwrap().into_decoded_with_budget(0).unwrap().is_empty());
         assert_eq!(DictionaryColumn::from_batch(&nulls, "v", 0, 0, 2)
             .unwrap().into_decoded().unwrap(), vec![Value::Null, Value::Null]);
+    }
+}
+
+#[cfg(test)]
+mod run_dictionary_encoding_tests {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn repeated_wide_keys_with_nulls_and_changes_roundtrip() {
+        let a = "one 🦀".repeat(2048);
+        let b = "two 🦀".repeat(2048);
+        let mut values = Vec::new();
+        for _ in 0..200 { values.push(Value::Text(a.clone())); }
+        values.push(Value::Null);
+        for _ in 0..200 { values.push(Value::Text(b.clone())); }
+        for _ in 0..200 { values.push(Value::Text(a.clone())); }
+        let schema = Schema::new(vec![Field::new("value", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema, values.iter().cloned().map(|v| vec![v]).collect()).unwrap();
+        let encoded = DictionaryColumn::from_batch(
+            &batch, "value", 2, a.len() + b.len(), values.len()
+        ).unwrap();
+        assert_eq!(encoded.distinct_count(), 2);
+        assert_eq!(encoded.encoded_string_bytes(), a.len() + b.len());
+        assert_eq!(encoded.decode().unwrap(), values);
+        assert!(DictionaryColumn::from_batch(
+            &batch, "value", 1, a.len() + b.len(), values.len()
+        ).is_err());
+    }
+
+    #[test]
+    fn alternating_runs_do_not_assign_different_codes_to_equal_keys() {
+        let values = ["a", "a", "b", "a", "b", "b", "a"];
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema, values.iter()
+            .map(|value| vec![Value::Text((*value).to_owned())]).collect()).unwrap();
+        let encoded = DictionaryColumn::from_batch(&batch, "key", 2, 2, 7).unwrap();
+        assert_eq!(encoded.indices, vec![Some(0), Some(0), Some(1), Some(0), Some(1), Some(1), Some(0)]);
     }
 }
