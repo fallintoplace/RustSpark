@@ -30,7 +30,10 @@ where I: Iterator<Item = Result<Vec<Value>>>
         Self::with_byte_budget(input, schema, batch_rows, MAX_BATCH_BYTES)
     }
 
-    fn with_byte_budget(
+    /// Configure an independent retained-byte budget per output batch.
+    /// This supports small-memory pipelines without changing the global
+    /// 64 MiB default or the valid-prefix/error streaming contract.
+    pub fn with_byte_budget(
         input: I, schema: Schema, batch_rows: usize, max_batch_bytes: usize,
     ) -> Result<Self> {
         let minimum = schema.len().checked_mul(std::mem::size_of::<Value>())
@@ -572,6 +575,46 @@ mod row_batch_retained_capacity_regressions {
             .unwrap();
         assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
         assert!(stream.next().unwrap().unwrap_err().to_string().contains("byte budget"));
+        assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_row_batch_budget_api_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn limits_live_batches_by_byte_budget_even_for_unbounded_row_requests() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let width = std::mem::size_of::<Value>();
+        let rows = (0..5).map(|n| Ok(vec![Value::Integer(n)]));
+        let batches = RowBatcher::with_byte_budget(rows, schema.clone(),
+            usize::MAX, width * 2).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(),
+            vec![2, 2, 1]);
+        assert_eq!(batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(),
+            (0..5).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>());
+        assert!(RowBatcher::with_byte_budget(
+            std::iter::empty::<Result<Vec<Value>>>(), schema, 4, width - 1,
+        ).is_err());
+    }
+
+    #[test]
+    fn rejected_oversized_row_is_terminal_after_a_valid_prefix() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let width = std::mem::size_of::<Value>();
+        let mut huge = String::with_capacity(512);
+        huge.push('x');
+        let input = [
+            Ok(vec![Value::Text("small".into())]),
+            Ok(vec![Value::Text(huge)]),
+        ];
+        let mut stream = RowBatcher::with_byte_budget(input.into_iter(), schema,
+            10, width + 64).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
     }
 }
