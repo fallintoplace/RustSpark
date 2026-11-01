@@ -5,7 +5,7 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
-    builder::StringBuilder, types::{Int8Type, Int16Type, Int32Type, Int64Type,
+    builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
         UInt8Type, UInt16Type, UInt32Type, UInt64Type},
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
@@ -16,6 +16,10 @@ use crate::{
     schema::{DataType, Field, Schema},
     Error, Result,
 };
+
+fn needs_large_utf8(payload_bytes: usize) -> bool {
+    payload_bytes > i32::MAX as usize
+}
 
 pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
     let mut fields = Vec::new();
@@ -51,20 +55,36 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
                 fields.push(ArrowField::new(&field.name, ArrowType::Float64, field.nullable));
             }
             DataType::Text => {
-                let text_bytes = input.iter().fold(0usize, |total, value| match value {
-                    Value::Text(value) => total.saturating_add(value.len()),
-                    _ => total,
-                });
-                let mut builder = StringBuilder::with_capacity(input.len(), text_bytes);
-                for value in input {
-                    match value {
-                        Value::Null => builder.append_null(),
-                        Value::Text(v) => builder.append_value(v),
-                        _ => return Err(Error::Type("invalid string column".into())),
+                let text_bytes = input.iter().try_fold(0usize, |total, value| match value {
+                    Value::Text(value) => total.checked_add(value.len()),
+                    _ => Some(total),
+                }).ok_or_else(|| Error::Execution("Arrow text offset overflow".into()))?;
+                // Utf8 stores 32-bit offsets, while native text columns can
+                // exceed that limit. Select LargeUtf8 before appending values
+                // so the builder cannot panic on a valid wide native batch.
+                if needs_large_utf8(text_bytes) {
+                    let mut builder = LargeStringBuilder::with_capacity(input.len(), text_bytes);
+                    for value in input {
+                        match value {
+                            Value::Null => builder.append_null(),
+                            Value::Text(v) => builder.append_value(v),
+                            _ => return Err(Error::Type("invalid string column".into())),
+                        }
                     }
+                    columns.push(Arc::new(builder.finish()));
+                    fields.push(ArrowField::new(&field.name, ArrowType::LargeUtf8, field.nullable));
+                } else {
+                    let mut builder = StringBuilder::with_capacity(input.len(), text_bytes);
+                    for value in input {
+                        match value {
+                            Value::Null => builder.append_null(),
+                            Value::Text(v) => builder.append_value(v),
+                            _ => return Err(Error::Type("invalid string column".into())),
+                        }
+                    }
+                    columns.push(Arc::new(builder.finish()));
+                    fields.push(ArrowField::new(&field.name, ArrowType::Utf8, field.nullable));
                 }
-                columns.push(Arc::new(builder.finish()));
-                fields.push(ArrowField::new(&field.name, ArrowType::Utf8, field.nullable));
             }
         }
     }
@@ -606,5 +626,32 @@ mod varied_dictionary_key_widths {
             Value::Text("first".into()),
             Value::Text("last".into()),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod arrow_text_offset_width_regressions {
+    use super::*;
+
+    #[test]
+    fn switches_builder_width_exactly_at_i32_offset_limit() {
+        assert!(!needs_large_utf8(0));
+        assert!(!needs_large_utf8(i32::MAX as usize));
+        assert!(needs_large_utf8(i32::MAX as usize + 1));
+        assert!(needs_large_utf8(usize::MAX));
+    }
+
+    #[test]
+    fn small_nullable_text_preserves_standard_utf8_arrow_layout() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Text("🦀".into())], vec![Value::Null],
+            vec![Value::Text(String::new())],
+        ]).unwrap();
+        let encoded = to_arrow(&source).unwrap();
+        assert_eq!(encoded.schema().field(0).data_type(), &ArrowType::Utf8);
+        assert_eq!(from_arrow(&encoded).unwrap(), source);
     }
 }
