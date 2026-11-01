@@ -140,6 +140,7 @@ impl<W: Write> SpillWriter<W> {
         let columns = (0..self.schema.len())
             .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
         let mut start = 0;
+        let mut emitted = false;
         while start < batch.num_rows() {
             let mut end = start;
             let mut bytes = 4usize;
@@ -150,6 +151,9 @@ impl<W: Write> SpillWriter<W> {
                         Value::Integer(_) | Value::Float(_) => 8,
                         Value::Text(text) => {
                             if text.len() > MAX_TEXT_BYTES {
+                                // Earlier wire windows may already be on disk.
+                                // Never allow finish() to commit their valid prefix.
+                                if emitted { self.poisoned = true; }
                                 return Err(Error::Execution("spill text value too long".into()));
                             }
                             text.len() + 4
@@ -160,6 +164,7 @@ impl<W: Write> SpillWriter<W> {
                         .ok_or_else(|| Error::Execution("spill batch byte overflow".into()))?;
                 }
                 if row_bytes > max_bytes - 4 {
+                    if emitted { self.poisoned = true; }
                     return Err(Error::Execution("spill row exceeds byte limit".into()));
                 }
                 if row_bytes > max_bytes - bytes { break; }
@@ -167,6 +172,7 @@ impl<W: Write> SpillWriter<W> {
                 end += 1;
             }
             self.write_batch_range(batch, start, end)?;
+            emitted = true;
             start = end;
         }
         Ok(())
@@ -1234,6 +1240,38 @@ mod spill_writer_poisoning_regressions {
         assert!(writer.write_batch(&batch).is_err());
         assert!(writer.write_batch(&batch).unwrap_err().to_string().contains("poisoned"));
         assert!(writer.finish().unwrap_err().to_string().contains("poisoned"));
+    }
+}
+
+#[cfg(test)]
+mod spill_bounded_writer_partial_admission_tests {
+    use super::*;
+
+    #[test]
+    fn late_oversized_row_poisoned_writer_cannot_commit_a_valid_prefix() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("ok".into())],
+            vec![Value::Text("x".repeat(256))],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        assert!(writer.write_batch_bounded_with_budget(&batch, 1, 64).is_err());
+        assert!(writer.finish().is_err());
+    }
+
+    #[test]
+    fn invalid_first_row_without_emitted_windows_can_be_retried() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let oversized = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(256))],
+        ]).unwrap();
+        let valid = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("ok".into())],
+        ]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        assert!(writer.write_batch_bounded_with_budget(&oversized, 1, 64).is_err());
+        writer.write_batch_bounded_with_budget(&valid, 1, 64).unwrap();
+        assert!(writer.finish().is_ok());
     }
 }
 
