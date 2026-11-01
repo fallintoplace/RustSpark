@@ -188,14 +188,19 @@ def summarize(samples, requests, row_count, warmup, repeat):
 def competitor_median_ratios(reports, engine):
     if "rustspark" not in reports or engine not in reports:
         return {}
-    return {
-        name: (
-            round(reports[engine][name]["median_ms"]
-                  / reports["rustspark"][name]["median_ms"], 3)
-            if reports["rustspark"][name]["median_ms"] > 0 else None
-        )
-        for name in WORKLOADS
-    }
+    ratios = {}
+    for name in WORKLOADS:
+        baseline = reports["rustspark"][name]["median_ms"]
+        candidate = reports[engine][name]["median_ms"]
+        if baseline == 0:
+            ratios[name] = None
+            continue
+        ratio = candidate / baseline
+        if not math.isfinite(ratio) or ratio < 0:
+            raise ValueError(f"Nonfinite warm benchmark ratio for {name}")
+        rounded = round(ratio, 3)
+        ratios[name] = rounded if rounded > 0 or ratio == 0 else float(f"{ratio:.3g}")
+    return ratios
 
 
 def benchmark(binary, engines, rows, warmup, repeat, timeout, partitions, master):
