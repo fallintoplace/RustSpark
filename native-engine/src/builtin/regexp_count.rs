@@ -269,7 +269,8 @@ mod ascii_alpha_class_count_regressions {
     use super::*;
     #[test]
     fn ascii_letter_runs_match_nonoverlapping_regex_counts() {
-        for text in ["", "ABCxyz", "a1b2C", "éabc🙂Z", "東京", "a\nb", "aa--BB", "a".repeat(100_000).as_str()] {
+        let long_run = "a".repeat(100_000);
+        for text in ["", "ABCxyz", "a1b2C", "éabc🙂Z", "東京", "a\nb", "aa--BB", long_run.as_str()] {
             for pattern in ["[A-Za-z]", "[A-Za-z]+"] {
                 let actual = evaluate(&[Value::Text(text.into()), Value::Text(pattern.into())]).unwrap();
                 let expected = regex_support::compile(pattern).unwrap().find_iter(text).count() as i64;
