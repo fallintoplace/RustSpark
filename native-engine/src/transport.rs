@@ -167,7 +167,10 @@ impl AttemptTracker {
         let Some(tasks) = self.by_stage.remove(&stage) else { return 0; };
         let retired = tasks.len();
         for task in tasks {
-            debug_assert!(self.attempts.remove(&(stage, task)).is_some());
+            // Removal must run in release builds too. Only the invariant
+            // assertion may be compiled out by debug_assert!.
+            let removed = self.attempts.remove(&(stage, task));
+            debug_assert!(removed.is_some());
         }
         retired
     }
