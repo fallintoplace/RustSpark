@@ -11,6 +11,19 @@ spec.loader.exec_module(bench)
 
 
 class BenchmarkHarnessTests(unittest.TestCase):
+    def test_native_cold_query_does_not_use_stream_only_schema_flag(self):
+        output = mock.Mock(stdout='{"n": 2}\n')
+        with mock.patch.object(bench.subprocess, "run", return_value=output) as run:
+            elapsed, _, rows = bench.execute(
+                "rs", pathlib.Path("input.csv"), "SELECT COUNT(*) AS n FROM data", 5
+            )
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:3], ["rs", "--csv", "input.csv"])
+        self.assertNotIn("--csv-schema", arguments)
+        self.assertNotIn("--stream", arguments)
+        self.assertEqual(rows, [{"n": 2}])
+        self.assertGreaterEqual(elapsed, 0)
+
     def test_benchmark_row_is_repeatable(self):
         self.assertEqual(bench.benchmark_row(0), ("city_0", 0))
         self.assertEqual(bench.benchmark_row(16), ("city_0", 92))

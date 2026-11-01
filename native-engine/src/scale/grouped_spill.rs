@@ -283,11 +283,14 @@ fn aggregate_shard_with_budget(
     let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
     let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut retained_key_state_bytes = 0usize;
+    // Keep the prior *owned group index* across spill batch boundaries.
+    // A hot clustered key often spans many small on-disk chunks, and the
+    // retained group key is stable even after the decoded batch is dropped.
+    let mut previous_group: Option<usize> = None;
     while let Some(batch) = reader.next_batch()? {
         control.check()?;
         let key_columns = keys.iter().map(|&index| batch.column(index))
             .collect::<Result<Vec<_>>>()?;
-        let mut previous_group: Option<usize> = None;
         for row in 0..batch.num_rows() {
             // Repeated adjacent groups are typical after hash-partitioned
             // sorting. Probe their retained key before hashing every cell.
@@ -392,7 +395,9 @@ where I: IntoIterator<Item = Result<Batch>>
         control.check()?;
         writer.write_batch(&incoming?, control)?;
     }
-    let files = writer.finish()?;
+    // Grouped aggregation does not need empty hash-bucket placeholders.
+    // Preserve complete shard lists only for join consumers.
+    let files = writer.finish_sparse()?;
     let mut result = GroupFiles { paths: Vec::new(), schema: output_schema.clone() };
     for shard in files.paths() {
         control.check()?;
@@ -1090,5 +1095,71 @@ mod cloned_distinct_budget_regressions {
             &mut keys, &mut bytes, &small, &mut retained, 256,
         ).unwrap());
         assert!(retained > 0);
+    }
+}
+
+#[cfg(test)]
+mod cross_chunk_group_cache_regressions {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static TEST_FILE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn clustered_nullable_unicode_keys_span_tiny_spill_batches() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-group-cross-chunk-{}-{}", std::process::id(),
+            TEST_FILE.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("group.rspill");
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let first_key = Value::Text("🙂cluster".repeat(1_000));
+        let second_key = Value::Text("é".repeat(600));
+        let items = vec![
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("amount".into())), "sum"),
+            AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("amount".into())), "distinct"),
+        ];
+        let result_schema = output_schema(
+            &schema, &[("key".into(), "key".into())], &items,
+        ).unwrap();
+        let file = super::super::private_files::create_private(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        for row in 0..150 {
+            let key = if row < 90 { first_key.clone() }
+                else if row < 120 { Value::Null }
+                else { second_key.clone() };
+            let amount = if row < 90 { Value::Integer(2) }
+                else if row < 120 { Value::Null }
+                else { Value::Integer(3) };
+            let batch = Batch::from_rows(schema.clone(), vec![vec![key, amount]]).unwrap();
+            writer.write_batch(&batch).unwrap();
+            if row % 17 == 0 {
+                writer.write_batch(&Batch::empty(schema.clone())).unwrap();
+            }
+        }
+        writer.finish().unwrap();
+        let grouped = aggregate_shard_with_budget(
+            &path, &schema, &[0], &items, &result_schema,
+            3, 1, MAX_GROUP_KEY_STATE_BYTES, &QueryControl::default(),
+        ).unwrap();
+        let results = grouped.rows().unwrap().into_iter().map(|mut row| {
+            let key = row.remove(0);
+            (key, row)
+        }).collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results.get(&first_key), Some(&vec![
+            Value::Integer(180), Value::Integer(1),
+        ]));
+        assert_eq!(results.get(&second_key), Some(&vec![
+            Value::Integer(90), Value::Integer(1),
+        ]));
+        assert_eq!(results.get(&Value::Null), Some(&vec![
+            Value::Null, Value::Integer(0),
+        ]));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

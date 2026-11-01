@@ -19,6 +19,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { 1 };
     if group > 100 { return Err(Error::Execution("REGEXP_EXTRACT group budget exceeded".into())); }
     regex_support::check_input(text)?;
+    if group == 0 && (pattern == "[0-9]" || pattern == "[0-9]+") {
+        // Group zero is the entire match. ASCII digit classes cannot capture,
+        // so find the first matching byte run without compiling a regex.
+        let Some(start) = text.bytes().position(|byte| byte.is_ascii_digit())
+            else { return Ok(Value::Text(String::new())); };
+        let width = if pattern == "[0-9]" { 1 } else {
+            text[start..].bytes().take_while(u8::is_ascii_digit).count()
+        };
+        return Ok(Value::Text(text[start..start + width].to_owned()));
+    }
     if group == 0 && !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
     {
@@ -188,6 +198,33 @@ mod anchored_literal_group_zero_regressions {
         ]).unwrap(), Value::Null);
         assert!(evaluate(&[
             Value::Text("foo".into()), Value::Text("^foo".into()),
+        ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod regexp_extract_zero_digit_regressions {
+    use super::*;
+
+    #[test]
+    fn group_zero_matches_regex_with_unicode_prefix_and_no_digits() {
+        for text in ["", "a123b45", "é🙂420東京", "no digits", "٩٨٧", "0", "\n12\n"] {
+            for pattern in ["[0-9]", "[0-9]+"] {
+                let actual = evaluate(&[
+                    Value::Text(text.into()),
+                    Value::Text(pattern.into()),
+                    Value::Integer(0),
+                ]).unwrap();
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or("", |matched| matched.as_str()).to_owned();
+                assert_eq!(actual, Value::Text(expected), "text={text:?} pattern={pattern}");
+            }
+        }
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text("[0-9]+".into()), Value::Integer(0),
+        ]).unwrap(), Value::Null);
+        assert!(evaluate(&[
+            Value::Text("123".into()), Value::Text("[0-9]+".into()),
         ]).is_err());
     }
 }
