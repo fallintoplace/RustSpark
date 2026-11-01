@@ -15,6 +15,7 @@ import (
     "strconv"
     "strings"
     "time"
+    "unicode/utf8"
 )
 
 var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\z`)
@@ -159,6 +160,11 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
         if ctx.Err() != nil { return nil, ctx.Err() }
         if output.exceeded || stderr.exceeded { return nil, errOutputLimit }
         return nil, fmt.Errorf("RustSpark query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+    }
+    // encoding/json repairs invalid UTF-8 by inserting U+FFFD. Reject
+    // malformed source bytes rather than silently altering SQL text values.
+    if !utf8.Valid(output.Bytes()) {
+        return nil, errors.New("RustSpark JSON output is not valid UTF-8")
     }
     return decodeRows(&output)
 }
