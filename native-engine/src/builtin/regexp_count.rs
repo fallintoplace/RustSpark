@@ -25,6 +25,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(i64::from(text.starts_with(prefix))));
         }
     }
+    if pattern == ".+" {
+        // Greedy dot-plus matches each maximal nonempty run excluding LF.
+        // Counting those runs avoids compiling or traversing regex matches.
+        let runs = text.split('\n').filter(|part| !part.is_empty()).count();
+        return i64::try_from(runs).map(Value::Integer)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+    }
     if pattern == "." {
         // Rust regex dot matches a Unicode scalar except LF by default.
         let count = text.chars().filter(|&ch| ch != '\n').count();
@@ -154,5 +161,28 @@ mod anchored_literal_count_fast_path_tests {
                     "pattern={pattern:?} text={text:?}");
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod dot_plus_regexp_count_differential_tests {
+    use super::*;
+
+    #[test]
+    fn greedy_runs_match_regex_find_iter_for_unicode_and_newlines() {
+        let regex = regex_support::compile(".+").unwrap();
+        for input in ["", "\n", "abc", "abc\ndef", "\n\nabc\n\n", "é🙂\n東京", "\r\n", "A\r\nB\nC"] {
+            assert_eq!(evaluate(&[
+                Value::Text(input.into()), Value::Text(".+".into()),
+            ]).unwrap(), Value::Integer(regex.find_iter(input).count() as i64), "{input:?}");
+        }
+        let huge = "é🙂x\n".repeat(40_000);
+        assert_eq!(evaluate(&[
+            Value::Text(huge), Value::Text(".+".into()),
+        ]).unwrap(), Value::Integer(40_000));
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text(".+".into()),
+        ]).unwrap(), Value::Null);
     }
 }
