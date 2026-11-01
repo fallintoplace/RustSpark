@@ -68,7 +68,7 @@ fn normalize_space(args: &[Value]) -> Result<Value> {
         let mut output = Vec::with_capacity(input.len());
         let mut pending = false;
         for &byte in input.as_bytes() {
-            if byte.is_ascii_whitespace() {
+            if byte.is_ascii_whitespace() || byte == b'\x0b' {
                 pending = !output.is_empty();
             } else {
                 if pending { output.push(b' '); }
@@ -255,6 +255,25 @@ mod ascii_normalize_byte_output_regressions {
         }
         assert_eq!(normalize_space(&[Value::Text("é\u{00A0}界".into())]).unwrap(),
             Value::Text("é 界".into()));
+        assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod vertical_tab_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_and_unicode_paths_agree_with_split_whitespace() {
+        for text in [
+            "", "a\x0bb", "\x0b\t a\x0b b \x0b",
+            "a\x0b\x0bb", "a\x0cb", "éa\x0bb",
+            "é\x0b🙂\x0b東京", "\x0b", "a\r\nb",
+        ] {
+            let expected = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(normalize_space(&[Value::Text(text.into())]).unwrap(),
+                Value::Text(expected), "input={text:?}");
+        }
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
     }
 }
