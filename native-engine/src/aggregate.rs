@@ -88,7 +88,10 @@ impl State {
         }
     }
 
-    fn update(&mut self, op: &AggregateOp, batch: &Batch, row: usize) -> Result<()> {
+    fn update(
+        &mut self, op: &AggregateOp, batch: &Batch, row: usize,
+        total_distinct_bytes: &mut usize, available_distinct_bytes: usize,
+    ) -> Result<()> {
         // Direct column aggregates can borrow the typed cell. Only computed
         // expressions must own a temporary. COUNT and duplicate DISTINCT
         // rows should never clone large TEXT values just to inspect them.
@@ -120,25 +123,28 @@ impl State {
                     if seen.len() >= MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP {
                         return Err(Error::Execution("COUNT DISTINCT key budget exceeded".into()));
                     }
-                    let footprint = 64usize.saturating_add(std::mem::size_of::<Value>())
-                        .saturating_add(match value.as_ref() {
-                            Value::Text(text) => text.len(),
-                            _ => 0,
-                        });
+                    let footprint = distinct_key_footprint(value.as_ref())?;
                     let total = bytes.checked_add(footprint)
                         .filter(|size| *size <= 64 * 1024 * 1024)
                         .ok_or_else(|| Error::Execution(
                             "COUNT DISTINCT byte budget exceeded".into()))?;
+                    let next_total = charge_distinct_size(
+                        *total_distinct_bytes, footprint, available_distinct_bytes)?;
                     seen.insert(value.into_owned());
                     *bytes = total;
+                    *total_distinct_bytes = next_total;
                 }
             }
             Self::Sum(total) => add_sum(total, value.as_ref())?,
             Self::SumDistinct { seen, total } => {
                 if !value.is_null() && !seen.contains(value.as_ref()) {
                     check_distinct_budget(seen)?;
+                    let next_total = charge_distinct_size(
+                        *total_distinct_bytes, distinct_key_footprint(value.as_ref())?,
+                        available_distinct_bytes)?;
                     add_sum(total, value.as_ref())?;
                     seen.insert(value.into_owned());
+                    *total_distinct_bytes = next_total;
                 }
             }
             Self::Avg { sum, compensation, count } =>
@@ -146,8 +152,12 @@ impl State {
             Self::AvgDistinct { seen, sum, compensation, count } => {
                 if !value.is_null() && !seen.contains(value.as_ref()) {
                     check_distinct_budget(seen)?;
+                    let next_total = charge_distinct_size(
+                        *total_distinct_bytes, distinct_key_footprint(value.as_ref())?,
+                        available_distinct_bytes)?;
                     add_avg(sum, compensation, count, value.as_ref())?;
                     seen.insert(value.into_owned());
+                    *total_distinct_bytes = next_total;
                 }
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
@@ -210,6 +220,23 @@ mod borrowed_aggregate_cells_tests {
 }
 
 const MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP: usize = 65_536;
+
+// Every DISTINCT key retains a HashSet entry and a cloned scalar. Charge
+// all groups and all DISTINCT aggregates against one query-scoped budget.
+fn distinct_key_footprint(value: &Value) -> Result<usize> {
+    let payload = match value {
+        Value::Text(text) => text.len(),
+        _ => 0,
+    };
+    64usize.checked_add(std::mem::size_of::<Value>())
+        .and_then(|fixed| fixed.checked_add(payload))
+        .ok_or_else(|| Error::Execution("DISTINCT key footprint overflow".into()))
+}
+
+fn charge_distinct_size(current: usize, footprint: usize, limit: usize) -> Result<usize> {
+    current.checked_add(footprint).filter(|&size| size <= limit)
+        .ok_or_else(|| Error::Execution("aggregate DISTINCT total byte budget exceeded".into()))
+}
 
 fn check_distinct_budget(values: &HashSet<Value>) -> Result<()> {
     if values.len() >= MAX_DISTINCT_NUMERIC_VALUES_PER_GROUP {
@@ -318,6 +345,9 @@ pub fn aggregate_global_stream(
     let schema = global_output_schema(input_schema, items)?;
     let mut states = items.iter().map(|item| State::new(&item.op))
         .collect::<Vec<_>>();
+    // The streaming path rejects DISTINCT during preflight above, so it
+    // never charges this counter. Keep the state transition shared.
+    let mut distinct_bytes = 0usize;
     for next in source {
         check()?;
         let batch = next?;
@@ -327,7 +357,8 @@ pub fn aggregate_global_stream(
         for row in 0..batch.num_rows() {
             if row % 1024 == 0 { check()?; }
             for (state, item) in states.iter_mut().zip(items) {
-                state.update(&item.op, &batch, row)?;
+                state.update(&item.op, &batch, row, &mut distinct_bytes,
+                    MAX_GROUP_KEY_BYTES)?;
             }
         }
     }
@@ -390,6 +421,7 @@ pub fn aggregate_with_limits(
     let mut group_indices: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut groups: Vec<(Vec<Value>, Vec<State>)> = Vec::new();
     let mut retained_group_bytes = 0usize;
+    let mut retained_distinct_bytes = 0usize;
 
     if group_by.is_empty() {
         if max_groups == 0 {
@@ -440,17 +472,19 @@ pub fn aggregate_with_limits(
                     .collect::<Vec<_>>();
                 let bytes = group_key_state_bytes(&owned_key, items.len())?;
                 let next = retained_group_bytes.checked_add(bytes)
+                    .and_then(|size| size.checked_add(retained_distinct_bytes))
                     .filter(|&size| size <= max_key_state_bytes)
                     .ok_or_else(|| Error::Execution("GROUP BY key state byte budget exceeded".into()))?;
                 let index = groups.len();
                 groups.push((owned_key, items.iter().map(|item| State::new(&item.op)).collect()));
                 group_indices.entry(fingerprint).or_default().push(index);
-                retained_group_bytes = next;
+                retained_group_bytes += bytes;
                 index
             }
         };
         for (state, item) in groups[index].1.iter_mut().zip(items) {
-            state.update(&item.op, batch, row)?;
+            state.update(&item.op, batch, row, &mut retained_distinct_bytes,
+                max_key_state_bytes.saturating_sub(retained_group_bytes))?;
         }
     }
     let rows = groups
@@ -829,5 +863,75 @@ mod reused_group_key_allocation_tests {
             assert_eq!(result.value(index, 1).unwrap(),
                 &Value::Integer(if index < 6 { 143 } else { 142 }));
         }
+    }
+}
+
+#[cfg(test)]
+mod aggregate_distinct_global_memory_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn numbers(values: &[i64]) -> Batch {
+        Batch::from_rows(
+            Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap(),
+            values.iter().map(|&value| vec![Value::Integer(value)]).collect(),
+        ).unwrap()
+    }
+
+    #[test]
+    fn distinct_keys_share_the_same_budget_even_with_one_group() {
+        let item = AggregateItem::new(
+            AggregateOp::CountDistinct(Expr::Column("value".into())), "distinct");
+        let base = group_key_state_bytes(&[], 1).unwrap();
+        let entry = distinct_key_footprint(&Value::Integer(1)).unwrap();
+        let budget = base + 2 * entry;
+        let result = aggregate_with_limits(&numbers(&[1, 1, 2, 2]), &[],
+            std::slice::from_ref(&item), 1, budget).unwrap();
+        assert_eq!(result.value(0, 0).unwrap(), &Value::Integer(2));
+        let error = aggregate_with_limits(&numbers(&[1, 2, 3]), &[],
+            &[item], 1, budget).err().unwrap();
+        assert!(error.to_string().contains("DISTINCT total byte budget"));
+    }
+
+    #[test]
+    fn different_distinct_aggregate_states_charge_separately() {
+        let items = [
+            AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("value".into())), "count"),
+            AggregateItem::new(AggregateOp::SumDistinct(Expr::Column("value".into())), "sum"),
+            AggregateItem::new(AggregateOp::AvgDistinct(Expr::Column("value".into())), "avg"),
+        ];
+        let base = group_key_state_bytes(&[], items.len()).unwrap();
+        let entry = distinct_key_footprint(&Value::Integer(8)).unwrap();
+        let input = numbers(&[8, 8, 8]);
+        let result = aggregate_with_limits(&input, &[], &items, 1, base + 3 * entry).unwrap();
+        assert_eq!(result.row(0).unwrap(),
+            vec![Value::Integer(1), Value::Integer(8), Value::Float(8.0)]);
+        assert!(aggregate_with_limits(&input, &[], &items, 1, base + 2 * entry).is_err());
+    }
+
+    #[test]
+    fn group_keys_and_distinct_entries_share_one_retained_limit() {
+        let schema = Schema::new(vec![
+            Field::new("bucket", DataType::Integer, false),
+            Field::new("value", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(20)],
+        ]).unwrap();
+        let group_by = [(Expr::Column("bucket".into()), "bucket".into())];
+        let item = [AggregateItem::new(
+            AggregateOp::CountDistinct(Expr::Column("value".into())), "count")];
+        let group_size = group_key_state_bytes(&[Value::Integer(1)], 1).unwrap();
+        let entry = distinct_key_footprint(&Value::Integer(10)).unwrap();
+        // Enough for the groups and just one DISTINCT value. The second
+        // group must not bypass accounting of the first group's hash set.
+        assert!(aggregate_with_limits(&batch, &group_by, &item, 2,
+            2 * group_size + entry).is_err());
+        let result = aggregate_with_limits(&batch, &group_by, &item, 2,
+            2 * (group_size + entry)).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.row(0).unwrap(), vec![Value::Integer(1), Value::Integer(1)]);
+        assert_eq!(result.row(1).unwrap(), vec![Value::Integer(2), Value::Integer(1)]);
     }
 }
