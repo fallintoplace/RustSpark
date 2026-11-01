@@ -17,6 +17,29 @@ impl BloomFilter {
         (bit / 64, 1_u64 << (bit % 64))
     }
 
+    /// Size a join filter from its expected key count and target false-positive
+    /// probability. Reject unachievable layouts rather than silently clipping
+    /// the hashing or bitset limits, which would promise a false FPR.
+    pub fn for_expected_items(expected_items: usize, target_fpr: f64) -> Result<Self> {
+        if expected_items == 0 || !target_fpr.is_finite() ||
+            !(0.0 < target_fpr && target_fpr < 1.0)
+        {
+            return Err(Error::Execution("invalid Bloom filter capacity or target false-positive rate".into()));
+        }
+        let ln2 = std::f64::consts::LN_2;
+        let bits = -(expected_items as f64) * target_fpr.ln() / (ln2 * ln2);
+        if !bits.is_finite() || bits < 1.0 || bits > (1usize << 29) as f64 {
+            return Err(Error::Execution("Bloom filter target exceeds bitset budget".into()));
+        }
+        let bits = bits.ceil() as usize;
+        let optimal_hashes = (bits as f64 / expected_items as f64) * ln2;
+        if !optimal_hashes.is_finite() || optimal_hashes > 16.5 {
+            return Err(Error::Execution("Bloom filter target exceeds hash probe budget".into()));
+        }
+        let hashes = optimal_hashes.round().clamp(1.0, 16.0) as u32;
+        Self::new(bits, hashes)
+    }
+
     pub fn new(bits: usize, hashes: u32) -> Result<Self> {
         if bits == 0 || bits > 1 << 29 || !(1..=16).contains(&hashes) {
             return Err(Error::Execution("invalid Bloom filter sizing".into()));
@@ -621,5 +644,46 @@ mod saturated_bloom_union_regressions {
         assert_eq!(full.bits_set(), 64);
         assert!(full.might_contain(&Value::Integer(10_000_000)));
         assert!(full.union_with(&BloomFilter::new(128, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bloom_optimal_sizing_tests {
+    use super::*;
+
+    #[test]
+    fn target_fpr_selects_bounded_layout_and_keeps_inserted_keys() {
+        let mut filter = BloomFilter::for_expected_items(10_000, 0.01).unwrap();
+        assert!(filter.bits >= 95_800 && filter.bits <= 96_000);
+        assert_eq!(filter.hashes, 7);
+        for i in 0..10_000 {
+            filter.insert(&Value::Integer(i));
+        }
+        assert!(filter.estimated_false_positive_rate() < 0.025);
+        for i in 0..10_000 {
+            assert!(filter.might_contain(&Value::Integer(i)));
+        }
+        let observed = (20_000..30_000)
+            .filter(|&i| filter.might_contain(&Value::Integer(i))).count();
+        assert!(observed < 350, "unexpected Bloom collision rate: {observed}");
+    }
+
+    #[test]
+    fn rejects_unachievable_targets_without_allocating_large_bitsets() {
+        for bad_rate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.5, 1.0, 2.0] {
+            assert!(BloomFilter::for_expected_items(100, bad_rate).is_err());
+        }
+        assert!(BloomFilter::for_expected_items(0, 0.01).is_err());
+        assert!(BloomFilter::for_expected_items(usize::MAX, 0.01).is_err());
+        assert!(BloomFilter::for_expected_items(100, f64::MIN_POSITIVE).is_err());
+    }
+
+    #[test]
+    fn stricter_target_allocates_more_bits_for_fixed_cardinality() {
+        let loose = BloomFilter::for_expected_items(1000, 0.1).unwrap();
+        let medium = BloomFilter::for_expected_items(1000, 0.01).unwrap();
+        let tight = BloomFilter::for_expected_items(1000, 0.001).unwrap();
+        assert!(loose.bits < medium.bits && medium.bits < tight.bits);
+        assert!(loose.hashes <= medium.hashes && medium.hashes <= tight.hashes);
     }
 }
