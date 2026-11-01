@@ -60,6 +60,7 @@ pub fn external_sort(
     if run_rows == 0 || output_rows == 0 || run_rows > 65_536 || output_rows > 65_536 {
         return Err(Error::Execution("external sort batch sizes must be in 1..=65536".into()));
     }
+    keys.iter().try_for_each(|key| key.expression.validate_budget())?;
     let bound_keys = keys.iter().map(|key| {
         let column = match &key.expression {
             crate::expr::Expr::Column(name) => Some(schema.column(name)?),
@@ -701,6 +702,24 @@ mod moved_external_merge_payload_tests {
         let actual = chunks.iter().flat_map(|batch| batch.rows().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod external_sort_expression_budget_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value};
+
+    #[test]
+    fn rejects_deep_keys_without_consuming_empty_input() {
+        let schema = Schema::new(vec![]).unwrap();
+        let mut expression = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { expression = Expr::Not(Box::new(expression)); }
+        let keys = [SortKey::ascending(expression)];
+        let result = external_sort(Vec::<Batch>::new(), &schema, &keys,
+            std::env::temp_dir(), 1, 1);
+        assert!(result.err().expect("deep key must fail").to_string()
+            .contains("complexity budget"));
     }
 }
 

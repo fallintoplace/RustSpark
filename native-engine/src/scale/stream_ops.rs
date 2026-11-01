@@ -94,9 +94,20 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterLimitStream<I> {
                 self.stopped = true;
                 return None;
             };
-            let result = next.and_then(|batch| filter::filter_first_owned(
-                batch, &self.predicate, self.offset + self.remaining,
-            ));
+            let result = next.and_then(|batch| {
+                if matches!(&self.predicate,
+                    Expr::Literal(crate::scalar::Value::Boolean(true))) {
+                    // A TRUE predicate admits every row. Avoid first copying
+                    // the LIMIT prefix into an intermediate Batch only to
+                    // slice OFFSET from it again below. Move the requested
+                    // window directly out of the original owned batch.
+                    Ok(batch)
+                } else {
+                    filter::filter_first_owned(
+                        batch, &self.predicate, self.offset + self.remaining,
+                    )
+                }
+            });
             let selected = match result {
                 Ok(batch) => batch,
                 Err(error) => {
@@ -448,5 +459,55 @@ mod stream_owned_filter_payload_regressions {
             QueryControl::default(),
         ).next().unwrap().unwrap();
         assert_eq!(output.num_rows(), 3);
+    }
+}
+
+#[cfg(test)]
+mod true_filter_limit_single_slice_tests {
+    use super::*;
+    use crate::{
+        scalar::Value, schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn true_filter_limits_owned_unicode_text_without_recopying_payloads() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..5).map(|index| {
+            vec![Value::Text(format!("{index}-{}", "é🙂".repeat(1024)))]
+        }).collect()).unwrap();
+        let retained_pointer = match input.value(1, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let mut stream = FilterLimitStream::new(
+            std::iter::once(Ok(input)),
+            Expr::Literal(Value::Boolean(true)),
+            1, 2, QueryControl::default(),
+        );
+        let selected = stream.next().unwrap().unwrap();
+        assert_eq!(selected.num_rows(), 2);
+        let output_pointer = match selected.value(0, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(retained_pointer, output_pointer);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn true_filter_still_tracks_offset_across_batch_boundaries() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Integer, false)]).unwrap();
+        let batches = [vec![0, 1], vec![2], vec![3, 4, 5]]
+            .into_iter().map(|items| Batch::from_rows(schema.clone(),
+                items.into_iter().map(|n| vec![Value::Integer(n)]).collect()
+            ).map_err(|error| error));
+        let stream = FilterLimitStream::new(
+            batches, Expr::Literal(Value::Boolean(true)), 3, 2,
+            QueryControl::default(),
+        );
+        let values = stream.collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>();
+        assert_eq!(values, [Value::Integer(3), Value::Integer(4)]);
     }
 }

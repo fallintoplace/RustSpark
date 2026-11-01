@@ -238,7 +238,8 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
             columns[index].push(value);
         }
     }
-    Batch::new_with_row_count(schema, columns, row_count)
+    // Every cell was converted to its inferred type above, and all fields are nullable.
+    Batch::from_validated_columns(schema, columns, row_count)
 }
 
 pub fn read_csv(path: impl AsRef<Path>) -> Result<Batch> {
@@ -587,5 +588,25 @@ mod csv_total_cells_budget_regressions {
         assert_eq!(rows[0].len(), 101);
         assert_eq!(rows[1].len(), 101);
         assert!(parse_records_with_limits(&input, 100, 201).is_err());
+    }
+}
+
+#[cfg(test)]
+mod eager_csv_validated_columns_perf_tests {
+    use super::*;
+
+    #[test]
+    fn inferred_types_nulls_and_quoted_text_stay_exact() {
+        let input = "n,flag,caption\n1,true,alpha\n,False,\n-2,true,\"hello, 世界\"\n";
+        let batch = from_csv_str(input).unwrap();
+        assert_eq!(batch.schema().fields()[0].data_type, DataType::Integer);
+        assert_eq!(batch.schema().fields()[1].data_type, DataType::Boolean);
+        assert_eq!(batch.schema().fields()[2].data_type, DataType::Text);
+        assert_eq!(batch.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Boolean(true), Value::Text("alpha".into())],
+            vec![Value::Null, Value::Boolean(false), Value::Null],
+            vec![Value::Integer(-2), Value::Boolean(true), Value::Text("hello, 世界".into())],
+        ]);
+        assert!(from_csv_str("n,flag\n1\n").is_err());
     }
 }
