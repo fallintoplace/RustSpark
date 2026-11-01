@@ -218,6 +218,14 @@ where
     Ok(emitted)
 }
 
+fn allocate_frame_payload(len: usize) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    payload.try_reserve_exact(len)
+        .map_err(|_| Error::Execution("exchange frame allocation failed".into()))?;
+    payload.resize(len, 0);
+    Ok(payload)
+}
+
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
     let mut header = [0u8; HEADER_BYTES];
@@ -241,7 +249,9 @@ pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Fram
     if len > max_bytes {
         return Err(Error::Execution("received exchange frame exceeds memory budget".into()));
     }
-    let mut payload = vec![0; len];
+    // A caller may set a very large frame budget. A valid wire length is
+    // not proof that the receiver can allocate it, so reserve fallibly.
+    let mut payload = allocate_frame_payload(len)?;
     input.read_exact(&mut payload)?;
     if checksum_parts(&header[..CHECKSUM_OFFSET], &payload) != expected_checksum {
         return Err(Error::Execution("exchange frame checksum mismatch".into()));
@@ -878,5 +888,29 @@ mod exchange_attempt_retirement_tests {
         assert_eq!(tracker.retire_stage(8), 1);
         assert_eq!(tracker.retire_stage(9), 1);
         assert_eq!(tracker.retire_stage(10), 1);
+    }
+}
+
+#[cfg(test)]
+mod fallible_frame_allocation_regressions {
+    use super::*;
+
+    #[test]
+    fn overflowed_receiver_allocation_returns_an_error() {
+        let failure = allocate_frame_payload(usize::MAX).unwrap_err();
+        assert!(failure.to_string().contains("exchange frame allocation failed"));
+    }
+
+    #[test]
+    fn zero_and_nonzero_frames_remain_checksums_compatible() {
+        for payload in [vec![], vec![0x7f], (0..127).collect::<Vec<u8>>()] {
+            let frame = Frame { stage: 98, task: 32, attempt: 4, payload };
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &frame, 128).unwrap();
+            assert_eq!(read_frame(&mut wire.as_slice(), 128).unwrap(), Some(frame));
+            let mut truncated = wire.clone();
+            truncated.pop();
+            assert!(read_frame(&mut truncated.as_slice(), 128).is_err());
+        }
     }
 }
