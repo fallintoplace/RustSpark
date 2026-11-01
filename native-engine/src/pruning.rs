@@ -71,15 +71,20 @@ fn can_skip_in_list(
 ) -> bool {
     let Expr::Column(name) = needle else { return false; };
     if !name.eq_ignore_ascii_case(column) { return false; }
-    let mut literals = Vec::with_capacity(choices.len());
-    for choice in choices {
-        let Expr::Literal(value) = choice else { return false; };
-        literals.push(value);
+    // Reject computed choices before applying min/max proofs. Iterate the
+    // existing expression slice rather than allocating a reference vector
+    // for every row group and repeated partition-pruning decision.
+    if !choices.iter().all(|choice| matches!(choice, Expr::Literal(_))) {
+        return false;
     }
+    let literals = || choices.iter().filter_map(|choice| match choice {
+        Expr::Literal(value) => Some(value),
+        _ => None,
+    });
     if stats.rows == stats.nulls { return true; }
-    let has_null = literals.iter().any(|value| value.is_null());
+    let has_null = literals().any(|value| value.is_null());
     if negated && has_null { return true; }
-    if !negated && literals.iter().all(|value| value.is_null()) {
+    if !negated && literals().all(|value| value.is_null()) {
         return true;
     }
     let (Some(min), Some(max)) = (&stats.min, &stats.max) else {
@@ -91,11 +96,11 @@ fn can_skip_in_list(
         if min.sql_compare(max).ok().flatten() != Some(Ordering::Equal) {
             return false;
         }
-        literals.iter().filter(|value| !value.is_null()).any(|value|
+        literals().filter(|value| !value.is_null()).any(|value|
             min.sql_equal(value).ok().flatten() == Some(true))
     } else {
         // No choice falls inside the inclusive min/max range.
-        literals.iter().filter(|value| !value.is_null()).all(|value| {
+        literals().filter(|value| !value.is_null()).all(|value| {
             match (min.sql_compare(value), max.sql_compare(value)) {
                 (Ok(Some(low)), Ok(Some(high))) =>
                     low == Ordering::Greater || high == Ordering::Less,
@@ -822,5 +827,36 @@ mod direct_statistics_lookup_regressions {
         };
         assert!(can_skip_columns(&stats, &distinct));
         assert!(!can_skip_columns(&stats, &Expr::Not(Box::new(is_null))));
+    }
+}
+
+#[cfg(test)]
+mod allocation_free_inlist_pruning_regressions {
+    use super::*;
+
+    #[test]
+    fn wide_literal_lists_prune_without_changing_three_valued_logic() {
+        let stats = ColumnStatistics {
+            rows: 10, nulls: 1,
+            min: Some(Value::Integer(100)), max: Some(Value::Integer(120)),
+        };
+        let predicate = |values: Vec<Expr>, negated| Expr::InList {
+            needle: Box::new(Expr::Column("n".into())),
+            choices: values,
+            negated,
+        };
+        let outside = (0..10_000).map(|n|
+            Expr::Literal(Value::Integer(n + 1_000))
+        ).collect::<Vec<_>>();
+        assert!(can_skip(&stats, "n", &predicate(outside.clone(), false)));
+        let mut inside = outside;
+        inside.push(Expr::Literal(Value::Integer(110)));
+        assert!(!can_skip(&stats, "n", &predicate(inside, false)));
+        assert!(can_skip(&stats, "n", &predicate(
+            vec![Expr::Literal(Value::Null), Expr::Literal(Value::Integer(110))], true,
+        )));
+        assert!(!can_skip(&stats, "n", &predicate(
+            vec![Expr::Column("other".into())], false,
+        )));
     }
 }
