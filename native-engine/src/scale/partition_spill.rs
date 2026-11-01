@@ -213,6 +213,22 @@ impl PartitionWriter {
         }
         let key_slices = self.key_columns.iter()
             .map(|&index| batch.column(index)).collect::<Result<Vec<_>>>()?;
+        // Preserve the last resolved destination across output windows. Sorted
+        // shuffle inputs can contain long runs of the same composite key.
+        let shard_count = writers.len();
+        let mut previous_row: Option<usize> = None;
+        let mut previous_shard = 0usize;
+        let mut shard_for_row = |row: usize| {
+            let shard = if previous_row.is_some_and(|previous|
+                key_slices.iter().all(|key| key[row] == key[previous])) {
+                previous_shard
+            } else {
+                bucket_bound(&key_slices, row, shard_count)
+            };
+            previous_row = Some(row);
+            previous_shard = shard;
+            shard
+        };
         let mut dense: Option<Vec<Vec<usize>>> = None;
         // Sparse exchanges can span many small batches. Reuse the shard
         // buckets instead of rebuilding a hash table and row vectors for each.
@@ -224,7 +240,7 @@ impl PartitionWriter {
             let end = start.saturating_add(self.batch_rows).min(batch.num_rows());
             if writers.len() > (end - start).saturating_mul(4) {
                 for row in start..end {
-                    let index = bucket_bound(&key_slices, row, writers.len());
+                    let index = shard_for_row(row);
                     let rows = sparse.entry(index).or_default();
                     if rows.is_empty() { touched.push(index); }
                     rows.push(row);
@@ -240,7 +256,7 @@ impl PartitionWriter {
                 let groups = dense.get_or_insert_with(|| vec![Vec::new(); writers.len()]);
                 for group in groups.iter_mut() { group.clear(); }
                 for row in start..end {
-                    let index = bucket_bound(&key_slices, row, writers.len());
+                    let index = shard_for_row(row);
                     groups[index].push(row);
                 }
                 for (index, rows) in groups.iter().enumerate() {
@@ -700,5 +716,68 @@ mod partition_wire_budget_regressions {
         assert!(write_bounded_windows(&batch, 1, |i| i, 40,
             |_, _| { emitted = true; Ok(()) }).is_err());
         assert!(!emitted);
+    }
+}
+
+#[cfg(test)]
+mod consecutive_shuffle_key_run_regressions {
+    use super::*;
+    use super::super::spill::SpillReader;
+    use crate::schema::{DataType, Field};
+    use std::{fs, io::BufReader};
+    use std::sync::atomic::{AtomicU64, Ordering as TestOrdering};
+
+    static RUN: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn clustered_composite_keys_keep_identical_spill_partitions_across_windows() {
+        let directory = std::env::temp_dir().join(format!("shuffle-runs-{}-{}",
+            std::process::id(), RUN.fetch_add(1, TestOrdering::Relaxed)));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("number", DataType::Float, true),
+            Field::new("label", DataType::Text, true),
+            Field::new("rowid", DataType::Integer, false),
+        ]).unwrap();
+        let long = "é🙂".repeat(4096);
+        let mut rows = Vec::new();
+        for (number, label) in [
+            (Value::Float(-0.0), Value::Text(long.clone())),
+            (Value::Float(0.0), Value::Text(long.clone())),
+            (Value::Float(f64::NAN), Value::Null),
+            (Value::Null, Value::Text("null".into())),
+            (Value::Float(9.0), Value::Text("nine".into())),
+        ] {
+            for _ in 0..27 {
+                rows.push(vec![number.clone(), label.clone(),
+                    Value::Integer(rows.len() as i64)]);
+            }
+        }
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        for partitions in [2, 64] {
+            let expected = crate::hash_partition::partition(&batch,
+                &["number", "label"], partitions).unwrap();
+            let mut writer = PartitionWriter::new(
+                &directory, schema.clone(), &["number", "label"], partitions, 11,
+            ).unwrap();
+            writer.write_batch(&batch, &QueryControl::default()).unwrap();
+            let files = writer.finish().unwrap();
+            for (index, path) in files.paths().iter().enumerate() {
+                let mut reader = SpillReader::new(
+                    BufReader::new(File::open(path).unwrap()), 11,
+                ).unwrap();
+                let mut chunks = Vec::new();
+                while let Some(chunk) = reader.next_batch().unwrap() {
+                    chunks.push(chunk);
+                }
+                let output = crate::batch_utils::concat(
+                    &schema, chunks, batch.num_rows(),
+                ).unwrap();
+                assert_eq!(output, expected[index],
+                    "spill partition {index} of {partitions}");
+            }
+            drop(files);
+        }
+        fs::remove_dir(directory).unwrap();
     }
 }
