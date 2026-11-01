@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 def checked_entry(item, seen):
+    if not isinstance(item, dict):
+        raise ValueError("ClickBench result entry must be an object")
     query = item.get("id")
     if type(query) is not int or query not in range(1, 44) or query in seen:
         raise ValueError("Invalid or duplicate query ID")
@@ -17,12 +19,20 @@ def checked_entry(item, seen):
     if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ValueError(f"Missing or invalid result hash in query {query}")
     median = item.get("median_ms")
-    if isinstance(median, bool) or not isinstance(median, (float, int)) or not math.isfinite(median) or median <= 0:
+    if type(median) not in (float, int):
         raise ValueError(f"Invalid query {query} median")
-    return query, {"hash": digest, "median": float(median)}
+    try:
+        median = float(median)
+    except OverflowError as error:
+        raise ValueError(f"Invalid query {query} median") from error
+    if not math.isfinite(median) or median <= 0:
+        raise ValueError(f"Invalid query {query} median")
+    return query, {"hash": digest, "median": median}
 
 
 def entries(report):
+    if not isinstance(report, dict):
+        raise ValueError("ClickBench report must be an object")
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("Missing ClickBench results")
@@ -34,8 +44,16 @@ def entries(report):
 
 
 def compare(baseline, candidate, threshold=0.2):
+    if type(threshold) not in (float, int):
+        raise ValueError("Threshold must be finite and nonnegative")
+    try:
+        threshold = float(threshold)
+    except OverflowError as error:
+        raise ValueError("Threshold must be finite and nonnegative") from error
     if not math.isfinite(threshold) or threshold < 0:
-        raise ValueError("Threshold must be nonnegative")
+        raise ValueError("Threshold must be finite and nonnegative")
+    if not isinstance(baseline, dict) or not isinstance(candidate, dict):
+        raise ValueError("ClickBench reports must be objects")
     old_hash, new_hash = baseline.get("query_file_sha256"), candidate.get("query_file_sha256")
     if old_hash is not None or new_hash is not None:
         if (not isinstance(old_hash, str) or len(old_hash) != 64
