@@ -120,9 +120,24 @@ impl HyperLogLog {
             .any(|&rank| u32::from(rank) > 65 - PRECISION) {
             return Err(Error::Parse("invalid HLL register rank".into()));
         }
-        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
-            if rank != 0 { self.update_register(index, rank); }
+        // Merge dense worker sketches in one accumulator update. Repeated
+        // u128 read-modify-writes impose a dependency chain across 4 KiB of
+        // registers, while the registerwise maximum is independent.
+        let mut removed_weight = 0u128;
+        let mut added_weight = 0u128;
+        let mut newly_nonempty = 0usize;
+        for (current, &incoming) in self.registers.iter_mut()
+            .zip(&bytes[WIRE_HEADER.len()..])
+        {
+            if incoming > *current {
+                removed_weight += harmonic_weight(*current);
+                added_weight += harmonic_weight(incoming);
+                newly_nonempty += usize::from(*current == 0);
+                *current = incoming;
+            }
         }
+        self.harmonic_scaled = self.harmonic_scaled - removed_weight + added_weight;
+        self.nonempty += newly_nonempty;
         Ok(())
     }
 
@@ -727,5 +742,36 @@ mod transactional_wire_merge_regressions {
         *dense.last_mut().unwrap() = u8::MAX;
         assert!(target.merge_wire_bytes(&dense).is_err());
         assert_eq!(target, original);
+    }
+}
+
+#[cfg(test)]
+mod dense_wire_batch_harmonic_tests {
+    use super::*;
+
+    #[test]
+    fn dense_wire_merges_match_individual_register_updates() {
+        let mut incoming = HyperLogLog::new();
+        for n in 0..40_000 { incoming.add(&Value::Integer(n)); }
+        let mut dense = Vec::from(WIRE_HEADER.as_slice());
+        dense.extend_from_slice(&incoming.registers);
+        assert_eq!(dense.len(), WIRE_BYTES);
+
+        let mut existing = HyperLogLog::new();
+        for n in 25_000..75_000 { existing.add(&Value::Integer(n)); }
+        let mut reference = existing.clone();
+        for (index, &rank) in incoming.registers.iter().enumerate() {
+            if rank != 0 { reference.update_register(index, rank); }
+        }
+
+        existing.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(existing, reference);
+        existing.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(existing, reference);
+        assert_eq!(existing.estimate(), reference.estimate());
+
+        let mut empty = HyperLogLog::new();
+        empty.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(empty, incoming);
     }
 }
