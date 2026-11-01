@@ -703,6 +703,6 @@ mod dictionary_retained_heap_accounting_regressions {
             + encoded.row_count() * std::mem::size_of::<Option<u32>>();
         assert_eq!(encoded.encoded_string_bytes(), 9);
         assert!(encoded.estimated_bytes() >= payload_only + 2 * std::mem::size_of::<String>());
-        assert_eq!(encoded.decode().unwrap(), input.column(0).unwrap());
+        assert_eq!(encoded.decode().unwrap().as_slice(), input.column(0).unwrap());
     }
 }
