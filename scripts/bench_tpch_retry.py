@@ -8,6 +8,14 @@ from pathlib import Path
 import subprocess
 import sys
 
+from tpch_run import unique_keys, reject_nonfinite
+
+
+def load_retry_report(path):
+    """Reject ambiguous JSON evidence before selecting or accepting query retries."""
+    return json.loads(Path(path).read_text(encoding="utf-8"),
+                      object_pairs_hook=unique_keys, parse_constant=reject_nonfinite)
+
 
 def failed_ids(report):
     if not isinstance(report, dict):
@@ -76,7 +84,7 @@ def retry_completed(replay, ids, previous=None):
 def execute_retry(args):
     if args.previous.resolve() == args.json_out.resolve():
         raise ValueError("Retry output must differ from previous report")
-    previous = json.loads(args.previous.read_text(encoding="utf-8"))
+    previous = load_retry_report(args.previous)
     ids = failed_ids(previous)
     if not ids:
         print("All recorded TPC-H queries succeeded; nothing to retry")
@@ -88,7 +96,7 @@ def execute_retry(args):
     args.json_out.unlink(missing_ok=True)
     result = subprocess.run(cmd, check=False)
     # Original runner versions can exit 0 even if some queries failed.
-    replay = json.loads(args.json_out.read_text(encoding="utf-8"))
+    replay = load_retry_report(args.json_out)
     completed = retry_completed(replay, ids, previous)
     return 0 if completed and result.returncode == 0 else 1
 
