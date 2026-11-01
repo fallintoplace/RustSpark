@@ -10,7 +10,8 @@ fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
         let mut bytes = text.as_bytes().to_vec();
         let mut start_of_word = true;
         for byte in &mut bytes {
-            if byte.is_ascii_whitespace() {
+            // Keep ASCII boundaries equivalent to char::is_whitespace.
+            if byte.is_ascii_whitespace() || *byte == b'\x0b' {
                 start_of_word = true;
             } else {
                 *byte = if start_of_word { byte.to_ascii_uppercase() }
@@ -79,7 +80,11 @@ mod initcap_ascii_bytes_tests {
     use super::*;
     #[test]
     fn retains_ascii_whitespace_boundaries() {
-        assert_eq!(evaluate(&[Value::Text("aB\\tcD\\neF".into())]).unwrap(), Value::Text("Ab\\tCd\\nEf".into()));
+        assert_eq!(evaluate(&[Value::Text("aB\tcD\neF\x0bgH".into())]).unwrap(),
+            Value::Text("Ab\tCd\nEf\x0bGh".into()));
+        // Backslash followed by 't' or 'n' is literal text, not whitespace.
+        assert_eq!(evaluate(&[Value::Text("aB\\tcD\\neF".into())]).unwrap(),
+            Value::Text("Ab\\tcd\\nef".into()));
         assert_eq!(evaluate(&[Value::Text("éCOLE".into())]).unwrap(), Value::Text("École".into()));
     }
 }
