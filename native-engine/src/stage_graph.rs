@@ -256,6 +256,22 @@ impl StageGraph {
         } else {
             &self.order_indices
         };
+        if running.is_empty() {
+            // The common initial dispatch has no occupied partitions. Emit
+            // one compact range per ready stage without an exclusion index.
+            let mut remaining = max_tasks;
+            let mut ranges = Vec::new();
+            for &index in order {
+                let stage = &self.stages[index];
+                if !Self::dependency_ready(stage, completed) { continue; }
+                let take = stage.partitions.min(remaining);
+                if take == 0 { continue; }
+                ranges.push((stage.id, 0..take));
+                remaining -= take;
+                if remaining == 0 { break; }
+            }
+            return ranges;
+        }
         let mut excluded: HashMap<u64, Vec<usize>> = HashMap::new();
         for &(stage, partition) in running {
             excluded.entry(stage).or_default().push(partition);
@@ -746,5 +762,37 @@ mod range_dispatch_regressions {
             graph.ready_task_ranges_excluding(&HashSet::new(), &running, 4, false),
             vec![(1, 1..2), (1, 3..6)],
         );
+    }
+}
+
+#[cfg(test)]
+mod fast_range_dispatch_regressions {
+    use super::*;
+
+    #[test]
+    fn initial_range_dispatch_matches_individual_tasks_in_both_orders() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 4, dependencies: vec![1], partitions: 9 },
+            Stage { id: 3, dependencies: vec![], partitions: 3 },
+            Stage { id: 2, dependencies: vec![], partitions: 7 },
+            Stage { id: 1, dependencies: vec![], partitions: 5 },
+        ]).unwrap();
+        for completed in [HashSet::new(), HashSet::from([1, 2])] {
+            for limit in [0, 1, 3, 7, 10, 50] {
+                for critical in [false, true] {
+                    let ranges = graph.ready_task_ranges_excluding(
+                        &completed, &HashSet::new(), limit, critical);
+                    let actual = ranges.into_iter().flat_map(|(stage, range)|
+                        range.map(move |partition| (stage, partition))).collect::<Vec<_>>();
+                    let expected = if critical {
+                        graph.ready_tasks_by_critical_path_excluding(
+                            &completed, &HashSet::new(), limit)
+                    } else {
+                        graph.ready_tasks_excluding(&completed, &HashSet::new(), limit)
+                    };
+                    assert_eq!(actual, expected, "limit={limit}, critical={critical}");
+                }
+            }
+        }
     }
 }
