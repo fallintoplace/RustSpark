@@ -47,6 +47,9 @@ def pinned_template(path: Path) -> Iterator[Path]:
     replaceable path just before the backend opens it.
     """
     flags = os.O_RDONLY
+    # A replaced FIFO must not block a worker before fstat can reject it.
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     # On platforms without O_NOFOLLOW, reject symlinks at the last check.
