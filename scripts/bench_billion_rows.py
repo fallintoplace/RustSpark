@@ -126,18 +126,65 @@ def query_command(binary, root, sql, partitions):
     return command
 
 
+MAX_QUERY_STDOUT_BYTES = 64 * 1024
+
+
+def parse_query_rows(stdout):
+    """Require unambiguous, finite JSON object rows for result validation."""
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate SQL result key: {key}")
+            result[key] = value
+        return result
+
+    def finite_float(number):
+        value = float(number)
+        if not math.isfinite(value):
+            raise ValueError("Nonfinite SQL result number")
+        return value
+
+    def reject_constant(value):
+        raise ValueError(f"Nonfinite SQL result number: {value}")
+
+    rows = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line, object_pairs_hook=unique_fields,
+                             parse_constant=reject_constant, parse_float=finite_float)
+        except json.JSONDecodeError as error:
+            raise ValueError("RustSpark emitted malformed JSON") from error
+        if not isinstance(row, dict):
+            raise ValueError("SQL result rows must be JSON objects")
+        rows.append(row)
+    return rows
+
+
 def run_query(binary, root, sql, timeout, partitions):
+    # These workloads return at most one small aggregate row. Buffering the
+    # entire subprocess output with capture_output can exhaust Python memory.
     started = time.perf_counter()
-    result = subprocess.run(query_command(binary, root, sql, partitions),
-                            capture_output=True, text=True, timeout=timeout, check=False)
-    milliseconds = (time.perf_counter() - started) * 1_000
-    if result.returncode:
-        raise RuntimeError(f"RustSpark exited {result.returncode}: {result.stderr[-600:]}")
-    try:
-        result_rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    except json.JSONDecodeError as error:
-        raise RuntimeError("RustSpark emitted malformed JSON") from error
-    return milliseconds, result_rows
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        result = subprocess.run(query_command(binary, root, sql, partitions),
+                                stdout=stdout, stderr=stderr, timeout=timeout, check=False)
+        milliseconds = (time.perf_counter() - started) * 1_000
+        if result.returncode:
+            stderr.seek(0, os.SEEK_END)
+            stderr.seek(max(0, stderr.tell() - 600))
+            tail = stderr.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"RustSpark exited {result.returncode}: {tail}")
+        stdout.seek(0, os.SEEK_END)
+        if stdout.tell() > MAX_QUERY_STDOUT_BYTES:
+            raise RuntimeError("RustSpark aggregate output exceeds 64 KiB")
+        stdout.seek(0)
+        try:
+            content = stdout.read().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError("RustSpark output is not valid UTF-8") from error
+    return milliseconds, parse_query_rows(content)
 
 
 def measure(binary, root, rows, day, repeat, warmup, timeout, partitions, only=None):
