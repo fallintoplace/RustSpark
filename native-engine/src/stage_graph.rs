@@ -243,6 +243,58 @@ impl StageGraph {
         tasks
     }
 
+    /// Claim free partition ranges without materializing one (stage, partition)
+    /// pair per task. Ranges keep topological or critical-path stage priority
+    /// and can be dispatched as bounded batches to native workers.
+    pub fn ready_task_ranges_excluding(
+        &self, completed: &HashSet<u64>, running: &HashSet<(u64, usize)>,
+        max_tasks: usize, critical_path: bool,
+    ) -> Vec<(u64, std::ops::Range<usize>)> {
+        if max_tasks == 0 { return Vec::new(); }
+        let order = if critical_path {
+            &self.critical_order_indices
+        } else {
+            &self.order_indices
+        };
+        let mut excluded: HashMap<u64, Vec<usize>> = HashMap::new();
+        for &(stage, partition) in running {
+            excluded.entry(stage).or_default().push(partition);
+        }
+        for positions in excluded.values_mut() {
+            positions.sort_unstable();
+        }
+        let mut remaining = max_tasks;
+        let mut ranges = Vec::new();
+        for &index in order {
+            let stage = &self.stages[index];
+            if !Self::dependency_ready(stage, completed) { continue; }
+            let mut next = 0usize;
+            if let Some(blocked) = excluded.get(&stage.id) {
+                for &partition in blocked {
+                    if partition >= stage.partitions { break; }
+                    if partition > next {
+                        let take = (partition - next).min(remaining);
+                        if take > 0 {
+                            ranges.push((stage.id, next..next + take));
+                            remaining -= take;
+                            if remaining == 0 { return ranges; }
+                        }
+                    }
+                    next = partition + 1;
+                }
+            }
+            if next < stage.partitions {
+                let take = (stage.partitions - next).min(remaining);
+                if take > 0 {
+                    ranges.push((stage.id, next..next + take));
+                    remaining -= take;
+                    if remaining == 0 { return ranges; }
+                }
+            }
+        }
+        ranges
+    }
+
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -638,5 +690,61 @@ mod critical_path_partition_dispatch_tests {
             .collect::<HashSet<_>>();
         assert_eq!(big.ready_tasks_by_critical_path_excluding(
             &HashSet::new(), &exclusions, 2), vec![(1, 900), (1, 901)]);
+    }
+}
+
+#[cfg(test)]
+mod range_dispatch_regressions {
+    use super::*;
+
+    fn flatten(ranges: Vec<(u64, std::ops::Range<usize>)>) -> Vec<(u64, usize)> {
+        ranges.into_iter().flat_map(|(id, range)|
+            range.map(move |partition| (id, partition))).collect()
+    }
+
+    #[test]
+    fn claimed_ranges_match_existing_task_windows_for_both_priorities() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 30, dependencies: vec![10], partitions: 70 },
+            Stage { id: 10, dependencies: vec![], partitions: 1200 },
+            Stage { id: 20, dependencies: vec![], partitions: 500 },
+            Stage { id: 40, dependencies: vec![20], partitions: 12 },
+        ]).unwrap();
+        let mut running = HashSet::new();
+        for partition in 0..1100 {
+            running.insert((10, partition));
+        }
+        running.extend([(10, 1199), (20, 1), (20, 10), (20, 400),
+            (999, 0), (10, 5000), (30, 0)]);
+        for completed in [HashSet::new(), HashSet::from([10]), HashSet::from([10, 20])] {
+            for limit in [0, 1, 2, 10, 100, 512, 10_000] {
+                let normal = flatten(graph.ready_task_ranges_excluding(
+                    &completed, &running, limit, false,
+                ));
+                assert_eq!(normal, graph.ready_tasks_excluding(&completed, &running, limit));
+                let critical = flatten(graph.ready_task_ranges_excluding(
+                    &completed, &running, limit, true,
+                ));
+                assert_eq!(critical, graph.ready_tasks_by_critical_path_excluding(
+                    &completed, &running, limit,
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn contiguous_unclaimed_partitions_emit_one_range() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 65_536 },
+        ]).unwrap();
+        assert_eq!(
+            graph.ready_task_ranges_excluding(&HashSet::new(), &HashSet::new(), 60_000, false),
+            vec![(1, 0..60_000)],
+        );
+        let running = HashSet::from([(1, 0), (1, 2), (1, 65_535)]);
+        assert_eq!(
+            graph.ready_task_ranges_excluding(&HashSet::new(), &running, 4, false),
+            vec![(1, 1..2), (1, 3..6)],
+        );
     }
 }
