@@ -164,3 +164,27 @@ test("query rejects invalid UTF-8 from native process stdout", () => {
   }) });
   assert.throws(() => failed.query("SELECT 1"), /query failed/);
 });
+
+test("named input maps reject invalid types and duplicate cross-format names", () => {
+  const client = new RustSpark({ runner: () => { throw Error("should not spawn"); } });
+  for (const invalid of [[], "sales.csv", 123, new Map([["sales", "sales.csv"]])]) {
+    assert.throws(() => client.query("SELECT 1", { csvTables: invalid }), TypeError);
+  }
+  assert.throws(() => client.query("SELECT 1", {
+    csvTables: { sales: "/a.csv" }, parquetTables: { sales: "/a.parquet" },
+  }), /multiple formats/);
+  assert.throws(() => client.query("SELECT 1", {
+    jsonTables: { facts: "/a.json" }, parquetTables: { facts: "/a.parquet" },
+  }), /multiple formats/);
+  const calls = [];
+  const valid = new RustSpark({ runner: (_binary, args) => {
+    calls.push(args);
+    return { status: 0, stdout: "[]" };
+  } });
+  assert.deepEqual(valid.query("SELECT 1", {
+    csvTables: Object.assign(Object.create(null), { sales: "a.csv" }),
+    parquetTables: { events: "b.parquet" },
+  }), []);
+  assert.ok(calls[0].includes("sales=a.csv"));
+  assert.ok(calls[0].includes("events=b.parquet"));
+});

@@ -74,7 +74,18 @@ impl<R: BufRead> Records<R> {
         Ok(Some(byte))
     }
 
+    // Empty physical lines are not CSV records. Match the eager CSV parser,
+    // while retaining quoted empty fields and explicit comma-only rows.
     fn record(&mut self) -> Result<Option<Vec<String>>> {
+        loop {
+            match self.record_once()? {
+                Some(row) if row.is_empty() => continue,
+                other => return Ok(other),
+            }
+        }
+    }
+
+    fn record_once(&mut self) -> Result<Option<Vec<String>>> {
         if self.skip_lf {
             if let Some(byte) = self.byte()? {
                 if byte != b'\n' {
@@ -163,6 +174,9 @@ impl<R: BufRead> Records<R> {
                 (State::Start | State::Unquoted | State::AfterQuote, b'\n' | b'\r') => {
                     if byte == b'\r' {
                         self.skip_lf = true;
+                    }
+                    if state == State::Start && fields.is_empty() && field.is_empty() {
+                        return Ok(Some(Vec::new()));
                     }
                     push_record_field(&mut fields, field)?;
                     return Ok(Some(fields));
@@ -759,5 +773,42 @@ mod bounded_csv_field_count_regressions {
         };
         assert_eq!(source.record().unwrap().unwrap(), vec!["a", "b"]);
         assert!(matches!(source.record(), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod blank_line_csv_stream_differential_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn differential(input: &str, batch_rows: usize) {
+        let eager = crate::csv::from_csv_str(input).unwrap();
+        let reader = CsvStream::new_typed(
+            Cursor::new(input.as_bytes()), batch_rows, 4096,
+            eager.schema().clone(),
+        ).unwrap();
+        let mut rows = Vec::new();
+        for batch in reader {
+            rows.extend(batch.unwrap().rows().unwrap());
+        }
+        assert_eq!(rows, eager.rows().unwrap());
+    }
+
+    #[test]
+    fn ignores_empty_lf_crlf_and_bare_cr_lines_consistently() {
+        differential("\n\r\nn\n\n1\r\n\r\n2\n\n3\r\n", 1);
+        differential("n\r\r1\r2\n\n3\r\n", 2);
+    }
+
+    #[test]
+    fn still_retains_quoted_empty_and_delimited_empty_fields() {
+        differential("a,b\n\n\"\",3\n\r\n4,\"ok\"\n\n", 1);
+        differential("a,b\n,\n\n\"\",\"quoted\"\n", 2);
+    }
+
+    #[test]
+    fn thousands_of_blank_rows_do_not_create_spurious_batches() {
+        let input = format!("n\n{}42\n{}43\n", "\r\n".repeat(2048), "\n".repeat(2048));
+        differential(&input, 1);
     }
 }
