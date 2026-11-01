@@ -238,7 +238,15 @@ impl Iterator for DistinctOutput {
                     }
                 };
             let mut selected = Vec::new();
+            // An adjacent duplicate was already checked or admitted earlier
+            // in this same batch. Skip both hash computation and collision
+            // chain traversal for long runs of identical sorted keys.
+            let mut previous_row: Option<usize> = None;
             for row in 0..batch.num_rows() {
+                let is_duplicate_run = previous_row.is_some_and(|previous|
+                    columns.iter().all(|column| column[row] == column[previous]));
+                previous_row = Some(row);
+                if is_duplicate_run { continue; }
                 let mut hash = std::collections::hash_map::DefaultHasher::new();
                 columns.len().hash(&mut hash);
                 for column in &columns { column[row].hash(&mut hash); }
@@ -1480,5 +1488,63 @@ mod early_stream_drop_cleans_spill_files_tests {
         drop(stream);
         assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod streamed_distinct_adjacency_run_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn wide_duplicate_runs_across_batches_preserve_first_occurrences() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Float, true),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let wide = "é🙂".repeat(2048);
+        let mut values = Vec::new();
+        for (key, label) in [
+            (Value::Null, Value::Null),
+            (Value::Float(-0.0), Value::Text(wide.clone())),
+            (Value::Float(0.0), Value::Text(wide.clone())),
+            (Value::Float(f64::NAN), Value::Text("nan".into())),
+            (Value::Float(-f64::NAN), Value::Text("nan".into())),
+            (Value::Float(7.0), Value::Text("seven".into())),
+        ] {
+            for _ in 0..51 {
+                values.push(vec![key.clone(), label.clone()]);
+            }
+        }
+        let batches = values.chunks(31).map(|part|
+            Ok(Batch::from_rows(schema.clone(), part.to_vec()).unwrap())
+        ).collect::<Vec<_>>();
+        let out = DistinctOutput::new(
+            Box::new(batches.into_iter()), QueryControl::default(), 12, 100_000,
+        ).collect::<Result<Vec<_>>>().unwrap();
+        let rows = out.into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Null, Value::Null],
+            vec![Value::Float(-0.0), Value::Text(wide)],
+            vec![Value::Float(f64::NAN), Value::Text("nan".into())],
+            vec![Value::Float(7.0), Value::Text("seven".into())],
+        ]);
+    }
+
+    #[test]
+    fn duplicate_run_skip_still_defers_unique_key_budget_failure() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(2)],
+            vec![Value::Integer(3)], vec![Value::Integer(3)],
+        ]).unwrap();
+        let mut output = DistinctOutput::new(
+            Box::new([Ok(batch)].into_iter()), QueryControl::default(), 2, 1000,
+        );
+        let first = output.next().unwrap().unwrap();
+        assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
+        assert!(output.next().unwrap().is_err());
+        assert!(output.next().is_none());
     }
 }
