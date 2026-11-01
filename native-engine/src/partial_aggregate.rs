@@ -93,9 +93,21 @@ impl PartialGroupSum {
         self.key_type = Some(kind);
         let key_values = batch.column(key)?;
         let amounts = batch.column(amount)?;
-        for (key_value, value) in key_values.iter().zip(amounts) {
+        // A sorted or locally partitioned input can contain thousands of
+        // adjacent copies of the same key. Hash once per run rather than
+        // acquiring a HashMap entry for every input row. Still accumulate
+        // each value with the checked State::add path.
+        let mut start = 0;
+        while start < key_values.len() {
+            let key_value = &key_values[start];
+            let mut end = start + 1;
+            while end < key_values.len() && key_values[end] == *key_value {
+                end += 1;
+            }
             if let Some(state) = self.groups.get_mut(key_value) {
-                state.add(value)?;
+                for value in &amounts[start..end] {
+                    state.add(value)?;
+                }
             } else {
                 if self.groups.len() >= self.max_groups {
                     return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
@@ -104,10 +116,13 @@ impl PartialGroupSum {
                     .filter(|&size| size <= self.max_key_bytes)
                     .ok_or_else(|| Error::Execution("partial aggregation key memory budget exceeded".into()))?;
                 let mut state = State::default();
-                state.add(value)?;
+                for value in &amounts[start..end] {
+                    state.add(value)?;
+                }
                 self.groups.insert(key_value.clone(), state);
                 self.retained_key_bytes = next_bytes;
             }
+            start = end;
         }
         Ok(())
     }
@@ -407,5 +422,60 @@ mod columnar_partial_finalization_tests {
         let result = partial.finish().unwrap();
         assert_eq!(result.num_rows(), 0);
         assert_eq!(result.schema().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod partial_aggregate_run_tests {
+    use super::*;
+
+    fn input(rows: Vec<(Value, Value)>) -> Batch {
+        Batch::from_rows(
+            Schema::new(vec![
+                Field::new("key", DataType::Text, true),
+                Field::new("amount", DataType::Integer, true),
+            ]).unwrap(),
+            rows.into_iter().map(|(key, value)| vec![key, value]).collect(),
+        ).unwrap()
+    }
+
+    #[test]
+    fn repeated_keys_hash_once_per_run_without_changing_totals() {
+        let a = Value::Text("🦀".repeat(1000));
+        let b = Value::Text("b".repeat(1000));
+        let mut rows = Vec::new();
+        for _ in 0..512 { rows.push((a.clone(), Value::Integer(2))); }
+        for _ in 0..128 { rows.push((b.clone(), Value::Null)); }
+        for _ in 0..512 { rows.push((a.clone(), Value::Integer(3))); }
+        rows.push((Value::Null, Value::Integer(4)));
+        let batch = input(rows);
+        let mut aggregate = PartialGroupSum::with_key_byte_limit(
+            "key", "amount", 3, 10_000
+        );
+        aggregate.update(&batch).unwrap();
+        let output = aggregate.finish().unwrap();
+        let keys = output.column(0).unwrap();
+        let counts = output.column(1).unwrap();
+        let sums = output.column(2).unwrap();
+        let mut actual = std::collections::HashMap::new();
+        for i in 0..output.num_rows() {
+            actual.insert(keys[i].clone(), (counts[i].clone(), sums[i].clone()));
+        }
+        assert_eq!(actual[&a], (Value::Integer(1024), Value::Integer(2560)));
+        assert_eq!(actual[&b], (Value::Integer(128), Value::Null));
+        assert_eq!(actual[&Value::Null], (Value::Integer(1), Value::Integer(4)));
+    }
+
+    #[test]
+    fn run_admission_rejects_new_keys_and_invalidates_the_aggregate() {
+        let mut aggregate = PartialGroupSum::new("key", "amount", 1);
+        let batch = input(vec![
+            (Value::Text("x".into()), Value::Integer(1)),
+            (Value::Text("x".into()), Value::Integer(2)),
+            (Value::Text("y".into()), Value::Integer(3)),
+        ]);
+        assert!(aggregate.update(&batch).is_err());
+        assert!(aggregate.update(&batch).is_err());
+        assert!(aggregate.finish().is_err());
     }
 }
