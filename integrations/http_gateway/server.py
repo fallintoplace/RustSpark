@@ -12,8 +12,11 @@ import math
 import os
 import signal
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from contextlib import contextmanager
 import socket
 from pathlib import Path
+import stat
+import tempfile
 import re
 import subprocess
 import threading
@@ -22,6 +25,7 @@ import time
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_TEMPLATE_BYTES = 1024 * 1024
 MAX_BACKEND_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_RESPONSE_BYTES = MAX_BACKEND_OUTPUT_BYTES
 
@@ -91,6 +95,34 @@ def list_query_templates(directory: Path) -> list[str]:
         if path.is_file() and not path.is_symlink()
         and path.suffix == ".sql" and TEMPLATE.fullmatch(path.stem)
     )
+
+
+@contextmanager
+def pinned_query_template(template: Path):
+    """Execute a private snapshot of the approved regular SQL file."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif template.is_symlink():
+        raise ValueError("SQL template cannot be a symlink")
+    try:
+        fd = os.open(template, flags)
+    except OSError as error:
+        raise ValueError("Unable to open SQL template") from error
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template must be a bounded regular file")
+        sql = source.read(MAX_TEMPLATE_BYTES + 1)
+        if len(sql) > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template exceeds byte limit")
+    with tempfile.TemporaryDirectory(prefix="rustspark-gateway-sql-") as directory:
+        snapshot = Path(directory) / "query.sql"
+        snapshot.write_bytes(sql)
+        snapshot.chmod(0o600)
+        yield snapshot
 
 
 def command_for_template(binary: str, database: Path, template: Path,
@@ -302,10 +334,11 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.send_json(404, {"error": "Unknown query"})
                 return
             try:
-                result = run_bounded_backend(
-                    command_for_template(binary, database, template, params, max_rows, timeout),
-                    timeout + 10,
-                )
+                with pinned_query_template(template) as pinned:
+                    result = run_bounded_backend(
+                        command_for_template(binary, database, pinned, params, max_rows, timeout),
+                        timeout + 10,
+                    )
                 if result.returncode:
                     self.send_json(422, {"error": "Query failed"})
                     return
