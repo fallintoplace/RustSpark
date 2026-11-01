@@ -28,7 +28,7 @@ mod tests {
         catalog.register("t", batch).unwrap();
         let query = "SELECT IF(condition, 5, 9223372036854775807 + 1) AS n FROM t";
         let plan = sql::parse_sql(query).unwrap();
-        let mut rows = executor::execute(&plan, &catalog).unwrap_err();
+        let rows = executor::execute(&plan, &catalog).unwrap_err();
         assert!(rows.to_string().contains("overflow"));
         let query = "SELECT IF(condition, 5, 7) AS n FROM t";
         let rows = executor::execute(&sql::parse_sql(query).unwrap(), &catalog)

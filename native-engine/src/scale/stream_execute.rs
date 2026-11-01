@@ -1419,7 +1419,7 @@ mod bounded_filter_limit_fusion_regressions {
 mod early_stream_drop_cleans_spill_files_tests {
     use super::*;
     use crate::{aggregate::{AggregateItem, AggregateOp}, expr::Expr,
-        join::JoinKind, schema::{DataType, Field}, scalar::Value};
+        join::JoinKind, schema::{DataType, Field}};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
     static ID: AtomicU64 = AtomicU64::new(1);
 

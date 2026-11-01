@@ -1,6 +1,10 @@
 name: Native engine
 
 on:
+  pull_request:
+    paths:
+      - 'native-engine/**'
+      - '.github/workflows/native-engine.yml'
   workflow_dispatch:
   schedule:
     - cron: '17 4 * * 0'
@@ -14,7 +18,7 @@ permissions:
 
 jobs:
   native:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     name: Build and test native engine
     runs-on: ubuntu-latest
     timeout-minutes: 15
