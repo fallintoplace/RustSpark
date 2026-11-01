@@ -247,7 +247,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                     .map_or(text.len(), |(offset, _)| offset);
                 let end_byte = text[start_byte..].char_indices().nth(count)
                     .map_or(text.len(), |(offset, _)| start_byte + offset);
-                Ok(Value::Text(text[start_byte..end_byte].into()))
+                let selected = &text[start_byte..end_byte];
+                if selected.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("SUBSTRING result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(selected.into()))
             }
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("SUBSTRING requires text and integer positions".into())),
@@ -322,7 +326,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("CONTAINS requires text".into())),
         },
         "REVERSE" => match args {
-            [Value::Text(value)] => Ok(Value::Text(value.chars().rev().collect())),
+            [Value::Text(value)] => {
+                if value.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("REVERSE result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(value.chars().rev().collect()))
+            },
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("REVERSE requires text".into())),
         },
@@ -466,5 +475,43 @@ mod bounded_replace_output_regressions {
         assert_eq!(evaluate("REPLACE", &[
             Value::Text("xy".into()), Value::Text("".into()), Value::Text("-".into()),
         ]).unwrap(), Value::Text("-x-y-".into()));
+    }
+}
+
+#[cfg(test)]
+mod reverse_result_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn reverse_is_unicode_safe_and_does_not_allocate_oversized_output() {
+        assert_eq!(evaluate("REVERSE", &[Value::Text("a🙂é".into())]).unwrap(),
+            Value::Text("é🙂a".into()));
+        assert_eq!(evaluate("REVERSE", &[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate("REVERSE", &[
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
+        ]).is_err());
+        let exact = "x".repeat(16 * 1024 * 1024);
+        assert_eq!(evaluate("REVERSE", &[Value::Text(exact.clone())]).unwrap(),
+            Value::Text(exact));
+    }
+}
+
+#[cfg(test)]
+mod substring_result_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn limits_cloned_result_but_allows_small_slices_of_large_text() {
+        let source = "a".repeat(16 * 1024 * 1024 + 1);
+        assert!(evaluate("SUBSTRING", &[
+            Value::Text(source.clone()), Value::Integer(1),
+            Value::Integer(i64::MAX),
+        ]).is_err());
+        assert_eq!(evaluate("SUBSTRING", &[
+            Value::Text(source), Value::Integer(1), Value::Integer(1),
+        ]).unwrap(), Value::Text("a".into()));
+        assert_eq!(evaluate("SUBSTRING", &[
+            Value::Text("é🙂z".into()), Value::Integer(2), Value::Integer(1),
+        ]).unwrap(), Value::Text("🙂".into()));
     }
 }

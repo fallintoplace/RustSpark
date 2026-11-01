@@ -149,6 +149,9 @@ mod tests {
 pub struct UnionDistinctStream<L, R> {
     inner: UnionAllStream<L, R>,
     seen: std::collections::HashMap<u64, Vec<Vec<crate::scalar::Value>>>,
+    // A one-column UNION needs exact scalar keys, not nested row vectors
+    // and an extra fingerprint bucket for every distinct value.
+    single_keys: std::collections::HashSet<crate::scalar::Value>,
     unique_keys: usize,
     retained_bytes: usize,
     max_keys: usize,
@@ -168,6 +171,7 @@ impl<L, R> UnionDistinctStream<L, R> {
         Ok(Self {
             inner: UnionAllStream::new(left, right, schema, control),
             seen: std::collections::HashMap::new(),
+            single_keys: std::collections::HashSet::new(),
             unique_keys: 0, retained_bytes: 0, max_keys, max_bytes,
             pending_error: None, stopped: false,
         })
@@ -205,6 +209,57 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 self.retained_bytes = 64;
                 return Some(batch.slice_rows(0, 1));
             }
+            if batch.schema().len() == 1 {
+                let values = match batch.column(0) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                };
+                let mut selected = Vec::new();
+                for (row, value) in values.iter().enumerate() {
+                    if self.single_keys.contains(value) { continue; }
+                    if self.unique_keys >= self.max_keys {
+                        self.pending_error = Some(Error::Execution(
+                            "UNION DISTINCT memory budget exceeded".into(),
+                        ));
+                        break;
+                    }
+                    let minimum = super::row_footprint::minimum_cloned_footprint(
+                        std::iter::once(value),
+                    );
+                    if self.retained_bytes.checked_add(minimum)
+                        .is_none_or(|bytes| bytes > self.max_bytes) {
+                        self.pending_error = Some(Error::Execution(
+                            "UNION DISTINCT memory budget exceeded".into(),
+                        ));
+                        break;
+                    }
+                    let key = value.clone();
+                    let actual = super::row_footprint::footprint(std::iter::once(&key));
+                    let Some(total) = self.retained_bytes.checked_add(actual)
+                        .filter(|&bytes| bytes <= self.max_bytes) else {
+                        self.pending_error = Some(Error::Execution(
+                            "UNION DISTINCT memory budget exceeded".into(),
+                        ));
+                        break;
+                    };
+                    self.single_keys.insert(key);
+                    self.unique_keys += 1;
+                    self.retained_bytes = total;
+                    selected.push(row);
+                }
+                if selected.is_empty() {
+                    if let Some(error) = self.pending_error.take() {
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                    continue;
+                }
+                if selected.len() == batch.num_rows() { return Some(Ok(batch)); }
+                return Some(batch.take_sorted_owned(&selected));
+            }
             // Probe hash buckets using references to column values. Only first
             // occurrences are materialized as owned keys.
             let columns = match (0..batch.schema().len())
@@ -217,7 +272,15 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     }
                 };
             let mut selected = Vec::new();
+            let mut previous_row = None;
             for row in 0..batch.num_rows() {
+                // A previous row was either inserted or already seen. Sorted
+                // streams can skip expensive wide-key hashing for whole runs.
+                if previous_row.is_some_and(|previous|
+                    columns.iter().all(|column| column[previous] == column[row])) {
+                    continue;
+                }
+                previous_row = Some(row);
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 columns.len().hash(&mut hasher);
                 for column in &columns { column[row].hash(&mut hasher); }
@@ -685,6 +748,116 @@ mod union_distinct_compact_retained_key_tests {
         assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(),
             vec![vec![Value::Text("ok".into())]]);
         assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
+        assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod clustered_union_distinct_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn long_clustered_nullable_keys_stay_unique_across_streams() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("partition", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "é🍀".repeat(4096);
+        let rows = |keys: Vec<(Option<&str>, i64)>| {
+            Batch::from_rows(schema.clone(), keys.into_iter().map(|(key, partition)| vec![
+                key.map_or(Value::Null, |value| Value::Text(value.into())),
+                Value::Integer(partition),
+            ]).collect()).unwrap()
+        };
+        let left = rows(vec![
+            (Some(&wide), 1), (Some(&wide), 1), (Some(&wide), 1),
+            (None, 1), (None, 1), (Some("short"), 2),
+            (Some(&wide), 1),
+        ]);
+        let right = rows(vec![
+            (Some(&wide), 1), (Some(&wide), 1), (None, 1),
+            (Some("new"), 3), (Some("new"), 3),
+        ]);
+        let result = UnionDistinctStream::new(
+            [Ok(left)].into_iter(), [Ok(right)].into_iter(),
+            schema, QueryControl::default(), 4, usize::MAX,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let actual = result.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual, vec![
+            vec![Value::Text(wide), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text("short".into()), Value::Integer(2)],
+            vec![Value::Text("new".into()), Value::Integer(3)],
+        ]);
+    }
+
+    #[test]
+    fn duplicate_runs_never_exceed_unique_key_limit() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Float, true)]).unwrap();
+        let source = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(-0.0)], vec![Value::Float(0.0)],
+            vec![Value::Float(0.0)], vec![Value::Float(f64::NAN)],
+            vec![Value::Float(f64::NAN)], vec![Value::Null],
+            vec![Value::Null],
+        ]).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            [Ok(source)].into_iter(), std::iter::empty(),
+            schema, QueryControl::default(), 3, usize::MAX,
+        ).unwrap();
+        let rows = stream.by_ref().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.iter().map(Batch::num_rows).sum::<usize>(), 3);
+    }
+}
+
+#[cfg(test)]
+mod union_single_column_hashset_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn preserves_null_nan_signed_zero_and_input_order_between_streams() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Float, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(f64::NAN)], vec![Value::Float(-0.0)],
+            vec![Value::Null], vec![Value::Float(3.0)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(-f64::NAN)], vec![Value::Float(0.0)],
+            vec![Value::Null], vec![Value::Float(5.0)],
+        ]).unwrap();
+        let stream = UnionDistinctStream::new(
+            [Ok(left)].into_iter(), [Ok(right)].into_iter(),
+            schema, QueryControl::default(), 16, 4096,
+        ).unwrap();
+        let actual = stream.collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![
+            vec![Value::Float(f64::NAN)], vec![Value::Float(-0.0)],
+            vec![Value::Null], vec![Value::Float(3.0)],
+            vec![Value::Float(5.0)],
+        ]);
+    }
+
+    #[test]
+    fn one_column_budget_errors_after_valid_prefix_without_extra_input() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("alpha".into())],
+            vec![Value::Text("alpha".into())],
+            vec![Value::Text("beta".into())],
+            vec![Value::Text("gamma".into())],
+        ]).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            [Ok(batch)].into_iter(), std::iter::empty(),
+            schema, QueryControl::default(), 2, 4096,
+        ).unwrap();
+        let prefix = stream.next().unwrap().unwrap();
+        assert_eq!(prefix.rows().unwrap(), vec![
+            vec![Value::Text("alpha".into())], vec![Value::Text("beta".into())],
+        ]);
+        assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
     }
 }

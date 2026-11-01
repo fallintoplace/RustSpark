@@ -106,6 +106,41 @@ impl AttemptTracker {
         }
     }
 
+    /// Admit a frame window atomically. Capacity errors must not commit
+    /// earlier attempt transitions from the same incoming network batch.
+    /// Decisions include frames already staged earlier in this window.
+    pub fn accept_batch(&mut self, frames: &[Frame]) -> Result<Vec<bool>> {
+        let mut staged = std::collections::HashMap::new();
+        let mut new_tasks = 0usize;
+        let mut accepted = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let key = (frame.stage, frame.task);
+            let previous = staged.get(&key).copied()
+                .or_else(|| self.attempts.get(&key).copied());
+            match previous {
+                Some(attempt) if frame.attempt < attempt => accepted.push(false),
+                Some(attempt) => {
+                    accepted.push(true);
+                    if frame.attempt > attempt {
+                        staged.insert(key, frame.attempt);
+                    }
+                }
+                None => {
+                    if new_tasks >= self.max_tasks.saturating_sub(self.attempts.len()) {
+                        return Err(Error::Execution("exchange task tracking budget exceeded".into()));
+                    }
+                    new_tasks += 1;
+                    staged.insert(key, frame.attempt);
+                    accepted.push(true);
+                }
+            }
+        }
+        for (key, attempt) in staged {
+            self.attempts.insert(key, attempt);
+        }
+        Ok(accepted)
+    }
+
     /// Release a completed task after its exchange stream has been fully
     /// committed and closed. Do not call while delayed frames can still arrive.
     pub fn retire_task(&mut self, stage: u64, task: u64) -> bool {
@@ -218,6 +253,14 @@ where
     Ok(emitted)
 }
 
+fn allocate_frame_payload(len: usize) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    payload.try_reserve_exact(len)
+        .map_err(|_| Error::Execution("exchange frame allocation failed".into()))?;
+    payload.resize(len, 0);
+    Ok(payload)
+}
+
 pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Frame>> {
     // Read one byte first to preserve clean EOF at frame boundaries.
     let mut header = [0u8; HEADER_BYTES];
@@ -241,7 +284,9 @@ pub fn read_frame(input: &mut impl Read, max_bytes: usize) -> Result<Option<Fram
     if len > max_bytes {
         return Err(Error::Execution("received exchange frame exceeds memory budget".into()));
     }
-    let mut payload = vec![0; len];
+    // A caller may set a very large frame budget. A valid wire length is
+    // not proof that the receiver can allocate it, so reserve fallibly.
+    let mut payload = allocate_frame_payload(len)?;
     input.read_exact(&mut payload)?;
     if checksum_parts(&header[..CHECKSUM_OFFSET], &payload) != expected_checksum {
         return Err(Error::Execution("exchange frame checksum mismatch".into()));
@@ -878,5 +923,68 @@ mod exchange_attempt_retirement_tests {
         assert_eq!(tracker.retire_stage(8), 1);
         assert_eq!(tracker.retire_stage(9), 1);
         assert_eq!(tracker.retire_stage(10), 1);
+    }
+}
+
+#[cfg(test)]
+mod transactional_attempt_window_regressions {
+    use super::*;
+
+    fn frame(stage: u64, task: u64, attempt: u32) -> Frame {
+        Frame { stage, task, attempt, payload: Vec::new() }
+    }
+
+    #[test]
+    fn mixed_stale_and_new_attempts_share_a_monotonic_window() {
+        let mut tracker = AttemptTracker::new(2).unwrap();
+        assert!(tracker.accept(&frame(1, 10, 3)).unwrap());
+        let accepted = tracker.accept_batch(&[
+            frame(1, 10, 2), frame(1, 11, 1), frame(1, 11, 5),
+            frame(1, 11, 2), frame(1, 10, 4), frame(1, 10, 3),
+        ]).unwrap();
+        assert_eq!(accepted, vec![false, true, true, false, true, false]);
+        assert_eq!(tracker.attempts[&(1, 10)], 4);
+        assert_eq!(tracker.attempts[&(1, 11)], 5);
+        assert!(!tracker.accept(&frame(1, 11, 4)).unwrap());
+    }
+
+    #[test]
+    fn exceeding_batch_capacity_does_not_commit_any_attempts() {
+        let mut tracker = AttemptTracker::new(2).unwrap();
+        tracker.accept(&frame(9, 1, 2)).unwrap();
+        let old = tracker.attempts.clone();
+        assert!(tracker.accept_batch(&[
+            frame(9, 1, 100), frame(9, 2, 4), frame(9, 3, 1),
+        ]).is_err());
+        assert_eq!(tracker.attempts, old);
+        assert_eq!(tracker.accept_batch(&[]).unwrap(), Vec::<bool>::new());
+        assert_eq!(tracker.attempts, old);
+        assert_eq!(tracker.accept_batch(&[
+            frame(9, 1, 4), frame(9, 2, 3), frame(9, 2, 3),
+        ]).unwrap(), vec![true, true, true]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_frame_allocation_regressions {
+    use super::*;
+
+    #[test]
+    fn overflowed_receiver_allocation_returns_an_error() {
+        let failure = allocate_frame_payload(usize::MAX).unwrap_err();
+        assert!(failure.to_string().contains("exchange frame allocation failed"));
+    }
+
+    #[test]
+    fn zero_and_nonzero_frames_remain_checksums_compatible() {
+        for payload in [vec![], vec![0x7f], (0..127).collect::<Vec<u8>>()] {
+            let frame = Frame { stage: 98, task: 32, attempt: 4, payload };
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &frame, 128).unwrap();
+            assert_eq!(read_frame(&mut wire.as_slice(), 128).unwrap(), Some(frame));
+            let mut truncated = wire.clone();
+            truncated.pop();
+            assert!(read_frame(&mut truncated.as_slice(), 128).is_err());
+        }
     }
 }
