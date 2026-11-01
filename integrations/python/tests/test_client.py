@@ -375,6 +375,25 @@ printf '%s\\n' '{"a":1}'
             with self.assertRaisesRegex(RustSparkError, "max_output_bytes"):
                 list(client.iter_rows("SELECT 1", max_row_bytes=7, max_output_bytes=7))
 
+    @unittest.skipUnless(os.name == "posix", "helper uses POSIX shell")
+    def test_crlf_row_framing_does_not_count_toward_row_limit(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake-rustspark"
+            script.write_text("""#!/bin/sh
+printf '%s\r\n' '{"a":1}'
+""", encoding="utf-8")
+            script.chmod(0o700)
+            client = RustSpark(binary=str(script))
+            self.assertEqual(list(client.iter_rows("SELECT 1", max_row_bytes=7)),
+                             [{"a": 1}])
+            with self.assertRaisesRegex(RustSparkError, "max_row_bytes"):
+                list(client.iter_rows("SELECT 1", max_row_bytes=6))
+            with self.assertRaisesRegex(RustSparkError, "max_output_bytes"):
+                list(client.iter_rows("SELECT 1", max_row_bytes=7,
+                                      max_output_bytes=8))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,9 +60,9 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
     } else if part.eq_ignore_ascii_case("HOST") {
         parsed.as_ref().and_then(|parsed| parsed.host_str().map(str::to_owned))
     } else if part.eq_ignore_ascii_case("AUTHORITY") {
-        find_authority(url).map(str::to_owned)
+        find_authority(without_query).map(str::to_owned)
     } else if part.eq_ignore_ascii_case("USERINFO") {
-        find_authority(url)
+        find_authority(without_query)
             .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user.to_owned()))
     } else if part.eq_ignore_ascii_case("PATH") {
         raw_path.map(str::to_owned)
@@ -161,6 +161,23 @@ mod tests {
             Value::Text("/tmp/data.csv".into()));
         assert_eq!(get("relative/data.csv", "PATH", None).unwrap(),
             Value::Text("relative/data.csv".into()));
+    }
+
+    #[test]
+    fn authority_cannot_come_from_query_or_fragment_text() {
+        for uri in [
+            "relative/path?next=https://fake.example/user",
+            "relative/path#https://fake.example/user",
+            "mailto:dev@example.com?next=https://fake.example",
+        ] {
+            assert_eq!(get(uri, "AUTHORITY", None).unwrap(), Value::Null);
+            assert_eq!(get(uri, "USERINFO", None).unwrap(), Value::Null);
+        }
+        let real = "https://user:pass@real.example/path?next=https://fake.example#https://other.example";
+        assert_eq!(get(real, "AUTHORITY", None).unwrap(),
+            Value::Text("user:pass@real.example".into()));
+        assert_eq!(get(real, "USERINFO", None).unwrap(),
+            Value::Text("user:pass".into()));
     }
 
     #[test]
