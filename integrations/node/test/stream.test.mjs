@@ -68,3 +68,20 @@ shellTest("breaking async iteration closes the exporter instead of hanging", asy
     assert.equal(count, 1);
   });
 });
+
+shellTest("queryRows handles many complete rows and a split Unicode row", async () => {
+  const script = [
+    "n=0",
+    'while [ "$n" -lt 1000 ]; do printf \'{"n":%s}\\n\' "$n"; n=$((n + 1)); done',
+    String.raw`printf '{"value":"é'`,
+    "sleep 0.02",
+    String.raw`printf '🙂"}\n'`,
+  ].join("\n") + "\n";
+  await withScript(script, async (client) => {
+    const rows = [];
+    for await (const row of client.queryRows("SELECT 1")) rows.push(row);
+    assert.equal(rows.length, 1001);
+    for (let n = 0; n < 1000; n++) assert.deepEqual(rows[n], { n });
+    assert.deepEqual(rows[1000], { value: "é🙂" });
+  });
+});

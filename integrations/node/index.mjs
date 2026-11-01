@@ -158,10 +158,10 @@ export class RustSpark {
     let segments = [];
     let segmentBytes = 0;
     const utf8 = new TextDecoder("utf-8", { fatal: true });
-    const parseRow = () => {
-      // Buffer.toString silently substitutes U+FFFD for malformed UTF-8.
-      // Preserve byte-exact SQL results by rejecting invalid row encoding.
-      const source = utf8.decode(Buffer.concat(segments, segmentBytes));
+    const parseRow = (directLine = null) => {
+      // A complete row inside one stdout chunk needs no Buffer.concat.
+      // TextDecoder still rejects malformed UTF-8 for either path.
+      const source = utf8.decode(directLine ?? Buffer.concat(segments, segmentBytes));
       const row = parseStrictJSON(source, { unsafeIntegers });
       if (row === null || typeof row !== "object" || Array.isArray(row)) {
         throw new RustSparkError("RustSpark NDJSON row must be an object");
@@ -184,14 +184,16 @@ export class RustSpark {
           if (segmentBytes + part.length > maxLineBytes) {
             throw new RustSparkError("RustSpark NDJSON row exceeded 16 MiB");
           }
-          segments.push(part);
-          segmentBytes += part.length;
-          if (newline >= 0) {
-            yield parseRow();
-            from = newline + 1;
+          if (newline >= 0 && segmentBytes === 0) {
+            // Most CLI rows fit in one pipe chunk. Parse the borrowed slice
+            // directly instead of allocating a new buffer for every row.
+            yield parseRow(part);
           } else {
-            from = chunk.length;
+            segments.push(part);
+            segmentBytes += part.length;
+            if (newline >= 0) yield parseRow();
           }
+          from = newline >= 0 ? newline + 1 : chunk.length;
         }
       }
       if (segmentBytes > 0) yield parseRow();
