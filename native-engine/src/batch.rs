@@ -165,40 +165,64 @@ impl Batch {
     }
 
     /// Gather arbitrary row indices from an owned batch, retaining order and
-    /// duplicates. The final use of each source cell moves its allocation.
-    /// Duplicate earlier uses must still clone the value.
+    /// duplicates. Each source cell is moved on its final use, not cloned.
+    ///
+    /// Sparse selections should not allocate an O(input rows) last-use table.
+    /// An empty-schema batch can legitimately have billions of logical rows.
     pub fn take_owned(self, indices: &[usize]) -> Result<Self> {
-        let mut last_positions = vec![usize::MAX; self.rows];
+        if indices.is_empty() { return Ok(Self::empty(self.schema)); }
+        if indices.len() <= self.rows / 8 {
+            let mut last = std::collections::HashMap::with_capacity(indices.len());
+            let mut has_duplicates = false;
+            for (position, &index) in indices.iter().enumerate() {
+                if index >= self.rows {
+                    return Err(Error::Execution(format!("row index out of bounds: {index}")));
+                }
+                has_duplicates |= last.insert(index, position).is_some();
+            }
+            if indices.len() == self.rows && !has_duplicates {
+                return self.permute_rows_owned(indices);
+            }
+            if indices.windows(2).all(|pair| pair[0] < pair[1]) {
+                return self.take_sorted_owned(indices);
+            }
+            return Ok(self.gather_owned_last_positions(indices, |row| last[&row]));
+        }
+        let mut last = vec![usize::MAX; self.rows];
         let mut has_duplicates = false;
         for (position, &index) in indices.iter().enumerate() {
             if index >= self.rows {
                 return Err(Error::Execution(format!("row index out of bounds: {index}")));
             }
-            if last_positions[index] != usize::MAX { has_duplicates = true; }
-            last_positions[index] = position;
+            if last[index] != usize::MAX { has_duplicates = true; }
+            last[index] = position;
         }
-        // Full permutations can swap column entries in place, preserving
-        // the original column allocations without any per-cell containers.
         if indices.len() == self.rows && !has_duplicates {
             return self.permute_rows_owned(indices);
         }
         if indices.windows(2).all(|pair| pair[0] < pair[1]) {
             return self.take_sorted_owned(indices);
         }
-        let columns = self.columns.into_iter().map(|source| {
-            let mut cells = source.into_iter().map(Some).collect::<Vec<_>>();
+        Ok(self.gather_owned_last_positions(indices, |row| last[row]))
+    }
+
+    // A final reference takes the source cell in place. This avoids a second
+    // O(input rows) Vec<Option<Value>> allocation for every source column.
+    fn gather_owned_last_positions(
+        self, indices: &[usize], last_position: impl Fn(usize) -> usize,
+    ) -> Self {
+        let columns = self.columns.into_iter().map(|mut source| {
             let mut output = Vec::with_capacity(indices.len());
             for (position, &index) in indices.iter().enumerate() {
-                let value = if last_positions[index] == position {
-                    cells[index].take().expect("last source reference")
+                output.push(if last_position(index) == position {
+                    std::mem::replace(&mut source[index], Value::Null)
                 } else {
-                    cells[index].as_ref().expect("live source reference").clone()
-                };
-                output.push(value);
+                    source[index].clone()
+                });
             }
             output
         }).collect();
-        Ok(Self { schema: self.schema, columns, rows: indices.len() })
+        Self { schema: self.schema, columns, rows: indices.len() }
     }
 
     /// Gather unique row indices in any order from an owned batch.
@@ -831,3 +855,56 @@ mod unique_owned_gather_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod sparse_owned_gather_budget_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn huge_zero_width_cardinality_uses_only_selection_memory() {
+        let batch = Batch::new_with_row_count(
+            Schema::new(vec![]).unwrap(), vec![], 1_000_000_000,
+        ).unwrap();
+        let output = batch.take_owned(&[999_999_999, 1, 1, 44]).unwrap();
+        assert_eq!(output.num_rows(), 4);
+        assert_eq!(output.schema().len(), 0);
+        let empty = Batch::new_with_row_count(
+            Schema::new(vec![]).unwrap(), vec![], usize::MAX,
+        ).unwrap().take_owned(&[]).unwrap();
+        assert_eq!(empty.num_rows(), 0);
+    }
+
+    #[test]
+    fn sparse_duplicates_move_last_text_and_match_borrowed_gather() {
+        let payload = "🙂".repeat(2048);
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap(), (0..256).map(|n| vec![
+            if n == 17 { Value::Text(payload.clone()) }
+            else if n == 42 { Value::Null }
+            else { Value::Text(format!("row-{n}")) }
+        ]).collect()).unwrap();
+        let indices = [17, 42, 17, 4, 42, 17];
+        let expected = input.take(&indices).unwrap();
+        let pointer = match input.value(17, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let actual = input.take_owned(&indices).unwrap();
+        assert_eq!(actual, expected);
+        let last_pointer = match actual.value(5, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(last_pointer, pointer);
+    }
+
+    #[test]
+    fn out_of_bounds_sparse_selection_is_rejected() {
+        let input = Batch::new_with_row_count(
+            Schema::new(vec![]).unwrap(), vec![], 1_000_000,
+        ).unwrap();
+        assert!(input.take_owned(&[1, 1_000_000]).is_err());
+    }
+}
