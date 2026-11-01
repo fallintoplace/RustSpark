@@ -35,9 +35,12 @@ def run_bounded(command: list[str], *, timeout: float,
         raise ValueError("Invalid backend resource budget")
     output = bytearray()
     overflow = threading.Event()
-    with subprocess.Popen(command, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL,
-                          start_new_session=(os.name == "posix")) as process:
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=(os.name == "posix"),
+    )
+    worker = None
+    try:
         assert process.stdout is not None
 
         def collect():
@@ -74,3 +77,12 @@ def run_bounded(command: list[str], *, timeout: float,
         return subprocess.CompletedProcess(
             command, process.returncode, stdout, ""
         )
+    finally:
+        # Popen's context manager waits but does not kill the child on an
+        # interrupt. Always stop descendants before joining the pipe worker.
+        _kill_backend_group(process)
+        process.wait()
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=1)
+        if process.stdout is not None and (worker is None or not worker.is_alive()):
+            process.stdout.close()
