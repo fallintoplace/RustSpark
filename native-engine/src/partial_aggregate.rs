@@ -15,18 +15,26 @@ struct State {
 }
 
 impl State {
-    fn add(&mut self, amount: &Value) -> Result<()> {
-        let rows = self.rows.checked_add(1)
+    // Accumulate a sorted key run transactionally, with one checked row
+    // count and one state write rather than repeating both for each cell.
+    fn add_run(&mut self, amounts: &[Value]) -> Result<()> {
+        let count = i64::try_from(amounts.len())
+            .map_err(|_| Error::Execution("group count overflow".into()))?;
+        let rows = self.rows.checked_add(count)
             .ok_or_else(|| Error::Execution("group count overflow".into()))?;
-        let (sum, has_value) = match amount {
-            Value::Integer(value) => (
-                self.sum.checked_add(i128::from(*value))
-                    .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?,
-                true,
-            ),
-            Value::Null => (self.sum, self.has_value),
-            _ => return Err(Error::Type("partial SUM requires integer values".into())),
-        };
+        let mut sum = self.sum;
+        let mut has_value = self.has_value;
+        for value in amounts {
+            match value {
+                Value::Integer(number) => {
+                    sum = sum.checked_add(i128::from(*number))
+                        .ok_or_else(|| Error::Execution("partial SUM overflow".into()))?;
+                    has_value = true;
+                }
+                Value::Null => {}
+                _ => return Err(Error::Type("partial SUM requires integer values".into())),
+            }
+        }
         self.rows = rows;
         self.sum = sum;
         self.has_value = has_value;
@@ -105,9 +113,7 @@ impl PartialGroupSum {
                 end += 1;
             }
             if let Some(state) = self.groups.get_mut(key_value) {
-                for value in &amounts[start..end] {
-                    state.add(value)?;
-                }
+                state.add_run(&amounts[start..end])?;
             } else {
                 if self.groups.len() >= self.max_groups {
                     return Err(Error::Execution("group cardinality exceeds memory admission limit".into()));
@@ -116,9 +122,7 @@ impl PartialGroupSum {
                     .filter(|&size| size <= self.max_key_bytes)
                     .ok_or_else(|| Error::Execution("partial aggregation key memory budget exceeded".into()))?;
                 let mut state = State::default();
-                for value in &amounts[start..end] {
-                    state.add(value)?;
-                }
+                state.add_run(&amounts[start..end])?;
                 self.groups.insert(key_value.clone(), state);
                 self.retained_key_bytes = next_bytes;
             }
@@ -477,5 +481,45 @@ mod partial_aggregate_run_tests {
         assert!(aggregate.update(&batch).is_err());
         assert!(aggregate.update(&batch).is_err());
         assert!(aggregate.finish().is_err());
+    }
+}
+
+#[cfg(test)]
+mod partial_run_accumulation_regressions {
+    use super::*;
+
+    #[test]
+    fn large_adjacent_runs_preserve_nullability_negative_sums_and_counts() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let rows = (0..4096).map(|n| vec![
+            Value::Integer(7),
+            if n % 3 == 0 { Value::Null } else if n % 2 == 0 {
+                Value::Integer(-3)
+            } else { Value::Integer(5) },
+        ]).collect::<Vec<_>>();
+        let expected = rows.iter().map(|row| match &row[1] {
+            Value::Integer(value) => *value, _ => 0
+        }).sum::<i64>();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let mut aggregate = PartialGroupSum::new("key", "amount", 4);
+        aggregate.update(&batch).unwrap();
+        assert_eq!(aggregate.finish().unwrap().row(0).unwrap(), vec![
+            Value::Integer(7), Value::Integer(4096), Value::Integer(expected),
+        ]);
+    }
+
+    #[test]
+    fn invalid_runs_and_row_overflow_leave_previous_state_unchanged() {
+        let original = State { rows: 9, sum: 20, has_value: true };
+        let mut state = original.clone();
+        assert!(state.add_run(&[Value::Integer(7), Value::Text("bad".into())]).is_err());
+        assert_eq!((state.rows, state.sum, state.has_value),
+            (original.rows, original.sum, original.has_value));
+        let mut state = State { rows: i64::MAX, ..original };
+        assert!(state.add_run(&[Value::Integer(1)]).is_err());
+        assert_eq!(state.rows, i64::MAX);
     }
 }

@@ -10,6 +10,11 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
         let Some(characters) = super::string(&args[1])? else { return Ok(Value::Null); };
         Some(characters)
     } else { None };
+    if characters.is_some_and(|set| set.len() > 16 * 1024 * 1024) {
+        // The Unicode branch builds a HashSet, whose capacity can be far
+        // larger than the source byte length.
+        return Err(Error::Execution("TRIM character set exceeds native 16 MiB budget".into()));
+    }
     // Empty input needs no character-set lookup, but validate the optional argument first.
     if text.is_empty() { return Ok(Value::Text(String::new())); }
     // Explicit empty trim sets cannot match any character.
@@ -303,5 +308,23 @@ mod vertical_tab_normalization_tests {
                 Value::Text(expected), "input={text:?}");
         }
         assert_eq!(normalize_space(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod oversized_trim_set_budget_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_huge_unicode_sets_before_building_hash_tables() {
+        let set = Value::Text("é".repeat(8 * 1024 * 1024 + 1));
+        assert!(matches!(btrim(&[Value::Text("éhelloé".into()), set.clone()]),
+            Err(Error::Execution(_))));
+        assert!(matches!(ltrim(&[Value::Text("".into()), set]),
+            Err(Error::Execution(_))));
+        assert_eq!(btrim(&[
+            Value::Text("éhelloé".into()),
+            Value::Text("é".into()),
+        ]).unwrap(), Value::Text("hello".into()));
     }
 }

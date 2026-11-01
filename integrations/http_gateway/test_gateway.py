@@ -139,6 +139,16 @@ class BoundedBackendTests(unittest.TestCase):
             with self.subTest(max_bytes=size), self.assertRaisesRegex(ValueError, "budget"):
                 run_bounded_backend(command, timeout=5, max_bytes=size)
 
+    def test_running_backend_exceeding_budget_does_not_wait_for_eof(self):
+        script = (
+            "import sys,time;"
+            "sys.stdout.buffer.write(b'x'*2048);"
+            "sys.stdout.flush();time.sleep(8)"
+        )
+        with self.assertRaisesRegex(ValueError, "budget"):
+            run_bounded_backend([sys.executable, "-c", script],
+                                timeout=2, max_bytes=32)
+
     def test_backend_invalid_utf8_is_checked_before_result_parsing(self):
         with self.assertRaisesRegex(ValueError, "UTF-8"):
             run_bounded_backend([
