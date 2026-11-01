@@ -1157,6 +1157,7 @@ mod spill_writer_poisoning_regressions {
     use super::*;
     use std::io;
 
+    #[derive(Debug)]
     struct FullAfter { bytes: Vec<u8>, limit: usize }
     impl Write for FullAfter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
