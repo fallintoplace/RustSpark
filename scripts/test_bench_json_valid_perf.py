@@ -10,6 +10,15 @@ import bench_json_valid_perf as perf
 
 
 class JsonValidPerfTests(unittest.TestCase):
+    def test_native_eager_csv_does_not_use_stream_only_schema(self):
+        output = mock.Mock(stdout='{"n": 5}\n')
+        with mock.patch.object(perf.subprocess, "run", return_value=output) as run:
+            self.assertGreater(perf.run_case("rs", Path("data.csv"), 5, 5), 0)
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:3], ["rs", "--csv", "data.csv"])
+        self.assertNotIn("--csv-schema", arguments)
+        self.assertEqual(arguments[-2:], ["--stdout-format", "json"])
+
     def test_expected_count_includes_partial_cycles(self):
         self.assertEqual(perf.expected_valid_count(1), 1)
         self.assertEqual(perf.expected_valid_count(6), 4)
