@@ -318,6 +318,13 @@ impl Expr {
 enum LikePiece { Literal(char), One, Many }
 
 fn sql_like_escape(input: &str, pattern: &str, escape: char) -> Result<bool> {
+    // Exact LIKE predicates are common in generated SQL. Rejecting all
+    // metacharacters with one borrowed scan avoids allocating a token for
+    // every character, which matters for multi-megabyte text patterns.
+    // Patterns containing ESCAPE still require validation by the parser.
+    if !pattern.chars().any(|ch| ch == '%' || ch == '_' || ch == escape) {
+        return Ok(input == pattern);
+    }
     let mut symbols = pattern.chars();
     let mut pieces = Vec::new();
     while let Some(symbol) = symbols.next() {
@@ -1031,5 +1038,29 @@ mod numeric_null_type_validation_tests {
         ).unwrap();
         let rows = crate::executor::execute(&plan, &catalog).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Null, Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod exact_like_borrowed_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn exact_patterns_cover_long_unicode_without_token_storage() {
+        let long = "é界🙂a".repeat(100_000);
+        assert!(sql_like_escape(&long, &long, '\\').unwrap());
+        assert!(!sql_like_escape(&long, &(long.clone() + "z"), '\\').unwrap());
+        assert!(!sql_like_escape("", &long, '\\').unwrap());
+        assert!(sql_like_escape("", "", '\\').unwrap());
+        assert!(!sql_like_escape("a", "", '\\').unwrap());
+    }
+
+    #[test]
+    fn metacharacters_and_escapes_keep_like_semantics() {
+        assert!(sql_like_escape("a%c", "a\\%c", '\\').unwrap());
+        assert!(sql_like_escape("é界🙂", "é_🙂", '\\').unwrap());
+        assert!(sql_like_escape("abc", "%b%", '\\').unwrap());
+        assert!(sql_like_escape("abc", "a%c", '\\').unwrap());
+        assert!(sql_like_escape("ab", "ab!", '!').is_err());
     }
 }
