@@ -156,16 +156,25 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
     for (batch_index, batch) in input.iter().enumerate() {
         let bound = &sources[batch_index];
+        let mut previous_bucket = 0usize;
         for row in 0..batch.num_rows() {
-            let mut hasher = PartitionHasher::default();
-            for &column in &key_columns {
-                bound[column][row].hash(&mut hasher);
-            }
-            let hash = hasher.finish();
-            let bucket = match mask {
-                Some(mask) => (hash as usize) & mask,
-                None => (hash % partitions as u64) as usize,
+            // Duplicate consecutive composite keys always have identical
+            // FNV hashes. Reuse the shard ID for clustered join inputs.
+            let bucket = if row > 0 && key_columns.iter().all(|&column|
+                bound[column][row] == bound[column][row - 1]) {
+                previous_bucket
+            } else {
+                let mut hasher = PartitionHasher::default();
+                for &column in &key_columns {
+                    bound[column][row].hash(&mut hasher);
+                }
+                let hash = hasher.finish();
+                match mask {
+                    Some(mask) => (hash as usize) & mask,
+                    None => (hash % partitions as u64) as usize,
+                }
             };
+            previous_bucket = bucket;
             let columns = buckets[bucket].get_or_insert_with(|| {
                 (0..schema.len()).map(|_| Vec::new()).collect::<Vec<_>>()
             });
@@ -231,14 +240,21 @@ pub fn partition_batches_owned(
         let columns = key_columns.iter().map(|&index| batch.column(index))
             .collect::<Result<Vec<_>>>()?;
         let mut destinations = Vec::with_capacity(batch.num_rows());
+        let mut previous_bucket = 0usize;
         for row in 0..batch.num_rows() {
-            let mut hasher = PartitionHasher::default();
-            for column in &columns { column[row].hash(&mut hasher); }
-            let hash = hasher.finish();
-            let bucket = match mask {
-                Some(mask) => (hash as usize) & mask,
-                None => (hash % partitions as u64) as usize,
+            let bucket = if row > 0 && columns.iter().all(|column|
+                column[row] == column[row - 1]) {
+                previous_bucket
+            } else {
+                let mut hasher = PartitionHasher::default();
+                for column in &columns { column[row].hash(&mut hasher); }
+                let hash = hasher.finish();
+                match mask {
+                    Some(mask) => (hash as usize) & mask,
+                    None => (hash % partitions as u64) as usize,
+                }
             };
+            previous_bucket = bucket;
             counts[bucket] = counts[bucket].checked_add(1)
                 .ok_or_else(|| Error::Execution("partition row count overflow".into()))?;
             destinations.push(bucket);
@@ -683,5 +699,61 @@ mod trusted_partition_bucket_construction_tests {
         let different_schema = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
         assert!(partition_batches_owned(vec![input[0].clone(), Batch::empty(different_schema)],
             &["key"], 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod adjacent_composite_key_hash_run_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn clustered_nan_null_and_unicode_keys_match_independent_row_hashes() {
+        let schema = Schema::new(vec![
+            Field::new("numeric", DataType::Float, true),
+            Field::new("word", DataType::Text, true),
+            Field::new("rowid", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "🙂é".repeat(8192);
+        let mut rows = Vec::new();
+        for (number, word) in [
+            (Value::Float(-0.0), Value::Text(wide.clone())),
+            (Value::Float(0.0), Value::Text(wide.clone())),
+            (Value::Float(f64::NAN), Value::Null),
+            (Value::Float(-f64::NAN), Value::Null),
+            (Value::Null, Value::Text("missing".into())),
+            (Value::Float(123.0), Value::Text("x".into())),
+        ] {
+            for _ in 0..24 {
+                rows.push(vec![number.clone(), word.clone(), Value::Integer(rows.len() as i64)]);
+            }
+        }
+        let input = Batch::from_rows(schema, rows).unwrap();
+        for fanout in [2, 7, 16, 127] {
+            let mut grouped = vec![Vec::new(); fanout];
+            for row in 0..input.num_rows() {
+                let mut hasher = PartitionHasher::default();
+                input.value(row, 0).unwrap().hash(&mut hasher);
+                input.value(row, 1).unwrap().hash(&mut hasher);
+                grouped[(hasher.finish() % fanout as u64) as usize].push(row);
+            }
+            let expected = grouped.iter().map(|indices| input.take(indices).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(partition(&input, &["numeric", "word"], fanout).unwrap(), expected);
+            assert_eq!(partition_owned(input.clone(), &["numeric", "word"], fanout).unwrap(), expected);
+        }
+
+        let pointer = match input.value(3, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        };
+        let buckets = partition_owned(input, &["numeric", "word"], 16).unwrap();
+        let selected_pointer = buckets.iter().flat_map(|batch| batch.rows().unwrap())
+            .any(|row| row[2] == Value::Integer(3));
+        assert!(selected_pointer);
+        assert!(buckets.iter().any(|batch| (0..batch.num_rows()).any(|index| {
+            if batch.value(index, 2).unwrap() != &Value::Integer(3) { return false; }
+            matches!(batch.value(index, 1).unwrap(),
+                Value::Text(text) if text.as_ptr() == pointer)
+        })));
     }
 }
