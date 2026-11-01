@@ -10,6 +10,30 @@ import bench_tpch_smoke as smoke
 
 
 class SmokeTests(unittest.TestCase):
+    def test_rejects_unrepresentable_validated_timings(self):
+        rows = [{
+            "id": number, "status": "ok", "median_ms": 1.0,
+            "p95_ms": 1.0, "result_rows": 1,
+            "sql_sha256": "a" * 64, "result_sha256": "b" * 64,
+        } for number in range(1, 23)]
+        for field in ("median_ms", "p95_ms"):
+            rows[0][field] = 10 ** 500
+            with self.subTest(field=field):
+                self.assertFalse(smoke.complete_query_results(rows))
+            rows[0][field] = 1.0
+
+    def test_smoke_rejects_ambiguous_json_report_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "smoke.json"
+            for invalid in (
+                '{"results":[],"results":[{"id":1}]}',
+                '{"results":[{"id":1,"id":2}]}',
+                '{"results":[{"id":1,"median_ms":NaN}]}',
+            ):
+                report.write_text(invalid, encoding="utf-8")
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    smoke.smoke_report_succeeded(report, 0)
+
     def test_command_selects_entire_suite(self):
         prep, runner = smoke.commands("rs", Path("/tmp/fixture"), Path("/tmp/out.json"), 0.01, 4, 30)
         self.assertIn("tpch_prepare.py", prep[1])
