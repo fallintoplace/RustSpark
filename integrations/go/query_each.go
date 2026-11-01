@@ -16,10 +16,14 @@ const maxNDJSONRowBytes = 16 * 1024 * 1024
 // The line bound prevents a single untrusted result from exhausting memory.
 func scanNDJSONRows(input io.Reader, visit func(map[string]any) error) error {
     scanner := bufio.NewScanner(input)
-    scanner.Buffer(make([]byte, 64*1024), maxNDJSONRowBytes)
+    // Scanner needs room for the line ending in addition to row bytes.
+    scanner.Buffer(make([]byte, 64*1024), maxNDJSONRowBytes+2)
     index := 0
     for scanner.Scan() {
         index++
+        if len(scanner.Bytes()) > maxNDJSONRowBytes {
+            return fmt.Errorf("RustSpark NDJSON row %d exceeds %d bytes", index, maxNDJSONRowBytes)
+        }
         line := bytes.TrimSpace(scanner.Bytes())
         if len(line) == 0 {
             return fmt.Errorf("RustSpark NDJSON row %d is blank", index)
