@@ -21,11 +21,19 @@ def reject_nonfinite(value):
     raise ValueError(f"Non-finite JSON value: {value}")
 
 
+def parse_finite_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("Non-finite JSON number")
+    return value
+
+
 def load_report(path: Path) -> dict:
     data = json.loads(
         path.read_text(encoding="utf-8"),
         object_pairs_hook=reject_duplicate_keys,
         parse_constant=reject_nonfinite,
+        parse_float=parse_finite_float,
     )
     if not isinstance(data, dict):
         raise ValueError(f"{path}: expected report object")
