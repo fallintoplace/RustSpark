@@ -43,8 +43,9 @@ WORKLOADS = {
 
 
 def validate(rows, products, regions):
-    if min(rows, products, regions) < 1:
-        raise ValueError("rows, products, and regions must be positive")
+    if (any(type(value) is not int for value in (rows, products, regions))
+            or min(rows, products, regions) < 1):
+        raise ValueError("rows, products, and regions must be positive integers")
 
 
 def _write_csv_table(path, records):

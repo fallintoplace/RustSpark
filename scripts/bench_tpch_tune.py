@@ -57,7 +57,9 @@ def parse_variants(raw):
 
 
 def run(binary, parquet, queries, variants, repeat=3, warmup=1, timeout=180):
-    if type(repeat) is not int or repeat < 1 or type(warmup) is not int or warmup < 0 or timeout < 1:
+    if (type(repeat) is not int or repeat < 1
+            or type(warmup) is not int or warmup < 0
+            or type(timeout) is not int or timeout < 1):
         raise ValueError("Invalid timing settings")
     inputs = input_arguments(parquet)
     expected = {}

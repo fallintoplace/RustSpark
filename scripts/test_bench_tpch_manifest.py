@@ -38,6 +38,15 @@ class ManifestTests(unittest.TestCase):
             self.fixture(root)
             self.assertEqual(audit.check(root)["queries"], 22)
 
+    def test_overlarge_integer_scale_factor_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = self.fixture(root)
+            manifest["scale_factor"] = 10**500
+            (root / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "scale factor"):
+                audit.check(root)
+
     def test_rejects_corrupted_query(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -7,6 +7,7 @@ use crate::{
 pub struct ScanCursor<'a> {
     source: &'a Batch,
     predicate: Option<Expr>,
+    boolean_column: Option<(&'a [Value], bool)>,
     columns: Vec<usize>,
     output_schema: Schema,
     identity_projection: bool,
@@ -38,6 +39,18 @@ pub fn scan<'a>(
         Some(Expr::Literal(Value::Boolean(true))) => None,
         other => other,
     };
+    // Resolve direct boolean predicates once, not once per input row.
+    // NULL remains UNKNOWN and is never selected.
+    let boolean_column = match &predicate {
+        Some(Expr::Column(name)) =>
+            Some((source.column(source.schema().column(name)?)?, true)),
+        Some(Expr::Not(inner)) => match inner.as_ref() {
+            Expr::Column(name) =>
+                Some((source.column(source.schema().column(name)?)?, false)),
+            _ => None,
+        },
+        _ => None,
+    };
     let columns = if projected_columns.is_empty() {
         (0..source.schema().len()).collect::<Vec<_>>()
     } else {
@@ -57,7 +70,7 @@ pub fn scan<'a>(
         0
     };
     Ok(ScanCursor {
-        source, predicate, columns, output_schema, identity_projection,
+        source, predicate, boolean_column, columns, output_schema, identity_projection,
         target_rows, next_row, pending_error: None, failed: false,
     })
 }
@@ -96,22 +109,27 @@ impl Iterator for ScanCursor<'_> {
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
             self.next_row += 1;
-            let include = match &self.predicate {
-                Some(predicate) => match predicate.evaluate(self.source, row)
-                    .and_then(|value| value.as_boolean()) {
-                    Ok(result) => result == Some(true),
-                    Err(error) => {
-                        if selected.is_empty() {
-                            self.failed = true;
-                            return Some(Err(error));
-                        }
-                        // Deliver matches already evaluated successfully.
-                        // Do not evaluate rows after the terminal error.
-                        self.pending_error = Some(error);
-                        break;
+            let include = if let Some((values, wanted)) = self.boolean_column {
+                // The slice was resolved once during scan construction.
+                matches!(&values[row], Value::Boolean(actual) if *actual == wanted)
+            } else {
+                match &self.predicate {
+                    Some(predicate) => match predicate.evaluate(self.source, row)
+                        .and_then(|value| value.as_boolean()) {
+                        Ok(result) => result == Some(true),
+                        Err(error) => {
+                            if selected.is_empty() {
+                                self.failed = true;
+                                return Some(Err(error));
+                            }
+                            // Deliver matches already evaluated successfully.
+                            // Do not evaluate rows after the terminal error.
+                            self.pending_error = Some(error);
+                            break;
+                        },
                     },
-                },
-                None => true,
+                    None => true,
+                }
             };
             if include { selected.push(row); }
         }
@@ -495,5 +513,90 @@ mod moved_scan_window_regressions {
             assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 5);
             assert!(batches.iter().all(|batch| batch.schema().is_empty()));
         }
+    }
+}
+
+#[cfg(test)]
+mod bound_boolean_scan_predicate_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn direct_and_negated_nullable_boolean_filters_keep_correct_global_rows() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..1000).map(|id| vec![
+            Value::Integer(id),
+            match id % 3 { 0 => Value::Null, 1 => Value::Boolean(true),
+                _ => Value::Boolean(false) },
+            Value::Text(format!("large-{}-{id}", "é🙂".repeat(20))),
+        ]).collect();
+        let source = Batch::from_rows(schema, rows).unwrap();
+        for (predicate, wanted) in [
+            (Expr::Column("FLAG".into()), true),
+            (Expr::Not(Box::new(Expr::Column("flag".into()))), false),
+        ] {
+            let expected = source.rows().unwrap().into_iter().filter(|row| {
+                matches!(&row[1], Value::Boolean(actual) if *actual == wanted)
+            }).map(|row| vec![row[2].clone()]).collect::<Vec<_>>();
+            let actual = scan(&source, Some(predicate), &["payload"], 13).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap().into_iter()
+                .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod bound_boolean_scan_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn filters_nullable_boolean_keys_across_many_output_windows() {
+        let schema = Schema::new(vec![
+            Field::new("allowed", DataType::Boolean, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..1500).map(|index| vec![
+            match index % 3 {
+                0 => Value::Boolean(true),
+                1 => Value::Boolean(false),
+                _ => Value::Null,
+            },
+            Value::Text(format!("row-{index}")),
+        ]).collect::<Vec<_>>();
+        let source = Batch::from_rows(schema, rows).unwrap();
+        for (predicate, wanted) in [
+            (Expr::Column("ALLOWED".into()), 0),
+            (Expr::Not(Box::new(Expr::Column("allowed".into()))), 1),
+        ] {
+            let output = scan(&source, Some(predicate), &["payload"], 13).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            assert!(output.iter().all(|batch| batch.num_rows() <= 13));
+            let rows = output.iter().flat_map(|batch| batch.rows().unwrap())
+                .collect::<Vec<_>>();
+            let expected = (0..1500).filter(|index| index % 3 == wanted)
+                .map(|index| vec![Value::Text(format!("row-{index}"))])
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
+    }
+
+    #[test]
+    fn empty_boolean_scans_still_validate_projection_and_type() {
+        let source = Batch::empty(Schema::new(vec![
+            Field::new("active", DataType::Boolean, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        assert_eq!(scan(&source, Some(Expr::Column("active".into())),
+            &["id"], 4).unwrap().count(), 0);
+        assert!(scan(&source, Some(Expr::Column("id".into())),
+            &[], 4).is_err());
+        assert!(scan(&source, Some(Expr::Column("active".into())),
+            &["unknown"], 4).is_err());
     }
 }

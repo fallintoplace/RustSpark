@@ -52,14 +52,18 @@ def verify_sql_fingerprints(results, sql_fingerprints):
             continue
         number = row["id"]
         digest = row.get("sql_sha256")
-        if digest is None:
-            if number in sql_fingerprints:
-                raise ValueError(f"Query Q{number:02} lost its SQL fingerprint")
-            continue
-        if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        if digest is not None and (
+            type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
             raise ValueError(f"Query Q{number:02} has invalid SQL fingerprint")
         if number in sql_fingerprints and sql_fingerprints[number] != digest:
+            if digest is None:
+                raise ValueError(f"Query Q{number:02} lost its SQL fingerprint")
+            if sql_fingerprints[number] is None:
+                raise ValueError(f"Query Q{number:02} gained an SQL fingerprint")
             raise ValueError(f"Query Q{number:02} changed SQL across partitions")
+        # Record absence too, so a later configuration cannot silently
+        # introduce a fingerprint missing from the first run.
         sql_fingerprints[number] = digest
 
 

@@ -28,6 +28,22 @@ class DuckdbWarmTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["result_rows"], 1)
 
+    def test_invalid_sample_counts_reject_before_database_setup(self):
+        with mock.patch.object(warm, "reference_connection") as connect:
+            for settings in ({"warmup": -1}, {"warmup": True},
+                             {"warmup": 1.5}, {"repeat": 0},
+                             {"repeat": False}, {"repeat": 1.5}):
+                with self.subTest(settings=settings), self.assertRaisesRegex(
+                        ValueError, "warmup or repeat"):
+                    warm.benchmark(Path("."), [], **settings)
+            connect.assert_not_called()
+        for settings in ({"warmup": True}, {"repeat": False}, {"repeat": 2.5}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                warm.measure_query(
+                    FakeConnection(), "SELECT 42",
+                    **{"warmup": 0, "repeat": 1, **settings},
+                )
+
     def test_rejects_duplicates_and_nondeterminism(self):
         con = FakeConnection()
         con.description = [("answer",), ("answer",)]

@@ -17,6 +17,15 @@ def invoke(args: list[str], timeout: float = 15) -> subprocess.CompletedProcess[
     )
 
 
+def unique_json_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate diagnostic result key")
+        result[key] = value
+    return result
+
+
 def diagnose(binary: str, csv: str | None = None,
              parquet: str | None = None, json_input: str | None = None) -> dict:
     """Return a support report that avoids filesystem paths and environment values."""
@@ -36,8 +45,14 @@ def diagnose(binary: str, csv: str | None = None,
                 item["ok"] = bool(result.stdout.strip())
             else:
                 try:
-                    rows = json.loads(result.stdout)
-                    item["ok"] = isinstance(rows, list) and len(rows) == 1 and rows[0].get("probe") == 42
+                    rows = json.loads(result.stdout, object_pairs_hook=unique_json_fields)
+                    item["ok"] = (
+                        isinstance(rows, list) and len(rows) == 1
+                        and isinstance(rows[0], dict) and set(rows[0]) == {expected}
+                        and type(rows[0][expected]) is int and rows[0][expected] == 42
+                    )
+                    if not item["ok"]:
+                        item["error"] = "Unexpected JSON result"
                 except (ValueError, AttributeError, TypeError):
                     item["error"] = "Unexpected JSON result"
         except FileNotFoundError:

@@ -1,7 +1,5 @@
 //! Multi-pass external merge to bound open file descriptors.
 use std::{
-    collections::HashSet,
-    fs::OpenOptions,
     io::BufWriter,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -48,6 +46,7 @@ pub fn merge_to_fan_in(
     };
     while result.current.len() > fan_in {
         control.check()?;
+        let previous_scratch_len = result.scratch.len();
         // Each fan-in group emits exactly one path in the next pass.
         let mut next_pass = Vec::with_capacity(result.current.len().div_ceil(fan_in));
         for group in result.current.chunks(fan_in) {
@@ -58,7 +57,7 @@ pub fn merge_to_fan_in(
             }
             let id = PASS_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("rustspark-merge-{}-{id}.rspill", std::process::id()));
-            let file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+            let file = super::private_files::create_private(&path)?;
             result.scratch.push(path.clone());
             let merger = RunMerger::new(
                 group, schema.clone(), keys, io_batch_rows, io_batch_rows, control.clone()
@@ -71,13 +70,23 @@ pub fn merge_to_fan_in(
         // Inputs to this pass are no longer required once every output run
         // is complete. Reclaim both original sorted runs and scratch runs;
         // carried-through singleton runs remain live in the next pass.
-        let live: HashSet<&PathBuf> = next_pass.iter().collect();
-        for path in &result.current {
-            if !live.contains(path) {
-                std::fs::remove_file(path)?;
+        let has_singleton = result.current.len() % fan_in == 1;
+        for (index, path) in result.current.iter().enumerate() {
+            if has_singleton && index + 1 == result.current.len() {
+                continue;
             }
+            std::fs::remove_file(path)?;
         }
-        result.scratch.retain(|path| live.contains(path));
+        // New output files were appended to scratch during this pass.
+        // Keep them, plus any old scratch run carried through unchanged.
+        let carried = has_singleton.then(|| result.current.last().expect("nonempty pass").clone());
+        let mut scratch_index = 0usize;
+        result.scratch.retain(|path| {
+            let keep = scratch_index >= previous_scratch_len
+                || carried.as_ref().is_some_and(|live| live.as_path() == path.as_path());
+            scratch_index += 1;
+            keep
+        });
         result.current = next_pass;
     }
     Ok(result)
@@ -245,5 +254,40 @@ mod reclaim_source_runs_after_merge_tests {
         drop(merged);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod merge_singleton_cleanup_regressions {
+    use super::*;
+    use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Field},
+        scale::sorted_runs::write_sorted_runs};
+
+    #[test]
+    fn lone_run_survives_successive_merge_passes_without_leaking_scratch() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-merge-singletons-{}-{}", std::process::id(),
+            PASS_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..10).rev()
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("k".into()))];
+        let source = write_sorted_runs([Ok(input)], schema.clone(), &keys,
+            &directory, 1, &QueryControl::default()).unwrap();
+        assert_eq!(source.files().len(), 10);
+        let merged = merge_to_fan_in(source, &directory, schema.clone(), &keys,
+            3, 2, &QueryControl::default()).unwrap();
+        assert_eq!(merged.files().len(), 2);
+        let all = RunMerger::new(merged.files(), schema, &keys,
+            2, 4, QueryControl::default()).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let values = all.iter().flat_map(|batch| batch.rows().unwrap())
+            .map(|row| row[0].clone()).collect::<Vec<_>>();
+        assert_eq!(values, (0..10).map(Value::Integer).collect::<Vec<_>>());
+        drop(merged);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(directory).unwrap();
     }
 }
