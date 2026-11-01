@@ -90,6 +90,7 @@ pub struct SpillWriter<W: Write> {
     schema: Schema,
     // Reuse the cell encoder between successive spill batches.
     encoded: Vec<u8>,
+    poisoned: bool,
 }
 
 impl<W: Write> SpillWriter<W> {
@@ -107,13 +108,13 @@ impl<W: Write> SpillWriter<W> {
             output.write_all(field.name.as_bytes())?;
             output.write_all(&[type_code(field.data_type), u8::from(field.nullable)])?;
         }
-        Ok(Self { output, schema, encoded: Vec::new() })
+        Ok(Self { output, schema, encoded: Vec::new(), poisoned: false })
     }
 
     // Continue a file whose schema header was already written and finalized.
     // Only internal scratch-file owners may reopen an existing stream.
     pub(crate) fn resume(output: W, schema: Schema) -> Self {
-        Self { output, schema, encoded: Vec::new() }
+        Self { output, schema, encoded: Vec::new(), poisoned: false }
     }
 
     pub fn write_batch(&mut self, batch: &Batch) -> Result<()> {
@@ -190,6 +191,9 @@ impl<W: Write> SpillWriter<W> {
     fn write_selected_rows<I>(&mut self, batch: &Batch, rows: I) -> Result<()>
     where I: ExactSizeIterator<Item = usize> + Clone
     {
+        if self.poisoned {
+            return Err(Error::Io("spill writer poisoned by earlier I/O failure".into()));
+        }
         if batch.schema() != &self.schema {
             return Err(Error::Schema("spill batch schema mismatch".into()));
         }
@@ -224,6 +228,7 @@ impl<W: Write> SpillWriter<W> {
                 }
             }
         }
+        let write_result = (|| -> Result<()> {
         write_u32(&mut self.output, rows.len())?;
         // Buffer cells to avoid a virtual Write call per numeric value.
         // Text larger than the scratch buffer is streamed directly to
@@ -277,9 +282,15 @@ impl<W: Write> SpillWriter<W> {
             self.output.write_all(encoded.as_slice())?;
         }
         Ok(())
+        })();
+        if write_result.is_err() { self.poisoned = true; }
+        write_result
     }
 
     pub fn finish(mut self) -> Result<W> {
+        if self.poisoned {
+            return Err(Error::Io("spill writer poisoned by earlier I/O failure".into()));
+        }
         self.output.flush()?;
         Ok(self.output)
     }
@@ -1168,5 +1179,38 @@ mod spill_native_slot_budget_regressions {
         let error = reader.next_batch().unwrap_err().to_string();
         assert!(error.contains("native batch memory"), "{error}");
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod spill_writer_poisoning_regressions {
+    use super::*;
+    use std::io;
+
+    #[derive(Debug)]
+    struct FullAfter { bytes: Vec<u8>, limit: usize }
+    impl Write for FullAfter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.bytes.len() >= self.limit {
+                return Err(io::Error::other("simulated full device"));
+            }
+            let accepted = buffer.len().min(self.limit - self.bytes.len());
+            self.bytes.extend_from_slice(&buffer[..accepted]);
+            Ok(accepted)
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn incomplete_spill_batch_poisoned_for_all_future_appends_and_finish() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("x".repeat(200))],
+        ]).unwrap();
+        let output = FullAfter { bytes: Vec::new(), limit: 48 };
+        let mut writer = SpillWriter::new(output, schema).unwrap();
+        assert!(writer.write_batch(&batch).is_err());
+        assert!(writer.write_batch(&batch).unwrap_err().to_string().contains("poisoned"));
+        assert!(writer.finish().unwrap_err().to_string().contains("poisoned"));
     }
 }
