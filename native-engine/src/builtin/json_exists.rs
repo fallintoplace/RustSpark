@@ -60,12 +60,17 @@ impl<'de> DeserializeSeed<'de> for RootMemberExists<'_> {
             fn visit_map<A: MapAccess<'de>>(
                 self, mut map: A,
             ) -> std::result::Result<bool, A::Error> {
-                let mut found = false;
                 while let Some(name) = map.next_key::<String>()? {
-                    found |= name == self.0;
+                    let found = name == self.0;
                     map.next_value::<IgnoredAny>()?;
+                    if found {
+                        while map.next_key::<IgnoredAny>()?.is_some() {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                        return Ok(true);
+                    }
                 }
-                Ok(found)
+                Ok(false)
             }
         }
         deserializer.deserialize_map(RootVisitor(self.0))
@@ -282,3 +287,50 @@ mod streaming_direct_json_member_exists_tests {
         ]).unwrap(), Value::Boolean(false));
     }
 }
+#[cfg(test)]
+mod streamed_root_object_json_exists_regressions {
+    use super::*;
+
+    fn exists(input: &str, path: &str) -> Result<Value> {
+        evaluate(&[Value::Text(input.into()), Value::Text(path.into())])
+    }
+
+    #[test]
+    fn handles_null_duplicate_and_escaped_root_member_names() {
+        assert_eq!(exists(r#"{"present":null,"other":{"x":1}}"#, "$.present").unwrap(),
+            Value::Boolean(true));
+        assert_eq!(exists(r#"{"present":null,"other":{"x":1}}"#, "$.absent").unwrap(),
+            Value::Boolean(false));
+        assert_eq!(exists(r#"{"x":1,"x":null}"#, "$.x").unwrap(),
+            Value::Boolean(true));
+        assert_eq!(exists(r#"{"\\u0061":1}"#.replace("\\\\u", "\\u").as_str(),
+            "$.a").unwrap(), Value::Boolean(true));
+        assert_eq!(exists(r#"{"root":{"nested":[1]}}"#, "$.root.nested[0]").unwrap(),
+            Value::Boolean(true));
+        assert_eq!(exists(r#"{"a.b":1}"#, r#"$["a.b"]"#).unwrap(),
+            Value::Boolean(true));
+    }
+
+    #[test]
+    fn large_objects_do_not_materialize_nested_values_but_validate_entire_input() {
+        let mut document = String::from(r#"{"first":null"#);
+        for index in 0..10_000 {
+            document.push_str(&format!(r#","padding_{index}":{{"nested":[1,2,3]}}"#));
+        }
+        document.push('}');
+        assert_eq!(exists(&document, "$.first").unwrap(), Value::Boolean(true));
+        assert_eq!(exists(&document, "$.missing").unwrap(), Value::Boolean(false));
+
+        for invalid in [
+            r#"{"first":null,"bad":[1,]}"#,
+            r#"{"first":null,"unfinished":"#,
+            r#"{"first":null} trailing"#,
+        ] {
+            assert!(exists(invalid, "$.first").is_err(), "{invalid}");
+        }
+        assert!(exists(r#"{"key":1}"#, "$.bad-name").is_err());
+        assert_eq!(evaluate(&[Value::Null, Value::Text("$.first".into())]).unwrap(),
+            Value::Null);
+    }
+}
+
