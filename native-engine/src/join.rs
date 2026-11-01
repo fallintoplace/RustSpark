@@ -472,6 +472,8 @@ pub struct PreparedHashJoin<'a> {
     kind: JoinKind,
     output_schema: Schema,
     right_hash: HashMap<&'a Value, Vec<usize>>,
+    // Existence joins do not need one row index per duplicate build key.
+    membership: HashSet<&'a Value>,
 }
 
 impl<'a> PreparedHashJoin<'a> {
@@ -492,10 +494,17 @@ impl<'a> PreparedHashJoin<'a> {
             left_key, right_key, kind,
         )?.schema().clone();
         let mut right_hash: HashMap<&Value, Vec<usize>> = HashMap::new();
-        for (row, key) in right.column(right_column)?.iter().enumerate() {
-            if joinable(key) { right_hash.entry(key).or_default().push(row); }
+        let mut membership = HashSet::new();
+        if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+            for key in right.column(right_column)? {
+                if joinable(key) { membership.insert(key); }
+            }
+        } else {
+            for (row, key) in right.column(right_column)?.iter().enumerate() {
+                if joinable(key) { right_hash.entry(key).or_default().push(row); }
+            }
         }
-        Ok(Self { right, left_schema, left_column, kind, output_schema, right_hash })
+        Ok(Self { right, left_schema, left_column, kind, output_schema, right_hash, membership })
     }
 
     pub fn probe(&self, left: &Batch) -> Result<Batch> {
@@ -532,7 +541,7 @@ impl<'a> PreparedHashJoin<'a> {
             for row in start..end {
                 let key = &probe_keys[row];
                 if previous != Some(key) {
-                    matched = joinable(key) && self.right_hash.contains_key(key);
+                    matched = joinable(key) && self.membership.contains(key);
                 }
                 previous = Some(key);
                 if (self.kind == JoinKind::Semi && matched) ||
@@ -1120,5 +1129,57 @@ mod bounded_hash_join_output_bytes_tests {
         let rejected = charge_join_row(&mut used, 10, &[], None, &[], None, usize::MAX);
         assert!(rejected.is_err());
         assert_eq!(used, usize::MAX - 5);
+    }
+}
+
+#[cfg(test)]
+mod prepared_existence_join_memory_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn semi_and_anti_build_only_distinct_keys_not_duplicate_row_indices() {
+        let schema = Schema::new(vec![Field::new("key", DataType::Text, true)]).unwrap();
+        let wide = "🦀".repeat(250);
+        let mut build_rows = (0..2500)
+            .map(|_| vec![Value::Text(wide.clone())]).collect::<Vec<_>>();
+        build_rows.extend([
+            vec![Value::Null], vec![Value::Text("other".into())],
+        ]);
+        let right = Batch::from_rows(schema.clone(), build_rows).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(wide.clone())],
+            vec![Value::Text("missing".into())],
+            vec![Value::Null],
+            vec![Value::Text("other".into())],
+            vec![Value::Text(wide)],
+        ]).unwrap();
+
+        for (kind, expected_rows) in [
+            (JoinKind::Semi, vec![0, 3, 4]),
+            (JoinKind::Anti, vec![1, 2]),
+        ] {
+            let prepared = PreparedHashJoin::new(schema.clone(), &right,
+                "key", "key", kind).unwrap();
+            assert!(prepared.right_hash.is_empty(), "existence joins keep no row positions");
+            assert_eq!(prepared.membership.len(), 2);
+            let actual = prepared.probe(&left).unwrap();
+            assert_eq!(actual, left.take(&expected_rows).unwrap());
+            assert_eq!(actual, hash_join(&left, &right, "key", "key", kind).unwrap());
+        }
+    }
+
+    #[test]
+    fn inner_join_still_retains_duplicate_build_row_positions() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(5)], vec![Value::Integer(5)],
+        ]).unwrap();
+        let prepared = PreparedHashJoin::new(schema.clone(), &right,
+            "k", "k", JoinKind::Inner).unwrap();
+        assert!(prepared.membership.is_empty());
+        assert_eq!(prepared.right_hash.get(&Value::Integer(5)).unwrap().len(), 2);
+        let left = Batch::from_rows(schema, vec![vec![Value::Integer(5)]]).unwrap();
+        assert_eq!(prepared.probe(&left).unwrap().num_rows(), 2);
     }
 }

@@ -53,6 +53,10 @@ fn bound_null_test<'a>(
 fn bound_distinct_comparison<'a>(
     batch: &'a Batch, expression: &'a Expr,
 ) -> Result<Option<(&'a [Value], &'a Value, bool)>> {
+    let (expression, inverse) = match expression {
+        Expr::Not(inner) => (inner.as_ref(), true),
+        _ => (expression, false),
+    };
     let Expr::IsDistinctFrom { left, right, negated } = expression else {
         return Ok(None);
     };
@@ -62,7 +66,7 @@ fn bound_distinct_comparison<'a>(
         _ => return Ok(None),
     };
     let index = batch.schema().column(name)?;
-    Ok(Some((batch.column(index)?, literal, *negated)))
+    Ok(Some((batch.column(index)?, literal, *negated ^ inverse)))
 }
 
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
@@ -629,5 +633,62 @@ mod projected_catalog_window_tests {
             Selection::new(Expr::Column("id".into()), "x"),
             Selection::new(Expr::Column("text".into()), "X"),
         ], 0, Some(1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod negated_nullsafe_projection_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn negated_nullsafe_projection_matches_scalar_nullable_float_oracle() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Float, true)]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Float(-0.0)],
+            vec![Value::Float(0.0)], vec![Value::Float(f64::NAN)],
+            vec![Value::Float(5.0)],
+        ]).unwrap();
+        for literal in [Value::Null, Value::Float(0.0), Value::Float(f64::NAN)] {
+            for negated in [false, true] {
+                let expression = Expr::Not(Box::new(Expr::IsDistinctFrom {
+                    left: Box::new(Expr::Column("value".into())),
+                    right: Box::new(Expr::Literal(literal.clone())),
+                    negated,
+                }));
+                let selections = [Selection::new(expression.clone(), "matched")];
+                let expected = (0..source.num_rows())
+                    .map(|row| expression.evaluate(&source, row).unwrap())
+                    .collect::<Vec<_>>();
+                for actual in [
+                    project(&source, &selections).unwrap(),
+                    project_owned(source.clone(), &selections).unwrap(),
+                ] {
+                    assert_eq!(actual.column(0).unwrap(), expected.as_slice());
+                    assert!(!actual.schema().field(0).unwrap().nullable);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negated_unicode_text_projection_matches_scalar_oracle() {
+        let long = "é🐈".repeat(2048);
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Text(long.clone())], vec![Value::Null],
+            vec![Value::Text("no".into())], vec![Value::Text(long.clone())],
+        ]).unwrap();
+        let expression = Expr::Not(Box::new(Expr::IsDistinctFrom {
+            left: Box::new(Expr::Column("text".into())),
+            right: Box::new(Expr::Literal(Value::Text(long))),
+            negated: false,
+        }));
+        let selections = [Selection::new(expression.clone(), "match")];
+        let expected = (0..source.num_rows())
+            .map(|row| expression.evaluate(&source, row).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(project(&source, &selections).unwrap().column(0).unwrap(), expected);
+        assert_eq!(project_owned(source, &selections).unwrap().column(0).unwrap(), expected);
     }
 }

@@ -105,6 +105,29 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     if schema.is_empty() {
         return Batch::new_with_row_count(schema, vec![], 1);
     }
+    // When the left side is smaller, hash its keys and remove every key
+    // present on the right. This bounds the hash state by the left cardinality
+    // while retaining first-appearance order when emitting the left rows.
+    if left.num_rows() < right.num_rows() {
+        let left_columns = borrowed_columns(&left)?;
+        let right_columns = borrowed_columns(&right)?;
+        let mut unmatched = bounded_right_keys(
+            &left_columns, left.num_rows(), MAX_DISTINCT_SET_KEYS,
+        )?;
+        for row in 0..right.num_rows() {
+            unmatched.remove(&BorrowedSetRow { columns: &right_columns, row });
+            if unmatched.is_empty() { break; }
+        }
+        let mut emitted = HashSet::new();
+        let mut selected = Vec::new();
+        for row in 0..left.num_rows() {
+            let key = BorrowedSetRow { columns: &left_columns, row };
+            if !unmatched.contains(&key) && emitted.insert(key) {
+                selected.push(row);
+            }
+        }
+        return left.take(&selected)?.relabel(schema);
+    }
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
         for value in right.column(0)? {
@@ -141,6 +164,29 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     let (left, right, schema) = align_set_inputs(left, right)?;
     if schema.is_empty() {
         return Batch::new_with_row_count(schema, vec![], usize::from(right.num_rows() == 0));
+    }
+    // When the left side is smaller, hash its keys and remove every key
+    // present on the right. This bounds the hash state by the left cardinality
+    // while retaining first-appearance order when emitting the left rows.
+    if left.num_rows() < right.num_rows() {
+        let left_columns = borrowed_columns(&left)?;
+        let right_columns = borrowed_columns(&right)?;
+        let mut unmatched = bounded_right_keys(
+            &left_columns, left.num_rows(), MAX_DISTINCT_SET_KEYS,
+        )?;
+        for row in 0..right.num_rows() {
+            unmatched.remove(&BorrowedSetRow { columns: &right_columns, row });
+            if unmatched.is_empty() { break; }
+        }
+        let mut emitted = HashSet::new();
+        let mut selected = Vec::new();
+        for row in 0..left.num_rows() {
+            let key = BorrowedSetRow { columns: &left_columns, row };
+            if unmatched.contains(&key) && emitted.insert(key) {
+                selected.push(row);
+            }
+        }
+        return left.take(&selected)?.relabel(schema);
     }
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
@@ -637,5 +683,53 @@ mod empty_key_set_multiplicity_regressions {
         ] {
             assert!(output.schema().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod adaptive_set_membership_regressions {
+    use super::*;
+
+    #[test]
+    fn smaller_left_side_preserves_nulls_ties_and_order() {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Float, true),
+            Field::new("tag", DataType::Text, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(f64::NAN), Value::Text("match".into())],
+            vec![Value::Float(-0.0), Value::Text("zero".into())],
+            vec![Value::Null, Value::Text("missing".into())],
+            vec![Value::Float(f64::NAN), Value::Text("match".into())],
+        ]).unwrap();
+        let mut right_rows = (0..500).map(|i| vec![
+            Value::Float(i as f64 + 20.0), Value::Text("other".into()),
+        ]).collect::<Vec<_>>();
+        right_rows.push(vec![Value::Float(f64::NAN), Value::Text("match".into())]);
+        right_rows.push(vec![Value::Float(0.0), Value::Text("zero".into())]);
+        let right = Batch::from_rows(schema, right_rows).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Float(f64::NAN), Value::Text("match".into())],
+            vec![Value::Float(-0.0), Value::Text("zero".into())],
+        ]);
+        assert_eq!(except_distinct(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Null, Value::Text("missing".into())],
+        ]);
+    }
+
+    #[test]
+    fn adaptive_one_column_sets_match_right_small_reference() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(),
+            (0..20).map(|v| vec![Value::Integer(v % 7)]).collect()).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            (0..100).map(|v| vec![Value::Integer(v % 3)]).collect()).unwrap();
+        let reference_right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Integer(2)]
+        ]).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap(),
+            intersect_distinct(&left, &reference_right).unwrap());
+        assert_eq!(except_distinct(&left, &right).unwrap(),
+            except_distinct(&left, &reference_right).unwrap());
     }
 }
