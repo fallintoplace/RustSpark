@@ -76,6 +76,44 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(list_query_templates(queries), ["first", "second"])
 
 
+class PinnedGatewayTemplateTests(unittest.TestCase):
+    def test_template_snapshot_stays_immutable_after_source_replacement(self):
+        from server import pinned_query_template
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "approved.sql"
+            other = root / "other.sql"
+            approved.write_text("SELECT 1", encoding="utf-8")
+            other.write_text("SELECT 999", encoding="utf-8")
+            with pinned_query_template(approved) as copy:
+                approved.unlink()
+                approved.symlink_to(other)
+                self.assertEqual(copy.read_text(encoding="utf-8"), "SELECT 1")
+                self.assertEqual(copy.stat().st_mode & 0o077, 0)
+            with self.assertRaises(ValueError):
+                with pinned_query_template(approved):
+                    pass
+
+    def test_nonregular_and_oversized_templates_are_rejected(self):
+        from server import pinned_query_template, MAX_TEMPLATE_BYTES
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_query_template(root):
+                    pass
+            large = root / "large.sql"
+            large.write_bytes(b"x" * (MAX_TEMPLATE_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_query_template(large):
+                    pass
+            if hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"):
+                fifo = root / "fifo.sql"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "regular file"):
+                    with pinned_query_template(fifo):
+                        pass
+
+
 class InvalidBackendJSONTests(unittest.TestCase):
     def test_excessively_nested_backend_rows_are_invalid(self):
         deep = '[{"value":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
