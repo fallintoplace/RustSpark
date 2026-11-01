@@ -9,6 +9,9 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.cargo/**'
+      - 'tests/native_cli_contract.rs'
+      - 'scripts/check_native_dependencies.py'
       - '.github/workflows/rust.yml'
   workflow_dispatch:
   schedule:
@@ -31,6 +34,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify native dependency graph
+        run: python3 scripts/check_native_dependencies.py
       - name: Check root targets
         run: cargo check --all-targets
       - name: Check native engine targets
@@ -41,6 +46,8 @@ jobs:
         run: |
           cargo test --manifest-path native-engine/Cargo.toml --lib builtin::char_length::
           cargo test --manifest-path native-engine/Cargo.toml --lib builtin::initcap::
+      - name: Test native CLI contract
+        run: cargo test --test native_cli_contract
 
   native:
     if: github.event_name != 'push' && github.ref == 'refs/heads/main'
