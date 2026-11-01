@@ -129,13 +129,28 @@ impl TaskScheduler {
     pub fn lease_many(
         &mut self, worker: u64, now: Instant, ttl: Duration, max_tasks: usize,
     ) -> Result<Vec<Lease>> {
+        self.lease_many_capped(worker, now, ttl, max_tasks, usize::MAX)
+    }
+
+    /// Bound the number of outstanding leases for one worker, even when a
+    /// worker repeatedly requests full windows before acknowledging results.
+    /// A recovered or expired lease frees its slot immediately.
+    pub fn lease_many_capped(
+        &mut self, worker: u64, now: Instant, ttl: Duration,
+        max_tasks: usize, max_active_per_worker: usize,
+    ) -> Result<Vec<Lease>> {
+        if max_active_per_worker == 0 {
+            return Err(Error::Execution("per-worker lease limit must be positive".into()));
+        }
         if ttl.is_zero() {
             return Err(Error::Execution("task lease duration must be positive".into()));
         }
         let until = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
         self.expire_leases(now);
-        let count = max_tasks.min(self.ready.len());
+        let active = self.by_worker.get(&worker).map_or(0, HashSet::len);
+        let available = max_active_per_worker.saturating_sub(active);
+        let count = max_tasks.min(available).min(self.ready.len());
         let mut leases = Vec::with_capacity(count);
         for _ in 0..count {
             leases.push(self.lease_ready(worker, until).expect("ready task exists"));
@@ -846,5 +861,47 @@ mod worker_reclaim_index_regressions {
         assert!(scheduler.cancel_pending() > 0);
         assert_active_index_matches_statuses(&scheduler);
         assert!(!scheduler.finish_at(&second[0], true, now + Duration::from_secs(7)));
+    }
+}
+
+#[cfg(test)]
+mod capped_worker_leases_regressions {
+    use super::*;
+
+    #[test]
+    fn workers_cannot_monopolize_ready_tasks_or_exceed_active_cap() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(60);
+        let mut scheduler = TaskScheduler::new(1..=6, 3).unwrap();
+        let first = scheduler.lease_many_capped(7, now, ttl, 100, 2).unwrap();
+        assert_eq!(first.iter().map(|lease| lease.task).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(scheduler.lease_many_capped(7, now, ttl, 10, 2).unwrap().is_empty());
+        let other = scheduler.lease_many_capped(8, now, ttl, 10, 3).unwrap();
+        assert_eq!(other.iter().map(|lease| lease.task).collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert_eq!(scheduler.counts().leased, 5);
+        assert!(scheduler.finish_at(&first[0], true, now + Duration::from_secs(1)));
+        let next = scheduler.lease_many_capped(7, now, ttl, 10, 2).unwrap();
+        assert_eq!(next.iter().map(|lease| lease.task).collect::<Vec<_>>(), vec![6]);
+        assert!(scheduler.lease_many_capped(7, now, ttl, 1, 0).is_err());
+        assert_eq!(scheduler.counts(), TaskCounts { queued: 0, leased: 5, done: 1, failed: 0 });
+        assert_eq!(scheduler.reclaim_worker(8), 3);
+        assert!(!scheduler.finish_at(&other[0], true, now + Duration::from_secs(1)));
+        assert_eq!(scheduler.queued_tasks(10), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn expired_leases_release_worker_slots_before_new_claims() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([10, 20], 3).unwrap();
+        let stale = scheduler.lease_many_capped(
+            9, now, Duration::from_secs(1), 2, 1,
+        ).unwrap().pop().unwrap();
+        let reclaimed = scheduler.lease_many_capped(
+            9, now + Duration::from_secs(2), Duration::from_secs(10), 2, 1,
+        ).unwrap();
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].task, 10);
+        assert_ne!(stale.attempt, reclaimed[0].attempt);
+        assert!(!scheduler.finish_at(&stale, true, now + Duration::from_secs(2)));
     }
 }

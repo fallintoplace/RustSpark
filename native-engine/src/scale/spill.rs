@@ -8,6 +8,16 @@ const MAX_NAME_BYTES: usize = 4096;
 const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CELLS: usize = 4_000_000;
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+// The wire stores one byte per Boolean/NULL cell, but native Value
+// vectors retain full tagged-union slots. Bound both representations.
+const MAX_NATIVE_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+fn check_native_slots(cells: usize) -> Result<()> {
+    cells.checked_mul(std::mem::size_of::<Value>())
+        .filter(|&bytes| bytes <= MAX_NATIVE_BATCH_BYTES)
+        .ok_or_else(|| Error::Execution("spill native batch memory budget exceeded".into()))?;
+    Ok(())
+}
 const ENCODE_BUFFER_BYTES: usize = 16 * 1024;
 
 fn write_u32(out: &mut impl Write, value: usize) -> Result<()> {
@@ -194,6 +204,7 @@ impl<W: Write> SpillWriter<W> {
         let cells = rows.len().checked_mul(self.schema.len())
             .filter(|&cells| cells <= MAX_CELLS)
             .ok_or_else(|| Error::Execution("spill batch exceeds cell limit".into()))?;
+        check_native_slots(cells)?;
         // Include the 4-byte row count and one tag per cell. Validate all
         // fixed-width and text bytes before emitting any batch data.
         let mut wire_bytes = 4usize.checked_add(cells)
@@ -272,8 +283,6 @@ impl<W: Write> SpillWriter<W> {
         }
         Ok(())
         })();
-        // A short write can leave a partial frame in the stream. It is never
-        // safe to append another batch or report successful completion.
         if write_result.is_err() { self.poisoned = true; }
         write_result
     }
@@ -395,6 +404,7 @@ impl<R: Read> SpillReader<R> {
         if rows > self.max_rows_per_batch {
             return Err(Error::Execution("spill batch exceeds configured limits".into()));
         }
+        check_native_slots(cells)?;
         // Reject the minimum encoded size before allocating column storage.
         let mut bytes_seen = 4usize.checked_add(cells)
             .filter(|&bytes| bytes <= MAX_BATCH_BYTES)
@@ -1149,6 +1159,26 @@ mod scalar_spill_decoder_tests {
         let mut reader = SpillReader::new(Cursor::new(truncated), 1).unwrap();
         assert!(reader.next_batch().is_err());
         assert_eq!(reader.next_batch().unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod spill_native_slot_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn reject_tiny_wire_rows_that_would_allocate_oversized_native_columns() {
+        let too_many = MAX_NATIVE_BATCH_BYTES / std::mem::size_of::<Value>() + 1;
+        assert!(too_many < MAX_CELLS);
+        assert!(check_native_slots(too_many).is_err());
+        assert!(check_native_slots(too_many - 1).is_ok());
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true)]).unwrap();
+        let mut wire = SpillWriter::new(Vec::new(), schema).unwrap().finish().unwrap();
+        wire.extend_from_slice(&(too_many as u32).to_le_bytes());
+        let mut reader = SpillReader::new(wire.as_slice(), too_many).unwrap();
+        let error = reader.next_batch().unwrap_err().to_string();
+        assert!(error.contains("native batch memory"), "{error}");
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }
 

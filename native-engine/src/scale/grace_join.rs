@@ -142,6 +142,19 @@ fn load_build_bounded(
     Batch::from_validated_columns(schema.clone(), columns, rows)
 }
 
+// Equality joins never match NULL keys. Discard null-side rows only
+// when the join kind does not need them for outer or anti semantics.
+// Selected rows are moved, including heap-backed TEXT payloads.
+fn discard_null_join_keys(batch: Batch, key_column: usize) -> Result<Option<Batch>> {
+    let mut selected = Vec::new();
+    for (row, key) in batch.column(key_column)?.iter().enumerate() {
+        if !key.is_null() { selected.push(row); }
+    }
+    if selected.is_empty() { return Ok(None); }
+    if selected.len() == batch.num_rows() { return Ok(Some(batch)); }
+    Ok(Some(batch.take_sorted_owned(&selected)?))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn grace_join<L, R>(
     left: L, right: R, left_schema: Schema, right_schema: Schema,
@@ -165,13 +178,30 @@ where L: IntoIterator<Item = Result<Batch>>,
         directory, left_schema.clone(), &[left_key], partitions, io_batch_rows)?;
     let mut rhs = PartitionWriter::new(
         directory, right_schema.clone(), &[right_key], partitions, io_batch_rows)?;
+    // Preserve null probe rows for LEFT/FULL/ANTI, and null build rows
+    // for RIGHT/FULL. Other NULL equality keys cannot affect results.
+    let prune_left = matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi);
+    let prune_right = matches!(kind,
+        JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti);
     for incoming in left {
         control.check()?;
-        lhs.write_batch(&incoming?, control)?;
+        let batch = incoming?;
+        if batch.schema() != &left_schema {
+            return Err(Error::Schema("join probe schema mismatch".into()));
+        }
+        let selected = if prune_left { discard_null_join_keys(batch, left_index)? }
+            else { Some(batch) };
+        if let Some(batch) = selected { lhs.write_batch(&batch, control)?; }
     }
     for incoming in right {
         control.check()?;
-        rhs.write_batch(&incoming?, control)?;
+        let batch = incoming?;
+        if batch.schema() != &right_schema {
+            return Err(Error::Schema("join build schema mismatch".into()));
+        }
+        let selected = if prune_right { discard_null_join_keys(batch, right_index)? }
+            else { Some(batch) };
+        if let Some(batch) = selected { rhs.write_batch(&batch, control)?; }
     }
     let lhs_files = lhs.finish()?;
     let rhs_files = rhs.finish()?;
@@ -751,5 +781,90 @@ mod interruptible_join_output_spill_tests {
         assert!(write_join_batches(&mut writer, &batch, 300, 1024, &control).is_err());
         let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 100).unwrap();
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod pruned_null_key_grace_join_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, io::BufReader};
+
+    fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new("k", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn all_join_kinds_match_in_memory_results_with_null_heavy_shards() {
+        let schema = schema();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null, Value::Text("left-null-a".into())],
+            vec![Value::Integer(1), Value::Text("left-one".into())],
+            vec![Value::Null, Value::Text("left-null-b".into())],
+            vec![Value::Integer(4), Value::Text("left-four".into())],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null, Value::Text("right-null-a".into())],
+            vec![Value::Integer(1), Value::Text("right-one".into())],
+            vec![Value::Null, Value::Text("right-null-b".into())],
+            vec![Value::Integer(2), Value::Text("right-two".into())],
+        ]).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-grace-null-{}-{}", std::process::id(),
+            JOIN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        for kind in [JoinKind::Inner, JoinKind::Left, JoinKind::Right,
+            JoinKind::Full, JoinKind::Semi, JoinKind::Anti] {
+            let expected = join::hash_join(&left, &right, "k", "k", kind).unwrap();
+            let output = grace_join(
+                [Ok(left.clone())], [Ok(right.clone())],
+                schema.clone(), schema.clone(), "k", "k", kind,
+                &dir, 8, 100, 2, &QueryControl::default(),
+            ).unwrap();
+            assert_eq!(output.schema(), expected.schema());
+            let mut rows = Vec::new();
+            for path in output.paths() {
+                let mut reader = SpillReader::new(
+                    BufReader::new(File::open(path).unwrap()), 2).unwrap();
+                while let Some(batch) = reader.next_batch().unwrap() {
+                    rows.extend(batch.rows().unwrap());
+                }
+            }
+            let mut actual = rows.into_iter()
+                .map(|row| format!("{row:?}")).collect::<Vec<_>>();
+            let mut expected = expected.rows().unwrap().into_iter()
+                .map(|row| format!("{row:?}")).collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "kind: {kind:?}");
+            drop(output);
+        }
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn partial_pruning_moves_large_text_without_cloning() {
+        let schema = schema();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Null, Value::Text("ignore".into())],
+            vec![Value::Integer(5), Value::Text("🦀".repeat(4096))],
+        ]).unwrap();
+        let pointer = match batch.value(1, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let kept = discard_null_join_keys(batch, 0).unwrap().unwrap();
+        assert_eq!(kept.num_rows(), 1);
+        assert_eq!(kept.column(0).unwrap(), &[Value::Integer(5)]);
+        let after = match kept.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(pointer, after);
     }
 }
