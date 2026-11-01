@@ -104,6 +104,14 @@ class BenchmarkReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "do not match samples"):
             bench_report.render_report(sample)
 
+    def test_extreme_finite_latency_does_not_produce_infinite_ratio(self):
+        sample = report()
+        sample["results"]["rustspark"]["scan_count"] = measurement(5e-324)
+        sample["results"]["duckdb"]["scan_count"] = measurement(1e100)
+        rendered = bench_report.render_report(sample)
+        self.assertIn("| scan_count | n/a |", rendered)
+        self.assertNotIn("infx", rendered)
+
     def test_zero_rounded_rustspark_median_has_no_ratio(self):
         sample = report()
         sample["results"]["rustspark"]["scan_count"] = measurement(0)
