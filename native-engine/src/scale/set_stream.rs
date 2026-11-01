@@ -232,6 +232,17 @@ impl Iterator for SetStream {
                 if batch.schema() != &self.left_schema {
                     return Err(Error::Schema("stream set left schema changed".into()));
                 }
+                // When every right-side bag count is exhausted, EXCEPT ALL
+                // becomes an identity operator. Move all left columns through
+                // without per-row hashing, materialization, or TEXT cloning.
+                // Only metadata widening is allowed: INTEGER->FLOAT still
+                // needs the normal per-cell conversion below.
+                if self.mode == SetMode::ExceptAll && self.right_counts.is_empty()
+                    && self.left_schema.fields().iter().zip(self.output_schema.fields())
+                        .all(|(source, target)| source.data_type == target.data_type)
+                {
+                    return batch.relabel(self.output_schema.clone());
+                }
                 let mut output: Vec<Vec<Value>> = (0..self.output_schema.len())
                     .map(|_| Vec::new()).collect();
                 let mut selected = 0usize;
@@ -791,5 +802,93 @@ mod exhausted_bag_key_eviction_tests {
         assert!(stream.right_counts.is_empty());
         assert_eq!(stream.retained_bytes, 0);
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod exhausted_except_all_passthrough_tests {
+    use super::*;
+
+    #[test]
+    fn empty_build_moves_wide_multi_column_text_without_clone() {
+        let left_schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("text", DataType::Text, false),
+        ]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(left_schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("🙂".repeat(40_000))],
+            vec![Value::Integer(2), Value::Text("x".repeat(20_000))],
+        ]).unwrap();
+        let first_ptr = match &input.column(1).unwrap()[0] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        };
+        let mut stream = SetStream::new(
+            Box::new([Ok(input.clone())].into_iter()),
+            Box::new(std::iter::empty()),
+            left_schema, right_schema, SetMode::ExceptAll,
+            QueryControl::default(), 100, 1024,
+        ).unwrap();
+        // Use the original owned batch to check allocation identity below.
+        let _ = stream.next().unwrap().unwrap();
+        let left_schema = input.schema().clone();
+        let right_schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let mut stream = SetStream::new(
+            Box::new([Ok(input)].into_iter()), Box::new(std::iter::empty()),
+            left_schema, right_schema, SetMode::ExceptAll,
+            QueryControl::default(), 100, 1024,
+        ).unwrap();
+        let actual = stream.next().unwrap().unwrap();
+        assert_eq!(actual.num_rows(), 2);
+        assert!(actual.schema().fields().iter().all(|field| field.nullable));
+        let output_ptr = match &actual.column(1).unwrap()[0] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        };
+        assert_eq!(output_ptr, first_ptr);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn exhausted_right_counts_unlock_passthrough_but_numeric_widening_still_converts() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, false),
+        ]).unwrap();
+        let consumed = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("taken".into())],
+        ]).unwrap();
+        let tail = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(2), Value::Text("wide".repeat(8192))],
+        ]).unwrap();
+        let ptr = match &tail.column(1).unwrap()[0] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        };
+        let mut stream = SetStream::new(
+            Box::new([Ok(consumed.clone()), Ok(tail)].into_iter()),
+            Box::new([Ok(consumed)].into_iter()),
+            schema.clone(), schema, SetMode::ExceptAll,
+            QueryControl::default(), 4, 50_000,
+        ).unwrap();
+        let after = stream.next().unwrap().unwrap();
+        assert_eq!(after.column(0).unwrap(), &[Value::Integer(2)]);
+        assert_eq!(match &after.column(1).unwrap()[0] {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        }, ptr);
+        assert!(stream.next().is_none());
+
+        let integer = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let float = Schema::new(vec![Field::new("n", DataType::Float, true)]).unwrap();
+        let batch = Batch::from_rows(integer.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let converted = SetStream::new(
+            Box::new([Ok(batch)].into_iter()), Box::new(std::iter::empty()),
+            integer, float, SetMode::ExceptAll, QueryControl::default(), 4, 1024,
+        ).unwrap().next().unwrap().unwrap();
+        assert_eq!(converted.column(0).unwrap(), &[Value::Float(7.0)]);
     }
 }
