@@ -3,11 +3,14 @@ use std::{cmp::Ordering, path::Path, sync::OnceLock};
 
 use crate::{
     batch::Batch,
+    scalar::Value,
     sort::{self, SortKey},
     spill_ipc::{self, SpillFile, SpillReader},
     schema::Schema,
     Error, Result,
 };
+
+const MAX_OUTPUT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 struct Run {
     _spill: SpillFile,
@@ -157,6 +160,18 @@ impl RunTournament {
     }
 }
 
+fn retained_row_bytes(run: &Run, schema: &Schema) -> Result<usize> {
+    let batch = run.batch.as_ref()
+        .ok_or_else(|| Error::Execution("missing active external sort batch".into()))?;
+    let mut bytes = schema.len().saturating_mul(std::mem::size_of::<Value>());
+    for column in 0..schema.len() {
+        if let Value::Text(text) = batch.value(run.position, column)? {
+            bytes = bytes.saturating_add(text.len());
+        }
+    }
+    Ok(bytes)
+}
+
 impl Iterator for ExternalSort {
     type Item = Result<Batch>;
 
@@ -174,13 +189,40 @@ impl Iterator for ExternalSort {
             return None;
         }
         let mut columns = (0..self.schema.len())
-            .map(|_| Vec::with_capacity(self.output_rows)).collect::<Vec<_>>();
+            .map(|_| Vec::with_capacity(self.output_rows.min(256))).collect::<Vec<_>>();
         let mut row_count = 0usize;
+        let mut output_bytes = 0usize;
         while row_count < self.output_rows {
             let Some(selected) = self.winners.winner() else {
                 self.finished = true;
                 break;
             };
+            // A row may contain large TEXT even when the requested row
+            // count is small. Enforce retained output bytes before cloning.
+            let bytes = match retained_row_bytes(&self.runs[selected], &self.schema) {
+                Ok(bytes) if bytes <= MAX_OUTPUT_BATCH_BYTES => bytes,
+                Ok(_) => {
+                    let error = Error::Execution("external sort row exceeds output byte budget".into());
+                    if row_count == 0 {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                    self.pending_error = Some(error);
+                    break;
+                }
+                Err(error) => {
+                    if row_count == 0 {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                    self.pending_error = Some(error);
+                    break;
+                }
+            };
+            if row_count != 0 && output_bytes.saturating_add(bytes) > MAX_OUTPUT_BATCH_BYTES {
+                // Leave this winner and its cursor untouched for the next batch.
+                break;
+            }
             let run = &mut self.runs[selected];
             let Some(batch) = run.batch.as_ref() else {
                 let error = Error::Execution("missing active external sort batch".into());
@@ -199,6 +241,7 @@ impl Iterator for ExternalSort {
                 self.pending_error = Some(error);
                 break;
             }
+            output_bytes += bytes;
             row_count += 1;
             run.position += 1;
             if run.position == batch.num_rows() {
@@ -513,3 +556,31 @@ mod empty_external_merge_allocation_regressions {
         assert!(sorted.next().is_none());
     }
 }
+#[cfg(test)]
+mod external_sort_output_byte_budget_regressions {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field}};
+
+    #[test]
+    fn wide_text_rows_are_emitted_in_separate_bounded_batches() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let large = 9 * 1024 * 1024;
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("z".repeat(large))],
+            vec![Value::Text("a".repeat(large))],
+        ]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("text".into()))];
+        let mut sorted = external_sort([input], &schema, &keys,
+            std::env::temp_dir(), 1, 100).unwrap();
+        let first = sorted.next().unwrap().unwrap();
+        let second = sorted.next().unwrap().unwrap();
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(second.num_rows(), 1);
+        assert!(matches!(first.value(0, 0).unwrap(), Value::Text(text)
+            if text.len() == large && text.starts_with('a')));
+        assert!(matches!(second.value(0, 0).unwrap(), Value::Text(text)
+            if text.len() == large && text.starts_with('z')));
+        assert!(sorted.next().is_none());
+    }
+}
+
