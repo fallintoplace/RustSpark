@@ -102,8 +102,16 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         }
         indices.sort_by(|&left, &right| {
             for (column, key) in columns.iter().zip(keys) {
-                let cmp = compare_values(&column[left], &column[right],
-                    key.descending, key.nulls_first);
+                // Native multi-key sorts spend much of their time comparing
+                // INTEGER columns. Use the total i64 order directly when
+                // neither side is NULL; retain SQL ordering for other values.
+                let cmp = match (&column[left], &column[right]) {
+                    (Value::Integer(a), Value::Integer(b)) => {
+                        let ordering = a.cmp(b);
+                        if key.descending { ordering.reverse() } else { ordering }
+                    }
+                    (a, b) => compare_values(a, b, key.descending, key.nulls_first),
+                };
                 if cmp != Ordering::Equal { return cmp; }
             }
             Ordering::Equal
@@ -450,6 +458,50 @@ mod single_integer_key_sort_regressions {
             let result = sort(&batch, &keys).unwrap();
             assert_eq!(result.rows().unwrap(), expected);
             assert_eq!(sort_owned(batch.clone(), &keys).unwrap(), result);
+        }
+    }
+}
+
+#[cfg(test)]
+mod multi_key_direct_integer_order_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn direct_integer_comparator_matches_sql_reference_and_stable_ties() {
+        let schema = Schema::new(vec![
+            Field::new("primary", DataType::Integer, true),
+            Field::new("secondary", DataType::Integer, true),
+            Field::new("label", DataType::Text, false),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..101i64).map(|i| vec![
+            if i % 17 == 0 { Value::Null } else { Value::Integer((i * 7) % 9) },
+            if i % 13 == 0 { Value::Null } else { Value::Integer((i * 5) % 11) },
+            Value::Text(format!("label-{}", i % 3)),
+            Value::Integer(i),
+        ]).collect()).unwrap();
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let keys = [
+                    SortKey { expression: Expr::Column("primary".into()), descending, nulls_first },
+                    SortKey { expression: Expr::Column("secondary".into()), descending: !descending, nulls_first },
+                    SortKey::ascending(Expr::Column("label".into())),
+                ];
+                let columns = keys.iter().map(|key| match &key.expression {
+                    Expr::Column(name) => input.column(input.schema().column(name).unwrap()).unwrap(),
+                    _ => unreachable!(),
+                }).collect::<Vec<_>>();
+                let mut reference = (0..input.num_rows()).collect::<Vec<_>>();
+                reference.sort_by(|&left, &right| {
+                    columns.iter().zip(&keys).map(|(values, key)|
+                        compare_values(&values[left], &values[right], key.descending, key.nulls_first)
+                    ).find(|order| *order != Ordering::Equal).unwrap_or(Ordering::Equal)
+                });
+                let expected = input.take(&reference).unwrap();
+                assert_eq!(sort_owned(input.clone(), &keys).unwrap(), expected);
+                assert_eq!(sort(&input, &keys).unwrap(), expected);
+            }
         }
     }
 }
