@@ -27,6 +27,14 @@ class DataFrameCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")
 
+    def test_invalid_text_paths_are_rejected_before_export(self):
+        for option in ("csv", "parquet", "json_input", "database_dir"):
+            for value in ("", b"bytes.csv", 42):
+                with self.subTest(option=option, value=value), self.assertRaises(ValueError):
+                    build_command("SELECT 1", Path("out.arrow"), **{option: value})
+        command = build_command("SELECT 1", Path("out.arrow"), csv=Path("input.csv"))
+        self.assertEqual(command[command.index("--csv") + 1], "input.csv")
+
     def test_persistent_database_path_is_forwarded(self):
         args = build_command("SELECT * FROM sales", Path("result.arrow"),
                              database_dir="/tmp/warehouse with spaces")

@@ -12,8 +12,11 @@ import math
 import os
 import signal
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from contextlib import contextmanager
 import socket
 from pathlib import Path
+import stat
+import tempfile
 import re
 import subprocess
 import threading
@@ -22,7 +25,9 @@ import time
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_TEMPLATE_BYTES = 1024 * 1024
 MAX_BACKEND_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = MAX_BACKEND_OUTPUT_BYTES
 
 
 def _reject_duplicate_json_fields(pairs):
@@ -54,6 +59,18 @@ def parse_result_rows(text: str) -> list[dict]:
     return rows
 
 
+def encode_response_bounded(payload, max_bytes: int = MAX_RESPONSE_BYTES) -> bytes:
+    """Build JSON without retaining a response larger than the wire budget."""
+    output = bytearray()
+    encoder = json.JSONEncoder(separators=(",", ":"))
+    for piece in encoder.iterencode(payload):
+        data = piece.encode("utf-8")
+        if len(data) > max_bytes - len(output):
+            raise ValueError("JSON response exceeds gateway output budget")
+        output.extend(data)
+    return bytes(output)
+
+
 def validate_params(body: bytes) -> dict[str, str]:
     try:
         payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
@@ -78,6 +95,39 @@ def list_query_templates(directory: Path) -> list[str]:
         if path.is_file() and not path.is_symlink()
         and path.suffix == ".sql" and TEMPLATE.fullmatch(path.stem)
     )
+
+
+@contextmanager
+def pinned_query_template(template: Path):
+    """Execute a private snapshot of the approved regular SQL file."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif template.is_symlink():
+        raise ValueError("SQL template cannot be a symlink")
+    try:
+        fd = os.open(template, flags)
+    except OSError as error:
+        raise ValueError("Unable to open SQL template") from error
+    # fdopen() can itself fail for directories, so validate the descriptor first.
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template must be a bounded regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as source:
+        sql = source.read(MAX_TEMPLATE_BYTES + 1)
+        if len(sql) > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template exceeds byte limit")
+    with tempfile.TemporaryDirectory(prefix="rustspark-gateway-sql-") as directory:
+        snapshot = Path(directory) / "query.sql"
+        snapshot.write_bytes(sql)
+        snapshot.chmod(0o600)
+        yield snapshot
 
 
 def command_for_template(binary: str, database: Path, template: Path,
@@ -148,8 +198,12 @@ def run_bounded_backend(command: list[str], timeout: float,
             raise
         if exceeded.is_set():
             raise ValueError("SQL result exceeds backend output budget")
+        try:
+            stdout = output.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("SQL backend output is not valid UTF-8") from error
         return subprocess.CompletedProcess(
-            command, process.returncode, output.decode("utf-8"), ""
+            command, process.returncode, stdout, ""
         )
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -200,7 +254,13 @@ def make_handler(*, secret: str, queries: Path, database: Path,
             super().setup()
 
         def send_json(self, status, payload):
-            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            try:
+                data = encode_response_bounded(payload)
+            except ValueError:
+                # Never send a partial success body or allocate an expanded
+                # JSON response beyond the gateway's byte budget.
+                status = 502
+                data = b'{"error":"JSON response exceeds output budget"}'
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -244,6 +304,12 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.close_connection = True
                 self.send_json(400, {"error": "Ambiguous request framing"})
                 return
+            # int() itself rejects extremely long decimal strings on modern
+            # Python. Reject oversized framing deterministically first.
+            if len(lengths[0]) > len(str(MAX_REQUEST_BYTES)):
+                self.close_connection = True
+                self.send_json(413, {"error": "Request too large"})
+                return
             length = int(lengths[0])
             if not 0 <= length <= MAX_REQUEST_BYTES:
                 self.close_connection = True
@@ -273,10 +339,11 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.send_json(404, {"error": "Unknown query"})
                 return
             try:
-                result = run_bounded_backend(
-                    command_for_template(binary, database, template, params, max_rows, timeout),
-                    timeout + 10,
-                )
+                with pinned_query_template(template) as pinned:
+                    result = run_bounded_backend(
+                        command_for_template(binary, database, pinned, params, max_rows, timeout),
+                        timeout + 10,
+                    )
                 if result.returncode:
                     self.send_json(422, {"error": "Query failed"})
                     return

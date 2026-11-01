@@ -52,10 +52,20 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
     command = [binary, "--sql", sql, "--output-arrow", str(output)]
     if database_dir is not None:
-        command.extend(["--database-dir", os.fspath(database_dir)])
+        if not isinstance(database_dir, (str, os.PathLike)):
+            raise ValueError("database_dir must be a text filesystem path")
+        database_path = os.fspath(database_dir)
+        if not isinstance(database_path, str) or not database_path:
+            raise ValueError("database_dir must be a nonempty text filesystem path")
+        command.extend(["--database-dir", database_path])
     for flag, source in (("--csv", csv), ("--parquet", parquet), ("--json", json_input)):
         if source is not None:
-            command.extend([flag, os.fspath(source)])
+            if not isinstance(source, (str, os.PathLike)):
+                raise ValueError("Unnamed sources must be text filesystem paths")
+            path = os.fspath(source)
+            if not isinstance(path, str) or not path:
+                raise ValueError("Unnamed sources must be nonempty text filesystem paths")
+            command.extend([flag, path])
     _add_named_tables(command, "--csv-table", csv_tables)
     _add_named_tables(command, "--parquet-table", parquet_tables)
     _add_named_tables(command, "--json-table", json_tables)

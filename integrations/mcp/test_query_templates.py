@@ -88,6 +88,16 @@ class BoundedMcpBackendTests(unittest.TestCase):
             with self.subTest(max_bytes=max_bytes), self.assertRaisesRegex(ValueError, "budget"):
                 run_bounded(command, timeout=1, max_bytes=max_bytes)
 
+    def test_invalid_backend_utf8_is_reported_as_checked_failure(self):
+        import sys
+        from bounded_backend import run_bounded
+
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            run_bounded([
+                sys.executable, "-c",
+                "import sys; sys.stdout.buffer.write(bytes([255]))",
+            ], timeout=5, max_bytes=1024)
+
     def test_output_is_bounded_without_buffering_unlimited_backend_data(self):
         import subprocess
         import sys
@@ -127,6 +137,17 @@ class ProcessGroupCleanupTests(unittest.TestCase):
 
 
 class PinnedTemplateTests(unittest.TestCase):
+    def test_fifo_template_is_rejected_without_waiting_for_a_writer(self):
+        import os
+        if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
+            self.skipTest("FIFO and nonblocking open require POSIX")
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "waiting.sql"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_template(fifo):
+                    pass
+
     def test_snapshot_does_not_follow_a_replaced_template(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

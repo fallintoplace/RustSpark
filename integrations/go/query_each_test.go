@@ -68,3 +68,27 @@ func TestQueryEachStopsChildWhenVisitorFails(t *testing.T) {
         t.Fatal("nil visitor accepted")
     }
 }
+
+func TestScanNDJSONRowsAcceptsExactByteLimit(t *testing.T) {
+    prefix := `{"data":"`
+    suffix := `"}`
+    size := maxNDJSONRowBytes - len(prefix) - len(suffix)
+    exact := prefix + strings.Repeat("a", size) + suffix
+    seen := 0
+    err := scanNDJSONRows(strings.NewReader(exact+"\r\n"), func(row map[string]any) error {
+        seen++
+        if len(row["data"].(string)) != size {
+            t.Fatal("lost the boundary row payload")
+        }
+        return nil
+    })
+    if err != nil || seen != 1 {
+        t.Fatalf("exactly 16 MiB should fit: seen=%d, err=%v", seen, err)
+    }
+    if err := scanNDJSONRows(strings.NewReader(exact+" "+"\n"), func(map[string]any) error {
+        t.Fatal("oversized row reached visitor")
+        return nil
+    }); err == nil {
+        t.Fatal("expected oversized row to be rejected")
+    }
+}

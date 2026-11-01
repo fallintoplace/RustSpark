@@ -118,6 +118,60 @@ impl DictionaryColumn {
         Ok(rows)
     }
 
+    /// Decode and consume a dictionary, moving a TEXT allocation on its
+    /// final use when this is the last owner of the dictionary table.
+    /// Earlier repeated uses still require independent TEXT allocations.
+    pub fn into_decoded_with_budget(self, max_bytes: usize) -> Result<Vec<Value>> {
+        // Keep the same admission and invalid-code checks as borrowed decode,
+        // without allocating output strings on the failing path.
+        let mut used = self.indices.len()
+            .checked_mul(std::mem::size_of::<Value>())
+            .ok_or_else(|| Error::Execution("dictionary decoded size overflow".into()))?;
+        if used > max_bytes {
+            return Err(Error::Execution("dictionary decode budget exceeded".into()));
+        }
+        let mut references = vec![0usize; self.dictionary.len()];
+        for index in self.indices.iter().flatten() {
+            let code = usize::try_from(*index)
+                .map_err(|_| Error::Execution("invalid dictionary code".into()))?;
+            let value = self.dictionary.get(code)
+                .ok_or_else(|| Error::Execution("invalid dictionary code".into()))?;
+            references[code] += 1;
+            used = used.checked_add(value.len())
+                .filter(|bytes| *bytes <= max_bytes)
+                .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
+        }
+        if Arc::strong_count(&self.dictionary) != 1 {
+            return self.decode_with_budget(max_bytes);
+        }
+        let Self { dictionary, indices, .. } = self;
+        let table = Arc::try_unwrap(dictionary)
+            .expect("single-owned dictionary Arc can be unwrapped");
+        let mut available = table.into_iter().map(Some).collect::<Vec<_>>();
+        let mut output = Vec::with_capacity(indices.len());
+        for index in indices {
+            match index {
+                None => output.push(Value::Null),
+                Some(index) => {
+                    let code = index as usize;
+                    references[code] -= 1;
+                    let text = if references[code] == 0 {
+                        available[code].take().expect("final dictionary reference")
+                    } else {
+                        available[code].as_ref()
+                            .expect("live dictionary reference").clone()
+                    };
+                    output.push(Value::Text(text));
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    pub fn into_decoded(self) -> Result<Vec<Value>> {
+        self.into_decoded_with_budget(64 * 1024 * 1024)
+    }
+
     pub fn estimated_bytes(&self) -> usize {
         self.encoded_string_bytes
             .saturating_add(self.indices.len().saturating_mul(std::mem::size_of::<Option<u32>>()))
@@ -500,5 +554,59 @@ mod invalid_left_dictionary_merge_regressions {
         assert_eq!(merged.decode().unwrap(), vec![
             Value::Text("left".into()), Value::Text("right".into())
         ]);
+    }
+}
+
+#[cfg(test)]
+mod consuming_dictionary_decode_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn moves_last_owned_text_references_but_clones_repeated_values() {
+        let schema = Schema::new(vec![Field::new("tag", DataType::Text, true)]).unwrap();
+        let large = "é🙂".repeat(1024);
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text(large.clone())], vec![Value::Null],
+            vec![Value::Text("once".repeat(1024))],
+            vec![Value::Text(large.clone())],
+        ]).unwrap();
+        let dictionary = DictionaryColumn::from_batch(&input, "tag", 4, 100_000, 4).unwrap();
+        let ptr_first = dictionary.dictionary()[0].as_ptr();
+        let ptr_second = dictionary.dictionary()[1].as_ptr();
+        let expected = dictionary.decode().unwrap();
+        let decoded = dictionary.into_decoded().unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(match &decoded[3] { Value::Text(text) => text.as_ptr(), _ => unreachable!() },
+            ptr_first);
+        assert_eq!(match &decoded[2] { Value::Text(text) => text.as_ptr(), _ => unreachable!() },
+            ptr_second);
+    }
+
+    #[test]
+    fn shared_dictionary_and_decode_budget_match_borrowed_path() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("abc".repeat(16))], vec![Value::Null],
+            vec![Value::Text("abc".repeat(16))],
+        ]).unwrap();
+        let encoded = DictionaryColumn::from_batch(&input, "v", 2, 256, 3).unwrap();
+        let required = 3 * std::mem::size_of::<Value>() + 96;
+        assert!(encoded.clone().into_decoded_with_budget(required - 1).is_err());
+        assert_eq!(encoded.clone().into_decoded_with_budget(required).unwrap(),
+            encoded.decode_with_budget(required).unwrap());
+        assert_eq!(encoded.into_decoded().unwrap(), input.column(0).unwrap());
+    }
+
+    #[test]
+    fn zero_rows_and_null_only_columns_decode_without_panics() {
+        let schema = Schema::new(vec![Field::new("v", DataType::Text, true)]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        let nulls = Batch::from_rows(schema,
+            vec![vec![Value::Null], vec![Value::Null]]).unwrap();
+        assert!(DictionaryColumn::from_batch(&empty, "v", 0, 0, 0)
+            .unwrap().into_decoded_with_budget(0).unwrap().is_empty());
+        assert_eq!(DictionaryColumn::from_batch(&nulls, "v", 0, 0, 2)
+            .unwrap().into_decoded().unwrap(), vec![Value::Null, Value::Null]);
     }
 }

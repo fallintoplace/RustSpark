@@ -4,9 +4,33 @@ import (
     "bytes"
     "context"
     "errors"
+    "io"
     "strings"
     "testing"
 )
+
+type shortNDJSONWriter struct {
+    bytes.Buffer
+}
+
+func (w *shortNDJSONWriter) Write(data []byte) (int, error) {
+    if len(data) > 1 {
+        data = data[:1]
+    }
+    return w.Buffer.Write(data)
+}
+
+func TestNDJSONByteCapRejectsSilentShortWrites(t *testing.T) {
+    underlying := &shortNDJSONWriter{}
+    writer := &ndjsonByteLimit{output: underlying, remaining: 5}
+    count, err := writer.Write([]byte("abcd"))
+    if count != 1 || !errors.Is(err, io.ErrShortWrite) {
+        t.Fatalf("short write = %d, %v", count, err)
+    }
+    if writer.remaining != 4 || underlying.String() != "a" {
+        t.Fatalf("short write must debit only emitted bytes: remaining %d", writer.remaining)
+    }
+}
 
 func TestNDJSONOptInByteCapStopsWrites(t *testing.T) {
     var captured bytes.Buffer

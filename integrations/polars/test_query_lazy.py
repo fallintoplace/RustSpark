@@ -26,6 +26,19 @@ class PolarsCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", Path("r.arrow"), csv="a.csv", parquet="b.parquet")
 
+    def test_rejects_invalid_unnamed_and_database_paths_before_launch(self):
+        for invalid in ("", b"data.csv", 123, None):
+            for flag in ("csv", "parquet", "json_input"):
+                if invalid is None:
+                    continue
+                with self.subTest(flag=flag, value=invalid), self.assertRaisesRegex(
+                        ValueError, "Unnamed sources"):
+                    build_command("SELECT 1", Path("out.arrow"), **{flag: invalid})
+        for invalid in ("", b"/tmp/database", 123):
+            with self.subTest(database_dir=invalid), self.assertRaisesRegex(
+                    ValueError, "database_dir"):
+                build_command("SELECT 1", Path("out.arrow"), database_dir=invalid)
+
     def test_persistent_database_directory_is_passed_as_argv(self):
         command = build_command("SELECT * FROM accounts", Path("result.arrow"),
                                 database_dir="/tmp/rustspark db")
