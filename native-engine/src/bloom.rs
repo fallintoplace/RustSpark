@@ -48,7 +48,16 @@ impl BloomFilter {
             return Err(Error::Execution("Bloom filter target exceeds hash probe budget".into()));
         }
         let hashes = optimal_hashes.round().clamp(1.0, 16.0) as u32;
-        Self::new(bits, hashes)
+        // The optimal continuous hash count was rounded to an integer.
+        // Recompute the minimum size for that actual probe count so the
+        // theoretical FPR does not drift above the caller's target.
+        let probes = f64::from(hashes);
+        let needed = -(probes * expected_items as f64)
+            / (-target_fpr.powf(1.0 / probes)).ln_1p();
+        if !needed.is_finite() || needed > (1usize << 29) as f64 {
+            return Err(Error::Execution("Bloom filter target exceeds bitset budget".into()));
+        }
+        Self::new(bits.max(needed.ceil() as usize), hashes)
     }
 
     pub fn new(bits: usize, hashes: u32) -> Result<Self> {
@@ -187,6 +196,26 @@ impl BloomFilter {
         output
     }
 
+    /// Probe a filtered key column in selection order, without creating
+    /// a gathered Value vector. Validate every index before producing output.
+    pub fn probe_selected(&self, keys: &[Value], selected: &[usize]) -> Result<Vec<bool>> {
+        if selected.iter().any(|&index| index >= keys.len()) {
+            return Err(Error::Execution("selected Bloom row out of bounds".into()));
+        }
+        if !self.populated { return Ok(vec![false; selected.len()]); }
+        if self.occupied_bits == self.bits { return Ok(vec![true; selected.len()]); }
+        let mut output = Vec::with_capacity(selected.len());
+        let mut previous: Option<&Value> = None;
+        let mut last_result = false;
+        for &index in selected {
+            let key = &keys[index];
+            if previous != Some(key) { last_result = self.might_contain(key); }
+            output.push(last_result);
+            previous = Some(key);
+        }
+        Ok(output)
+    }
+
     pub fn byte_size(&self) -> usize { self.words.len() * 8 }
 
     /// Number of active bits for monitoring filter saturation.
@@ -198,6 +227,42 @@ impl BloomFilter {
         (self.bits_set() as f64 / self.bits as f64).powi(self.hashes as i32)
     }
 }
+
+#[cfg(test)]
+mod selected_bloom_probe_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_selected_probes_match_scalar_probes_across_duplicate_and_unicode_keys() {
+        let keys = vec![
+            Value::Integer(10), Value::Text("é🙂".into()), Value::Integer(20),
+            Value::Null, Value::Float(-0.0), Value::Float(0.0),
+            Value::Text("Berlin".into()), Value::Float(f64::NAN),
+        ];
+        let selection = [2, 2, 1, 7, 0, 6, 5, 4, 4, 3, 0, 1];
+        for bits in [513, 1024, 8192] {
+            let mut filter = BloomFilter::new(bits, 5).unwrap();
+            for &index in &[0, 1, 3, 4, 7] { filter.insert(&keys[index]); }
+            let expected = selection.iter().map(|&index|
+                filter.might_contain(&keys[index])).collect::<Vec<_>>();
+            assert_eq!(filter.probe_selected(&keys, &selection).unwrap(), expected);
+            assert_eq!(filter.probe_selected(&keys, &[]).unwrap(), Vec::<bool>::new());
+        }
+    }
+
+    #[test]
+    fn empty_filter_and_invalid_selection_preserve_contract() {
+        let keys = [Value::Integer(1), Value::Text("x".into())];
+        let mut filter = BloomFilter::new(64, 3).unwrap();
+        assert_eq!(filter.probe_selected(&keys, &[1, 1, 0]).unwrap(),
+            vec![false, false, false]);
+        assert!(filter.probe_selected(&keys, &[0, 2]).is_err());
+        filter.insert(&keys[0]);
+        assert!(filter.probe_selected(&keys, &[0, usize::MAX]).is_err());
+        assert_eq!(filter.probe_selected(&keys, &[0]).unwrap(), vec![true]);
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -860,6 +925,24 @@ mod fallible_bloom_admission_regressions {
                 assert!(filter.might_contain(&Value::Integer(value)));
             }
             assert!(filter.bits_set() <= bits);
+        }
+    }
+}
+
+#[cfg(test)]
+mod rounded_bloom_fpr_budget_tests {
+    use super::*;
+
+    #[test]
+    fn rounded_hash_counts_do_not_exceed_theoretical_target_rate() {
+        for (items, target) in [(1000, 0.01), (1000, 0.1),
+            (10000, 0.01), (100, 0.0001)] {
+            let filter = BloomFilter::for_expected_items(items, target).unwrap();
+            let probes = f64::from(filter.hashes);
+            let rate = (1.0 - (-(probes * items as f64) /
+                filter.bits as f64).exp()).powf(probes);
+            assert!(rate <= target * (1.0 + 1e-12),
+                "items={items}, target={target}, estimated={rate}");
         }
     }
 }

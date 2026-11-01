@@ -19,6 +19,15 @@ impl QueryControl {
         Ok(Self::new(Some(deadline)))
     }
 
+    /// Fork a child stage with the same cancellation token and an optional
+    /// tighter timeout. A child must never extend the parent query deadline.
+    pub fn child_with_timeout(&self, timeout: Duration) -> Result<Self> {
+        let local = Instant::now().checked_add(timeout)
+            .ok_or_else(|| Error::Execution("query deadline out of range".into()))?;
+        let deadline = self.deadline.map_or(local, |parent| parent.min(local));
+        Ok(Self { cancelled: self.cancelled.clone(), deadline: Some(deadline) })
+    }
+
     pub fn cancel(&self) {
         self.cancelled.cancel();
     }
@@ -82,5 +91,37 @@ mod remaining_deadline_tests {
         assert!(remaining > Duration::ZERO && remaining <= Duration::from_secs(60));
         live.cancel();
         assert!(live.check().is_err());
+    }
+}
+
+#[cfg(test)]
+mod inherited_stage_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn child_cannot_extend_expired_parent_or_escape_cancellation() {
+        let expired = QueryControl::new(Some(Instant::now()));
+        let child = expired.child_with_timeout(Duration::from_secs(60)).unwrap();
+        assert!(child.check().unwrap_err().to_string().contains("deadline"));
+
+        let parent = QueryControl::with_timeout(Duration::from_secs(60)).unwrap();
+        let child = parent.child_with_timeout(Duration::from_secs(1)).unwrap();
+        assert!(child.remaining_time().unwrap() <= Duration::from_secs(1));
+        assert!(child.remaining_time().unwrap() <= parent.remaining_time().unwrap());
+        parent.cancel();
+        assert!(child.is_cancelled());
+        assert!(child.check().unwrap_err().to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn nested_children_preserve_the_earliest_deadline_and_shared_token() {
+        let parent = QueryControl::with_timeout(Duration::from_secs(10)).unwrap();
+        let child = parent.child_with_timeout(Duration::from_secs(5)).unwrap();
+        let grandchild = child.child_with_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(grandchild.deadline, child.deadline);
+        grandchild.cancel();
+        assert!(parent.is_cancelled());
+        assert!(child.check().is_err());
+        assert!(QueryControl::default().child_with_timeout(Duration::MAX).is_err());
     }
 }
