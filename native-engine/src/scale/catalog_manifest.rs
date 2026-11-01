@@ -174,8 +174,18 @@ pub fn save_atomic(catalog: &FileCatalog, destination: &Path) -> Result<()> {
 
 /// Reload a persisted snapshot. Failed validation never returns a partial catalog.
 pub fn load(path: &Path) -> Result<FileCatalog> {
+    // A manifest must be a finite file. Opening a FIFO before checking its
+    // type could block indefinitely, even with a bounded read.
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(Error::Execution("catalog manifest is not a regular file".into()));
+    }
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(Error::Execution("catalog manifest exceeds byte limit".into()));
+    }
     let mut bytes = Vec::new();
     File::open(path)?.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+    // Recheck size in case the file grew after the metadata probe.
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(Error::Execution("catalog manifest exceeds byte limit".into()));
     }
@@ -359,5 +369,50 @@ mod private_manifest_snapshot_tests {
         assert_eq!(fs::metadata(&manifest).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(load(&manifest).unwrap().list(), ["data"]);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod manifest_regular_file_validation_tests {
+    use super::*;
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn rejects_directories_without_attempting_a_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-manifest-dir-{}-{}",
+            std::process::id(), FILE_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        assert!(load(&dir).unwrap_err().to_string().contains("regular file"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_unix_socket_nodes_without_waiting_for_data() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-manifest-socket-{}-{}",
+            std::process::id(), FILE_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("manifest.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert!(load(&path).unwrap_err().to_string().contains("regular file"));
+        drop(listener);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_oversized_files_before_deserializing() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-manifest-oversize-{}-{}",
+            std::process::id(), FILE_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::write(&path, vec![b' '; MAX_MANIFEST_BYTES as usize + 1]).unwrap();
+        assert!(load(&path).unwrap_err().to_string().contains("byte limit"));
+        fs::remove_file(path).unwrap();
     }
 }
