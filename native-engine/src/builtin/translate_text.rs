@@ -47,6 +47,33 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(String::from_utf8(output)
             .expect("ASCII translations remain UTF-8")));
     }
+    // Unicode input often uses an ASCII replacement alphabet. Avoid a
+    // per-row HashMap when all source and target scalars fit a fixed table.
+    // Non-ASCII input scalars cannot match this mapping and pass through.
+    if from.is_ascii() && to.is_ascii() {
+        const UNMAPPED: i16 = -1;
+        const REMOVE: i16 = -2;
+        let mut mapping = [UNMAPPED; 128];
+        for (index, &byte) in from.as_bytes().iter().enumerate() {
+            if mapping[usize::from(byte)] == UNMAPPED {
+                mapping[usize::from(byte)] = to.as_bytes().get(index)
+                    .map_or(REMOVE, |replacement| i16::from(*replacement));
+            }
+        }
+        let mut output = String::with_capacity(text.len());
+        for character in text.chars() {
+            if character.is_ascii() {
+                match mapping[character as usize] {
+                    UNMAPPED => output.push(character),
+                    REMOVE => {},
+                    replacement => output.push(char::from(replacement as u8)),
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        return Ok(Value::Text(output));
+    }
     if text.is_ascii() {
         // Mixed Unicode source maps still need their distinct-character
         // limit, even though non-ASCII keys cannot match ASCII input.
@@ -239,5 +266,31 @@ mod mixed_unicode_ascii_translation_regressions {
         assert_eq!(translate("ba", "éb", "🙂"), Value::Text("a".into()));
         assert_eq!(translate("foo", "é🙂", "ab"), Value::Text("foo".into()));
         assert_eq!(translate("", "", ""), Value::Text(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod unicode_text_ascii_mapping_regressions {
+    use super::*;
+
+    #[test]
+    fn replaces_ascii_scalars_inside_unicode_text_without_changing_other_scalars() {
+        let translate = |input: &str, from: &str, to: &str| evaluate(&[
+            Value::Text(input.into()), Value::Text(from.into()), Value::Text(to.into()),
+        ]).unwrap();
+        assert_eq!(translate("éa🙂bab東京", "ab", "XY"), Value::Text("éX🙂YXY東京".into()));
+        assert_eq!(translate("éa🙂bab東京", "ab", "Z"), Value::Text("éZ🙂Z東京".into()));
+        assert_eq!(translate("éa🙂bab東京", "aab", "XYZ"), Value::Text("éX🙂ZXZ東京".into()));
+        assert_eq!(translate("é🙂東京", "ab", "XY"), Value::Text("é🙂東京".into()));
+    }
+
+    #[test]
+    fn large_unicode_payload_keeps_byte_size_and_duplicate_mapping_rules() {
+        let text = format!("{}a🙂b", "東京é".repeat(10_000));
+        let expected = format!("{}X🙂Y", "東京é".repeat(10_000));
+        assert_eq!(evaluate(&[Value::Text(text), Value::Text("ab".into()),
+            Value::Text("XY".into())]).unwrap(), Value::Text(expected));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("ab".into()),
+            Value::Text("XY".into())]).unwrap(), Value::Null);
     }
 }
