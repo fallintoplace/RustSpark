@@ -644,7 +644,7 @@ mod owned_external_sort_run_regressions {
         let keys = [SortKey::ascending(crate::expr::Expr::Column("key".into()))];
         let expected = sort::sort(&batch, &keys).unwrap().rows().unwrap();
         let result = external_sort([batch], &schema, &keys, std::env::temp_dir(), 5, 7)
-            .unwrap().collect::<Result<Vec<_>>().unwrap();
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert!(result.iter().all(|part| part.num_rows() <= 7));
         assert_eq!(
             result.iter().flat_map(|part| part.rows().unwrap()).collect::<Vec<_>>(),
