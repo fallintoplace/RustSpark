@@ -18,6 +18,17 @@ enum State {
 }
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
+// A byte-only record limit permits millions of empty CSV fields, each of
+// which allocates a String and eventually a column. Bound shape separately.
+const MAX_RECORD_FIELDS: usize = 4_096;
+
+fn push_record_field(fields: &mut Vec<String>, field: Vec<u8>) -> Result<()> {
+    if fields.len() >= MAX_RECORD_FIELDS {
+        return Err(Error::Execution("CSV record exceeds field count limit".into()));
+    }
+    fields.push(decode(field)?);
+    Ok(())
+}
 
 // The CSV decoder transfers its Vec allocation into String without shrinking.
 // Charge the allocation retained by an output batch, not just visible bytes.
@@ -128,7 +139,7 @@ impl<R: BufRead> Records<R> {
                     if state == State::Quoted {
                         return Err(Error::Parse("unterminated CSV quote".into()));
                     }
-                    fields.push(decode(field)?);
+                    push_record_field(&mut fields, field)?;
                     return Ok(Some(fields));
                 }
             };
@@ -146,14 +157,14 @@ impl<R: BufRead> Records<R> {
                 }
                 (State::Quoted, byte) => field.push(byte),
                 (State::Start | State::Unquoted | State::AfterQuote, b',') => {
-                    fields.push(decode(std::mem::take(&mut field))?);
+                    push_record_field(&mut fields, std::mem::take(&mut field))?;
                     state = State::Start;
                 }
                 (State::Start | State::Unquoted | State::AfterQuote, b'\n' | b'\r') => {
                     if byte == b'\r' {
                         self.skip_lf = true;
                     }
-                    fields.push(decode(field)?);
+                    push_record_field(&mut fields, field)?;
                     return Ok(Some(fields));
                 }
                 (State::Unquoted, b'"') => {
@@ -712,3 +723,41 @@ mod required_null_prefix_regression_tests {
     }
 }
 
+
+#[cfg(test)]
+mod bounded_csv_field_count_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    fn record(input: String) -> Result<Option<Vec<String>>> {
+        let mut source = Records {
+            input: Cursor::new(input.into_bytes()),
+            max_record_bytes: 16_384,
+            pending: None, skip_lf: false,
+            buffer: [0; READ_CHUNK_BYTES], cursor: 0, filled: 0,
+        };
+        source.record()
+    }
+
+    #[test]
+    fn accepts_limit_but_rejects_one_additional_empty_field() {
+        let exact = ",".repeat(MAX_RECORD_FIELDS - 1);
+        assert_eq!(record(exact).unwrap().unwrap().len(), MAX_RECORD_FIELDS);
+        let too_wide = ",".repeat(MAX_RECORD_FIELDS);
+        assert!(matches!(record(too_wide), Err(Error::Execution(_))));
+        let too_wide_newline = format!("{}\n", ",".repeat(MAX_RECORD_FIELDS));
+        assert!(matches!(record(too_wide_newline), Err(Error::Execution(_))));
+    }
+
+    #[test]
+    fn malformed_late_row_keeps_preceding_record() {
+        let mut source = Records {
+            input: Cursor::new(format!("a,b\n{}\n", ",".repeat(MAX_RECORD_FIELDS)).into_bytes()),
+            max_record_bytes: 16_384,
+            pending: None, skip_lf: false,
+            buffer: [0; READ_CHUNK_BYTES], cursor: 0, filled: 0,
+        };
+        assert_eq!(source.record().unwrap().unwrap(), vec!["a", "b"]);
+        assert!(matches!(source.record(), Err(Error::Execution(_))));
+    }
+}
