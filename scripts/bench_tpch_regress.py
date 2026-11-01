@@ -6,6 +6,15 @@ import json
 import math
 from pathlib import Path
 
+from tpch_run import unique_keys, reject_nonfinite
+
+
+def read_benchmark_report(path):
+    """Reject duplicate object fields and unsupported JSON numeric constants."""
+    return json.loads(Path(path).read_text(encoding="utf-8"),
+                      object_pairs_hook=unique_keys,
+                      parse_constant=reject_nonfinite)
+
 
 def finite_nonnegative_number(value):
     if type(value) not in (int, float) or value < 0:
@@ -23,11 +32,15 @@ def checked_median(value, number):
 
 
 def medians(report):
+    if not isinstance(report, dict):
+        raise ValueError("TPC-H benchmark report must be a JSON object")
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("TPC-H query results are missing")
     values = {}
     for row in results:
+        if not isinstance(row, dict):
+            raise ValueError("TPC-H query result must be a JSON object")
         number = row.get("id")
         if type(number) is not int or number not in range(1, 23) or number in values:
             raise ValueError("Missing, repeated or invalid query ID")
@@ -86,6 +99,8 @@ def rounded_positive_ratio(value):
 
 
 def compare(baseline, candidate, max_regression=0.20):
+    if not isinstance(baseline, dict) or not isinstance(candidate, dict):
+        raise ValueError("TPC-H comparison requires two report objects")
     max_regression = checked_regression_threshold(max_regression)
     check_matching_environment(baseline, candidate)
     old, new = medians(baseline), medians(candidate)
@@ -127,8 +142,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         result = compare(
-            json.loads(args.baseline.read_text(encoding="utf-8")),
-            json.loads(args.candidate.read_text(encoding="utf-8")),
+            read_benchmark_report(args.baseline),
+            read_benchmark_report(args.candidate),
             args.max_regression,
         )
     except (OSError, ValueError, TypeError) as error:
