@@ -282,13 +282,7 @@ pub fn approximate_distinct_selected(
     let index = batch.schema().column(column)?;
     let values = batch.column(index)?;
     let mut sketch = HyperLogLog::new();
-    let mut previous: Option<&Value> = None;
-    for &row in selected {
-        let value = values.get(row)
-            .ok_or_else(|| Error::Execution("selected HLL row out of bounds".into()))?;
-        if previous != Some(value) { sketch.add(value); }
-        previous = Some(value);
-    }
+    sketch.add_selected(values, selected)?;
     Ok(sketch.estimate())
 }
 
