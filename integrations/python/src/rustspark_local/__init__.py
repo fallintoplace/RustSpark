@@ -82,7 +82,9 @@ class RustSpark:
             if not isinstance(sql, str) or not sql.strip():
                 raise ValueError("SQL cannot be blank")
         else:
-            if sql is not None and (not isinstance(sql, str) or sql.strip()):
+            if (sql is not None and (not isinstance(sql, str) or sql.strip())) or (
+                isinstance(sql_file, (str, bytes)) and not sql_file
+            ):
                 raise ValueError("Provide exactly one inline SQL statement or sql_file")
             _text_path(sql_file, "sql_file")
         unnamed = {"input": input, "csv": csv, "parquet": parquet, "json": json_input}
