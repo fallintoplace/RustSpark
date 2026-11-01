@@ -420,7 +420,7 @@ fn collect_parquet_batches<I>(
 ) -> Result<Batch>
 where I: IntoIterator<Item = Result<Batch>>
 {
-    let mut columns: Option<Vec<Vec<Value>>> = None;
+    let mut output = Batch::empty(schema.clone());
     let mut total_rows = 0usize;
     let mut retained_bytes = 0usize;
     for incoming in input {
@@ -434,19 +434,11 @@ where I: IntoIterator<Item = Result<Batch>>
         let bytes = retained_bytes.checked_add(parquet_batch_retained_bytes(&batch)?)
             .filter(|&bytes| bytes <= max_bytes)
             .ok_or_else(|| Error::Execution("Parquet input exceeds native byte limit".into()))?;
-        let incoming = batch.into_columns();
-        if let Some(existing) = columns.as_mut() {
-            for (target, source) in existing.iter_mut().zip(incoming) {
-                target.extend(source);
-            }
-        } else {
-            columns = Some(incoming);
-        }
+        output.append_owned(batch)?;
         total_rows = rows;
         retained_bytes = bytes;
     }
-    let columns = columns.unwrap_or_else(|| (0..schema.len()).map(|_| Vec::new()).collect());
-    Batch::from_validated_columns(schema, columns, total_rows)
+    Ok(output)
 }
 
 fn read_parquet_bounded(path: &Path) -> Result<Batch> {
@@ -732,11 +724,13 @@ mod bounded_owned_parquet_materialization_tests {
     #[test]
     fn enforces_row_and_retained_byte_budgets_without_partial_results() {
         let schema = schema();
-        let mut huge = String::with_capacity(8192);
-        huge.push('a');
-        let make_batch = || Batch::from_rows(schema.clone(), vec![
-            vec![Value::Integer(1), Value::Text(huge.clone())]
-        ]).unwrap();
+        let make_batch = || {
+            let mut huge = String::with_capacity(8192);
+            huge.push('a');
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(1), Value::Text(huge)]
+            ]).unwrap()
+        };
         assert!(collect_parquet_batches(schema.clone(),
             [Ok(make_batch()), Ok(make_batch())], 1, 100_000).is_err());
         let oversized = collect_parquet_batches(schema.clone(),
