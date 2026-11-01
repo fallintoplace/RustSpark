@@ -10,6 +10,18 @@ import bench_jsonl as benchmark
 
 
 class JSONLTests(unittest.TestCase):
+    def test_benchmark_rejects_non_integer_budgets_before_file_creation(self):
+        defaults = dict(rows=4, repeat=1, warmup=0, timeout=5)
+        invalid = (True, False, 1.5, "2", None, float("nan"), float("inf"), -1)
+        for field in ("rows", "repeat", "warmup", "timeout"):
+            for value in invalid:
+                with self.subTest(field=field, value=value):
+                    settings = {**defaults, field: value}
+                    with patch.object(benchmark, "write_jsonl") as writer:
+                        with self.assertRaisesRegex(ValueError, "benchmark settings"):
+                            benchmark.benchmark("rustspark", **settings)
+                        writer.assert_not_called()
+
     def test_generated_rows_are_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "data.jsonl"

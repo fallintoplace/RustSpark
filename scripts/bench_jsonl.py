@@ -56,7 +56,10 @@ def measure(binary, file, sql, digest, repeat, warmup, timeout):
 
 def benchmark(binary, rows=100000, repeat=3, warmup=1, timeout=120,
               workloads=None):
-    if rows < 1 or repeat < 1 or warmup < 0 or timeout < 1:
+    if (type(rows) is not int or rows < 1
+            or type(repeat) is not int or repeat < 1
+            or type(warmup) is not int or warmup < 0
+            or type(timeout) is not int or timeout < 1):
         raise ValueError("Invalid JSONL benchmark settings")
     selected = tuple(WORKLOADS) if workloads is None else tuple(workloads)
     if not selected or len(set(selected)) != len(selected) or any(
