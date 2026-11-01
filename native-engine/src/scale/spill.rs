@@ -39,10 +39,20 @@ fn read_byte(input: &mut impl Read) -> Result<u8> {
     Ok(byte[0])
 }
 
+// Length checks bound logical payload size, but the available host memory
+// can be smaller than the budget. Never infallibly allocate untrusted lengths.
+fn allocate_wire_bytes(length: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("spill payload allocation failed".into()))?;
+    bytes.resize(length, 0);
+    Ok(bytes)
+}
+
 fn read_bounded(input: &mut impl Read, bound: usize) -> Result<Vec<u8>> {
     let bytes = read_u32(input)?;
     if bytes > bound { return Err(Error::Execution("spill value exceeds byte limit".into())); }
-    let mut buffer = vec![0; bytes];
+    let mut buffer = allocate_wire_bytes(bytes)?;
     input.read_exact(&mut buffer)?;
     Ok(buffer)
 }
@@ -68,7 +78,7 @@ fn read_text_bounded(
     let next = bytes_seen.checked_add(extra)
         .filter(|total| *total <= MAX_BATCH_BYTES)
         .ok_or_else(|| Error::Execution("spill batch exceeds byte limit".into()))?;
-    let mut buffer = vec![0; length];
+    let mut buffer = allocate_wire_bytes(length)?;
     input.read_exact(&mut buffer)?;
     let text = String::from_utf8(buffer)
         .map_err(|_| Error::Parse("invalid spill UTF-8".into()))?;
@@ -1240,6 +1250,35 @@ mod spill_writer_poisoning_regressions {
         assert!(writer.write_batch(&batch).is_err());
         assert!(writer.write_batch(&batch).unwrap_err().to_string().contains("poisoned"));
         assert!(writer.finish().unwrap_err().to_string().contains("poisoned"));
+    }
+}
+
+#[cfg(test)]
+mod untrusted_spill_payload_admission_tests {
+    use super::*;
+
+    #[test]
+    fn text_length_budget_is_enforced_before_allocation_or_reading() {
+        let oversize = u32::try_from(MAX_TEXT_BYTES + 1).unwrap().to_le_bytes();
+        let mut bytes_seen = 0usize;
+        assert!(matches!(
+            read_text_bounded(&mut oversize.as_slice(), &mut bytes_seen),
+            Err(Error::Execution(_))
+        ));
+        assert_eq!(bytes_seen, 0);
+    }
+
+    #[test]
+    fn truncated_payload_does_not_commit_wire_budget() {
+        let mut payload = (16u32).to_le_bytes().to_vec();
+        payload.extend_from_slice(b"hi");
+        let mut bytes_seen = 5usize;
+        assert!(read_text_bounded(&mut payload.as_slice(), &mut bytes_seen).is_err());
+        assert_eq!(bytes_seen, 5);
+        assert_eq!(
+            read_bounded(&mut [2u8, 0, 0, 0, b'a', b'b'].as_slice(), 2).unwrap(),
+            b"ab"
+        );
     }
 }
 
