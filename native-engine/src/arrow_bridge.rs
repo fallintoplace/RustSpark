@@ -5,7 +5,7 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
-    builder::StringBuilder, types::{Int8Type, Int16Type, Int32Type, Int64Type,
+    builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
         UInt8Type, UInt16Type, UInt32Type, UInt64Type},
 };
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
@@ -16,6 +16,12 @@ use crate::{
     schema::{DataType, Field, Schema},
     Error, Result,
 };
+
+const MAX_ARROW_DECODED_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+fn needs_large_utf8(payload_bytes: usize) -> bool {
+    payload_bytes > i32::MAX as usize
+}
 
 pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
     let mut fields = Vec::new();
@@ -51,20 +57,36 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
                 fields.push(ArrowField::new(&field.name, ArrowType::Float64, field.nullable));
             }
             DataType::Text => {
-                let text_bytes = input.iter().fold(0usize, |total, value| match value {
-                    Value::Text(value) => total.saturating_add(value.len()),
-                    _ => total,
-                });
-                let mut builder = StringBuilder::with_capacity(input.len(), text_bytes);
-                for value in input {
-                    match value {
-                        Value::Null => builder.append_null(),
-                        Value::Text(v) => builder.append_value(v),
-                        _ => return Err(Error::Type("invalid string column".into())),
+                let text_bytes = input.iter().try_fold(0usize, |total, value| match value {
+                    Value::Text(value) => total.checked_add(value.len()),
+                    _ => Some(total),
+                }).ok_or_else(|| Error::Execution("Arrow text offset overflow".into()))?;
+                // Utf8 stores 32-bit offsets, while native text columns can
+                // exceed that limit. Select LargeUtf8 before appending values
+                // so the builder cannot panic on a valid wide native batch.
+                if needs_large_utf8(text_bytes) {
+                    let mut builder = LargeStringBuilder::with_capacity(input.len(), text_bytes);
+                    for value in input {
+                        match value {
+                            Value::Null => builder.append_null(),
+                            Value::Text(v) => builder.append_value(v),
+                            _ => return Err(Error::Type("invalid string column".into())),
+                        }
                     }
+                    columns.push(Arc::new(builder.finish()));
+                    fields.push(ArrowField::new(&field.name, ArrowType::LargeUtf8, field.nullable));
+                } else {
+                    let mut builder = StringBuilder::with_capacity(input.len(), text_bytes);
+                    for value in input {
+                        match value {
+                            Value::Null => builder.append_null(),
+                            Value::Text(v) => builder.append_value(v),
+                            _ => return Err(Error::Type("invalid string column".into())),
+                        }
+                    }
+                    columns.push(Arc::new(builder.finish()));
+                    fields.push(ArrowField::new(&field.name, ArrowType::Utf8, field.nullable));
                 }
-                columns.push(Arc::new(builder.finish()));
-                fields.push(ArrowField::new(&field.name, ArrowType::Utf8, field.nullable));
             }
         }
     }
@@ -79,7 +101,7 @@ pub fn to_arrow(batch: &Batch) -> Result<RecordBatch> {
 // Decode the dictionary's keys without expanding or copying dictionary values
 // per row. Checked conversion and bounds ensure malformed input returns an error.
 macro_rules! decode_text_dictionary {
-    ($array:expr, $key_type:ty) => {{
+    ($array:expr, $key_type:ty, $budget:expr) => {{
         let dictionary = $array.as_any().downcast_ref::<DictionaryArray<$key_type>>()
             .ok_or_else(|| Error::Type("invalid Arrow dictionary array".into()))?;
         let values = dictionary.values();
@@ -102,9 +124,15 @@ macro_rules! decode_text_dictionary {
             if values.is_null(key) {
                 decoded.push(Value::Null);
             } else if let Some(strings) = utf8 {
-                decoded.push(Value::Text(strings.value(key).into()));
+                let value = strings.value(key);
+                *$budget = (*$budget).checked_sub(value.len())
+                    .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                decoded.push(Value::Text(value.into()));
             } else if let Some(strings) = large_utf8 {
-                decoded.push(Value::Text(strings.value(key).into()));
+                let value = strings.value(key);
+                *$budget = (*$budget).checked_sub(value.len())
+                    .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                decoded.push(Value::Text(value.into()));
             }
         }
         decoded
@@ -114,6 +142,9 @@ macro_rules! decode_text_dictionary {
 pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
     let mut fields = Vec::new();
     let mut columns = Vec::new();
+    // A small Arrow dictionary may expand into gigabytes of native strings.
+    // Share the budget across every decoded TEXT column in this record batch.
+    let mut remaining_text_bytes = MAX_ARROW_DECODED_TEXT_BYTES;
     for (index, field) in input.schema().fields().iter().enumerate() {
         let array = input.column(index);
         let data_type = match field.data_type() {
@@ -232,29 +263,39 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                 let values = array.as_any().downcast_ref::<StringArray>()
                     .ok_or_else(|| Error::Type("invalid Utf8 Arrow array".into()))?;
                 Some((0..values.len()).map(|row| {
-                    if values.is_null(row) { Value::Null }
-                    else { Value::Text(values.value(row).into()) }
-                }).collect())
+                    if values.is_null(row) { Ok(Value::Null) }
+                    else {
+                        let text = values.value(row);
+                        remaining_text_bytes = remaining_text_bytes.checked_sub(text.len())
+                            .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                        Ok(Value::Text(text.into()))
+                    }
+                }).collect::<Result<Vec<_>>>()?)
             }
             ArrowType::LargeUtf8 => {
                 let values = array.as_any().downcast_ref::<LargeStringArray>()
                     .ok_or_else(|| Error::Type("invalid LargeUtf8 Arrow array".into()))?;
                 Some((0..values.len()).map(|row| {
-                    if values.is_null(row) { Value::Null }
-                    else { Value::Text(values.value(row).into()) }
-                }).collect())
+                    if values.is_null(row) { Ok(Value::Null) }
+                    else {
+                        let text = values.value(row);
+                        remaining_text_bytes = remaining_text_bytes.checked_sub(text.len())
+                            .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                        Ok(Value::Text(text.into()))
+                    }
+                }).collect::<Result<Vec<_>>>()?)
             }
             ArrowType::Dictionary(key, value)
                 if matches!(value.as_ref(), ArrowType::Utf8 | ArrowType::LargeUtf8) => {
                 Some(match key.as_ref() {
-                    ArrowType::Int8 => decode_text_dictionary!(array, Int8Type),
-                    ArrowType::Int16 => decode_text_dictionary!(array, Int16Type),
-                    ArrowType::Int32 => decode_text_dictionary!(array, Int32Type),
-                    ArrowType::Int64 => decode_text_dictionary!(array, Int64Type),
-                    ArrowType::UInt8 => decode_text_dictionary!(array, UInt8Type),
-                    ArrowType::UInt16 => decode_text_dictionary!(array, UInt16Type),
-                    ArrowType::UInt32 => decode_text_dictionary!(array, UInt32Type),
-                    ArrowType::UInt64 => decode_text_dictionary!(array, UInt64Type),
+                    ArrowType::Int8 => decode_text_dictionary!(array, Int8Type, &mut remaining_text_bytes),
+                    ArrowType::Int16 => decode_text_dictionary!(array, Int16Type, &mut remaining_text_bytes),
+                    ArrowType::Int32 => decode_text_dictionary!(array, Int32Type, &mut remaining_text_bytes),
+                    ArrowType::Int64 => decode_text_dictionary!(array, Int64Type, &mut remaining_text_bytes),
+                    ArrowType::UInt8 => decode_text_dictionary!(array, UInt8Type, &mut remaining_text_bytes),
+                    ArrowType::UInt16 => decode_text_dictionary!(array, UInt16Type, &mut remaining_text_bytes),
+                    ArrowType::UInt32 => decode_text_dictionary!(array, UInt32Type, &mut remaining_text_bytes),
+                    ArrowType::UInt64 => decode_text_dictionary!(array, UInt64Type, &mut remaining_text_bytes),
                     _ => return Err(Error::Unsupported("unsupported Arrow dictionary key type".into())),
                 })
             }
@@ -606,5 +647,59 @@ mod varied_dictionary_key_widths {
             Value::Text("first".into()),
             Value::Text("last".into()),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod arrow_decoded_text_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn dictionary_expansion_is_bounded_before_allocating_many_copies() {
+        let value = "z".repeat(1_048_576);
+        let source = StringArray::from(vec![value.as_str()]);
+        let keys = Int32Array::from(vec![0; 65]);
+        let dictionary = DictionaryArray::<Int32Type>::try_new(keys, Arc::new(source)).unwrap();
+        let arrow = RecordBatch::try_from_iter(vec![
+            ("label", Arc::new(dictionary) as ArrayRef),
+        ]).unwrap();
+        assert!(from_arrow(&arrow).unwrap_err().to_string().contains("decode budget"));
+    }
+
+    #[test]
+    fn regular_text_columns_share_the_same_decode_budget() {
+        let value = "x".repeat(34 * 1024 * 1024);
+        let values = Arc::new(StringArray::from(vec![value.as_str()])) as ArrayRef;
+        let arrow = RecordBatch::try_from_iter(vec![
+            ("left", values.clone()), ("right", values),
+        ]).unwrap();
+        assert!(from_arrow(&arrow).unwrap_err().to_string().contains("decode budget"));
+    }
+}
+
+#[cfg(test)]
+mod arrow_text_offset_width_regressions {
+    use super::*;
+
+    #[test]
+    fn switches_builder_width_exactly_at_i32_offset_limit() {
+        assert!(!needs_large_utf8(0));
+        assert!(!needs_large_utf8(i32::MAX as usize));
+        assert!(needs_large_utf8(i32::MAX as usize + 1));
+        assert!(needs_large_utf8(usize::MAX));
+    }
+
+    #[test]
+    fn small_nullable_text_preserves_standard_utf8_arrow_layout() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, true),
+        ]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Text("🦀".into())], vec![Value::Null],
+            vec![Value::Text(String::new())],
+        ]).unwrap();
+        let encoded = to_arrow(&source).unwrap();
+        assert_eq!(encoded.schema().field(0).data_type(), &ArrowType::Utf8);
+        assert_eq!(from_arrow(&encoded).unwrap(), source);
     }
 }

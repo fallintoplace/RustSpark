@@ -10,6 +10,7 @@ use super::{cancel::QueryControl, spill::SpillWriter};
 use std::fs::File;
 
 static RUN_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_SORT_RUN_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct RunSet {
@@ -79,6 +80,22 @@ pub fn write_sorted_runs<I>(
 ) -> Result<RunSet>
 where I: IntoIterator<Item = Result<Batch>>
 {
+    write_sorted_runs_with_budget(
+        input, schema, keys, directory, max_rows_per_run, control, MAX_SORT_RUN_BYTES,
+    )
+}
+
+// Keep the byte limit parameterized for small deterministic regression cases.
+fn write_sorted_runs_with_budget<I>(
+    input: I, schema: Schema, keys: &[SortKey],
+    directory: &Path, max_rows_per_run: usize,
+    control: &QueryControl, max_bytes_per_run: usize,
+) -> Result<RunSet>
+where I: IntoIterator<Item = Result<Batch>>
+{
+    if max_bytes_per_run == 0 {
+        return Err(Error::Execution("sort run byte budget must be positive".into()));
+    }
     if !(1..=65_536).contains(&max_rows_per_run) {
         return Err(Error::Execution("sort run size must be in 1..=65536".into()));
     }
@@ -86,6 +103,7 @@ where I: IntoIterator<Item = Result<Batch>>
     let mut runs = RunSet { files: Vec::new(), schema: schema.clone() };
     let mut pending = Vec::new();
     let mut pending_rows = 0usize;
+    let mut pending_bytes = 0usize;
     for incoming in input {
         control.check()?;
         let incoming = incoming?;
@@ -93,32 +111,46 @@ where I: IntoIterator<Item = Result<Batch>>
             return Err(Error::Schema("external sort input schema changed".into()));
         }
         if incoming.num_rows() == 0 { continue; }
-        if incoming.num_rows() <= max_rows_per_run - pending_rows {
-            pending_rows += incoming.num_rows();
-            pending.push(incoming);
-            if pending_rows == max_rows_per_run {
+        // Split owned columns into run windows. Count the actual retained
+        // String capacities, not only row counts, before sorting or merging.
+        // No input TEXT payloads are cloned by these windows.
+        let mut remaining = incoming.num_rows();
+        let mut sources = incoming.into_columns().into_iter()
+            .map(Vec::into_iter).collect::<Vec<_>>();
+        while remaining != 0 {
+            control.check()?;
+            let available_rows = (max_rows_per_run - pending_rows).min(remaining);
+            let mut take = 0usize;
+            let mut bytes = 0usize;
+            while take < available_rows {
+                let row_bytes = super::row_footprint::footprint(
+                    sources.iter().map(|source| &source.as_slice()[take]),
+                );
+                if row_bytes > max_bytes_per_run {
+                    return Err(Error::Execution("sort input row exceeds run byte budget".into()));
+                }
+                if row_bytes > max_bytes_per_run - pending_bytes - bytes { break; }
+                bytes += row_bytes;
+                take += 1;
+            }
+            if take == 0 {
                 flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
                     &schema, keys, directory, max_rows_per_run, control)?;
+                pending_bytes = 0;
+                continue;
             }
-        } else {
-            // A large incoming batch crosses multiple run boundaries.
-            // Move its column values into each window instead of cloning
-            // every heap-backed TEXT cell through borrowed row slices.
-            let mut remaining = incoming.num_rows();
-            let mut sources = incoming.into_columns().into_iter()
-                .map(Vec::into_iter).collect::<Vec<_>>();
-            while remaining != 0 {
-                control.check()?;
-                let take = (max_rows_per_run - pending_rows).min(remaining);
-                let columns: Vec<Vec<crate::scalar::Value>> = sources.iter_mut()
-                    .map(|source| source.by_ref().take(take).collect()).collect();
-                pending.push(Batch::from_validated_columns(schema.clone(), columns, take)?);
-                pending_rows += take;
-                remaining -= take;
-                if pending_rows == max_rows_per_run {
-                    flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
-                        &schema, keys, directory, max_rows_per_run, control)?;
-                }
+            let columns = sources.iter_mut()
+                .map(|source| source.by_ref().take(take).collect()).collect();
+            pending.push(Batch::from_validated_columns(
+                schema.clone(), columns, take,
+            )?);
+            pending_rows += take;
+            pending_bytes += bytes;
+            remaining -= take;
+            if pending_rows == max_rows_per_run || pending_bytes == max_bytes_per_run {
+                flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
+                    &schema, keys, directory, max_rows_per_run, control)?;
+                pending_bytes = 0;
             }
         }
     }
@@ -386,5 +418,146 @@ mod bounded_sorted_spill_run_regressions {
         assert_eq!(rows, expected);
         drop(runs);
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod size_bounded_sorted_runs_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}, scale::spill::SpillReader};
+    use std::{fs, fs::File, io::BufReader};
+
+    #[test]
+    fn byte_windows_limit_run_size_without_reordering_text_rows() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-sort-byte-window-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, false)]).unwrap();
+        let original = (0..30).rev()
+            .map(|index| format!("{index:03}-{}", "é".repeat(120)))
+            .collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema.clone(), original.iter().cloned()
+            .map(|text| vec![Value::Text(text)]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("label".into()))];
+        let runs = write_sorted_runs_with_budget(
+            [Ok(batch)], schema.clone(), &keys, &directory, 30,
+            &QueryControl::default(), 1024,
+        ).unwrap();
+        assert!(runs.files().len() >= 10, "byte budget must split the run");
+        let mut actual = Vec::new();
+        for path in runs.files() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 30).unwrap();
+            let mut rows = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                rows.extend(batch.rows().unwrap());
+            }
+            assert!(rows.len() <= 3);
+            assert!(rows.windows(2).all(|window| window[0][0]
+                .sql_compare(&window[1][0]).unwrap().unwrap().is_le()));
+            actual.extend(rows.into_iter().map(|row| row[0].clone()));
+        }
+        actual.sort_by(|a, b| a.sql_compare(b).unwrap().unwrap());
+        let mut expected = original.into_iter().map(Value::Text).collect::<Vec<_>>();
+        expected.sort_by(|a, b| a.sql_compare(b).unwrap().unwrap());
+        assert_eq!(actual, expected);
+        drop(runs);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn oversized_input_row_does_not_leave_a_partial_spill() {
+        let directory = std::env::temp_dir().join(format!(
+            "native-sort-byte-reject-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("small".into())],
+            vec![Value::Text("too-large".repeat(100))],
+        ]).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("label".into()))];
+        assert!(write_sorted_runs_with_budget(
+            [Ok(batch)], schema, &keys, &directory, 100, &QueryControl::default(), 128,
+        ).is_err());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+        fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod byte_bounded_sorted_run_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use crate::scale::spill::SpillReader;
+    use std::{fs, fs::File, io::BufReader};
+
+    fn test_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn retained_bytes_split_sorted_runs_before_row_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-byte-sort-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = test_schema();
+        let input = Batch::from_rows(schema.clone(), (0..10).rev()
+            .map(|n| vec![Value::Integer(n), Value::Text("x".repeat(128))])
+            .collect()).unwrap();
+        let per_row = 64 + 2 * std::mem::size_of::<Value>() + 128;
+        let runs = write_sorted_runs_with_budget(
+            [Ok(input)], schema.clone(),
+            &[SortKey::ascending(Expr::Column("id".into()))],
+            &dir, 20, &QueryControl::default(), per_row * 3,
+        ).unwrap();
+        assert_eq!(runs.files().len(), 4);
+        let mut ids = Vec::new();
+        for path in runs.files() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 20).unwrap();
+            let mut local = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                assert!(batch.num_rows() <= 3);
+                for row in batch.rows().unwrap() {
+                    local.push(row[0].clone());
+                }
+            }
+            assert!(local.windows(2).all(|pair|
+                pair[0].sql_compare(&pair[1]).unwrap().unwrap().is_le()));
+            ids.extend(local);
+        }
+        ids.sort_by(|a,b| a.sql_compare(b).unwrap().unwrap());
+        assert_eq!(ids, (0..10).map(Value::Integer).collect::<Vec<_>>());
+        drop(runs);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_retained_text_capacity_is_rejected_before_spilling() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-byte-sort-reject-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let mut text = String::with_capacity(4096);
+        text.push('x');
+        let schema = test_schema();
+        let input = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(1), Value::Text(text)]]).unwrap();
+        let error = write_sorted_runs_with_budget(
+            [Ok(input)], schema, &[SortKey::ascending(Expr::Column("id".into()))],
+            &dir, 10, &QueryControl::default(), 256,
+        ).err().expect("row exceeds budget");
+        assert!(error.to_string().contains("retained byte budget"));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
     }
 }

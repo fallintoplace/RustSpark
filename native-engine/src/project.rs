@@ -3,8 +3,23 @@ use crate::{
     expr::Expr,
     scalar::Value,
     schema::{Field, Schema},
-    Result,
+    Error, Result,
 };
+
+const MAX_MATERIALIZED_PROJECT_BYTES: usize = 64 * 1024 * 1024;
+
+fn charge_projected_value(used: &mut usize, value: &Value, copies: usize) -> Result<()> {
+    let payload = if let Value::Text(text) = value { text.len() } else { 0 };
+    let per_value = std::mem::size_of::<Value>().checked_add(payload)
+        .ok_or_else(|| Error::Execution("projection size overflow".into()))?;
+    let total = per_value.checked_mul(copies)
+        .ok_or_else(|| Error::Execution("projection size overflow".into()))?;
+    *used = used.checked_add(total)
+        .filter(|&bytes| bytes <= MAX_MATERIALIZED_PROJECT_BYTES)
+        .ok_or_else(|| Error::Execution("projection materialization budget exceeded".into()))?;
+    Ok(())
+}
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Selection {
@@ -53,6 +68,10 @@ fn bound_null_test<'a>(
 fn bound_distinct_comparison<'a>(
     batch: &'a Batch, expression: &'a Expr,
 ) -> Result<Option<(&'a [Value], &'a Value, bool)>> {
+    let (expression, inverse) = match expression {
+        Expr::Not(inner) => (inner.as_ref(), true),
+        _ => (expression, false),
+    };
     let Expr::IsDistinctFrom { left, right, negated } = expression else {
         return Ok(None);
     };
@@ -62,7 +81,7 @@ fn bound_distinct_comparison<'a>(
         _ => return Ok(None),
     };
     let index = batch.schema().column(name)?;
-    Ok(Some((batch.column(index)?, literal, *negated)))
+    Ok(Some((batch.column(index)?, literal, *negated ^ inverse)))
 }
 
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
@@ -82,18 +101,25 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
         .iter()
         .map(|_| Vec::with_capacity(batch.num_rows()))
         .collect();
+    let mut generated_bytes = 0usize;
     for (column, selection) in columns.iter_mut().zip(selections) {
         if let Expr::Column(name) = &selection.expression {
             let index = batch.schema().column(name)?;
+            for value in batch.column(index)? {
+                charge_projected_value(&mut generated_bytes, value, 1)?;
+            }
             column.extend_from_slice(batch.column(index)?);
         } else if let Expr::Literal(value) = &selection.expression {
+            charge_projected_value(&mut generated_bytes, value, batch.num_rows())?;
             column.resize(batch.num_rows(), value.clone());
         } else if let Some((values, is_null)) =
             bound_null_test(batch, &selection.expression)? {
+            charge_projected_value(&mut generated_bytes, &Value::Boolean(false), batch.num_rows())?;
             column.extend(values.iter().map(|value|
                 Value::Boolean(value.is_null() == is_null)));
         } else if let Some((values, literal, negated)) =
             bound_distinct_comparison(batch, &selection.expression)? {
+            charge_projected_value(&mut generated_bytes, &Value::Boolean(false), values.len())?;
             for value in values {
                 let distinct = match (value.is_null(), literal.is_null()) {
                     (true, true) => false,
@@ -106,7 +132,9 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
             }
         } else {
             for row in 0..batch.num_rows() {
-                column.push(selection.expression.evaluate(batch, row)?);
+                let value = selection.expression.evaluate(batch, row)?;
+                charge_projected_value(&mut generated_bytes, &value, 1)?;
+                column.push(value);
             }
         }
     }
@@ -129,6 +157,7 @@ pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
         ))
     }).collect::<Result<Vec<_>>>()?)?;
     let rows = batch.num_rows();
+    let mut generated_bytes = 0usize;
     let mut sources = Vec::with_capacity(selections.len());
     let mut prepared = Vec::with_capacity(selections.len());
     let mut remaining = vec![0usize; batch.schema().len()];
@@ -142,16 +171,19 @@ pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
             }
             Expr::Literal(value) => {
                 sources.push(None);
+                charge_projected_value(&mut generated_bytes, value, rows)?;
                 prepared.push(Some(vec![value.clone(); rows]));
             }
             expression => {
                 sources.push(None);
                 let values = if let Some((column, is_null)) =
                     bound_null_test(&batch, expression)? {
+                    charge_projected_value(&mut generated_bytes, &Value::Boolean(false), rows)?;
                     column.iter().map(|value|
                         Value::Boolean(value.is_null() == is_null)).collect()
                 } else if let Some((column, literal, negated)) =
                     bound_distinct_comparison(&batch, expression)? {
+                    charge_projected_value(&mut generated_bytes, &Value::Boolean(false), rows)?;
                     column.iter().map(|value| {
                         let distinct = match (value.is_null(), literal.is_null()) {
                             (true, true) => false,
@@ -165,7 +197,9 @@ pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
                 } else {
                     let mut values = Vec::with_capacity(rows);
                     for row in 0..rows {
-                        values.push(expression.evaluate(&batch, row)?);
+                        let value = expression.evaluate(&batch, row)?;
+                        charge_projected_value(&mut generated_bytes, &value, 1)?;
+                        values.push(value);
                     }
                     values
                 };
@@ -629,5 +663,88 @@ mod projected_catalog_window_tests {
             Selection::new(Expr::Column("id".into()), "x"),
             Selection::new(Expr::Column("text".into()), "X"),
         ], 0, Some(1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod negated_nullsafe_projection_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn negated_nullsafe_projection_matches_scalar_nullable_float_oracle() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Float, true)]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Float(-0.0)],
+            vec![Value::Float(0.0)], vec![Value::Float(f64::NAN)],
+            vec![Value::Float(5.0)],
+        ]).unwrap();
+        for literal in [Value::Null, Value::Float(0.0), Value::Float(f64::NAN)] {
+            for negated in [false, true] {
+                let expression = Expr::Not(Box::new(Expr::IsDistinctFrom {
+                    left: Box::new(Expr::Column("value".into())),
+                    right: Box::new(Expr::Literal(literal.clone())),
+                    negated,
+                }));
+                let selections = [Selection::new(expression.clone(), "matched")];
+                let expected = (0..source.num_rows())
+                    .map(|row| expression.evaluate(&source, row).unwrap())
+                    .collect::<Vec<_>>();
+                for actual in [
+                    project(&source, &selections).unwrap(),
+                    project_owned(source.clone(), &selections).unwrap(),
+                ] {
+                    assert_eq!(actual.column(0).unwrap(), expected.as_slice());
+                    assert!(!actual.schema().field(0).unwrap().nullable);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negated_unicode_text_projection_matches_scalar_oracle() {
+        let long = "é🐈".repeat(2048);
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, true)]).unwrap();
+        let source = Batch::from_rows(schema, vec![
+            vec![Value::Text(long.clone())], vec![Value::Null],
+            vec![Value::Text("no".into())], vec![Value::Text(long.clone())],
+        ]).unwrap();
+        let expression = Expr::Not(Box::new(Expr::IsDistinctFrom {
+            left: Box::new(Expr::Column("text".into())),
+            right: Box::new(Expr::Literal(Value::Text(long))),
+            negated: false,
+        }));
+        let selections = [Selection::new(expression.clone(), "match")];
+        let expected = (0..source.num_rows())
+            .map(|row| expression.evaluate(&source, row).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(project(&source, &selections).unwrap().column(0).unwrap(), expected);
+        assert_eq!(project_owned(source, &selections).unwrap().column(0).unwrap(), expected);
+    }
+}
+
+#[cfg(test)]
+mod projection_computed_memory_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn literal_text_expansion_is_rejected_before_allocating_large_output() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = Batch::from_rows(schema, (0..65).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let selections = [Selection::new(Expr::Literal(Value::Text("p".repeat(1_048_576))), "payload")];
+        let borrowed = project(&input, &selections).unwrap_err().to_string();
+        assert!(borrowed.contains("projection materialization budget"));
+        let owned = project_owned(input, &selections).unwrap_err().to_string();
+        assert!(owned.contains("projection materialization budget"));
+    }
+
+    #[test]
+    fn small_computed_and_borrowed_columns_match_existing_results() {
+        let schema = Schema::new(vec![Field::new("name", DataType::Text, false)]).unwrap();
+        let input = Batch::from_rows(schema, vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())]]).unwrap();
+        let selections = [Selection::new(Expr::Column("name".into()), "original"),
+            Selection::new(Expr::Literal(Value::Text("same".into())), "fixed")];
+        assert_eq!(project(&input, &selections).unwrap(), project_owned(input, &selections).unwrap());
     }
 }
