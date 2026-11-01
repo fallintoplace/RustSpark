@@ -319,21 +319,41 @@ impl PartitionWriter {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<PartitionFiles> {
+    /// Materialize every shard, including schema-only headers for untouched
+    /// partitions. Required by hash joins that pair build/probe shard indices.
+    pub fn finish(self) -> Result<PartitionFiles> {
+        self.finish_with_empty_files(true)
+    }
+
+    /// Materialize only shards receiving rows. Standalone DISTINCT and GROUP BY
+    /// consumers do not need placeholders for untouched hash buckets.
+    pub(crate) fn finish_sparse(self) -> Result<PartitionFiles> {
+        self.finish_with_empty_files(false)
+    }
+
+    fn finish_with_empty_files(mut self, include_empty: bool) -> Result<PartitionFiles> {
         // Keep path ownership until every file is finalized. If a flush or
         // create_new fails, dropping self removes the incomplete spill files.
         let owned = self.owned.as_ref().expect("active partition writer");
         for (index, writer) in self.writers.take().unwrap_or_default().into_iter().enumerate() {
             if let Some(writer) = writer {
                 writer.finish()?;
-            } else if !self.initialized[index] {
-                // Readers expect one schema-checked file per partition,
-                // including untouched partitions. Already closed shards exist.
+            } else if include_empty && !self.initialized[index] {
+                // Paired join partitions require an on-disk placeholder;
+                // independent hash aggregates can omit empty shards.
                 let file = super::private_files::create_private(&owned.paths[index])?;
                 SpillWriter::new(BufWriter::new(file), owned.schema.clone())?.finish()?;
             }
         }
-        Ok(self.owned.take().expect("active partition writer"))
+        let mut owned = self.owned.take().expect("active partition writer");
+        if !include_empty {
+            // Keep only paths that were actually opened. The same ownership
+            // guard cleans them all on drop, including after reader failures.
+            owned.paths = owned.paths.into_iter().enumerate()
+                .filter_map(|(index, path)| self.initialized[index].then_some(path))
+                .collect();
+        }
+        Ok(owned)
     }
 }
 
@@ -866,5 +886,73 @@ mod consecutive_shuffle_key_run_regressions {
             drop(files);
         }
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sparse_partition_finalization_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CASE_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn directory() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-sparse-exchange-{}-{}",
+            std::process::id(), CASE_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn sparse_finalization_only_keeps_populated_shards_and_cleans_them() {
+        let directory = directory();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..100).map(|n| vec![
+            Value::Integer(7), if n % 2 == 0 {
+                Value::Text("🦀".repeat(48))
+            } else { Value::Null },
+        ]).collect()).unwrap();
+        let mut writer = PartitionWriter::new(&directory, schema.clone(), &["key"],
+            1024, 17).unwrap();
+        writer.write_batch(&batch, &QueryControl::default()).unwrap();
+        let files = writer.finish_sparse().unwrap();
+        assert_eq!(files.paths().len(), 1);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        let reader = SpillReader::new(
+            BufReader::new(File::open(&files.paths()[0]).unwrap()), 17,
+        ).unwrap();
+        let decoded = std::iter::successors(Some(reader), |_| None);
+        drop(decoded);
+        drop(files);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn dense_finalization_still_creates_empty_join_shards() {
+        let directory = directory();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+        ]).unwrap();
+        let writer = PartitionWriter::new(&directory, schema.clone(), &["key"],
+            16, 8).unwrap();
+        let files = writer.finish().unwrap();
+        assert_eq!(files.paths().len(), 16);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 16);
+        for file in files.paths() {
+            let mut reader = SpillReader::new(
+                BufReader::new(File::open(file).unwrap()), 8,
+            ).unwrap();
+            assert_eq!(reader.schema(), &schema);
+            assert!(reader.next_batch().unwrap().is_none());
+        }
+        drop(files);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(&directory).unwrap();
     }
 }

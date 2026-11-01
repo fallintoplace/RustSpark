@@ -54,7 +54,9 @@ where I: IntoIterator<Item = Result<Batch>>
         control.check()?;
         writer.write_batch(&incoming?, control)?;
     }
-    let input_files = writer.finish()?;
+    // A partition with no rows cannot contribute a DISTINCT key. Do not
+    // create and reopen thousands of schema-only shard files.
+    let input_files = writer.finish_sparse()?;
     let mut result = DistinctFiles { paths: Vec::new(), schema: schema.clone() };
     for shard in input_files.paths() {
         control.check()?;
