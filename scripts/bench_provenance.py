@@ -125,6 +125,14 @@ def enrich(report, binary, repository="."):
     return copy
 
 
+def write_new_report(path: Path, report: dict) -> None:
+    """Create a report only if its destination does not already exist."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation rejects existing files and dangling symlinks alike.
+    with path.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(report, indent=2) + "\n")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
@@ -135,11 +143,8 @@ def main(argv=None):
     try:
         if args.report.resolve() == args.output.resolve():
             raise ValueError("Output must differ from source report")
-        if args.output.exists():
-            raise ValueError("Output already exists")
         report = enrich(load_report(args.report), args.binary, args.repo)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        write_new_report(args.output, report)
     except (OSError, ValueError) as error:
         parser.exit(1, f"provenance failed: {error}\n")
     return 0
