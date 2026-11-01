@@ -157,6 +157,7 @@ fn parse_records_with_limits(
     Ok(records)
 }
 
+#[cfg(test)]
 fn kind(values: &[Vec<String>], column: usize) -> DataType {
     let mut nonempty = false;
     let mut boolean = true;
@@ -189,6 +190,59 @@ fn kind(values: &[Vec<String>], column: usize) -> DataType {
     else { DataType::Text }
 }
 
+
+#[derive(Clone, Copy)]
+struct InferredKind {
+    nonempty: bool,
+    boolean: bool,
+    integer: bool,
+    float: bool,
+}
+
+impl InferredKind {
+    fn new() -> Self {
+        Self { nonempty: false, boolean: true, integer: true, float: true }
+    }
+
+    fn observe(&mut self, value: &str) {
+        if value.is_empty() { return; }
+        self.nonempty = true;
+        if self.boolean {
+            self.boolean = value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("false");
+        }
+        if self.integer {
+            if value.parse::<i64>().is_err() {
+                self.integer = false;
+                if self.float { self.float = value.parse::<f64>().is_ok_and(f64::is_finite); }
+            }
+        } else if self.float {
+            self.float = value.parse::<f64>().is_ok_and(f64::is_finite);
+        }
+    }
+
+    fn data_type(self) -> DataType {
+        if !self.nonempty { DataType::Text }
+        else if self.boolean { DataType::Boolean }
+        else if self.integer { DataType::Integer }
+        else if self.float { DataType::Float }
+        else { DataType::Text }
+    }
+}
+
+// Walk CSV records in storage order, updating all column inference states
+// together. Column-major inference repeatedly traversed each row's Vec and
+// String headers for every column in a wide CSV.
+fn infer_kinds(records: &[Vec<String>], columns: usize) -> Vec<DataType> {
+    let mut states = vec![InferredKind::new(); columns];
+    for row in records {
+        for (state, value) in states.iter_mut().zip(row) {
+            state.observe(value);
+        }
+    }
+    states.into_iter().map(InferredKind::data_type).collect()
+}
+
 pub fn from_csv_str(input: &str) -> Result<Batch> {
     // Count the CSV header separately from the table's data-row admission budget.
     let mut records = parse_records_with_limit(
@@ -209,11 +263,10 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
             return Err(Error::Parse("CSV row width differs from header".into()));
         }
     }
+    let inferred = infer_kinds(&records[1..], header.len());
     let schema = Schema::new(
-        header
-            .iter()
-            .enumerate()
-            .map(|(column, name)| Field::new(name, kind(&records[1..], column), true))
+        header.iter().zip(inferred)
+            .map(|(name, data_type)| Field::new(name, data_type, true))
             .collect(),
     )?;
     let row_count = records.len() - 1;
@@ -608,5 +661,38 @@ mod eager_csv_validated_columns_perf_tests {
             vec![Value::Integer(-2), Value::Boolean(true), Value::Text("hello, 世界".into())],
         ]);
         assert!(from_csv_str("n,flag\n1\n").is_err());
+    }
+}
+
+#[cfg(test)]
+mod row_major_inference_regressions {
+    use super::*;
+
+    #[test]
+    fn row_major_inference_matches_independent_column_reference() {
+        let mut rows = Vec::new();
+        for index in 0..512_usize {
+            let row = (0..96_usize).map(|column| {
+                match column % 8 {
+                    0 => String::new(),
+                    1 => if index % 2 == 0 { "true" } else { "FALSE" }.to_owned(),
+                    2 => (index as i64 - 240).to_string(),
+                    3 => if index == 500 { "3.1415".into() } else { index.to_string() },
+                    4 => if index == 500 { "NaN".into() } else { index.to_string() },
+                    5 => format!("é-{}", index % 3),
+                    6 => if index == 511 { "1e9999".into() } else { index.to_string() },
+                    _ => if index % 7 == 0 { String::new() } else { "-3".into() },
+                }
+            }).collect::<Vec<_>>();
+            rows.push(row);
+        }
+        let expected = (0..96).map(|column| kind(&rows, column)).collect::<Vec<_>>();
+        assert_eq!(infer_kinds(&rows, 96), expected);
+        assert_eq!(infer_kinds(&[], 4), vec![DataType::Text; 4]);
+        let text = format!("{}\n{}\n", (0..96).map(|i| format!("c{i}")).collect::<Vec<_>>().join(","),
+            rows.iter().take(5).map(|row| row.join(",")).collect::<Vec<_>>().join("\n"));
+        let parsed = from_csv_str(&text).unwrap();
+        assert_eq!(parsed.num_rows(), 5);
+        assert_eq!(parsed.schema().len(), 96);
     }
 }
