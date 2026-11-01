@@ -25,6 +25,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(i64::from(text.starts_with(prefix))));
         }
     }
+    if pattern == "[0-9]" || pattern == "[0-9]+" {
+        // These exact classes match ASCII bytes, not Unicode-wide \\d.
+        // A single scan can count all digits or maximal digit runs.
+        let runs = pattern == "[0-9]+";
+        let mut count = 0usize;
+        let mut previous_digit = false;
+        for byte in text.bytes() {
+            let digit = byte.is_ascii_digit();
+            if digit && (!runs || !previous_digit) { count += 1; }
+            previous_digit = digit;
+        }
+        return i64::try_from(count).map(Value::Integer)
+            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+    }
     if pattern == ".+" {
         // Greedy dot-plus matches each maximal nonempty run excluding LF.
         // Counting those runs avoids compiling or traversing regex matches.
@@ -184,5 +198,27 @@ mod dot_plus_regexp_count_differential_tests {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text(".+".into()),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod regex_digit_class_count_regressions {
+    use super::*;
+
+    #[test]
+    fn digit_class_fast_path_matches_regex_on_utf8_and_newlines() {
+        let long_run = format!("{}-{}-{}", "0".repeat(25_000),
+            "a".repeat(1_000), "12345".repeat(8_000));
+        let samples = ["", "123", "a12b345", "é12🙂34", "١٢٣",
+            "line1\n22\nend333", "123-456-000", long_run.as_str()];
+        for input in samples {
+            for pattern in ["[0-9]", "[0-9]+"] {
+                let regex = regex_support::compile(pattern).unwrap();
+                let expected = regex.find_iter(input).count() as i64;
+                assert_eq!(evaluate(&[
+                    Value::Text(input.to_owned()), Value::Text(pattern.to_owned()),
+                ]).unwrap(), Value::Integer(expected), "{input:?}, {pattern}");
+            }
+        }
     }
 }
