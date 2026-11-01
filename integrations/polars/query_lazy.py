@@ -7,6 +7,7 @@ import re
 import subprocess
 import signal
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Mapping
@@ -76,25 +77,54 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     return command
 
 
-def _export_arrow(command: list[str], error_log, process_timeout: float | None) -> int:
-    """Stop exporter descendants when the subprocess fails or is interrupted."""
+def _export_arrow(command: list[str], error_log, process_timeout: float | None,
+                  output: Path, max_arrow_bytes: int) -> int:
+    """Stop an exporter before a temporary Arrow IPC file fills the disk."""
     process = subprocess.Popen(
         command, stdout=subprocess.DEVNULL, stderr=error_log,
         start_new_session=(os.name == "posix"),
     )
+    stop_monitor = threading.Event()
+    oversized = threading.Event()
+    monitor = None
+
+    def kill_group():
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        elif process.poll() is None:
+            process.kill()
+
+    def watch_size():
+        while not stop_monitor.wait(0.02):
+            try:
+                size = output.stat().st_size
+            except FileNotFoundError:
+                continue
+            if size > max_arrow_bytes:
+                oversized.set()
+                kill_group()
+                return
+
     try:
-        return process.wait(timeout=process_timeout)
+        monitor = threading.Thread(target=watch_size, daemon=True)
+        monitor.start()
+        status = process.wait(timeout=process_timeout)
+        if oversized.is_set() or (output.exists() and output.stat().st_size > max_arrow_bytes):
+            raise RuntimeError("RustSpark Arrow export exceeds max_arrow_bytes")
+        return status
     except BaseException:
         if process.poll() is None:
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            else:
-                process.kill()
+            kill_group()
             process.wait()
         raise
+    finally:
+        stop_monitor.set()
+        if monitor is not None and monitor.is_alive():
+            monitor.join(timeout=1)
+
 
 
 @contextmanager
@@ -109,7 +139,8 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
                          parquet_tables: Mapping[str, str | Path] | None = None,
                          json_tables: Mapping[str, str | Path] | None = None,
                          temp_dir: str | None = None,
-                         process_timeout: float | None = None) -> Iterator[object]:
+                         process_timeout: float | None = None,
+                         max_arrow_bytes: int = 512 * 1024 * 1024) -> Iterator[object]:
     """Export Arrow once and provide a lazy Polars scan while the file exists.
 
     The frame must be collected or processed inside the context manager.
@@ -119,6 +150,8 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
         not math.isfinite(process_timeout) or process_timeout <= 0
     ):
         raise ValueError("process_timeout must be finite and positive")
+    if type(max_arrow_bytes) is not int or max_arrow_bytes <= 0:
+        raise ValueError("max_arrow_bytes must be a positive integer")
     import polars as pl  # Optional dependency.
 
     with tempfile.TemporaryDirectory(dir=temp_dir, prefix="rustspark-polars-") as directory:
@@ -134,7 +167,7 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
         # the Python heap and surface only a bounded tail on failure.
         with tempfile.TemporaryFile() as error_log:
             try:
-                status = _export_arrow(command, error_log, process_timeout)
+                status = _export_arrow(command, error_log, process_timeout, result, max_arrow_bytes)
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
             except OSError as error:
