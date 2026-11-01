@@ -1,6 +1,7 @@
 """Bounded process I/O for the local RustSpark client."""
 from __future__ import annotations
 
+import math
 import os
 import signal
 import subprocess
@@ -29,8 +30,13 @@ def run_bounded(
     max_error_bytes: int = MAX_STDERR_BYTES,
 ) -> subprocess.CompletedProcess[str]:
     """Stream both output pipes with caps, including on queries that fail."""
-    if max_output_bytes <= 0 or max_error_bytes <= 0:
+    if (type(max_output_bytes) is not int or max_output_bytes <= 0
+            or type(max_error_bytes) is not int or max_error_bytes <= 0):
         raise ValueError("invalid process output limit")
+    if timeout is not None and (
+        type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
+    ):
+        raise ValueError("invalid process timeout")
     stdout = bytearray()
     stderr = bytearray()
     exceeded = threading.Event()
