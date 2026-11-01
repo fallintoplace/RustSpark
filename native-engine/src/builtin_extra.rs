@@ -156,6 +156,28 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
     }
 }
 
+
+/// Calculate REPLACE output bytes before a potentially large allocation.
+fn replace_bounded(text: &str, pattern: &str, replacement: &str) -> Result<String> {
+    const MAX_OUTPUT: usize = 16 * 1024 * 1024;
+    let matches = if pattern.is_empty() {
+        text.chars().count().saturating_add(1)
+    } else {
+        text.match_indices(pattern).count()
+    };
+    let removed = pattern.len().checked_mul(matches)
+        .ok_or_else(|| Error::Execution("REPLACE output length overflow".into()))?;
+    let added = replacement.len().checked_mul(matches)
+        .ok_or_else(|| Error::Execution("REPLACE output length overflow".into()))?;
+    let result_len = text.len().checked_sub(removed)
+        .and_then(|length| length.checked_add(added))
+        .ok_or_else(|| Error::Execution("REPLACE output length overflow".into()))?;
+    if result_len > MAX_OUTPUT {
+        return Err(Error::Execution("REPLACE result exceeds native 16 MiB budget".into()));
+    }
+    Ok(text.replace(pattern, replacement))
+}
+
 pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => Ok(args.iter().find(|value| !value.is_null()).cloned().unwrap_or(Value::Null)),
@@ -232,9 +254,9 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         },
         "REPLACE" => match args {
             [Value::Text(text), Value::Text(pattern)] =>
-                Ok(Value::Text(text.replace(pattern.as_str(), ""))),
+                Ok(Value::Text(replace_bounded(text, pattern, "")?)),
             [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] =>
-                Ok(Value::Text(text.replace(pattern.as_str(), replacement))),
+                Ok(Value::Text(replace_bounded(text, pattern, replacement)?)),
             [a, b] if a.is_null() || b.is_null() => Ok(Value::Null),
             [a, b, c] if a.is_null() || b.is_null() || c.is_null() => Ok(Value::Null),
             _ => Err(Error::Type("REPLACE requires two or three text arguments".into())),
@@ -432,6 +454,23 @@ mod borrowed_extrema_tests {
         assert_eq!(evaluate("GREATEST", &args).unwrap(), Value::Text("zz".into()));
         assert_eq!(evaluate("LEAST", &args).unwrap(), Value::Text("a".into()));
         assert_eq!(evaluate("GREATEST", &[Value::Null, Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_replace_output_regressions {
+    use super::*;
+    #[test]
+    fn replacement_expansion_is_checked_before_allocation() {
+        assert_eq!(replace_bounded("aéa", "a", "🙂").unwrap(), "🙂é🙂");
+        assert_eq!(replace_bounded("é🙂", "", "X").unwrap(), "XéX🙂X");
+        assert_eq!(replace_bounded("banana", "na", "").unwrap(), "ba");
+        assert_eq!(replace_bounded("abc", "z", "x").unwrap(), "abc");
+        assert!(replace_bounded("a".repeat(1_000_000).as_str(), "a", &"b".repeat(32)).is_err());
+        assert!(replace_bounded("x", "", &"b".repeat(9 * 1024 * 1024)).is_err());
+        assert_eq!(evaluate("REPLACE", &[
+            Value::Text("xy".into()), Value::Text("".into()), Value::Text("-".into()),
+        ]).unwrap(), Value::Text("-x-y-".into()));
     }
 }
 

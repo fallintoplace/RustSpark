@@ -24,6 +24,19 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     {
         return Ok(Value::Text(text.find(pattern).map_or("", |_| pattern).to_owned()));
     }
+    // Group zero can use the anchored prefix directly. Group validation
+    // and capture expansion still use the regular expression engine.
+    if group == 0 {
+        if let Some(prefix) = pattern.strip_prefix('^') {
+            if prefix.len() <= 4095 &&
+                prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            {
+                return Ok(Value::Text(
+                    if text.starts_with(prefix) { prefix } else { "" }.to_owned()
+                ));
+            }
+        }
+    }
     let re = regex_support::compile(pattern)?;
     if group >= re.captures_len() {
         return Err(Error::Execution("REGEXP_EXTRACT group index exceeds regex capture count".into()));
@@ -149,5 +162,32 @@ mod unicode_literal_extract_regressions {
         assert_eq!(evaluate(&[
             Value::Text("xééy".into()), Value::Text("é".into()), Value::Integer(0),
         ]).unwrap(), Value::Text("é".into()));
+    }
+}
+
+
+#[cfg(test)]
+mod anchored_literal_group_zero_regressions {
+    use super::*;
+
+    #[test]
+    fn anchored_unicode_extract_matches_regex_reference() {
+        for text in ["", "é🙂", "東京foo", "foo東京", "\n東京", "αβγ", "hello\nworld"] {
+            for pattern in ["^", "^é", "^東京", "^αβ", "^foo", "^hello", "^é+", "(?m)^東京"] {
+                let expected = regex_support::compile(pattern).unwrap()
+                    .find(text).map_or("", |matched| matched.as_str()).to_owned();
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                    Value::Integer(0),
+                ]).unwrap(), Value::Text(expected),
+                    "text={text:?}, pattern={pattern:?}");
+            }
+        }
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text("^é".into()), Value::Integer(0),
+        ]).unwrap(), Value::Null);
+        assert!(evaluate(&[
+            Value::Text("foo".into()), Value::Text("^foo".into()),
+        ]).is_err());
     }
 }

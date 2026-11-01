@@ -144,3 +144,23 @@ test("invalid unsafe integer policy is rejected before spawning", () => {
   assert.deepEqual(client.query("SELECT 1", { unsafeIntegers: "bigint" }), []);
   assert.equal(calls, 1);
 });
+
+
+test("query rejects invalid UTF-8 from native process stdout", () => {
+  const broken = Buffer.concat([
+    Buffer.from('[{"value":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}]'),
+  ]);
+  const client = new RustSpark({ runner: (_binary, _args, options) => {
+    assert.equal(options.encoding, null);
+    return { status: 0, stdout: broken, stderr: Buffer.alloc(0) };
+  } });
+  assert.throws(() => client.query("SELECT value FROM t"), RustSparkError);
+  const valid = new RustSpark({ runner: () => ({
+    status: 0, stdout: Buffer.from('[{"value":"é"}]'), stderr: Buffer.alloc(0),
+  }) });
+  assert.deepEqual(valid.query("SELECT value FROM t"), [{ value: "é" }]);
+  const failed = new RustSpark({ runner: () => ({
+    status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("query failed"),
+  }) });
+  assert.throws(() => failed.query("SELECT 1"), /query failed/);
+});
