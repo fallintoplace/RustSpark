@@ -582,7 +582,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -595,7 +595,7 @@ impl Parser {
             let _ = self.next();
             self.expect_symbol('(')?;
             let distinct = self.take_word("DISTINCT");
-            if distinct && !["COUNT", "SUM", "AVG"].contains(&function.as_str()) {
+            if distinct && !["COUNT", "SUM", "AVG", "MEAN"].contains(&function.as_str()) {
                 return Err(Error::Unsupported("DISTINCT supports COUNT, SUM and AVG".into()));
             }
             let op = if function == "COUNT" && !distinct && self.take_symbol('*') {
@@ -608,8 +608,8 @@ impl Parser {
                     "COUNT_IF" => count_if_aggregate(expr),
                     "SUM" if distinct => AggregateOp::SumDistinct(expr),
                     "SUM" => AggregateOp::Sum(expr),
-                    "AVG" if distinct => AggregateOp::AvgDistinct(expr),
-                    "AVG" => AggregateOp::Avg(expr),
+                    "AVG" | "MEAN" if distinct => AggregateOp::AvgDistinct(expr),
+                    "AVG" | "MEAN" => AggregateOp::Avg(expr),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
                     _ => unreachable!(),
@@ -1188,7 +1188,7 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "COUNT_IF", "SUM", "AVG", "MIN", "MAX", "__spark_count_star"]
+            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "__spark_count_star"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
@@ -1202,7 +1202,7 @@ fn rewrite_having(
                     "COUNT" => AggregateOp::Count(argument),
                     "COUNT_IF" => count_if_aggregate(argument),
                     "SUM" => AggregateOp::Sum(argument),
-                    "AVG" => AggregateOp::Avg(argument),
+                    "AVG" | "MEAN" => AggregateOp::Avg(argument),
                     "MIN" => AggregateOp::Min(argument),
                     "MAX" => AggregateOp::Max(argument),
                     _ => unreachable!(),
