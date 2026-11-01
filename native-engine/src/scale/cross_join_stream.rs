@@ -58,24 +58,25 @@ impl CrossJoinStream {
             if batch.schema() != &right_schema {
                 return Err(Error::Schema("stream cross join right schema changed".into()));
             }
-            let source_columns = (0..right_schema.len())
-                .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
-            for row in 0..batch.num_rows() {
+            // Consume each owned column once. Borrow the next cell to
+            // enforce the retained-byte budget before moving its payload.
+            let rows = batch.num_rows();
+            let mut columns = batch.into_columns().into_iter()
+                .map(Vec::into_iter).collect::<Vec<_>>();
+            for row in 0..rows {
                 if row % 1024 == 0 { control.check()?; }
                 if right_rows.len() >= MAX_BUILD_ROWS {
                     return Err(Error::Execution("stream cross join build row budget exceeded".into()));
                 }
-                // Do not clone a potentially enormous right row if even its
-                // minimum retained size exceeds the build memory budget.
-                let minimum = cloned_row_lower_bound(&source_columns, row);
-                if size.checked_add(minimum).is_none_or(|next| next > MAX_BUILD_BYTES) {
-                    return Err(Error::Execution("stream cross join build byte budget exceeded".into()));
-                }
-                let values = batch.row(row)?;
-                let footprint = super::row_footprint::footprint(values.iter());
+                let footprint = super::row_footprint::footprint(
+                    columns.iter().map(|column| column.as_slice().first()
+                        .expect("one cell per remaining column row"))
+                );
                 size = size.checked_add(footprint)
                     .filter(|size| *size <= MAX_BUILD_BYTES)
                     .ok_or_else(|| Error::Execution("stream cross join build byte budget exceeded".into()))?;
+                let values = columns.iter_mut().map(|column| column.next()
+                    .expect("one cell per remaining column row")).collect::<Vec<_>>();
                 right_rows.push(values);
                 right_bytes.push(footprint);
             }
@@ -463,5 +464,50 @@ mod cloned_stream_cross_join_budget_regressions {
         ).unwrap();
         assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod owned_cross_join_build_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    #[test]
+    fn retains_right_text_allocation_and_zero_width_build_cardinality() {
+        let left_schema = Schema::new(vec![Field::new("left_n", DataType::Integer, false)]).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("right_n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let right = Batch::from_rows(right_schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("é".repeat(100_000))],
+            vec![Value::Integer(2), Value::Text("🙂".repeat(50_000))],
+        ]).unwrap();
+        let text_ptr = match right.value(0, 1).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let left = Batch::from_rows(left_schema.clone(), vec![vec![Value::Integer(7)]]).unwrap();
+        let mut cross = CrossJoinStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            left_schema, right_schema, 1, QueryControl::default(),
+        ).unwrap();
+        assert!(matches!(&cross.right_rows[0][1], Value::Text(text) if text.as_ptr() == text_ptr));
+        assert_eq!(cross.next().unwrap().unwrap().num_rows(), 1);
+        assert_eq!(cross.next().unwrap().unwrap().num_rows(), 1);
+        assert!(cross.next().is_none());
+
+        let empty = Schema::new(vec![]).unwrap();
+        let right = Batch::new_with_row_count(empty.clone(), vec![], 3).unwrap();
+        let left = Batch::new_with_row_count(empty.clone(), vec![], 2).unwrap();
+        let cross = CrossJoinStream::new(
+            Box::new(std::iter::once(Ok(left))),
+            Box::new(std::iter::once(Ok(right))),
+            empty.clone(), empty, 2, QueryControl::default(),
+        ).unwrap();
+        assert_eq!(cross.right_rows.len(), 3);
+        assert!(cross.right_rows.iter().all(Vec::is_empty));
+        assert_eq!(cross.collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().map(|batch| batch.num_rows()).sum::<usize>(), 6);
     }
 }
