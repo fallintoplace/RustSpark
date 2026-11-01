@@ -5,6 +5,7 @@ import math
 import os
 import re
 import subprocess
+import signal
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -51,10 +52,20 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
 
     command = [binary, "--sql", sql, "--output-arrow", str(output)]
     if database_dir is not None:
-        command.extend(["--database-dir", os.fspath(database_dir)])
+        if not isinstance(database_dir, (str, os.PathLike)):
+            raise ValueError("database_dir must be a text filesystem path")
+        database_path = os.fspath(database_dir)
+        if not isinstance(database_path, str) or not database_path:
+            raise ValueError("database_dir must be a nonempty text filesystem path")
+        command.extend(["--database-dir", database_path])
     for flag, source in (("--csv", csv), ("--parquet", parquet), ("--json", json_input)):
         if source is not None:
-            command.extend([flag, os.fspath(source)])
+            if not isinstance(source, (str, os.PathLike)):
+                raise ValueError("Unnamed sources must be text filesystem paths")
+            path = os.fspath(source)
+            if not isinstance(path, str) or not path:
+                raise ValueError("Unnamed sources must be nonempty text filesystem paths")
+            command.extend([flag, path])
     _add_named_tables(command, "--csv-table", csv_tables)
     _add_named_tables(command, "--parquet-table", parquet_tables)
     _add_named_tables(command, "--json-table", json_tables)
@@ -63,6 +74,27 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     if max_rows is not None:
         command.extend(["--max-rows", str(max_rows)])
     return command
+
+
+def _export_arrow(command: list[str], error_log, process_timeout: float | None) -> int:
+    """Stop exporter descendants when the subprocess fails or is interrupted."""
+    process = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=error_log,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        return process.wait(timeout=process_timeout)
+    except BaseException:
+        if process.poll() is None:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            process.wait()
+        raise
 
 
 @contextmanager
@@ -102,12 +134,12 @@ def rustspark_lazy_frame(sql: str, *, binary: str = "rustspark",
         # the Python heap and surface only a bounded tail on failure.
         with tempfile.TemporaryFile() as error_log:
             try:
-                completed = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                           stderr=error_log, check=False,
-                                           timeout=process_timeout)
+                status = _export_arrow(command, error_log, process_timeout)
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("RustSpark Arrow export exceeded process timeout") from error
-            if completed.returncode:
+            except OSError as error:
+                raise RuntimeError("Unable to start RustSpark Arrow export") from error
+            if status:
                 error_log.seek(0, os.SEEK_END)
                 error_log.seek(max(0, error_log.tell() - 65_536))
                 detail = error_log.read().decode("utf-8", errors="replace").strip()

@@ -7,7 +7,7 @@ use crate::{
 pub struct ScanCursor<'a> {
     source: &'a Batch,
     predicate: Option<Expr>,
-    boolean_column: Option<(usize, bool)>,
+    boolean_column: Option<(&'a [Value], bool)>,
     columns: Vec<usize>,
     output_schema: Schema,
     identity_projection: bool,
@@ -42,9 +42,11 @@ pub fn scan<'a>(
     // Resolve direct boolean predicates once, not once per input row.
     // NULL remains UNKNOWN and is never selected.
     let boolean_column = match &predicate {
-        Some(Expr::Column(name)) => Some((source.schema().column(name)?, true)),
+        Some(Expr::Column(name)) =>
+            Some((source.column(source.schema().column(name)?)?, true)),
         Some(Expr::Not(inner)) => match inner.as_ref() {
-            Expr::Column(name) => Some((source.schema().column(name)?, false)),
+            Expr::Column(name) =>
+                Some((source.column(source.schema().column(name)?)?, false)),
             _ => None,
         },
         _ => None,
@@ -107,12 +109,9 @@ impl Iterator for ScanCursor<'_> {
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
             self.next_row += 1;
-            let include = if let Some((column, wanted)) = self.boolean_column {
-                matches!(
-                    &self.source.column(column)
-                        .expect("boolean predicate was bound to a valid column")[row],
-                    Value::Boolean(actual) if *actual == wanted
-                )
+            let include = if let Some((values, wanted)) = self.boolean_column {
+                // The slice was resolved once during scan construction.
+                matches!(&values[row], Value::Boolean(actual) if *actual == wanted)
             } else {
                 match &self.predicate {
                     Some(predicate) => match predicate.evaluate(self.source, row)
@@ -548,5 +547,56 @@ mod bound_boolean_scan_predicate_tests {
                 .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
             assert_eq!(actual, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod bound_boolean_scan_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn filters_nullable_boolean_keys_across_many_output_windows() {
+        let schema = Schema::new(vec![
+            Field::new("allowed", DataType::Boolean, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..1500).map(|index| vec![
+            match index % 3 {
+                0 => Value::Boolean(true),
+                1 => Value::Boolean(false),
+                _ => Value::Null,
+            },
+            Value::Text(format!("row-{index}")),
+        ]).collect::<Vec<_>>();
+        let source = Batch::from_rows(schema, rows).unwrap();
+        for (predicate, wanted) in [
+            (Expr::Column("ALLOWED".into()), 0),
+            (Expr::Not(Box::new(Expr::Column("allowed".into()))), 1),
+        ] {
+            let output = scan(&source, Some(predicate), &["payload"], 13).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            assert!(output.iter().all(|batch| batch.num_rows() <= 13));
+            let rows = output.iter().flat_map(|batch| batch.rows().unwrap())
+                .collect::<Vec<_>>();
+            let expected = (0..1500).filter(|index| index % 3 == wanted)
+                .map(|index| vec![Value::Text(format!("row-{index}"))])
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
+    }
+
+    #[test]
+    fn empty_boolean_scans_still_validate_projection_and_type() {
+        let source = Batch::empty(Schema::new(vec![
+            Field::new("active", DataType::Boolean, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap());
+        assert_eq!(scan(&source, Some(Expr::Column("active".into())),
+            &["id"], 4).unwrap().count(), 0);
+        assert!(scan(&source, Some(Expr::Column("id".into())),
+            &[], 4).is_err());
+        assert!(scan(&source, Some(Expr::Column("active".into())),
+            &["unknown"], 4).is_err());
     }
 }

@@ -17,6 +17,15 @@ class FormatTests(unittest.TestCase):
         self.assertIn("--parquet", command)
         self.assertNotIn("--csv-schema", command)
 
+    def test_invalid_benchmark_controls_fail_before_fixture_creation(self):
+        invalid = [
+            {"rows": True}, {"rows": 1.5}, {"repeat": False},
+            {"warmup": float("nan")}, {"timeout": "120"}, {"timeout": None},
+        ]
+        for controls in invalid:
+            with self.subTest(controls=controls), self.assertRaisesRegex(ValueError, "integer"):
+                comparison.benchmark("rs", **controls)
+
     def test_unknown_input_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown"):
             comparison.command("rs", "pickle", "file", "SELECT 1")

@@ -186,7 +186,7 @@ impl BloomFilter {
         if self.bits != other.bits || self.hashes != other.hashes {
             return Err(Error::Execution("cannot intersect incompatible Bloom filters".into()));
         }
-        if !self.populated { return Ok(()); }
+        if !self.populated || other.occupied_bits == other.bits { return Ok(()); }
         if !other.populated {
             self.words.fill(0);
             self.occupied_bits = 0;
@@ -575,5 +575,51 @@ mod saturated_batch_short_circuit_tests {
         let keys = (0..100).map(Value::Integer).collect::<Vec<_>>();
         partial.insert_batch(&keys);
         assert!(keys.iter().all(|key| partial.might_contain(key)));
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_intersection_regressions {
+    use super::*;
+
+    #[test]
+    fn intersecting_with_a_saturated_source_preserves_membership_and_counts() {
+        let mut partial = BloomFilter::new(64, 5).unwrap();
+        partial.insert(&Value::Integer(23));
+        let before = partial.clone();
+        let mut full = BloomFilter::new(64, 5).unwrap();
+        for n in 0..10_000 {
+            if full.bits_set() == 64 { break; }
+            full.insert(&Value::Integer(n));
+        }
+        assert_eq!(full.bits_set(), 64);
+        partial.intersect_with(&full).unwrap();
+        assert_eq!(partial.words, before.words);
+        assert_eq!(partial.bits_set(), before.bits_set());
+        assert!(partial.might_contain(&Value::Integer(23)));
+        assert!(partial.intersect_with(&BloomFilter::new(128, 5).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod saturated_bloom_union_regressions {
+    use super::*;
+
+    #[test]
+    fn saturated_union_is_identity_and_still_validates_layout() {
+        let mut full = BloomFilter::new(64, 5).unwrap();
+        for n in 0..10_000 {
+            if full.bits_set() == 64 { break; }
+            full.insert(&Value::Integer(n));
+        }
+        assert_eq!(full.bits_set(), 64);
+        let before = full.clone();
+        let mut other = BloomFilter::new(64, 5).unwrap();
+        other.insert(&Value::Text("different".into()));
+        full.union_with(&other).unwrap();
+        assert_eq!(full.words, before.words);
+        assert_eq!(full.bits_set(), 64);
+        assert!(full.might_contain(&Value::Integer(10_000_000)));
+        assert!(full.union_with(&BloomFilter::new(128, 5).unwrap()).is_err());
     }
 }

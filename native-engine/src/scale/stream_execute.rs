@@ -8,7 +8,7 @@ use crate::{
 use super::{
     cancel::QueryControl,
     chunks::RowBatcher, file_catalog::FileCatalog,
-    stream_ops::{FilterStream, ProjectStream, LimitStream},
+    stream_ops::{FilterStream, FilterLimitStream, ProjectStream, LimitStream},
     union_stream::{UnionAllStream, UnionDistinctStream},
     cross_join_stream::CrossJoinStream,
     set_stream::{SetStream, SetMode, set_schema},
@@ -584,6 +584,17 @@ fn lower(
         }
         Plan::Project { input, selections } =>
             Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Limit { input, offset, count: Some(count) }
+            if matches!(input.as_ref(), Plan::Filter { .. }) => {
+            let Plan::Filter { input: source, predicate } = input.as_ref() else {
+                unreachable!("matched direct filter under bounded limit");
+            };
+            // Keep the original depth accounting for both plan nodes.
+            let source = lower(source, catalog, options, control, depth + 2, cache)?;
+            Ok(Box::new(FilterLimitStream::new(
+                source, predicate.clone(), *offset, *count, control.clone(),
+            )))
+        }
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
@@ -1330,5 +1341,66 @@ mod compact_retained_stream_key_accounting {
             vec![vec![Value::Text("key".into())]]);
         assert_eq!(distinct.retained_bytes, 64 + std::mem::size_of::<Value>() + 3);
         assert!(distinct.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod bounded_filter_limit_fusion_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::Field};
+
+    #[test]
+    fn direct_where_limit_does_not_evaluate_rows_after_limit() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+            vec![Value::Integer(0)],
+        ]).unwrap();
+        let predicate = Expr::binary(
+            Expr::binary(Expr::Literal(Value::Integer(10)), BinaryOp::Divide,
+                Expr::Column("n".into())),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(0)),
+        );
+        for (offset, result) in [(0, 1), (1, 2)] {
+            let plan = Plan::Values { batch: batch.clone() }
+                .filter(predicate.clone()).limit(offset, Some(1));
+            let chunks = execute(&plan, &FileCatalog::new(),
+                &StreamOptions::default(), QueryControl::default()).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            let rows = chunks.into_iter().flat_map(|part| part.rows().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(rows, vec![vec![Value::Integer(result)]]);
+        }
+        let plan = Plan::Values { batch }.filter(predicate).limit(0, Some(3));
+        assert!(execute(&plan, &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default()).unwrap()
+            .collect::<Result<Vec<_>>>().is_err());
+    }
+
+    #[test]
+    fn fused_windows_match_unfused_filter_limit_across_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..100)
+            .map(|n| vec![if n % 9 == 0 { Value::Null } else { Value::Integer(n) }])
+            .collect()).unwrap();
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(12)));
+        for (offset, count) in [(0, 1), (0, 100), (5, 7), (30, 4), (100, 1)] {
+            let plan = Plan::Values { batch: batch.clone() }
+                .filter(predicate.clone()).limit(offset, Some(count));
+            let fused = execute(&plan, &FileCatalog::new(),
+                &StreamOptions::default(), QueryControl::default()).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap();
+            let baseline = LimitStream::new(FilterStream::new(
+                std::iter::once(Ok(batch.clone())), predicate.clone(),
+                QueryControl::default(),
+            ), offset, Some(count), QueryControl::default())
+                .collect::<Result<Vec<_>>>().unwrap();
+            let fused_rows = fused.into_iter().flat_map(|part| part.rows().unwrap())
+                .collect::<Vec<_>>();
+            let old_rows = baseline.into_iter().flat_map(|part| part.rows().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(fused_rows, old_rows);
+        }
     }
 }

@@ -51,6 +51,69 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterStream<I> {
     }
 }
 
+/// A bounded WHERE + LIMIT pipeline. The filter stops evaluating a source
+/// batch as soon as enough matches satisfy the remaining OFFSET/LIMIT window.
+pub struct FilterLimitStream<I> {
+    input: I,
+    predicate: Expr,
+    offset: usize,
+    remaining: usize,
+    control: QueryControl,
+    invalid_limit: bool,
+    stopped: bool,
+}
+
+impl<I> FilterLimitStream<I> {
+    pub fn new(
+        input: I, predicate: Expr, offset: usize, count: usize, control: QueryControl,
+    ) -> Self {
+        let invalid_limit = offset.checked_add(count).is_none();
+        Self { input, predicate, offset, remaining: count, control, invalid_limit, stopped: false }
+    }
+}
+
+impl<I: Iterator<Item = Result<Batch>>> Iterator for FilterLimitStream<I> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        if self.invalid_limit {
+            self.stopped = true;
+            return Some(Err(crate::Error::Execution("LIMIT + OFFSET overflow".into())));
+        }
+        if self.remaining == 0 {
+            self.stopped = true;
+            return None;
+        }
+        loop {
+            if let Err(error) = self.control.check() {
+                self.stopped = true;
+                return Some(Err(error));
+            }
+            let Some(next) = self.input.next() else {
+                self.stopped = true;
+                return None;
+            };
+            let result = next.and_then(|batch| filter::filter_first_owned(
+                batch, &self.predicate, self.offset + self.remaining,
+            ));
+            let selected = match result {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            };
+            let skipped = self.offset.min(selected.num_rows());
+            self.offset -= skipped;
+            let take = self.remaining.min(selected.num_rows() - skipped);
+            if take == 0 { continue; }
+            self.remaining -= take;
+            return Some(selected.slice_rows_owned(skipped, skipped + take));
+        }
+    }
+}
+
 pub struct ProjectStream<I> {
     input: I,
     selections: Vec<Selection>,

@@ -4,6 +4,8 @@ use crate::{scalar::Value, Error, Result};
 
 const PRECISION: u32 = 12;
 const REGISTERS: usize = 1 << PRECISION;
+const WIRE_HEADER: &[u8; 4] = b"RSH1";
+const WIRE_BYTES: usize = WIRE_HEADER.len() + REGISTERS;
 // Use exact fixed-point harmonic weights. Every reachable HLL rank has
 // a power-of-two reciprocal, so register updates are lossless in u128.
 const HARMONIC_BITS: u32 = 65 - PRECISION;
@@ -46,6 +48,31 @@ impl HyperLogLog {
     pub fn new() -> Self {
         Self { registers: [0; REGISTERS], nonempty: 0,
             harmonic_scaled: REGISTERS as u128 * HARMONIC_SCALE }
+    }
+
+    /// Encode an in-process sketch for exchange with workers using the same
+    /// native hash implementation. This is not a persistent cross-version format.
+    pub fn to_wire_bytes(&self) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(WIRE_BYTES);
+        encoded.extend_from_slice(WIRE_HEADER);
+        encoded.extend_from_slice(&self.registers);
+        encoded
+    }
+
+    /// Decode a bounded sketch, validating every rank before admitting it.
+    /// Derive cached harmonic and population state from the wire registers.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != WIRE_BYTES || &bytes[..WIRE_HEADER.len()] != WIRE_HEADER {
+            return Err(Error::Parse("unsupported HLL sketch wire layout".into()));
+        }
+        let mut sketch = Self::new();
+        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
+            if u32::from(rank) > 65 - PRECISION {
+                return Err(Error::Parse("invalid HLL register rank".into()));
+            }
+            if rank != 0 { sketch.update_register(index, rank); }
+        }
+        Ok(sketch)
     }
 
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
@@ -462,6 +489,47 @@ mod batched_hll_merge_regressions {
         reference_merge(&mut expected, &b);
         a.merge(&b);
         assert_eq!(a, expected);
+    }
+}
+
+#[cfg(test)]
+mod hll_wire_exchange_regressions {
+    use super::*;
+
+    #[test]
+    fn roundtrips_sparse_dense_and_merged_worker_sketches() {
+        let mut a = HyperLogLog::new();
+        let mut b = HyperLogLog::new();
+        for n in 0..40_000 {
+            a.add(&Value::Integer(n));
+            b.add(&Value::Integer(n + 20_000));
+        }
+        let empty = HyperLogLog::new();
+        for sketch in [&empty, &a, &b] {
+            let wire = sketch.to_wire_bytes();
+            assert_eq!(wire.len(), WIRE_BYTES);
+            assert_eq!(HyperLogLog::from_wire_bytes(&wire).unwrap(), *sketch);
+        }
+        let mut merged = HyperLogLog::from_wire_bytes(&a.to_wire_bytes()).unwrap();
+        merged.merge(&HyperLogLog::from_wire_bytes(&b.to_wire_bytes()).unwrap());
+        a.merge(&b);
+        assert_eq!(merged, a);
+        assert_eq!(merged.nonempty_registers(), a.nonempty_registers());
+        assert_eq!(merged.estimate(), a.estimate());
+    }
+
+    #[test]
+    fn rejects_bad_version_lengths_and_unreachable_register_ranks() {
+        let mut wire = HyperLogLog::new().to_wire_bytes();
+        assert!(HyperLogLog::from_wire_bytes(&wire[..WIRE_BYTES - 1]).is_err());
+        let mut trailing = wire.clone();
+        trailing.push(0);
+        assert!(HyperLogLog::from_wire_bytes(&trailing).is_err());
+        wire[0] ^= 0xff;
+        assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
+        wire = HyperLogLog::new().to_wire_bytes();
+        wire[WIRE_HEADER.len()] = (65 - PRECISION + 1) as u8;
+        assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
     }
 }
 

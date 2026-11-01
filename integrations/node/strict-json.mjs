@@ -1,6 +1,9 @@
 // Reject conflicting object keys before JSON.parse discards the earlier value.
 // Keep the scanner small: JSON.parse still owns full JSON syntax validation.
-export function parseStrictJSON(source) {
+export function parseStrictJSON(source, { unsafeIntegers = "error" } = {}) {
+  if (unsafeIntegers !== "error" && unsafeIntegers !== "bigint") {
+    throw new TypeError("unsafeIntegers must be 'error' or 'bigint'");
+  }
   if (typeof source !== "string") throw new TypeError("SQL JSON output must be text");
   let position = 0;
   const maxDepth = 256;
@@ -8,12 +11,12 @@ export function parseStrictJSON(source) {
   const whitespace = () => {
     while (position < source.length && /[\x20\t\n\r]/.test(source[position])) position++;
   };
-  const stringToken = () => {
+  const stringToken = (decode = true) => {
     const start = position++;
     while (position < source.length) {
       const char = source[position++];
       if (char === '"') {
-        return JSON.parse(source.slice(start, position));
+        return decode ? JSON.parse(source.slice(start, position)) : undefined;
       }
       if (char === "\\") position++;
     }
@@ -24,7 +27,9 @@ export function parseStrictJSON(source) {
     whitespace();
     const first = source[position];
     if (first === '"') {
-      stringToken();
+      // JSON.parse validates the full document later. Avoid materializing
+      // large value strings during the duplicate-key pre-scan.
+      stringToken(false);
     } else if (first === "{") {
       position++;
       const names = new Set();
@@ -67,11 +72,21 @@ export function parseStrictJSON(source) {
   value(0);
   whitespace();
   if (position !== source.length) throw new SyntaxError("Unexpected trailing SQL JSON");
-  return JSON.parse(source, (_key, item) => {
+  return JSON.parse(source, (_key, item, context) => {
     if (typeof item === "number" && !Number.isFinite(item)) {
       throw new RangeError("Non-finite SQL JSON result number");
     }
     if (typeof item === "number" && Number.isInteger(item) && !Number.isSafeInteger(item)) {
+      if (unsafeIntegers === "bigint") {
+        // JSON.parse has already rounded the number. Use its original token.
+        // Older Node versions have no source context: fail instead of corrupting it.
+        if (typeof context?.source !== "string") {
+          throw new RangeError("Lossless integers require Node.js with JSON.parse source context");
+        }
+        if (/^-?(?:0|[1-9][0-9]*)$/.test(context.source)) {
+          return BigInt(context.source);
+        }
+      }
       throw new RangeError("Unsafe SQL JSON integer");
     }
     return item;

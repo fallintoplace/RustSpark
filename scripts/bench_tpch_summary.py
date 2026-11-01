@@ -15,19 +15,28 @@ def finite_sample_median(samples):
     )
 
 
+def valid_positive_duration(value):
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def checked_medians(entries):
     medians = []
     for row in entries:
         if row.get("status") != "ok":
             raise ValueError(f"Query {row['id']} did not execute successfully")
         value = row.get("median_ms")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        if not valid_positive_duration(value):
             raise ValueError(f"Invalid median for query {row['id']}")
         if "samples_ms" in row:
             samples = row["samples_ms"]
             if (not isinstance(samples, list) or not samples
                     or any(type(sample) not in (int, float)
-                           or not math.isfinite(sample) or sample <= 0
+                           or not valid_positive_duration(sample)
                            for sample in samples)):
                 raise ValueError(f"Invalid timing samples for query {row['id']}")
             if abs(finite_sample_median(samples) - value) > 0.002:
