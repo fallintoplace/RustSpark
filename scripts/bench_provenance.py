@@ -128,7 +128,10 @@ def enrich(report, binary, repository="."):
 def write_new_report(path: Path, report: dict) -> None:
     """Create a report only if its destination does not already exist."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Exclusive creation rejects existing files and dangling symlinks alike.
+    # Windows exclusive open may follow a dangling symlink. Reject it before
+    # opening the destination as well as relying on exclusive creation.
+    if path.is_symlink():
+        raise FileExistsError(f"Report output must not be a symlink: {path}")
     with path.open("x", encoding="utf-8") as output:
         output.write(json.dumps(report, indent=2) + "\n")
 

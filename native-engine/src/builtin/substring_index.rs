@@ -5,6 +5,13 @@ fn output(types: &[DataType]) -> Result<DataType> {
     if types == [DataType::Text, DataType::Text, DataType::Integer] { Ok(DataType::Text) }
     else { Err(Error::Type("SUBSTRING_INDEX requires text, delimiter, integer count".into())) }
 }
+fn bounded_substring_index_result(text: &str) -> Result<Value> {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("SUBSTRING_INDEX result exceeds native 16 MiB budget".into()));
+    }
+    Ok(Value::Text(text.to_owned()))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -14,10 +21,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // Skip scanning if the requested occurrence cannot exist.
     let max_matches = text.len() / delimiter.len();
     if count.unsigned_abs() > u64::try_from(max_matches).unwrap_or(u64::MAX) {
-        return Ok(Value::Text(text.to_owned()));
+        return bounded_substring_index_result(text);
     }
     if count == 1 {
-        return Ok(Value::Text(text.split_once(delimiter).map_or(text, |(head, _)| head).to_owned()));
+        return bounded_substring_index_result(text.split_once(delimiter).map_or(text, |(head, _)| head));
     }
     if count == -1 {
         // Reversing a non-overlapping search changes the matches for
@@ -25,7 +32,25 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         // SUBSTRING_INDEX must agree with the forward split fields.
         let tail = text.match_indices(delimiter).last()
             .map_or(text, |(position, _)| &text[position + delimiter.len()..]);
-        return Ok(Value::Text(tail.to_owned()));
+        return bounded_substring_index_result(tail);
+    }
+    if (-16..=-2).contains(&count) {
+        // Track only the requested trailing delimiter positions. Forward
+        // match_indices preserves the nonoverlapping split contract even
+        // when the delimiter can overlap with itself.
+        let from_end = (-count) as usize;
+        let mut recent = [0_usize; 16];
+        let mut seen = 0usize;
+        for (position, _) in text.match_indices(delimiter) {
+            recent[seen % from_end] = position;
+            seen += 1;
+        }
+        let suffix = if seen < from_end {
+            text
+        } else {
+            &text[recent[seen % from_end] + delimiter.len()..]
+        };
+        return bounded_substring_index_result(suffix);
     }
     let index = usize::try_from(count.unsigned_abs() - 1).ok();
     let result = match index {
@@ -44,7 +69,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             }
         },
     };
-    Ok(Value::Text(result.to_string()))
+    bounded_substring_index_result(result)
 }
 
 fn split_count_type(types: &[DataType]) -> Result<DataType> {
@@ -217,5 +242,67 @@ mod overlapping_substring_index_regressions {
         assert_eq!(run("aaaaa", "aa", -1), "a");
         assert_eq!(run("aaaaa", "aa", -2), "aaa");
         assert_eq!(run("aaaaa", "aa", -3), "aaaaa");
+    }
+}
+
+#[cfg(test)]
+mod bounded_substring_index_regressions {
+    use super::*;
+    #[test]
+    fn large_source_keeps_small_results_but_rejects_large_outputs() {
+        let source = format!("short,{}", "x".repeat(16 * 1024 * 1024 + 1));
+        let args = |count| [Value::Text(source.clone()),
+            Value::Text(",".into()), Value::Integer(count)];
+        assert_eq!(evaluate(&args(1)).unwrap(), Value::Text("short".into()));
+        assert!(matches!(evaluate(&args(-1)), Err(Error::Execution(_))));
+        assert!(matches!(evaluate(&args(i64::MAX)), Err(Error::Execution(_))));
+        assert!(matches!(evaluate(&args(-2)), Err(Error::Execution(_))));
+        assert_eq!(evaluate(&args(0)).unwrap(), Value::Text(String::new()));
+        assert_eq!(evaluate(&[Value::Null, Value::Text(",".into()),
+            Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_negative_index_ring_tests {
+    use super::*;
+
+    #[test]
+    fn negative_offsets_match_forward_split_for_unicode_and_overlaps() {
+        for (text, delimiter) in [
+            ("", "aa"), ("aaaaa", "aa"), ("ababababa", "aba"),
+            ("ééééé", "éé"), ("a,b,c,d,e,f,g", ","),
+            ("東京🙂東京🙂end", "🙂"), ("none", "::"),
+        ] {
+            let fields = text.split(delimiter).collect::<Vec<_>>();
+            for count in -20_i64..=-1 {
+                let wanted = count.unsigned_abs() as usize;
+                let expected = if wanted > fields.len() { text.to_string() }
+                    else { fields[fields.len() - wanted..].join(delimiter) };
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(delimiter.into()),
+                    Value::Integer(count),
+                ]).unwrap(), Value::Text(expected),
+                    "text={text:?}, delimiter={delimiter:?}, count={count}");
+            }
+        }
+    }
+
+    #[test]
+    fn large_nonoverlapping_stream_keeps_requested_suffix() {
+        let value = "a|".repeat(100_000);
+        for wanted in [2, 3, 8, 16, 17] {
+            let expected = value.split('|')
+                .collect::<Vec<_>>();
+            let suffix = expected[expected.len() - wanted..].join("|");
+            assert_eq!(evaluate(&[
+                Value::Text(value.clone()), Value::Text("|".into()),
+                Value::Integer(-(wanted as i64)),
+            ]).unwrap(), Value::Text(suffix));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text(value.clone()), Value::Text("|".into()),
+            Value::Integer(i64::MIN),
+        ]).unwrap(), Value::Text(value));
     }
 }

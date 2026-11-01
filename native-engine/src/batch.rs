@@ -85,6 +85,21 @@ impl Batch {
         Ok(Self { schema, columns, rows: row_count })
     }
 
+    /// Append a fully validated owned batch without cloning TEXT payloads.
+    /// Failed schema and row-count checks never consume the next input.
+    pub fn append_owned(&mut self, other: Self) -> Result<()> {
+        if self.schema != other.schema {
+            return Err(Error::Schema("cannot append batches with different schemas".into()));
+        }
+        let rows = self.rows.checked_add(other.rows)
+            .ok_or_else(|| Error::Execution("batch append row count overflow".into()))?;
+        for (target, source) in self.columns.iter_mut().zip(other.columns) {
+            target.extend(source);
+        }
+        self.rows = rows;
+        Ok(())
+    }
+
     pub fn into_widened_schema(mut self, schema: Schema) -> Result<Self> {
         if schema.len() != self.schema.len() {
             return Err(Error::Schema("batch schema width mismatch".into()));
@@ -171,6 +186,15 @@ impl Batch {
     /// An empty-schema batch can legitimately have billions of logical rows.
     pub fn take_owned(self, indices: &[usize]) -> Result<Self> {
         if indices.is_empty() { return Ok(Self::empty(self.schema)); }
+        // Zero-width batches can represent billions of logical rows without
+        // allocating any column storage. Only check the selection indices:
+        // a last-use table indexed by source row is unnecessary.
+        if self.columns.is_empty() {
+            if let Some(&invalid) = indices.iter().find(|&&row| row >= self.rows) {
+                return Err(Error::Execution(format!("row index out of bounds: {invalid}")));
+            }
+            return Ok(Self { schema: self.schema, columns: Vec::new(), rows: indices.len() });
+        }
         if indices.len() <= self.rows / 8 {
             let mut last = std::collections::HashMap::with_capacity(indices.len());
             let mut has_duplicates = false;
@@ -906,5 +930,59 @@ mod sparse_owned_gather_budget_tests {
             Schema::new(vec![]).unwrap(), vec![], 1_000_000,
         ).unwrap();
         assert!(input.take_owned(&[1, 1_000_000]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_width_owned_gather_scaling_tests {
+    use super::*;
+
+    #[test]
+    fn large_logical_batches_need_no_per_source_row_gather_index() {
+        let schema = crate::schema::Schema::new(vec![]).unwrap();
+        let input = Batch::new_with_row_count(schema.clone(), vec![], 1_000_000_000).unwrap();
+        // Dense selections formerly attempted a billion-entry last-use table.
+        let indices = (0..100_000).map(|n| (n * 17) % 4_003).collect::<Vec<_>>();
+        let selected = input.take_owned(&indices).unwrap();
+        assert_eq!(selected.schema(), &schema);
+        assert_eq!(selected.num_rows(), 100_000);
+        assert!(selected.rows().unwrap().iter().all(Vec::is_empty));
+        // Keep validation even if no physical column can be indexed.
+        let invalid = Batch::new_with_row_count(schema, vec![], 8).unwrap();
+        assert!(invalid.take_owned(&[0, 7, 8]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod batch_owned_append_tests {
+    use super::*;
+    use crate::schema::DataType;
+
+    #[test]
+    fn appends_text_by_ownership_and_retains_zero_width_cardinality() {
+        let schema = Schema::new(vec![Field::new("message", DataType::Text, true)]).unwrap();
+        let mut existing = Batch::empty(schema.clone());
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(4096))], vec![Value::Null],
+        ]).unwrap();
+        let old_ptr = match right.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        existing.append_owned(right).unwrap();
+        assert_eq!(existing.num_rows(), 2);
+        let new_ptr = match existing.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(old_ptr, new_ptr);
+        let wrong = Schema::new(vec![Field::new("another", DataType::Text, true)]).unwrap();
+        assert!(existing.append_owned(Batch::empty(wrong)).is_err());
+        assert_eq!(existing.num_rows(), 2);
+
+        let empty_schema = Schema::new(vec![]).unwrap();
+        let mut zero = Batch::new_with_row_count(empty_schema.clone(), vec![], 2).unwrap();
+        zero.append_owned(Batch::new_with_row_count(empty_schema, vec![], 5).unwrap()).unwrap();
+        assert_eq!(zero.num_rows(), 7);
     }
 }

@@ -15,8 +15,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     // A start-anchored identifier literal matches only at SQL position 1.
     if let Some(prefix) = pattern.strip_prefix('^') {
-        if prefix.len() <= 4095 && prefix.bytes().all(|byte|
-            byte.is_ascii_alphanumeric() || byte == b'_') {
+        if prefix.len() <= 4095 && prefix.chars().all(|ch|
+            ch.is_alphanumeric() || ch == '_') {
             return Ok(Value::Integer(if text.starts_with(prefix) { 1 } else { 0 }));
         }
     }
@@ -28,7 +28,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
     }
     if !pattern.is_empty() && pattern.len() <= 4096 &&
-        pattern.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
         let Some(index) = text.find(pattern) else { return Ok(Value::Integer(0)); };
         let prefix = &text[..index];
         let count = super::char_length::character_count(prefix);
@@ -214,5 +214,27 @@ mod ascii_digit_position_regressions {
                 ]).unwrap(), Value::Integer(expected), "{text:?} {pattern}");
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod unicode_literal_instr_optimization_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_patterns_preserve_one_based_scalar_offsets() {
+        for text in ["", "é🙂東京", "a東京b", "東京abc", "\n東京", "café", "αβγ αβγ"] {
+            for pattern in ["é", "東京", "αβ", "café", "^é", "^東京", "^αβ", "é+", "é$"] {
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or(0, |matched| text[..matched.start()].chars().count() + 1);
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), Value::Integer(expected as i64),
+                    "text={text:?}, pattern={pattern:?}");
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("東京".into())]).unwrap(),
+            Value::Null);
     }
 }

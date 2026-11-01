@@ -33,3 +33,5 @@ Use `json_input="events.json"` for JSON input or `csv_tables={"users": "users.cs
 The context manager now terminates and reaps the entire Arrow export process
 group when an export deadline expires or a wait is interrupted. This avoids
 orphaned native workers when a lazy-frame export fails.
+
+Typed SQL bindings are supported with `named_params={"min": "int64:7"}`. Parameters are passed as CLI arguments without a shell. Names must be ASCII SQL identifiers, values require a type prefix, and each value is limited to 8192 UTF-8 bytes (64 bindings maximum).

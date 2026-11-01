@@ -75,8 +75,22 @@ impl SetStream {
             if batch.schema() != &right_schema {
                 return Err(Error::Schema("stream set right schema changed".into()));
             }
+            // DISTINCT modes do not track multiplicity. Adjacent duplicate
+            // composite keys need neither row conversion nor a hash probe.
+            // ALL modes still update the bag count for every input row.
+            let distinct_columns = if track_multiplicity { None } else {
+                Some((0..batch.schema().len()).map(|column| batch.column(column))
+                    .collect::<Result<Vec<_>>>()?)
+            };
+            let mut previous_row = None;
             for row in 0..batch.num_rows() {
                 if row % 1024 == 0 { control.check()?; }
+                if distinct_columns.as_ref().is_some_and(|columns|
+                    previous_row.is_some_and(|previous|
+                        columns.iter().all(|column| column[previous] == column[row]))) {
+                    continue;
+                }
+                previous_row = Some(row);
                 // For common single-column sets, probe an existing key with
                 // the borrowed cell. Duplicate TEXT rows need no temporary
                 // Vec or cloned String on the right-hand build side.
@@ -890,5 +904,68 @@ mod exhausted_except_all_passthrough_tests {
             integer, float, SetMode::ExceptAll, QueryControl::default(), 4, 1024,
         ).unwrap().next().unwrap().unwrap();
         assert_eq!(converted.column(0).unwrap(), &[Value::Float(7.0)]);
+    }
+}
+
+#[cfg(test)]
+mod clustered_right_set_build_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_unicode_composite_keys_match_distinct_and_all_bag_semantics() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+            Field::new("number", DataType::Float, true),
+        ]).unwrap();
+        let long = "é🌱".repeat(2048);
+        let row = |text: Option<&str>, number: Option<f64>| vec![
+            text.map_or(Value::Null, |value| Value::Text(value.into())),
+            number.map_or(Value::Null, Value::Float),
+        ];
+        let left = Batch::from_rows(schema.clone(), vec![
+            row(Some(&long), Some(0.0)), row(Some(&long), Some(-0.0)),
+            row(None, Some(5.0)), row(Some("other"), None),
+            row(None, Some(5.0)),
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            row(Some(&long), Some(-0.0)), row(Some(&long), Some(0.0)),
+            row(Some(&long), Some(0.0)), row(None, Some(5.0)),
+            row(None, Some(5.0)), row(None, Some(5.0)),
+        ]).unwrap();
+        let run = |mode| SetStream::new(
+            Box::new([Ok(left.clone())].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            schema.clone(), schema.clone(), mode, QueryControl::default(), 3, usize::MAX,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(run(SetMode::IntersectDistinct),
+            vec![row(Some(&long), Some(0.0)), row(None, Some(5.0))]);
+        assert_eq!(run(SetMode::ExceptDistinct),
+            vec![row(Some("other"), None)]);
+        assert_eq!(run(SetMode::IntersectAll),
+            vec![row(Some(&long), Some(0.0)), row(Some(&long), Some(-0.0)),
+                 row(None, Some(5.0)), row(None, Some(5.0))]);
+        assert_eq!(run(SetMode::ExceptAll),
+            vec![row(Some("other"), None)]);
+    }
+
+    #[test]
+    fn repeated_distinct_keys_do_not_exhaust_right_key_budget() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Integer, true),
+            Field::new("b", DataType::Text, true),
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(),
+            std::iter::repeat_n(vec![Value::Null, Value::Text("same".into())], 2000)
+                .collect()).unwrap();
+        let left = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Null, Value::Text("same".into())]]).unwrap();
+        let result = SetStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::IntersectDistinct,
+            QueryControl::default(), 1, 4096,
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(result.iter().map(Batch::num_rows).sum::<usize>(), 1);
     }
 }

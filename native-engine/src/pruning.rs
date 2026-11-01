@@ -235,6 +235,10 @@ fn simple_predicate_column(predicate: &Expr) -> Option<&str> {
             Expr::Column(name) => Some(name),
             _ => None,
         },
+        Expr::InList { needle, .. } => match needle.as_ref() {
+            Expr::Column(name) => Some(name),
+            _ => None,
+        },
         Expr::Binary { left, right, .. }
         | Expr::IsDistinctFrom { left, right, .. } => match (left.as_ref(), right.as_ref()) {
             (Expr::Column(name), Expr::Literal(_))
@@ -911,5 +915,52 @@ mod allocation_free_inlist_pruning_regressions {
         assert!(!can_skip(&stats, "n", &predicate(
             vec![Expr::Column("other".into())], false,
         )));
+    }
+}
+
+#[cfg(test)]
+mod normalized_membership_pruning_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn summaries(min: i64, max: i64) -> HashMap<String, ColumnStatistics> {
+        HashMap::from([("account_id".into(), ColumnStatistics {
+            rows: 100, nulls: 3,
+            min: Some(Value::Integer(min)),
+            max: Some(Value::Integer(max)),
+        })])
+    }
+
+    fn membership(values: &[i64], negated: bool) -> Expr {
+        Expr::InList {
+            needle: Box::new(Expr::Column("account_id".into())),
+            choices: values.iter().map(|&value| Expr::Literal(Value::Integer(value))).collect(),
+            negated,
+        }
+    }
+
+    #[test]
+    fn normalized_stats_prune_impossible_in_lists_without_scanning_all_columns() {
+        let stats = summaries(10, 20);
+        assert!(can_skip_columns(&stats, &membership(&[1, 2, 30], false)));
+        assert!(!can_skip_columns(&stats, &membership(&[1, 10, 30], false)));
+        assert!(!can_skip_columns(&stats, &membership(&[15], true)));
+        assert!(can_skip_columns(&summaries(15, 15), &membership(&[15], true)));
+    }
+
+    #[test]
+    fn nulls_and_boolean_composition_preserve_conservative_pruning() {
+        let stats = summaries(10, 20);
+        let impossible = membership(&[1, 2], false);
+        let possible = membership(&[12], false);
+        assert!(can_skip_columns(&stats, &Expr::binary(
+            impossible.clone(), BinaryOp::And, possible.clone()
+        )));
+        assert!(!can_skip_columns(&stats, &Expr::binary(
+            impossible, BinaryOp::Or, possible
+        )));
+        let mut missing = HashMap::new();
+        missing.insert("other".into(), stats["account_id"].clone());
+        assert!(!can_skip_columns(&missing, &membership(&[1, 2], false)));
     }
 }
