@@ -86,7 +86,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     _add_named_tables(command, "--csv-table", csv_tables)
     _add_named_tables(command, "--parquet-table", parquet_tables)
     _add_named_tables(command, "--json-table", json_tables)
-    __add_named_parameters(command, named_params)
+    _add_named_parameters(command, named_params)
     if query_timeout is not None:
         command.extend(["--query-timeout", str(query_timeout)])
     if max_rows is not None:
