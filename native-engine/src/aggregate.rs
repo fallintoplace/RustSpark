@@ -20,6 +20,7 @@ pub enum AggregateOp {
     AvgDistinct(Expr),
     Min(Expr),
     Max(Expr),
+    Last(Expr, bool),
 }
 
 // The engine validates query plans, but public aggregation helpers may be
@@ -32,7 +33,8 @@ fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
             AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
             | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
-            | AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.validate_budget()?,
+            | AggregateOp::Min(expr) | AggregateOp::Max(expr)
+            | AggregateOp::Last(expr, _) => expr.validate_budget()?,
         }
     }
     Ok(())
@@ -72,7 +74,8 @@ impl AggregateItem {
                     _ => Err(Error::Type("AVG requires a numeric column".into())),
                 }
             }
-            AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(schema),
+            AggregateOp::Min(expr) | AggregateOp::Max(expr)
+            | AggregateOp::Last(expr, _) => expr.output_type(schema),
         }
     }
 }
@@ -87,6 +90,7 @@ enum State {
     AvgDistinct { seen: HashSet<Value>, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
+    Last(Option<Value>),
 }
 
 impl State {
@@ -101,6 +105,7 @@ impl State {
                 Self::AvgDistinct { seen: HashSet::new(), sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
+            AggregateOp::Last(_, _) => Self::Last(None),
         }
     }
 
@@ -120,7 +125,8 @@ impl State {
             | AggregateOp::Avg(expr)
             | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr)
-            | AggregateOp::Max(expr) => match expr {
+            | AggregateOp::Max(expr)
+            | AggregateOp::Last(expr, _) => match expr {
                 Expr::Column(name) =>
                     Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
                 _ => Cow::Owned(expr.evaluate(batch, row)?),
@@ -178,6 +184,11 @@ impl State {
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
             Self::Max(maximum) => update_extreme(maximum, value, false)?,
+            Self::Last(slot) => {
+                if (!matches!(op, AggregateOp::Last(_, true)) || !value.is_null()) {
+                    *slot = Some(value.into_owned());
+                }
+            },
         }
         Ok(())
     }
@@ -194,7 +205,7 @@ impl State {
             Self::AvgDistinct { sum, compensation, count, .. } =>
                 if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
             Self::SumDistinct { total, .. } => total.unwrap_or(Value::Null),
-            Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
+            Self::Sum(value) | Self::Min(value) | Self::Max(value) | Self::Last(value) => {
                 value.unwrap_or(Value::Null)
             }
         })
