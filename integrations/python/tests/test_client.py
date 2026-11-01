@@ -338,10 +338,6 @@ class SourcePathPreflightTests(unittest.TestCase):
         self.assertIn("db", args)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StreamingStderrBudgetRegressionTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "helper uses POSIX shell")
     def test_large_stderr_keeps_only_the_last_diagnostics(self):
@@ -378,3 +374,7 @@ printf '%s\\n' '{"a":1}'
                 list(client.iter_rows("SELECT 1", max_row_bytes=6))
             with self.assertRaisesRegex(RustSparkError, "max_output_bytes"):
                 list(client.iter_rows("SELECT 1", max_row_bytes=7, max_output_bytes=7))
+
+
+if __name__ == "__main__":
+    unittest.main()
