@@ -85,3 +85,14 @@ shellTest("queryRows handles many complete rows and a split Unicode row", async 
     assert.deepEqual(rows[1000], { value: "é🙂" });
   });
 });
+
+shellTest("queryRows reports the final SQL error after large warning output", async () => {
+  await withScript(
+    "printf '%070000d' 0 >&2\nprintf '%s\\n' 'FINAL SQL ERROR' >&2\nexit 2\n",
+    async (client) => {
+      await assert.rejects(async () => {
+        for await (const _row of client.queryRows("SELECT 1")) {}
+      }, /FINAL SQL ERROR/);
+    },
+  );
+});
