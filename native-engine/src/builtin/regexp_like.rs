@@ -16,8 +16,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         // A non-newline UTF-8 byte implies a non-newline Unicode scalar.
         return Ok(Value::Boolean(text.bytes().any(|byte| byte != b'\n')));
     }
-    // Exact anchors with no regex metacharacters reduce to a string equality.
-    if let Some(exact) = pattern.strip_prefix('^').and_then(|value| value.strip_suffix('    if let Some(prefix) = pattern.strip_prefix('^') {
+    // A leading ^ followed only by literal word characters is a prefix
+    // test. Patterns with $, escapes, groups or modifiers use the regex
+    // compiler so their full semantics remain intact.
+    if let Some(prefix) = pattern.strip_prefix('^') {
         if prefix.len() <= 4095 && prefix.chars().all(|ch|
             ch.is_alphanumeric() || ch == '_') {
             return Ok(Value::Boolean(text.starts_with(prefix)));
@@ -383,5 +385,33 @@ mod exact_anchored_literal_regressions {
             }
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text("^foo$".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod recovered_regex_prefix_parser_regressions {
+    use super::*;
+
+    #[test]
+    fn anchored_prefix_and_exact_patterns_agree_with_the_regex_engine() {
+        for text in [
+            "", "foo", "foobar", "foo\n", "xfoo", "café", "café🙂",
+            "\nfoo", "FOO", "abc_123", "abc_123\n",
+        ] {
+            for pattern in [
+                "^", "^foo", "^foo$", "^foo.*", "foo$", "^café",
+                "^abc_123", "^abc_123$", "(?m)^foo", "^foo\\z",
+            ] {
+                let actual = evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap();
+                let reference = Value::Boolean(regex_support::compile(pattern).unwrap()
+                    .is_match(text));
+                assert_eq!(actual, reference, "pattern={pattern:?}, text={text:?}");
+            }
+        }
+        assert_eq!(evaluate(&[Value::Null, Value::Text("^foo".into())]).unwrap(),
+            Value::Null);
+        assert!(evaluate(&[Value::Text("hello".into()), Value::Text("(".into())]).is_err());
     }
 }
