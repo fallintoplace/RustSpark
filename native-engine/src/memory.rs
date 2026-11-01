@@ -104,6 +104,20 @@ impl Reservation {
         self.bytes
     }
 
+    /// Combine owned reservations without releasing and reacquiring pool
+    /// capacity. Only guards from the same memory pool can be combined.
+    /// A failed transfer leaves both guards and accounting unchanged.
+    pub fn absorb(&mut self, other: &mut Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.pool, &other.pool) {
+            return Err(Error::Execution("cannot combine different memory pools".into()));
+        }
+        let total = self.bytes.checked_add(other.bytes)
+            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
+        self.bytes = total;
+        other.bytes = 0;
+        Ok(())
+    }
+
     /// Transfer part of an existing reservation without changing total pool usage.
     pub fn split_off(&mut self, bytes: usize) -> Result<Self> {
         if bytes > self.bytes {
@@ -342,5 +356,48 @@ mod zero_capacity_partial_claim_contention_tests {
         assert_eq!(claim.bytes(), 64);
         drop(claim);
         assert_eq!(pool.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod memory_reservation_ownership_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn combined_guards_do_not_release_or_recharge_capacity() {
+        let pool = MemoryPool::new(128);
+        let mut first = pool.reserve(40).unwrap();
+        let mut second = pool.reserve(50).unwrap();
+        first.absorb(&mut second).unwrap();
+        assert_eq!(first.bytes(), 90);
+        assert_eq!(second.bytes(), 0);
+        assert_eq!(pool.used(), 90);
+        drop(second);
+        assert_eq!(pool.used(), 90);
+        let split = first.split_off(60).unwrap();
+        assert_eq!(pool.used(), 90);
+        first.resize(68).unwrap();
+        assert_eq!(pool.used(), 128);
+        assert!(first.resize(69).is_err());
+        drop(split);
+        assert_eq!(pool.used(), 68);
+        drop(first);
+        assert_eq!(pool.used(), 0);
+    }
+
+    #[test]
+    fn cross_pool_absorb_fails_without_changing_either_guard() {
+        let first_pool = MemoryPool::new(100);
+        let second_pool = MemoryPool::new(100);
+        let mut first = first_pool.reserve(20).unwrap();
+        let mut other = second_pool.reserve(30).unwrap();
+        assert!(first.absorb(&mut other).is_err());
+        assert_eq!(first.bytes(), 20);
+        assert_eq!(other.bytes(), 30);
+        assert_eq!(first_pool.used(), 20);
+        assert_eq!(second_pool.used(), 30);
+        drop((first, other));
+        assert_eq!(first_pool.used(), 0);
+        assert_eq!(second_pool.used(), 0);
     }
 }
