@@ -12,6 +12,14 @@ fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
     })
 }
 
+// Trust a size-hint lower bound, but never a speculative upper bound
+// beyond a small starter allocation. Exact-size producers keep their
+// full-window allocation with no growth on the common path.
+fn initial_row_capacity(hint: (usize, Option<usize>), limit: usize) -> usize {
+    let (lower, upper) = hint;
+    lower.min(limit).max(upper.unwrap_or(256).min(limit).min(256))
+}
+
 pub struct RowBatcher<I> {
     input: I,
     schema: Schema,
@@ -69,8 +77,7 @@ where I: Iterator<Item = Result<Vec<Value>>>
         // Exact or bounded iterators often have far fewer rows remaining than
         // the requested batch size. Avoid reserving tens of thousands of slots
         // for a tiny final batch.
-        let capacity = self.input.size_hint().1
-            .map_or(limit.min(256), |upper| upper.min(limit));
+        let capacity = initial_row_capacity(self.input.size_hint(), limit);
         // Do not allocate a potential 256-row buffer for every field until
         // the first validated row arrives. Empty streams and a malformed
         // first record should leave all column vectors unallocated.
@@ -671,5 +678,43 @@ mod custom_row_batch_budget_api_tests {
         assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
         assert!(stream.next().unwrap().is_err());
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod speculative_row_hint_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn exact_producers_keep_their_capacity_and_upper_only_hints_are_capped() {
+        assert_eq!(initial_row_capacity((64_000, Some(64_000)), 65_536), 64_000);
+        assert_eq!(initial_row_capacity((0, Some(usize::MAX)), 65_536), 256);
+        assert_eq!(initial_row_capacity((0, None), 65_536), 256);
+        assert_eq!(initial_row_capacity((1000, Some(usize::MAX)), 65_536), 1000);
+        assert_eq!(initial_row_capacity((0, Some(3)), 65_536), 3);
+        assert_eq!(initial_row_capacity((0, Some(0)), 65_536), 0);
+        assert_eq!(initial_row_capacity((1000, Some(1000)), 128), 128);
+    }
+
+    #[test]
+    fn speculative_hints_do_not_change_streamed_rows() {
+        struct UpperOnly(std::vec::IntoIter<Result<Vec<Value>>>);
+        impl Iterator for UpperOnly {
+            type Item = Result<Vec<Value>>;
+            fn next(&mut self) -> Option<Self::Item> { self.0.next() }
+            fn size_hint(&self) -> (usize, Option<usize>) { (0, Some(usize::MAX)) }
+        }
+        let schema = Schema::new(vec![
+            crate::schema::Field::new("payload", crate::schema::DataType::Text, true),
+        ]).unwrap();
+        let rows = (0..513).map(|index| Ok(vec![
+            Value::Text(format!("row-{index}")),
+        ])).collect::<Vec<_>>();
+        let batches = RowBatcher::new(UpperOnly(rows.into_iter()), schema, 512)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).collect::<Vec<_>>(),
+            vec![512, 1]);
+        assert_eq!(batches[1].row(0).unwrap(),
+            vec![Value::Text("row-512".into())]);
     }
 }
