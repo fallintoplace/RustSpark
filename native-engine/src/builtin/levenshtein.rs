@@ -307,7 +307,58 @@ fn hamming_distance(args: &[Value]) -> Result<Value> {
     }
 }
 
+// Match Spark's Java implementation, including UTF-16 code-unit comparisons.
+fn jaro_winkler_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Float)
+}
+
+fn jaro_winkler_similarity(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    // A naive pairwise search is quadratic; cap it before allocating UTF-16 state.
+    if left.len() > 4096 || right.len() > 4096 {
+        return Err(Error::Execution("JARO_WINKLER_SIMILARITY input exceeds 4096 bytes".into()));
+    }
+    if left == right { return Ok(Value::Float(1.0)); }
+    if left.is_empty() || right.is_empty() { return Ok(Value::Float(0.0)); }
+    let a = left.encode_utf16().collect::<Vec<_>>();
+    let b = right.encode_utf16().collect::<Vec<_>>();
+    let window = (a.len().max(b.len()) / 2).saturating_sub(1);
+    let mut a_matched = vec![false; a.len()];
+    let mut b_matched = vec![false; b.len()];
+    let mut matches = 0usize;
+
+    for (i, unit) in a.iter().enumerate() {
+        let start = i.saturating_sub(window);
+        let end = i.saturating_add(window).saturating_add(1).min(b.len());
+        for j in start..end {
+            if b_matched[j] || *unit != b[j] { continue; }
+            a_matched[i] = true;
+            b_matched[j] = true;
+            matches += 1;
+            break;
+        }
+    }
+    if matches == 0 { return Ok(Value::Float(0.0)); }
+    let mut transpositions = 0usize;
+    let mut j = 0usize;
+    for (i, matched) in a_matched.iter().enumerate() {
+        if !matched { continue; }
+        while !b_matched[j] { j += 1; }
+        if a[i] != b[j] { transpositions += 1; }
+        j += 1;
+    }
+    let matches_f64 = matches as f64;
+    let jaro = (matches_f64 / a.len() as f64
+        + matches_f64 / b.len() as f64
+        + (matches_f64 - transpositions as f64 / 2.0) / matches_f64) / 3.0;
+    let prefix = a.iter().zip(&b).take(4).take_while(|(left, right)| left == right).count();
+    Ok(Value::Float(jaro + prefix as f64 * 0.1 * (1.0 - jaro)))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "jaro_winkler_similarity", min_args: 2, max_args: 2, result_type: jaro_winkler_type, call: jaro_winkler_similarity },
     Function { name: "hamming_distance", min_args: 2, max_args: 2, result_type: hamming_distance_type, call: hamming_distance },Function {
     name: "levenshtein", min_args: 2, max_args: 3,
     result_type: output, call: evaluate,
@@ -710,5 +761,36 @@ mod unicode_distance_preallocation_budget_tests {
         assert_eq!(evaluate(&args).unwrap(), Value::Integer(1));
         assert_eq!(evaluate(&[args[0].clone(), args[1].clone(), Value::Integer(1)]).unwrap(),
             Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod spark_jaro_winkler_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn matches_spark_reference_similarity() {
+        let run = |a: &str, b: &str| {
+            let Value::Float(value) = jaro_winkler_similarity(&[
+                Value::Text(a.into()), Value::Text(b.into()),
+            ]).unwrap() else { panic!("double"); };
+            value
+        };
+        assert!((run("MARTHA", "MARHTA") - 0.9611111111111111).abs() < 1e-12);
+        assert!((run("DWAYNE", "DUANE") - 0.8400000000000001).abs() < 1e-12);
+        assert!((run("kitten", "sitting") - 0.746031746031746).abs() < 1e-12);
+        assert_eq!(run("ABC", "XYZ"), 0.0);
+        assert_eq!(run("", ""), 1.0);
+        assert_eq!(run("ABC", ""), 0.0);
+        assert_eq!(run("東京都", "東京都"), 1.0);
+        assert_eq!(run("🙂abc", "🙂abd"), run("🙂abd", "🙂abc"));
+        assert_eq!(jaro_winkler_similarity(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+        assert!(jaro_winkler_similarity(&[
+            Value::Text("a".repeat(4097)), Value::Text("a".into())]).is_err());
+        assert!(crate::builtin::supports("jaro_winkler_similarity"));
+        let plan = sql::parse_sql("SELECT JARO_WINKLER_SIMILARITY('ABC', 'ABC')").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Float(1.0)]]);
     }
 }

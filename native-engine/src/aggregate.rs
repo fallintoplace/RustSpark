@@ -21,6 +21,10 @@ pub enum AggregateOp {
     Min(Expr),
     Max(Expr),
     Last(Expr, bool),
+    First(Expr, bool),
+    BitXor(Expr),
+    BitOr(Expr),
+    BitAnd(Expr),
 }
 
 // The engine validates query plans, but public aggregation helpers may be
@@ -33,7 +37,11 @@ fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
             AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
             | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
-            | AggregateOp::Min(expr) | AggregateOp::Max(expr)
+            | AggregateOp::Min(expr) | AggregateOp::Max(expr) 
+            | AggregateOp::BitAnd(expr) 
+            | AggregateOp::BitOr(expr) 
+            | AggregateOp::BitXor(expr) 
+            | AggregateOp::First(expr, _) 
             | AggregateOp::Last(expr, _) => expr.validate_budget()?,
         }
     }
@@ -75,7 +83,35 @@ impl AggregateItem {
                 }
             }
             AggregateOp::Min(expr) | AggregateOp::Max(expr)
+            | AggregateOp::First(expr, _) 
             | AggregateOp::Last(expr, _) => expr.output_type(schema),
+            AggregateOp::BitAnd(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else {
+                    expr.output_type(schema)?
+                };
+                if kind == DataType::Integer { Ok(DataType::Integer) }
+                else { Err(Error::Type("BIT_AND requires integer input".into())) }
+            },
+            AggregateOp::BitOr(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else {
+                    expr.output_type(schema)?
+                };
+                if kind == DataType::Integer { Ok(DataType::Integer) }
+                else { Err(Error::Type("BIT_OR requires integer input".into())) }
+            },
+            AggregateOp::BitXor(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else {
+                    expr.output_type(schema)?
+                };
+                if kind == DataType::Integer { Ok(DataType::Integer) }
+                else { Err(Error::Type("BIT_XOR requires integer input".into())) }
+            },
         }
     }
 }
@@ -91,6 +127,10 @@ enum State {
     Min(Option<Value>),
     Max(Option<Value>),
     Last(Option<Value>),
+    First(Option<Value>),
+    BitXor(Option<i64>),
+    BitOr(Option<i64>),
+    BitAnd(Option<i64>),
 }
 
 impl State {
@@ -106,6 +146,10 @@ impl State {
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
             AggregateOp::Last(_, _) => Self::Last(None),
+            AggregateOp::First(_, _) => Self::First(None),
+            AggregateOp::BitXor(_) => Self::BitXor(None),
+            AggregateOp::BitOr(_) => Self::BitOr(None),
+            AggregateOp::BitAnd(_) => Self::BitAnd(None),
         }
     }
 
@@ -125,7 +169,11 @@ impl State {
             | AggregateOp::Avg(expr)
             | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr)
-            | AggregateOp::Max(expr)
+            | AggregateOp::Max(expr) 
+            | AggregateOp::BitAnd(expr) 
+            | AggregateOp::BitOr(expr) 
+            | AggregateOp::BitXor(expr) 
+            | AggregateOp::First(expr, _) 
             | AggregateOp::Last(expr, _) => match expr {
                 Expr::Column(name) =>
                     Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
@@ -184,6 +232,32 @@ impl State {
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
             Self::Max(maximum) => update_extreme(maximum, value, false)?,
+            Self::BitAnd(aggregate) => match value.as_ref() {
+                Value::Null => {},
+                Value::Integer(number) => {
+                    *aggregate = Some((*aggregate).map_or(*number, |prior| prior & *number));
+                },
+                _ => return Err(Error::Type("BIT_AND requires integer input".into())),
+            },
+            Self::BitOr(aggregate) => match value.as_ref() {
+                Value::Null => {},
+                Value::Integer(number) => {
+                    *aggregate = Some((*aggregate).map_or(*number, |prior| prior | *number));
+                },
+                _ => return Err(Error::Type("BIT_OR requires integer input".into())),
+            },
+            Self::BitXor(aggregate) => match value.as_ref() {
+                Value::Null => {},
+                Value::Integer(number) => {
+                    *aggregate = Some((*aggregate).map_or(*number, |prior| prior ^ *number));
+                },
+                _ => return Err(Error::Type("BIT_XOR requires integer input".into())),
+            },
+            Self::First(slot) => {
+                if slot.is_none() && (!matches!(op, AggregateOp::First(_, true)) || !value.is_null()) {
+                    *slot = Some(value.into_owned());
+                }
+            },
             Self::Last(slot) => {
                 if (!matches!(op, AggregateOp::Last(_, true)) || !value.is_null()) {
                     *slot = Some(value.into_owned());
@@ -205,7 +279,10 @@ impl State {
             Self::AvgDistinct { sum, compensation, count, .. } =>
                 if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
             Self::SumDistinct { total, .. } => total.unwrap_or(Value::Null),
-            Self::Sum(value) | Self::Min(value) | Self::Max(value) | Self::Last(value) => {
+            Self::BitAnd(value) => value.map(Value::Integer).unwrap_or(Value::Null),
+            Self::BitOr(value) => value.map(Value::Integer).unwrap_or(Value::Null),
+            Self::BitXor(value) => value.map(Value::Integer).unwrap_or(Value::Null),
+            Self::Sum(value) | Self::Min(value) | Self::Max(value) | Self::First(value) | Self::Last(value) => {
                 value.unwrap_or(Value::Null)
             }
         })
