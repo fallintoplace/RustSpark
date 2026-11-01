@@ -13,6 +13,8 @@ pub struct ScanCursor<'a> {
     identity_projection: bool,
     target_rows: usize,
     next_row: usize,
+    // Consume the OFFSET in the scan loop before building projected columns.
+    skip_accepted: usize,
     pending_error: Option<Error>,
     failed: bool,
 }
@@ -71,7 +73,7 @@ pub fn scan<'a>(
     };
     Ok(ScanCursor {
         source, predicate, boolean_column, columns, output_schema, identity_projection,
-        target_rows, next_row, pending_error: None, failed: false,
+        target_rows, next_row, skip_accepted: 0, pending_error: None, failed: false,
     })
 }
 
@@ -131,7 +133,10 @@ impl Iterator for ScanCursor<'_> {
                     None => true,
                 }
             };
-            if include { selected.push(row); }
+            if include {
+                if self.skip_accepted != 0 { self.skip_accepted -= 1; }
+                else { selected.push(row); }
+            }
         }
         if selected.is_empty() {
             return None;
@@ -207,9 +212,18 @@ pub fn scan_window<'a>(
 ) -> Result<WindowedScan<'a>> {
     offset.checked_add(count)
         .ok_or_else(|| Error::Execution("scan window OFFSET + LIMIT overflow".into()))?;
+    let mut inner = scan(source, predicate, projected_columns, target_rows)?;
+    if inner.predicate.is_none() {
+        // Unfiltered OFFSET can jump directly to the first required row.
+        // No skipped TEXT columns are cloned or converted into throwaway batches.
+        inner.next_row = offset.min(source.num_rows());
+    } else {
+        // Filtered OFFSET still evaluates every predicate, but materializes
+        // only matches after the requested number of qualifying rows.
+        inner.skip_accepted = offset;
+    }
     Ok(WindowedScan {
-        inner: scan(source, predicate, projected_columns, target_rows)?,
-        skip: offset,
+        inner, skip: 0,
         remaining: count,
         stopped: false,
     })
@@ -598,5 +612,57 @@ mod bound_boolean_scan_regressions {
             &[], 4).is_err());
         assert!(scan(&source, Some(Expr::Column("active".into())),
             &["unknown"], 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scan_offset_pushdown_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    fn input() -> Batch {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        Batch::from_rows(schema, (0..173_i64).map(|n| vec![
+            Value::Integer(n),
+            if n % 29 == 0 { Value::Null }
+            else { Value::Text(format!("{n}-{}", "🙂".repeat(2048))) },
+        ]).collect()).unwrap()
+    }
+
+    #[test]
+    fn unfiltered_window_seeks_past_skipped_projection_rows() {
+        let source = input();
+        let mut cursor = scan_window(&source, None, &["payload"], 7, 111, 19).unwrap();
+        assert_eq!(cursor.inner.next_row, 111);
+        assert_eq!(cursor.inner.skip_accepted, 0);
+        let output = cursor.by_ref().collect::<Result<Vec<_>>>().unwrap();
+        assert!(output.iter().all(|batch| batch.num_rows() <= 7));
+        let actual = output.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        let expected = source.column(1).unwrap()[111..130].iter().cloned()
+            .map(|value| vec![value]).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(cursor.next().is_none());
+    }
+
+    #[test]
+    fn filtered_offset_skips_matches_without_materializing_payloads() {
+        let source = input();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(23)),
+        );
+        let mut cursor = scan_window(
+            &source, Some(predicate), &["payload"], 5, 72, 11,
+        ).unwrap();
+        assert_eq!(cursor.inner.skip_accepted, 72);
+        let batches = cursor.by_ref().collect::<Result<Vec<_>>>().unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() <= 5));
+        let actual = batches.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        let expected = source.column(1).unwrap()[96..107].iter().cloned()
+            .map(|value| vec![value]).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }
