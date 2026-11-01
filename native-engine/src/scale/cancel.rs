@@ -118,7 +118,7 @@ mod inherited_stage_deadline_tests {
         let parent = QueryControl::with_timeout(Duration::from_secs(10)).unwrap();
         let child = parent.child_with_timeout(Duration::from_secs(5)).unwrap();
         let grandchild = child.child_with_timeout(Duration::from_secs(30)).unwrap();
-        assert!(grandchild.remaining_time().unwrap() <= child.remaining_time().unwrap());
+        assert_eq!(grandchild.deadline, child.deadline);
         grandchild.cancel();
         assert!(parent.is_cancelled());
         assert!(child.check().is_err());
