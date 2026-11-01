@@ -463,7 +463,7 @@ mod partial_group_memory_reservation_regressions {
             for handle in handles { totals.push(handle.join().unwrap()); }
         });
         assert!(totals.iter().map(|(claimed, _)| *claimed).sum::<usize>() <= 101);
-        assert_eq!(pool.used(), totals.iter().map(|(claimed, _)| *claimed).sum());
+        assert_eq!(pool.used(), totals.iter().map(|(claimed, _)| *claimed).sum::<usize>());
         drop(totals);
         assert_eq!(pool.used(), 0);
     }
