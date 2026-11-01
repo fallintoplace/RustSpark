@@ -161,8 +161,29 @@ fn mixed_top_k_indices(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Vec<
     Ok(retained.into_iter().map(|entry| entry.row).collect())
 }
 
+// For LIMIT 2 on one direct column, retain only two row indexes on the stack.
+// Comparisons use strict Less so input order stays stable for equal keys.
+fn top_two_column_indices(column: &[Value], descending: bool, nulls_first: bool) -> [usize; 2] {
+    debug_assert!(column.len() >= 2);
+    let less = |row: usize, other: usize| {
+        crate::sort::compare_values(&column[row], &column[other], descending, nulls_first)
+            == Ordering::Less
+    };
+    let (mut first, mut second) = if less(1, 0) { (1, 0) } else { (0, 1) };
+    for row in 2..column.len() {
+        if less(row, first) {
+            second = first;
+            first = row;
+        } else if less(row, second) {
+            second = row;
+        }
+    }
+    [first, second]
+}
+
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
+        key.expression.validate_budget()?;
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take(&[]); }
@@ -171,6 +192,14 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if keys.is_empty() {
         return batch.slice_rows(0, k.min(batch.num_rows()));
+    }
+    if k == 2 && keys.len() == 1 {
+        if let Expr::Column(name) = &keys[0].expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            return batch.take(&top_two_column_indices(
+                column, keys[0].descending, keys[0].nulls_first,
+            ));
+        }
     }
     if k == 1 && keys.len() == 1 {
         if let Expr::Column(name) = &keys[0].expression {
@@ -251,6 +280,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
 /// deep-copying TEXT. Other key shapes retain the borrowed implementation.
 pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
+        key.expression.validate_budget()?;
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take_unique_owned(&[]); }
@@ -261,6 +291,15 @@ pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     }
     if k >= batch.num_rows() { return crate::sort::sort_owned(batch, keys); }
 
+    if k == 2 && keys.len() == 1 {
+        if let Expr::Column(name) = &keys[0].expression {
+            let column = batch.column(batch.schema().column(name)?)?;
+            let chosen = top_two_column_indices(
+                column, keys[0].descending, keys[0].nulls_first,
+            );
+            return batch.take_unique_owned(&chosen);
+        }
+    }
     if k == 1 && keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         // LIMIT 1 never needs a heap, even with composite ORDER BY keys.
         // Compare borrowed cells and transfer the winning owned row once.
@@ -386,6 +425,7 @@ mod tests {
 pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize) -> Result<Batch> {
     if count == 0 {
         for key in keys {
+            key.expression.validate_budget()?;
             key.expression.output_type(batch.schema())?;
         }
         return batch.take(&[]);
@@ -397,6 +437,7 @@ pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize
     if offset >= batch.num_rows() &&
         keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         for key in keys {
+            key.expression.validate_budget()?;
             key.expression.output_type(batch.schema())?;
         }
         return batch.take(&[]);
@@ -990,5 +1031,61 @@ mod owned_top_one_heap_elision_tests {
             vec![Value::Integer(0)], vec![Value::Integer(i64::MAX)],
         ]).unwrap();
         assert!(top_k_owned(invalid, &[key], 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_column_top_two_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn top_two_matches_stable_sort_with_nulls_ties_and_wide_text() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let wide = "é東京".repeat(512);
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("b".into()), Value::Text(format!("0{wide}"))],
+            vec![Value::Null, Value::Text(format!("1{wide}"))],
+            vec![Value::Text("a".into()), Value::Text(format!("2{wide}"))],
+            vec![Value::Text("a".into()), Value::Text(format!("3{wide}"))],
+            vec![Value::Null, Value::Text(format!("4{wide}"))],
+            vec![Value::Text("c".into()), Value::Text(format!("5{wide}"))],
+        ]).unwrap();
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let keys = [SortKey {
+                    expression: Expr::Column("key".into()), descending, nulls_first,
+                }];
+                let expected = crate::sort::sort(&input, &keys).unwrap()
+                    .slice_rows(0, 2).unwrap().rows().unwrap();
+                assert_eq!(top_k(&input, &keys, 2).unwrap().rows().unwrap(), expected);
+                assert_eq!(top_k_owned(input.clone(), &keys, 2).unwrap().rows().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_topk_expression_budget_tests {
+    use super::*;
+    use crate::schema::Schema;
+
+    #[test]
+    fn oversized_keys_fail_even_for_empty_and_zero_limit_inputs() {
+        let empty = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut expression = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { expression = Expr::Not(Box::new(expression)); }
+        let keys = [SortKey::ascending(expression)];
+        for result in [
+            top_k(&empty, &keys, 0),
+            top_k_owned(empty.clone(), &keys, 0),
+            top_k_offset(&empty, &keys, 0, 0),
+            top_k_offset(&empty, &keys, 4, 1),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
     }
 }

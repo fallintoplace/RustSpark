@@ -93,6 +93,12 @@ impl Batch {
         }
         let rows = self.rows.checked_add(other.rows)
             .ok_or_else(|| Error::Execution("batch append row count overflow".into()))?;
+        // Admit every column's growth before moving any cells. An allocator
+        // failure must not abort the process or leave half the columns extended.
+        for (target, source) in self.columns.iter_mut().zip(&other.columns) {
+            target.try_reserve(source.len())
+                .map_err(|_| Error::Execution("batch append allocation failed".into()))?;
+        }
         for (target, source) in self.columns.iter_mut().zip(other.columns) {
             target.extend(source);
         }
@@ -194,6 +200,15 @@ impl Batch {
                 return Err(Error::Execution(format!("row index out of bounds: {invalid}")));
             }
             return Ok(Self { schema: self.schema, columns: Vec::new(), rows: indices.len() });
+        }
+        // Ordered selections can transfer cells directly, without building a
+        // last-use hash map or an O(source rows) dense index.
+        if indices.len() == self.rows &&
+            indices.iter().enumerate().all(|(position, &row)| position == row) {
+            return Ok(self);
+        }
+        if indices.windows(2).all(|pair| pair[0] < pair[1]) {
+            return self.take_sorted_owned(indices);
         }
         if indices.len() <= self.rows / 8 {
             let mut last = std::collections::HashMap::with_capacity(indices.len());
@@ -984,5 +999,95 @@ mod batch_owned_append_tests {
         let mut zero = Batch::new_with_row_count(empty_schema.clone(), vec![], 2).unwrap();
         zero.append_owned(Batch::new_with_row_count(empty_schema, vec![], 5).unwrap()).unwrap();
         assert_eq!(zero.num_rows(), 7);
+    }
+}
+
+#[cfg(test)]
+mod transactional_owned_batch_append_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn moving_wide_text_after_reservation_preserves_owned_storage() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, false),
+            Field::new("value", DataType::Integer, false),
+        ]).unwrap();
+        let mut left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("first".into()), Value::Integer(1)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(8000)), Value::Integer(2)],
+            vec![Value::Text("third".into()), Value::Integer(3)],
+        ]).unwrap();
+        let source_ptr = match right.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        left.append_owned(right).unwrap();
+        assert_eq!(left.num_rows(), 3);
+        assert_eq!(left.value(1, 1).unwrap(), &Value::Integer(2));
+        let moved_ptr = match left.value(1, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(source_ptr, moved_ptr);
+    }
+
+    #[test]
+    fn append_rejects_bad_schema_before_changing_existing_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let mut left = Batch::from_rows(schema, vec![
+            vec![Value::Integer(42)],
+        ]).unwrap();
+        let invalid = Batch::from_rows(
+            Schema::new(vec![Field::new("n", DataType::Text, false)]).unwrap(),
+            vec![vec![Value::Text("bad".into())]],
+        ).unwrap();
+        assert!(left.append_owned(invalid).is_err());
+        assert_eq!(left.rows().unwrap(), vec![vec![Value::Integer(42)]]);
+    }
+}
+
+#[cfg(test)]
+mod ordered_owned_gather_no_index_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn ordered_sparse_and_full_gathers_move_existing_text_storage() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..8)
+            .map(|n| vec![Value::Text(format!("value-{n}"))]).collect()).unwrap();
+        let ptr = match batch.value(5, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let sparse = batch.take_owned(&[1, 5, 7]).unwrap();
+        assert_eq!(sparse.rows().unwrap(), vec![
+            vec![Value::Text("value-1".into())],
+            vec![Value::Text("value-5".into())],
+            vec![Value::Text("value-7".into())],
+        ]);
+        match sparse.value(1, 0).unwrap() {
+            Value::Text(value) => assert_eq!(value.as_ptr(), ptr),
+            _ => unreachable!(),
+        }
+        let full = Batch::from_rows(schema, vec![
+            vec![Value::Text("left".into())],
+            vec![Value::Text("right".into())],
+        ]).unwrap();
+        let ptr = match full.value(0, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let identity = full.take_owned(&[0, 1]).unwrap();
+        match identity.value(0, 0).unwrap() {
+            Value::Text(value) => assert_eq!(value.as_ptr(), ptr),
+            _ => unreachable!(),
+        }
+        assert!(identity.take_owned(&[1, 2]).is_err());
     }
 }

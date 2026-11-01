@@ -128,6 +128,18 @@ mod tests {
  
 impl Schema {
     /// Retain named fields in the requested order; reject unknown and duplicate names.
+    /// Build a projection from already resolved column indices. Avoid name
+    /// normalization and hash lookups on the physical planning path.
+    pub fn project_indices(&self, indices: &[usize]) -> Result<Self> {
+        if indices.len() == self.len() &&
+            indices.iter().copied().eq(0..self.len()) {
+            return Ok(self.clone());
+        }
+        Self::new(indices.iter().map(|&index| {
+            Ok(self.field(index)?.clone())
+        }).collect::<Result<Vec<_>>>()?)
+    }
+
     pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
         // An identity projection only changes the caller's view, not the
         // metadata. Reuse both Arc allocations and their column index.
@@ -244,5 +256,28 @@ mod identity_projection_sharing_tests {
         assert_eq!(reordered.fields()[0].name, "City");
         assert!(source.project_columns(&["userid", "userid", "東京"]).is_err());
         assert!(source.project_columns(&["userid", "missing", "東京"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod indexed_schema_projection_tests {
+    use super::*;
+
+    #[test]
+    fn index_projections_match_named_projections_and_reuse_identity_metadata() {
+        let schema = Schema::new(vec![
+            Field::new("UserId", DataType::Integer, false),
+            Field::new("City", DataType::Text, true),
+            Field::new("Score", DataType::Float, true),
+        ]).unwrap();
+        let identity = schema.project_indices(&[0, 1, 2]).unwrap();
+        assert!(Arc::ptr_eq(&identity.fields, &schema.fields));
+        assert!(Arc::ptr_eq(&identity.indices, &schema.indices));
+        assert_eq!(schema.project_indices(&[2, 0]).unwrap(),
+            schema.project_columns(&["Score", "UserId"]).unwrap());
+        assert!(schema.project_indices(&[0, 0]).is_err());
+        assert!(schema.project_indices(&[3]).is_err());
+        assert!(schema.project_indices(&[usize::MAX]).is_err());
+        assert!(schema.project_indices(&[]).unwrap().is_empty());
     }
 }
