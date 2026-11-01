@@ -318,5 +318,30 @@ class BoundedGatewayConcurrencyTests(unittest.TestCase):
                 worker.join(timeout=2)
 
 
+
+class BackendInterruptReapTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_reader_construction_interrupt_reaps_backend(self):
+        from unittest.mock import patch
+        import server
+        original = subprocess.Popen
+        started = []
+
+        def tracked(*args, **kwargs):
+            child = original(*args, **kwargs)
+            started.append(child)
+            return child
+
+        with patch("server.subprocess.Popen", side_effect=tracked):
+            with patch("server.threading.Thread", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_bounded_backend(
+                        [sys.executable, "-c", "import time;time.sleep(30)"],
+                        timeout=5, max_bytes=1024,
+                    )
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll())
+
+
 if __name__ == "__main__":
     unittest.main()
