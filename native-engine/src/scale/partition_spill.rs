@@ -923,11 +923,17 @@ mod sparse_partition_finalization_regressions {
         let files = writer.finish_sparse().unwrap();
         assert_eq!(files.paths().len(), 1);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
-        let reader = SpillReader::new(
+        let mut reader = SpillReader::new(
             BufReader::new(File::open(&files.paths()[0]).unwrap()), 17,
         ).unwrap();
-        let decoded = std::iter::successors(Some(reader), |_| None);
-        drop(decoded);
+        assert_eq!(reader.schema(), &schema);
+        let mut decoded = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() {
+            decoded.extend(batch.rows().unwrap());
+        }
+        assert_eq!(decoded, batch.rows().unwrap());
+        // Release the file handle before unlinking it, including on Windows.
+        drop(reader);
         drop(files);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         std::fs::remove_dir(&directory).unwrap();
