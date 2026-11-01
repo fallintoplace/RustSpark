@@ -281,7 +281,10 @@ class RustSpark:
                 if not line:
                     break
                 total += len(line)
-                row_size = len(line) - int(line.endswith(b"\n"))
+                # CRLF is row framing, not JSON payload. Keep both bytes
+                # in the total stdout budget accounted above.
+                terminator = 2 if line.endswith(b"\r\n") else int(line.endswith(b"\n"))
+                row_size = len(line) - terminator
                 if row_size > max_row_bytes:
                     raise RustSparkError("RustSpark NDJSON row exceeds max_row_bytes")
                 if total > max_output_bytes:
