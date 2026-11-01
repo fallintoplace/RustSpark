@@ -29,6 +29,7 @@ pub fn scan<'a>(
         return Err(Error::Execution("scan batch size must be positive".into()));
     }
     if let Some(predicate) = &predicate {
+        predicate.validate_budget()?;
         let kind = predicate.output_type(source.schema())?;
         if kind != crate::schema::DataType::Boolean &&
             !matches!(predicate, Expr::Literal(Value::Null)) {
@@ -107,7 +108,7 @@ impl Iterator for ScanCursor<'_> {
             if result.is_err() { self.failed = true; }
             return Some(result);
         }
-        let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()));
+        let mut selected = Vec::with_capacity(self.target_rows.min(self.source.num_rows()).min(1_024));
         while self.next_row < self.source.num_rows() && selected.len() < self.target_rows {
             let row = self.next_row;
             self.next_row += 1;
@@ -664,5 +665,50 @@ mod scan_offset_pushdown_regressions {
         let expected = source.column(1).unwrap()[96..107].iter().cloned()
             .map(|value| vec![value]).collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod direct_scan_expression_budget_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_predicate_fails_before_cursor_construction() {
+        let batch = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut predicate = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { predicate = Expr::Not(Box::new(predicate)); }
+        let direct = scan(&batch, Some(predicate.clone()), &[], 1);
+        assert!(direct.err().expect("deep predicate must fail").to_string()
+            .contains("complexity budget"));
+        let window = scan_window(&batch, Some(predicate), &[], 1, 0, 0);
+        assert!(window.err().expect("deep window predicate must fail").to_string()
+            .contains("complexity budget"));
+    }
+}
+
+#[cfg(test)]
+mod sparse_stream_scan_buffer_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field}};
+
+    #[test]
+    fn a_large_target_with_rare_matches_preserves_global_row_order() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema, (0..12_000)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(11_996)),
+        );
+        let rows = scan(&input, Some(predicate), &[], 10_000)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rows().unwrap(), vec![
+            vec![Value::Integer(11_997)],
+            vec![Value::Integer(11_998)],
+            vec![Value::Integer(11_999)],
+        ]);
     }
 }

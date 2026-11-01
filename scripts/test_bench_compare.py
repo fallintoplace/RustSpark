@@ -11,6 +11,14 @@ import sql_report_compare
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_native_engine_command_omits_stream_only_schema(self):
+        command = bench_compare.command_for(
+            "rustspark", "rs", pathlib.Path("dataset.csv"), "SELECT COUNT(*) FROM data"
+        )
+        self.assertEqual(command[:3], ["rs", "--csv", "dataset.csv"])
+        self.assertNotIn("--csv-schema", command)
+        self.assertEqual(command[-2:], ["--stdout-format", "json"])
+
     def test_commands_use_shared_input_and_sql(self):
         csv = pathlib.Path("/tmp/with ' quote.csv")
         query = "SELECT 1"

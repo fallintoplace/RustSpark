@@ -99,10 +99,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         !replacement.contains('$') {
         // Scan once, appending whole unchanged UTF-8 spans. Check the
         // output budget incrementally to reject expansion before allocating it.
+        let mut matches = suffix.match_indices(pattern);
+        let Some(first_match) = matches.next() else {
+            // No substitution is required. Reuse a single clone and avoid
+            // constructing the incremental replacement buffer.
+            return Ok(Value::Text(text.to_owned()));
+        };
         let mut result = String::with_capacity(text.len());
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
-        for (index, _) in suffix.match_indices(pattern) {
+        for (index, _) in std::iter::once(first_match).chain(matches) {
             let unchanged = &suffix[consumed..index];
             let next_len = result.len().checked_add(unchanged.len())
                 .and_then(|len| len.checked_add(replacement.len()))
@@ -480,5 +486,29 @@ mod bounded_capture_template_expansion_tests {
             Value::Text("$$:${num}/$first/$missing".into()),
         ]).unwrap();
         assert_eq!(output, Value::Text("$:12/ab/".into()));
+    }
+}
+
+#[cfg(test)]
+mod literal_no_match_replace_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_original_text_when_literal_never_matches() {
+        for text in ["", "é🙂東京", "no match here", "foofoo"] {
+            let args = [
+                Value::Text(text.into()), Value::Text("absent".into()),
+                Value::Text("replaced".into()),
+            ];
+            assert_eq!(evaluate(&args).unwrap(), Value::Text(text.into()));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("start é🙂".into()), Value::Text("start".into()),
+            Value::Text("X".into()), Value::Integer(3),
+        ]).unwrap(), Value::Text("start é🙂".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("ééé".into()), Value::Text("é".into()),
+            Value::Text("X".into()),
+        ]).unwrap(), Value::Text("XXX".into()));
     }
 }
