@@ -76,6 +76,8 @@ fn checksum(bytes: &[u8]) -> u32 {
 /// duplicate frames. Callers must commit task results exactly once.
 pub struct AttemptTracker {
     attempts: std::collections::HashMap<(u64, u64), u32>,
+    // Retire a completed stage without scanning every unrelated worker task.
+    by_stage: std::collections::HashMap<u64, std::collections::HashSet<u64>>,
     max_tasks: usize,
 }
 
@@ -84,7 +86,11 @@ impl AttemptTracker {
         if max_tasks == 0 {
             return Err(Error::Execution("exchange task tracking budget must be positive".into()));
         }
-        Ok(Self { attempts: std::collections::HashMap::new(), max_tasks })
+        Ok(Self {
+            attempts: std::collections::HashMap::new(),
+            by_stage: std::collections::HashMap::new(),
+            max_tasks,
+        })
     }
 
     pub fn accept(&mut self, frame: &Frame) -> Result<bool> {
@@ -101,6 +107,7 @@ impl AttemptTracker {
                     return Err(Error::Execution("exchange task tracking budget exceeded".into()));
                 }
                 entry.insert(frame.attempt);
+                self.by_stage.entry(frame.stage).or_default().insert(frame.task);
                 Ok(true)
             }
         }
@@ -136,7 +143,9 @@ impl AttemptTracker {
             }
         }
         for (key, attempt) in staged {
-            self.attempts.insert(key, attempt);
+            if self.attempts.insert(key, attempt).is_none() {
+                self.by_stage.entry(key.0).or_default().insert(key.1);
+            }
         }
         Ok(accepted)
     }
@@ -144,15 +153,23 @@ impl AttemptTracker {
     /// Release a completed task after its exchange stream has been fully
     /// committed and closed. Do not call while delayed frames can still arrive.
     pub fn retire_task(&mut self, stage: u64, task: u64) -> bool {
-        self.attempts.remove(&(stage, task)).is_some()
+        if self.attempts.remove(&(stage, task)).is_none() { return false; }
+        if let Some(tasks) = self.by_stage.get_mut(&stage) {
+            tasks.remove(&task);
+            if tasks.is_empty() { self.by_stage.remove(&stage); }
+        }
+        true
     }
 
     /// Reclaim all attempt records for a finished stage. Stage IDs must not
     /// be reused while frames from an earlier incarnation are in flight.
     pub fn retire_stage(&mut self, stage: u64) -> usize {
-        let before = self.attempts.len();
-        self.attempts.retain(|&(existing, _), _| existing != stage);
-        before - self.attempts.len()
+        let Some(tasks) = self.by_stage.remove(&stage) else { return 0; };
+        let retired = tasks.len();
+        for task in tasks {
+            debug_assert!(self.attempts.remove(&(stage, task)).is_some());
+        }
+        retired
     }
 }
 
@@ -986,5 +1003,50 @@ mod fallible_frame_allocation_regressions {
             truncated.pop();
             assert!(read_frame(&mut truncated.as_slice(), 128).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod indexed_attempt_retirement_regressions {
+    use super::*;
+
+    fn frame(stage: u64, task: u64, attempt: u32) -> Frame {
+        Frame { stage, task, attempt, payload: Vec::new() }
+    }
+
+    #[test]
+    fn stage_retirement_only_visits_its_tasks_after_mixed_batch_admission() {
+        let mut tracker = AttemptTracker::new(3000).unwrap();
+        for task in 0..1000 {
+            assert!(tracker.accept(&frame(7, task, 1)).unwrap());
+            assert!(tracker.accept(&frame(8, task, 1)).unwrap());
+        }
+        let decisions = tracker.accept_batch(&[
+            frame(7, 8, 3), frame(7, 8, 2), frame(9, 1000, 1),
+            frame(8, 5, 2), frame(9, 1000, 2),
+        ]).unwrap();
+        assert_eq!(decisions, vec![true, false, true, true, true]);
+        assert!(tracker.retire_task(7, 10));
+        assert!(!tracker.retire_task(7, 10));
+        assert_eq!(tracker.retire_stage(7), 999);
+        assert_eq!(tracker.retire_stage(7), 0);
+        assert_eq!(tracker.attempts.len(), 1001);
+        assert_eq!(tracker.by_stage.len(), 2);
+        assert_eq!(tracker.retire_stage(9), 1);
+        assert_eq!(tracker.retire_stage(8), 1000);
+        assert!(tracker.attempts.is_empty());
+        assert!(tracker.by_stage.is_empty());
+    }
+
+    #[test]
+    fn rejected_atomic_window_does_not_publish_partial_stage_index() {
+        let mut tracker = AttemptTracker::new(2).unwrap();
+        tracker.accept(&frame(1, 1, 1)).unwrap();
+        assert!(tracker.accept_batch(&[frame(2, 5, 1), frame(3, 6, 1)]).is_err());
+        assert_eq!(tracker.attempts.len(), 1);
+        assert_eq!(tracker.by_stage.len(), 1);
+        assert_eq!(tracker.retire_stage(2), 0);
+        assert_eq!(tracker.retire_stage(3), 0);
+        assert_eq!(tracker.retire_stage(1), 1);
     }
 }
