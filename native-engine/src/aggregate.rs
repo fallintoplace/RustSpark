@@ -21,6 +21,8 @@ pub enum AggregateOp {
     Min(Expr),
     Max(Expr),
     BitXor(Expr),
+    BitOr(Expr),
+    BitAnd(Expr),
 }
 
 // The engine validates query plans, but public aggregation helpers may be
@@ -33,7 +35,9 @@ fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
             AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
             | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
             | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
-            | AggregateOp::Min(expr) | AggregateOp::Max(expr)
+            | AggregateOp::Min(expr) | AggregateOp::Max(expr) 
+            | AggregateOp::BitAnd(expr) 
+            | AggregateOp::BitOr(expr) 
             | AggregateOp::BitXor(expr) => expr.validate_budget()?,
         }
     }
@@ -75,6 +79,24 @@ impl AggregateItem {
                 }
             }
             AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(schema),
+            AggregateOp::BitAnd(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else {
+                    expr.output_type(schema)?
+                };
+                if kind == DataType::Integer { Ok(DataType::Integer) }
+                else { Err(Error::Type("BIT_AND requires integer input".into())) }
+            },
+            AggregateOp::BitOr(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else {
+                    expr.output_type(schema)?
+                };
+                if kind == DataType::Integer { Ok(DataType::Integer) }
+                else { Err(Error::Type("BIT_OR requires integer input".into())) }
+            },
             AggregateOp::BitXor(expr) => {
                 let kind = if matches!(expr, Expr::Literal(Value::Null)) {
                     DataType::Integer
@@ -99,6 +121,8 @@ enum State {
     Min(Option<Value>),
     Max(Option<Value>),
     BitXor(Option<i64>),
+    BitOr(Option<i64>),
+    BitAnd(Option<i64>),
 }
 
 impl State {
@@ -114,6 +138,8 @@ impl State {
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
             AggregateOp::BitXor(_) => Self::BitXor(None),
+            AggregateOp::BitOr(_) => Self::BitOr(None),
+            AggregateOp::BitAnd(_) => Self::BitAnd(None),
         }
     }
 
@@ -133,7 +159,9 @@ impl State {
             | AggregateOp::Avg(expr)
             | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr)
-            | AggregateOp::Max(expr)
+            | AggregateOp::Max(expr) 
+            | AggregateOp::BitAnd(expr) 
+            | AggregateOp::BitOr(expr) 
             | AggregateOp::BitXor(expr) => match expr {
                 Expr::Column(name) =>
                     Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
@@ -192,6 +220,20 @@ impl State {
             }
             Self::Min(minimum) => update_extreme(minimum, value, true)?,
             Self::Max(maximum) => update_extreme(maximum, value, false)?,
+            Self::BitAnd(aggregate) => match value.as_ref() {
+                Value::Null => {},
+                Value::Integer(number) => {
+                    *aggregate = Some((*aggregate).map_or(*number, |prior| prior & *number));
+                },
+                _ => return Err(Error::Type("BIT_AND requires integer input".into())),
+            },
+            Self::BitOr(aggregate) => match value.as_ref() {
+                Value::Null => {},
+                Value::Integer(number) => {
+                    *aggregate = Some((*aggregate).map_or(*number, |prior| prior | *number));
+                },
+                _ => return Err(Error::Type("BIT_OR requires integer input".into())),
+            },
             Self::BitXor(aggregate) => match value.as_ref() {
                 Value::Null => {},
                 Value::Integer(number) => {
@@ -215,6 +257,8 @@ impl State {
             Self::AvgDistinct { sum, compensation, count, .. } =>
                 if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
             Self::SumDistinct { total, .. } => total.unwrap_or(Value::Null),
+            Self::BitAnd(value) => value.map(Value::Integer).unwrap_or(Value::Null),
+            Self::BitOr(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::BitXor(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
                 value.unwrap_or(Value::Null)
