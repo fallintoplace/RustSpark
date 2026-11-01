@@ -33,8 +33,14 @@ fn round_even(args: &[Value]) -> Result<Value> {
     let result = if scale >= 0 {
         if x.abs() > f64::MAX / factor { return super::finite(x); }
         (x * factor).round_ties_even() / factor
-    }
-        else { (x / factor).round_ties_even() * factor };
+    } else {
+        // Large doubles are already exact multiples at this decimal
+        // scale. Avoid a divide/multiply round trip changing their bits.
+        if x.abs() >= factor * (1u64 << 53) as f64 {
+            return super::finite(x);
+        }
+        (x / factor).round_ties_even() * factor
+    };
     super::finite(result)
 }
 fn rint(args: &[Value]) -> Result<Value> {
@@ -89,5 +95,28 @@ mod large_finite_bround_float_tests {
         assert_eq!(round_even(&[Value::Float(-f64::MAX), Value::Integer(15)]).unwrap(), Value::Float(-f64::MAX));
         assert_eq!(round_even(&[Value::Float(2.5)]).unwrap(), Value::Float(2.0));
         assert_eq!(round_even(&[Value::Float(3.5)]).unwrap(), Value::Float(4.0));
+    }
+}
+
+#[cfg(test)]
+mod inexact_large_negative_bround_regressions {
+    use super::*;
+
+    #[test]
+    fn large_floats_do_not_shift_by_one_ulp_at_negative_scales() {
+        for (value, scale) in [
+            (-3.3036582842864976e239, -1),
+            (2.4560805462934964e260, -3),
+            (9.234641875553306e113, -8),
+            (f64::MAX, -15),
+            (-f64::MAX, -15),
+        ] {
+            let rounded = round_even(&[Value::Float(value), Value::Integer(scale)]).unwrap();
+            assert_eq!(rounded, Value::Float(value), "value={value}, scale={scale}");
+        }
+        assert_eq!(round_even(&[Value::Float(125.0), Value::Integer(-1)]).unwrap(),
+            Value::Float(120.0));
+        assert_eq!(round_even(&[Value::Float(135.0), Value::Integer(-1)]).unwrap(),
+            Value::Float(140.0));
     }
 }
