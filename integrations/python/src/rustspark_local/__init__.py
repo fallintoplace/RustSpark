@@ -9,7 +9,6 @@ import re
 import subprocess
 import signal
 import threading
-import tempfile
 
 from .subprocess_budget import run_bounded
 from dataclasses import dataclass
