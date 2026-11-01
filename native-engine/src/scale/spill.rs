@@ -325,6 +325,40 @@ impl<R: Read> SpillReader<R> {
         result
     }
 
+    /// A common spill stream contains one numeric or boolean column. Decode
+    /// it directly without per-row schema zips or an outer column-vector
+    /// dispatch. Retain the exact tag, nullability, and wire-byte checks.
+    fn read_single_scalar_column(
+        &mut self, rows: usize, mut bytes_seen: usize,
+    ) -> Result<Batch> {
+        let field = self.schema.field(0)?;
+        let (data_type, nullable) = (field.data_type, field.nullable);
+        let mut values = Vec::with_capacity(rows.min(1024));
+        for _ in 0..rows {
+            let tag = read_byte(&mut self.input)?;
+            let value = match (data_type, tag) {
+                (_, 0) if nullable => Value::Null,
+                (DataType::Boolean, 1) => Value::Boolean(false),
+                (DataType::Boolean, 2) => Value::Boolean(true),
+                (DataType::Integer, 3) => {
+                    charge_batch_bytes(&mut bytes_seen, 8)?;
+                    let mut bytes = [0u8; 8];
+                    self.input.read_exact(&mut bytes)?;
+                    Value::Integer(i64::from_le_bytes(bytes))
+                }
+                (DataType::Float, 4) => {
+                    charge_batch_bytes(&mut bytes_seen, 8)?;
+                    let mut bytes = [0u8; 8];
+                    self.input.read_exact(&mut bytes)?;
+                    Value::Float(f64::from_bits(u64::from_le_bytes(bytes)))
+                }
+                _ => return Err(Error::Parse("spill value does not match schema".into())),
+            };
+            values.push(value);
+        }
+        Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
+    }
+
     fn read_batch(&mut self) -> Result<Option<Batch>> {
         let mut first = [0u8; 1];
         // Interrupted at a batch boundary is not EOF or a corrupt spill file.
@@ -359,6 +393,12 @@ impl<R: Read> SpillReader<R> {
         // A huge claimed row count with a truncated body must not reserve
         // millions of scalar slots before the first cell is read.
         let initial_capacity = rows.min(1_024);
+        if self.schema.len() == 1 &&
+            matches!(self.schema.field(0)?.data_type,
+                DataType::Integer | DataType::Float | DataType::Boolean)
+        {
+            return Ok(Some(self.read_single_scalar_column(rows, bytes_seen)?));
+        }
         let mut columns = (0..self.schema.len())
             .map(|_| Vec::with_capacity(initial_capacity)).collect::<Vec<_>>();
         for _ in 0..rows {
@@ -1041,5 +1081,60 @@ mod bounded_wire_batch_windows_regressions {
         let mut reader = SpillReader::new(output.as_slice(), 8).unwrap();
         // The invalid row is rejected before this batch's header is emitted.
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod scalar_spill_decoder_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn scalar_columns_roundtrip_across_multiple_spill_batches() {
+        let cases = [
+            (DataType::Boolean, vec![Value::Boolean(true), Value::Null,
+                Value::Boolean(false), Value::Boolean(true)]),
+            (DataType::Integer, vec![Value::Integer(i64::MIN), Value::Null,
+                Value::Integer(i64::MAX), Value::Integer(0)]),
+            (DataType::Float, vec![Value::Float(f64::INFINITY), Value::Null,
+                Value::Float(-0.0), Value::Float(f64::NEG_INFINITY)]),
+        ];
+        for (data_type, values) in cases {
+            let schema = Schema::new(vec![Field::new("value", data_type, true)]).unwrap();
+            let batch = Batch::from_rows(schema.clone(),
+                values.into_iter().map(|value| vec![value]).collect()).unwrap();
+            let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+            writer.write_batch(&batch).unwrap();
+            writer.write_batch(&batch).unwrap();
+            let bytes = writer.finish().unwrap();
+            let mut reader = SpillReader::new(Cursor::new(bytes), 4).unwrap();
+            assert_eq!(reader.next_batch().unwrap(), Some(batch.clone()));
+            assert_eq!(reader.next_batch().unwrap(), Some(batch));
+            assert_eq!(reader.next_batch().unwrap(), None);
+            assert_eq!(reader.next_batch().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn scalar_decoder_rejects_wrong_tags_and_truncated_payloads_terminally() {
+        let schema = Schema::new(vec![Field::new("amount", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(42)]]).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let bytes = writer.finish().unwrap();
+
+        let mut corrupted = bytes.clone();
+        let tag_index = corrupted.len() - 9;
+        corrupted[tag_index] = 2;
+        let mut reader = SpillReader::new(Cursor::new(corrupted), 1).unwrap();
+        assert!(reader.next_batch().is_err());
+        assert_eq!(reader.next_batch().unwrap(), None);
+
+        let mut truncated = bytes;
+        truncated.pop();
+        let mut reader = SpillReader::new(Cursor::new(truncated), 1).unwrap();
+        assert!(reader.next_batch().is_err());
+        assert_eq!(reader.next_batch().unwrap(), None);
     }
 }
