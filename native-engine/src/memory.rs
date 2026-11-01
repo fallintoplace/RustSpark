@@ -197,7 +197,11 @@ pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Re
             .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
     })?;
     let mut combined = pool.reserve(total)?;
-    let mut reservations = Vec::with_capacity(requests.len());
+    // A caller can request many small guards. If the guard array cannot
+    // be allocated, return an error and release the combined charge via Drop.
+    let mut reservations = Vec::new();
+    reservations.try_reserve_exact(requests.len())
+        .map_err(|_| Error::Execution("memory reservation list allocation failed".into()))?;
     for &bytes in requests {
         reservations.push(combined.split_off(bytes)?);
     }
@@ -218,7 +222,9 @@ pub fn reserve_many_up_to(
     });
     let mut grant = pool.reserve_up_to(requested)?;
     let mut available = grant.bytes();
-    let mut reservations = Vec::with_capacity(requests.len());
+    let mut reservations = Vec::new();
+    reservations.try_reserve_exact(requests.len())
+        .map_err(|_| Error::Execution("memory reservation list allocation failed".into()))?;
     for &requested_bytes in requests {
         let bytes = requested_bytes.min(available);
         reservations.push(grant.split_off(bytes)?);
@@ -485,6 +491,27 @@ mod overflowing_partial_memory_requests_tests {
         drop(reservations);
         assert_eq!(pool.used(), 0);
         assert!(reserve_many(&pool, &[usize::MAX, 1]).is_err());
+        assert_eq!(pool.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod fallible_bulk_memory_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn large_guard_vector_preserves_exact_pool_accounting() {
+        let pool = MemoryPool::new(4096);
+        let requests = vec![1usize; 4096];
+        let guards = reserve_many(&pool, &requests).unwrap();
+        assert_eq!(guards.len(), requests.len());
+        assert_eq!(pool.used(), 4096);
+        drop(guards);
+        assert_eq!(pool.used(), 0);
+        let limited = reserve_many_up_to(&pool, &[1024, 4096, 1024]).unwrap();
+        assert_eq!(limited.iter().map(Reservation::bytes).collect::<Vec<_>>(),
+            vec![1024, 3072, 0]);
+        drop(limited);
         assert_eq!(pool.used(), 0);
     }
 }
