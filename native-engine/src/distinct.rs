@@ -173,7 +173,12 @@ pub fn distinct_on_with_budget(
     if columns.len() == 1 {
         // Probe each borrowed key once, including newly admitted values.
         let mut seen = HashMap::<&crate::scalar::Value, ()>::new();
+        let mut previous = None;
         for (row, value) in columns[0].iter().enumerate() {
+            // Clustered keys need only one hash lookup per adjacent run.
+            // Nonadjacent repeats still consult the table.
+            if previous == Some(value) { continue; }
+            previous = Some(value);
             match seen.entry(value) {
                 Entry::Occupied(_) => {}
                 Entry::Vacant(entry) => {
@@ -190,8 +195,11 @@ pub fn distinct_on_with_budget(
         }
     } else {
         let mut seen = HashMap::<BorrowedRow<'_>, ()>::new();
+        let mut previous = None;
         for row in 0..batch.num_rows() {
             let key = BorrowedRow { columns: &columns, row };
+            if previous == Some(key) { continue; }
+            previous = Some(key);
             let at_limit = seen.len() >= max_keys;
             match seen.entry(key) {
                 Entry::Occupied(_) => {}
@@ -478,5 +486,60 @@ mod single_probe_distinct_on_regressions {
         let only_duplicates = input.take(&[0, 2]).unwrap();
         assert_eq!(distinct_on_with_budget(&only_duplicates, &["key"], 1, usize::MAX)
             .unwrap().num_rows(), 1);
+    }
+}
+
+#[cfg(test)]
+mod adjacent_distinct_on_runs {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn clustered_and_nonadjacent_text_keys_keep_first_occurrence() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Integer, false),
+        ]).unwrap();
+        let long = "é🙂".repeat(4096);
+        let mut rows = Vec::new();
+        for (key, n) in [
+            (Some(long.as_str()), 0), (Some(long.as_str()), 1),
+            (None, 2), (None, 3),
+            (Some("z"), 4), (Some("z"), 5),
+            (Some(long.as_str()), 6),
+        ] {
+            rows.push(vec![
+                key.map_or(Value::Null, |text| Value::Text(text.into())),
+                Value::Integer(n),
+            ]);
+        }
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let bytes = 3 * (64 + std::mem::size_of::<Value>()) + long.len() + 1;
+        let result = distinct_on_with_budget(&batch, &["key"], 3, bytes).unwrap();
+        assert_eq!(result.column(1).unwrap(), &[
+            Value::Integer(0), Value::Integer(2), Value::Integer(4),
+        ]);
+        assert!(distinct_on_with_budget(&batch, &["key"], 2, bytes).is_err());
+    }
+
+    #[test]
+    fn clustered_composite_keys_preserve_null_and_signed_zero_equality() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Float, true),
+            Field::new("b", DataType::Text, true),
+            Field::new("seq", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Float(-0.0), Value::Text("x".into()), Value::Integer(0)],
+            vec![Value::Float(0.0), Value::Text("x".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Null, Value::Integer(2)],
+            vec![Value::Null, Value::Null, Value::Integer(3)],
+            vec![Value::Float(1.0), Value::Text("x".into()), Value::Integer(4)],
+            vec![Value::Float(-0.0), Value::Text("x".into()), Value::Integer(5)],
+        ]).unwrap();
+        let result = distinct_on_with_budget(&batch, &["a", "b"], 3, usize::MAX).unwrap();
+        assert_eq!(result.column(2).unwrap(), &[
+            Value::Integer(0), Value::Integer(2), Value::Integer(4),
+        ]);
     }
 }

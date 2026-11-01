@@ -125,19 +125,34 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }))
 }
 
-fn escape(text: &str) -> String {
-    if text.chars().any(|ch| matches!(ch, ',' | '"' | '\r' | '\n')) {
-        format!("\"{}\"", text.replace('"', "\"\""))
-    } else { text.to_string() }
+
+fn write_csv_text(output: &mut impl Write, text: &str) -> Result<()> {
+    let bytes = text.as_bytes();
+    if !bytes.iter().any(|byte| matches!(byte, b',' | b'"' | b'\r' | b'\n')) {
+        output.write_all(bytes)?;
+        return Ok(());
+    }
+    output.write_all(b"\"")?;
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'"' {
+            output.write_all(&bytes[start..index])?;
+            output.write_all(b"\"\"")?;
+            start = index + 1;
+        }
+    }
+    output.write_all(&bytes[start..])?;
+    output.write_all(b"\"")?;
+    Ok(())
 }
 
-fn csv_value(value: &Value) -> String {
+fn write_csv_value(output: &mut impl Write, value: &Value) -> Result<()> {
     match value {
-        Value::Null => String::new(),
-        Value::Boolean(v) => v.to_string(),
-        Value::Integer(v) => v.to_string(),
-        Value::Float(v) => v.to_string(),
-        Value::Text(v) => escape(v),
+        Value::Null => Ok(()),
+        Value::Boolean(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Integer(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Float(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Text(value) => write_csv_text(output, value),
     }
 }
 
@@ -145,15 +160,26 @@ fn write_csv(
     schema: &Schema, input: impl IntoIterator<Item = Result<Batch>>,
     output: &mut impl Write,
 ) -> Result<()> {
-    writeln!(output, "{}", schema.fields().iter().map(|field| escape(&field.name))
-        .collect::<Vec<_>>().join(","))?;
+    for (index, field) in schema.fields().iter().enumerate() {
+        if index != 0 { output.write_all(b",")?; }
+        write_csv_text(output, &field.name)?;
+    }
+    output.write_all(b"\n")?;
     for batch in input {
         let batch = batch?;
         if batch.schema() != schema {
             return Err(Error::Schema("streaming output schema changed".into()));
         }
-        for row in batch.rows()? {
-            writeln!(output, "{}", row.iter().map(csv_value).collect::<Vec<_>>().join(","))?;
+        // Access column slices once. Converting to rows clones every STRING
+        // before formatting, even though CSV only needs to borrow the text.
+        let columns = (0..schema.len())
+            .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
+        for row in 0..batch.num_rows() {
+            for (index, column) in columns.iter().enumerate() {
+                if index != 0 { output.write_all(b",")?; }
+                write_csv_value(output, &column[row])?;
+            }
+            output.write_all(b"\n")?;
         }
     }
     output.flush()?;
@@ -248,5 +274,39 @@ mod tests {
         assert!(parse_args(parquet.into_iter().map(String::from)).unwrap().unwrap().parquet.is_some());
         let invalid = ["--parquet", "data.parquet", "--schema", "n:int", "--sql", "SELECT * FROM data"];
         assert!(parse_args(invalid.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_csv_output_tests {
+    use super::*;
+
+    #[test]
+    fn wide_unicode_and_quotes_stream_with_exact_csv_escaping() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let big = "🙂".repeat(8_000);
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text(format!("{big},\"quoted\"\r\nnext"))],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("plain".into())],
+        ]).unwrap();
+        let mut output = Vec::new();
+        write_csv(&schema, [Ok(input)], &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output, format!(
+            "id,label\n1,\"{big},\"\"quoted\"\"\r\nnext\"\n2,\n3,plain\n"
+        ));
+    }
+
+    #[test]
+    fn zero_column_batches_preserve_row_count_without_row_vectors() {
+        let schema = Schema::new(vec![]).unwrap();
+        let input = Batch::new_with_row_count(schema.clone(), vec![], 4).unwrap();
+        let mut output = Vec::new();
+        write_csv(&schema, [Ok(input)], &mut output).unwrap();
+        assert_eq!(output, b"\n\n\n\n\n");
     }
 }

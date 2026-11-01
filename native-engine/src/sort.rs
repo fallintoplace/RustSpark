@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+const MAX_COMPUTED_SORT_KEY_BYTES: usize = 64 * 1024 * 1024;
+
 use crate::{
     batch::Batch,
     expr::Expr,
@@ -123,6 +125,7 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
     // expression results, keeping both kinds of keys indexed from zero.
     let mut key_columns: Vec<std::borrow::Cow<'_, [Value]>> =
         Vec::with_capacity(keys.len());
+    let mut computed_key_bytes = 0usize;
     for key in keys {
         if let Expr::Column(name) = &key.expression {
             let column = batch.column(batch.schema().column(name)?)?;
@@ -130,7 +133,17 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
         } else {
             let mut values = Vec::with_capacity(end - start);
             for row in start..end {
-                values.push(key.expression.evaluate(batch, row)?);
+                let value = key.expression.evaluate(batch, row)?;
+                let payload = match &value {
+                    Value::Text(text) => text.len(),
+                    _ => 0,
+                };
+                let bytes = std::mem::size_of::<Value>().checked_add(payload)
+                    .ok_or_else(|| crate::Error::Execution("computed sort key size overflow".into()))?;
+                computed_key_bytes = computed_key_bytes.checked_add(bytes)
+                    .filter(|&used| used <= MAX_COMPUTED_SORT_KEY_BYTES)
+                    .ok_or_else(|| crate::Error::Execution("computed sort key memory budget exceeded".into()))?;
+                values.push(value);
             }
             key_columns.push(std::borrow::Cow::Owned(values));
         }
@@ -503,5 +516,30 @@ mod multi_key_direct_integer_order_regressions {
                 assert_eq!(sort(&input, &keys).unwrap(), expected);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod computed_sort_key_memory_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn rejects_expanding_computed_text_keys_before_sort_allocation_runs_away() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let rows = (0..65).map(|value| vec![Value::Integer(value)]).collect();
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let key = SortKey::ascending(Expr::Literal(Value::Text("x".repeat(1024 * 1024))));
+        assert!(sort(&batch, &[key]).unwrap_err().to_string().contains("sort key memory"));
+    }
+
+    #[test]
+    fn column_sort_does_not_charge_existing_input_text_again() {
+        let schema = Schema::new(vec![Field::new("text", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("z".into())], vec![Value::Text("a".into())],
+        ]).unwrap();
+        let sorted = sort_owned(batch, &[SortKey::ascending(Expr::Column("text".into()))]).unwrap();
+        assert_eq!(sorted.row(0).unwrap(), vec![Value::Text("a".into())]);
     }
 }

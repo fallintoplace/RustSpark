@@ -16,10 +16,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(lowercase_bounded(text, 16 * 1024 * 1024)?))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "lcase", min_args: 1, max_args: 1,
-    result_type: output, call: evaluate,
-}];
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "lcase", min_args: 1, max_args: 1, result_type: output, call: evaluate },
+    Function { name: "lower", min_args: 1, max_args: 1, result_type: output, call: evaluate },
+];
 
 #[cfg(test)]
 mod tests {
@@ -45,5 +45,22 @@ mod bounded_lowercase_tests {
         assert!(lowercase_bounded("İ", 2).is_err());
         assert_eq!(lowercase_bounded("ABC", 3).unwrap(), "abc");
         assert!(lowercase_bounded("ABCD", 3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lower_alias_bound_tests {
+    use super::*;
+    use crate::{batch::Batch, expr::Expr, schema::Schema};
+
+    #[test]
+    fn lower_alias_uses_the_same_bounded_unicode_implementation() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 1).unwrap();
+        assert_eq!(crate::functions::evaluate("LOWER", &[
+            Expr::Literal(Value::Text("İSTANBUL".into())),
+        ], &batch, 0).unwrap(), Value::Text("i\u{307}stanbul".into()));
+        assert!(crate::functions::evaluate("LOWER", &[
+            Expr::Literal(Value::Text("A".repeat(16 * 1024 * 1024 + 1))),
+        ], &batch, 0).is_err());
     }
 }
