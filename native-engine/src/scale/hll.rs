@@ -857,3 +857,34 @@ mod dense_wire_merge_accumulator_tests {
         assert_eq!(HyperLogLog::from_wire_bytes(&frame).unwrap(), incoming);
     }
 }
+
+#[cfg(test)]
+mod dense_wire_batch_harmonic_tests {
+    use super::*;
+
+    #[test]
+    fn dense_wire_merges_match_individual_register_updates() {
+        let mut incoming = HyperLogLog::new();
+        for n in 0..40_000 { incoming.add(&Value::Integer(n)); }
+        let mut dense = Vec::from(WIRE_HEADER.as_slice());
+        dense.extend_from_slice(&incoming.registers);
+        assert_eq!(dense.len(), WIRE_BYTES);
+
+        let mut existing = HyperLogLog::new();
+        for n in 25_000..75_000 { existing.add(&Value::Integer(n)); }
+        let mut reference = existing.clone();
+        for (index, &rank) in incoming.registers.iter().enumerate() {
+            if rank != 0 { reference.update_register(index, rank); }
+        }
+
+        existing.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(existing, reference);
+        existing.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(existing, reference);
+        assert_eq!(existing.estimate(), reference.estimate());
+
+        let mut empty = HyperLogLog::new();
+        empty.merge_wire_bytes(&dense).unwrap();
+        assert_eq!(empty, incoming);
+    }
+}
