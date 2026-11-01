@@ -178,9 +178,6 @@ class ArrowDiskBudgetTests(unittest.TestCase):
                                            diagnostics, 2, output, 128), 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class ExportDiagnosticsBudgetTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "process group cleanup requires POSIX")
     def test_large_stderr_stops_live_export_before_timeout(self):
@@ -210,3 +207,6 @@ class ExportDiagnosticsBudgetTests(unittest.TestCase):
                 _export_arrow([sys.executable, "-c", "print('unused')"],
                               diagnostics, 2, Path("never.arrow"), 1024,
                               max_stderr_bytes=0)
+
+if __name__ == "__main__":
+    unittest.main()
