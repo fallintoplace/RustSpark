@@ -436,23 +436,57 @@ fn run_stream(args: &Args) -> Result<()> {
 }
 
 const MAX_PARQUET_ROWS: usize = 1_000_000;
+const MAX_PARQUET_RETAINED_BYTES: usize = 256 * 1024 * 1024;
+
+fn parquet_batch_retained_bytes(batch: &Batch) -> Result<usize> {
+    let fixed = batch.schema().len().checked_mul(std::mem::size_of::<Value>())
+        .and_then(|bytes| bytes.checked_add(64))
+        .ok_or_else(|| Error::Execution("Parquet retained byte estimate overflow".into()))?;
+    let mut bytes = batch.num_rows().checked_mul(fixed)
+        .ok_or_else(|| Error::Execution("Parquet retained byte estimate overflow".into()))?;
+    for column in 0..batch.schema().len() {
+        for value in batch.column(column)? {
+            if let Value::Text(text) = value {
+                bytes = bytes.checked_add(text.capacity())
+                    .ok_or_else(|| Error::Execution("Parquet retained byte estimate overflow".into()))?;
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+// Reassemble decoded column buffers by ownership instead of first cloning
+// them into row vectors and cloning the TEXT cells again into new columns.
+fn collect_parquet_batches<I>(
+    schema: Schema, input: I, max_rows: usize, max_bytes: usize,
+) -> Result<Batch>
+where I: IntoIterator<Item = Result<Batch>>
+{
+    let mut output = Batch::empty(schema.clone());
+    let mut total_rows = 0usize;
+    let mut retained_bytes = 0usize;
+    for incoming in input {
+        let batch = incoming?;
+        if batch.schema() != &schema {
+            return Err(Error::Schema("Parquet batch schema changed".into()));
+        }
+        let rows = total_rows.checked_add(batch.num_rows())
+            .filter(|&rows| rows <= max_rows)
+            .ok_or_else(|| Error::Execution("Parquet input exceeds native row limit".into()))?;
+        let bytes = retained_bytes.checked_add(parquet_batch_retained_bytes(&batch)?)
+            .filter(|&bytes| bytes <= max_bytes)
+            .ok_or_else(|| Error::Execution("Parquet input exceeds native byte limit".into()))?;
+        output.append_owned(batch)?;
+        total_rows = rows;
+        retained_bytes = bytes;
+    }
+    Ok(output)
+}
 
 fn read_parquet_bounded(path: &Path) -> Result<Batch> {
     let schema = parquet_scan::file_schema(path)?;
-    let mut rows = Vec::new();
-    for next in parquet_scan::scan(path, 4_096)? {
-        let batch = next?;
-        if &schema != batch.schema() {
-            return Err(Error::Schema("Parquet batch schema changed".into()));
-        }
-        let total = rows.len().checked_add(batch.num_rows())
-            .ok_or_else(|| Error::Execution("Parquet row count overflow".into()))?;
-        if total > MAX_PARQUET_ROWS {
-            return Err(Error::Execution("Parquet input exceeds native 1000000 row limit".into()));
-        }
-        rows.extend(batch.rows()?);
-    }
-    Batch::from_rows(schema, rows)
+    let scan = parquet_scan::scan(path, 4_096)?;
+    collect_parquet_batches(schema, scan, MAX_PARQUET_ROWS, MAX_PARQUET_RETAINED_BYTES)
 }
 
 fn run() -> Result<()> {
@@ -777,5 +811,72 @@ mod borrowed_json_output_regressions {
         let mut printer = JsonArrayPrinter::new(&mut array).unwrap();
         assert!(printer.print_batch(&batch).is_err());
         assert_eq!(array, b"[{\"f\":2.5}");
+    }
+}
+
+#[cfg(test)]
+mod bounded_owned_parquet_materialization_tests {
+    use super::*;
+
+    fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn moves_nullable_wide_text_and_preserves_input_row_order() {
+        let schema = schema();
+        let wide = "🙂é".repeat(4096);
+        let a = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text(wide.clone())],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let b = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(3), Value::Text(wide.clone())]
+        ]).unwrap();
+        let expected = vec![
+            vec![Value::Integer(1), Value::Text(wide.clone())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text(wide)],
+        ];
+        let result = collect_parquet_batches(schema.clone(), [Ok(a), Ok(b)],
+            3, 1024 * 1024).unwrap();
+        assert_eq!(result.schema(), &schema);
+        assert_eq!(result.rows().unwrap(), expected);
+    }
+
+    #[test]
+    fn enforces_row_and_retained_byte_budgets_without_partial_results() {
+        let schema = schema();
+        let make_batch = || {
+            let mut huge = String::with_capacity(8192);
+            huge.push('a');
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(1), Value::Text(huge)]
+            ]).unwrap()
+        };
+        assert!(collect_parquet_batches(schema.clone(),
+            [Ok(make_batch()), Ok(make_batch())], 1, 100_000).is_err());
+        let oversized = collect_parquet_batches(schema.clone(),
+            [Ok(make_batch())], 10, 4096).err().unwrap();
+        assert!(oversized.to_string().contains("byte limit"));
+        let empty = collect_parquet_batches(
+            schema.clone(), Vec::<Result<Batch>>::new(), 10, 4096).unwrap();
+        assert_eq!(empty.num_rows(), 0);
+        assert_eq!(empty.schema(), &schema);
+    }
+
+    #[test]
+    fn rejects_schema_changes_before_assembling_mismatched_columns() {
+        let base = schema();
+        let different = Schema::new(vec![Field::new(
+            "id", DataType::Integer, false,
+        )]).unwrap();
+        let batch = Batch::from_rows(different, vec![
+            vec![Value::Integer(3)]
+        ]).unwrap();
+        assert!(collect_parquet_batches(base, [Ok(batch)], 10, 10000).is_err());
     }
 }
