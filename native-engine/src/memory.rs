@@ -211,10 +211,11 @@ pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Re
 pub fn reserve_many_up_to(
     pool: &Arc<MemoryPool>, requests: &[usize],
 ) -> Result<Vec<Reservation>> {
-    let requested = requests.iter().try_fold(0usize, |total, &bytes| {
-        total.checked_add(bytes)
-            .ok_or_else(|| Error::Execution("memory reservation overflow".into()))
-    })?;
+    // An up-to request is allowed to exceed the addressable total.
+    // Saturate admission demand and distribute the actual grant below.
+    let requested = requests.iter().fold(0usize, |total, &bytes| {
+        total.saturating_add(bytes)
+    });
     let mut grant = pool.reserve_up_to(requested)?;
     let mut available = grant.bytes();
     let mut reservations = Vec::with_capacity(requests.len());
@@ -465,6 +466,25 @@ mod partial_group_memory_reservation_regressions {
         assert!(totals.iter().map(|(claimed, _)| *claimed).sum::<usize>() <= 101);
         assert_eq!(pool.used(), totals.iter().map(|(claimed, _)| *claimed).sum::<usize>());
         drop(totals);
+        assert_eq!(pool.used(), 0);
+    }
+}
+
+#[cfg(test)]
+mod overflowing_partial_memory_requests_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_requests_share_available_capacity_without_overflow() {
+        let pool = MemoryPool::new(100);
+        let reservations = reserve_many_up_to(&pool, &[40, usize::MAX, usize::MAX])
+            .unwrap();
+        assert_eq!(reservations.iter().map(Reservation::bytes).collect::<Vec<_>>(),
+            vec![40, 60, 0]);
+        assert_eq!(pool.used(), 100);
+        drop(reservations);
+        assert_eq!(pool.used(), 0);
+        assert!(reserve_many(&pool, &[usize::MAX, 1]).is_err());
         assert_eq!(pool.used(), 0);
     }
 }

@@ -127,8 +127,7 @@ def execute(binary: str, csv: pathlib.Path, sql: str, timeout: int):
     started = time.perf_counter()
     output = subprocess.run(
         [
-            binary, "--csv", str(csv), "--csv-schema",
-            "id:int64,city:utf8,amount:int64", "--sql", sql,
+            binary, "--csv", str(csv), "--sql", sql,
             "--stdout-format", "json",
         ],
         capture_output=True,

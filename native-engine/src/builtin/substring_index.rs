@@ -52,6 +52,24 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         };
         return bounded_substring_index_result(suffix);
     }
+    if (-256..=-17).contains(&count) {
+        // For moderately deep tail lookups, one pass and a bounded position
+        // ring beat counting every match then scanning them all again.
+        // Forward match_indices remains necessary for overlapping delimiters.
+        let from_end = (-count) as usize;
+        let mut recent = vec![0_usize; from_end];
+        let mut seen = 0usize;
+        for (position, _) in text.match_indices(delimiter) {
+            recent[seen % from_end] = position;
+            seen += 1;
+        }
+        let suffix = if seen < from_end {
+            text
+        } else {
+            &text[recent[seen % from_end] + delimiter.len()..]
+        };
+        return bounded_substring_index_result(suffix);
+    }
     let index = usize::try_from(count.unsigned_abs() - 1).ok();
     let result = match index {
         None => text,
@@ -304,5 +322,35 @@ mod bounded_negative_index_ring_tests {
             Value::Text(value.clone()), Value::Text("|".into()),
             Value::Integer(i64::MIN),
         ]).unwrap(), Value::Text(value));
+    }
+}
+
+#[cfg(test)]
+mod medium_tail_substring_index_ring_tests {
+    use super::*;
+
+    #[test]
+    fn negative_counts_preserve_nonoverlapping_and_unicode_boundaries() {
+        for (source, delimiter) in [
+            ("abaX".repeat(350), "aba"),
+            ("🙂a".repeat(350), "🙂a"),
+            ("aaaaa".repeat(180), "aa"),
+        ] {
+            let matches = source.match_indices(delimiter).collect::<Vec<_>>();
+            for from_end in [17_usize, 32, 64, 128, 256, 257] {
+                let expected = if matches.len() < from_end {
+                    source.as_str()
+                } else {
+                    &source[matches[matches.len() - from_end].0 + delimiter.len()..]
+                };
+                let result = evaluate(&[
+                    Value::Text(source.clone()),
+                    Value::Text(delimiter.into()),
+                    Value::Integer(-(from_end as i64)),
+                ]).unwrap();
+                assert_eq!(result, Value::Text(expected.into()),
+                    "delimiter={delimiter:?} from_end={from_end}");
+            }
+        }
     }
 }

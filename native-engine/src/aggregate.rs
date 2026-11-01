@@ -520,14 +520,20 @@ pub fn aggregate_with_limits(
                 max_key_state_bytes.saturating_sub(retained_group_bytes))?;
         }
     }
-    let rows = groups
-        .into_iter()
-        .map(|(mut key, states)| {
-            key.extend(states.into_iter().map(State::finish).collect::<Result<Vec<_>>>()?);
-            Ok(key)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Batch::from_rows(schema, rows)
+    // Move finished states directly into column buffers. Row-major output
+    // would allocate a temporary Vec per group and transpose it again.
+    let group_count = groups.len();
+    let mut columns: Vec<Vec<Value>> = (0..schema.len())
+        .map(|_| Vec::with_capacity(group_count)).collect();
+    for (mut key, states) in groups {
+        for state in states {
+            key.push(state.finish()?);
+        }
+        for (column, value) in columns.iter_mut().zip(key) {
+            column.push(value);
+        }
+    }
+    Batch::new_with_row_count(schema, columns, group_count)
 }
 
 #[cfg(test)]
@@ -1063,5 +1069,35 @@ mod direct_aggregate_expression_budget_regressions {
         let rows = [AggregateItem::new(AggregateOp::CountAll, "n")];
         assert!(aggregate(&batch, &group, &rows).unwrap_err().to_string()
             .contains("complexity budget"));
+    }
+}
+
+#[cfg(test)]
+mod grouped_direct_column_output_regressions {
+    use super::*;
+
+    #[test]
+    fn multiple_groups_preserve_nullable_keys_order_and_aggregates() {
+        let schema = Schema::new(vec![
+            Field::new("category", DataType::Text, true),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text("世界".into()), Value::Integer(2)],
+            vec![Value::Null, Value::Integer(3)],
+            vec![Value::Text("世界".into()), Value::Integer(4)],
+            vec![Value::Text("other".into()), Value::Integer(5)],
+        ]).unwrap();
+        let groups = [(Expr::Column("category".into()), "category".into())];
+        let items = [
+            AggregateItem::new(AggregateOp::CountAll, "n"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("amount".into())), "total"),
+        ];
+        let output = aggregate_with_limits(&batch, &groups, &items, 10, 4096).unwrap();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Text("世界".into()), Value::Integer(2), Value::Integer(6)],
+            vec![Value::Null, Value::Integer(1), Value::Integer(3)],
+            vec![Value::Text("other".into()), Value::Integer(1), Value::Integer(5)],
+        ]);
     }
 }
