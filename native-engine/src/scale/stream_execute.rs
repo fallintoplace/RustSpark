@@ -415,6 +415,8 @@ fn infer(
                         _ => return Err(Error::Type("SUM requires numeric input".into())),
                     },
                     AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                    _ => return Err(Error::Unsupported(
+                        "spilled GROUP BY does not support this aggregate".into())),
                 };
                 fields.push(Field::new(&item.alias, kind, true));
             }
