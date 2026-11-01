@@ -487,3 +487,77 @@ mod size_bounded_sorted_runs_regressions {
         fs::remove_dir(directory).unwrap();
     }
 }
+
+#[cfg(test)]
+mod byte_bounded_sorted_run_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+    use crate::scale::spill::SpillReader;
+    use std::{fs, fs::File, io::BufReader};
+
+    fn test_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn retained_bytes_split_sorted_runs_before_row_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-byte-sort-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = test_schema();
+        let input = Batch::from_rows(schema.clone(), (0..10).rev()
+            .map(|n| vec![Value::Integer(n), Value::Text("x".repeat(128))])
+            .collect()).unwrap();
+        let per_row = 64 + 2 * std::mem::size_of::<Value>() + 128;
+        let runs = write_sorted_runs_with_budget(
+            [Ok(input)], schema.clone(),
+            &[SortKey::ascending(Expr::Column("id".into()))],
+            &dir, 20, &QueryControl::default(), per_row * 3,
+        ).unwrap();
+        assert_eq!(runs.files().len(), 4);
+        let mut ids = Vec::new();
+        for path in runs.files() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 20).unwrap();
+            let mut local = Vec::new();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                assert!(batch.num_rows() <= 3);
+                for row in batch.rows().unwrap() {
+                    local.push(row[0].clone());
+                }
+            }
+            assert!(local.windows(2).all(|pair|
+                pair[0].sql_compare(&pair[1]).unwrap().unwrap().is_le()));
+            ids.extend(local);
+        }
+        ids.sort_by(|a,b| a.sql_compare(b).unwrap().unwrap());
+        assert_eq!(ids, (0..10).map(Value::Integer).collect::<Vec<_>>());
+        drop(runs);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_retained_text_capacity_is_rejected_before_spilling() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-byte-sort-reject-{}-{}", std::process::id(),
+            RUN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let mut text = String::with_capacity(4096);
+        text.push('x');
+        let schema = test_schema();
+        let input = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(1), Value::Text(text)]]).unwrap();
+        let error = write_sorted_runs_with_budget(
+            [Ok(input)], schema, &[SortKey::ascending(Expr::Column("id".into()))],
+            &dir, 10, &QueryControl::default(), 256,
+        ).err().expect("row exceeds budget");
+        assert!(error.to_string().contains("retained byte budget"));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
+    }
+}
