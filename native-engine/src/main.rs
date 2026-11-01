@@ -186,40 +186,57 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, json_array, max_rows }))
 }
 
-fn escape_field(input: &str) -> String {
-    if input.chars().any(|character| matches!(character, ',' | '"' | '\r' | '\n')) {
-        format!("\"{}\"", input.replace('"', "\"\""))
-    } else {
-        input.to_string()
+
+fn write_csv_text(input: &str, output: &mut impl Write) -> Result<()> {
+    let bytes = input.as_bytes();
+    if !bytes.iter().any(|byte| matches!(byte, b',' | b'"' | b'\r' | b'\n')) {
+        output.write_all(bytes)?;
+        return Ok(());
     }
+    output.write_all(b"\"")?;
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'"' {
+            output.write_all(&bytes[start..index])?;
+            output.write_all(b"\"\"")?;
+            start = index + 1;
+        }
+    }
+    output.write_all(&bytes[start..])?;
+    output.write_all(b"\"")?;
+    Ok(())
 }
 
-fn csv_value(value: &Value) -> String {
+fn write_csv_value(value: &Value, output: &mut impl Write) -> Result<()> {
     match value {
-        Value::Null => String::new(),
-        Value::Boolean(value) => value.to_string(),
-        Value::Integer(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Text(value) => escape_field(value),
+        Value::Null => Ok(()),
+        Value::Boolean(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Integer(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Float(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Text(value) => write_csv_text(value, output),
     }
 }
 
 fn print_header(schema: &Schema, output: &mut impl Write) -> Result<()> {
-    let header = schema
-        .fields()
-        .iter()
-        .map(|field| escape_field(&field.name))
-        .collect::<Vec<_>>()
-        .join(",");
-    writeln!(output, "{header}")?;
+    for (index, field) in schema.fields().iter().enumerate() {
+        if index != 0 { output.write_all(b",")?; }
+        write_csv_text(&field.name, output)?;
+    }
+    output.write_all(b"\n")?;
     Ok(())
 }
 
 fn print_csv_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
-    for row_idx in 0..batch.num_rows() {
-        let row = batch.row(row_idx)?;
-        let line = row.iter().map(csv_value).collect::<Vec<_>>().join(",");
-        writeln!(output, "{line}")?;
+    // Borrow native scalar cells in place. Batch::row() allocates an owned
+    // Vec and clones each STRING only for the printer to discard it.
+    let columns = (0..batch.schema().len())
+        .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
+    for row in 0..batch.num_rows() {
+        for (index, column) in columns.iter().enumerate() {
+            if index != 0 { output.write_all(b",")?; }
+            write_csv_value(&column[row], output)?;
+        }
+        output.write_all(b"\n")?;
     }
     Ok(())
 }
@@ -648,7 +665,42 @@ mod tests {
 
     #[test]
     fn quote_text_fields_for_csv_export() {
-        assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
-        assert_eq!(csv_value(&Value::Null), "");
+        let mut output = Vec::new();
+        write_csv_value(&Value::Text("a,\"b\"".into()), &mut output).unwrap();
+        assert_eq!(output, b"\"a,\"\"b\"\"\"");
+        output.clear();
+        write_csv_value(&Value::Null, &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod zero_copy_cli_csv_regressions {
+    use super::*;
+
+    #[test]
+    fn wide_unicode_text_quotes_crlf_and_nullable_values_preserve_bytes() {
+        let schema = Schema::new(vec![
+            Field::new("message", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "é🙂".repeat(4096);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(format!("{wide},\"quoted\"\r\nline")), Value::Integer(8)],
+            vec![Value::Null, Value::Integer(-3)],
+        ]).unwrap();
+        let mut output = Vec::new();
+        print_csv(&batch, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(),
+            format!("message,id\n\"{wide},\"\"quoted\"\"\r\nline\",8\n,-3\n"));
+    }
+
+    #[test]
+    fn zero_width_batches_print_one_line_per_logical_row() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema, vec![], 3).unwrap();
+        let mut output = Vec::new();
+        print_csv(&batch, &mut output).unwrap();
+        assert_eq!(output, b"\n\n\n\n");
     }
 }
