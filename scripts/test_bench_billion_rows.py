@@ -23,7 +23,7 @@ class BillionRowBenchmarkTests(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 bench.parse_query_rows(text)
-        self.assertEqual(bench.parse_query_rows('{"n":12}\\n'), [{"n": 12}])
+        self.assertEqual(bench.parse_query_rows('{"n":12}\n'), [{"n": 12}])
 
     def test_oracles_match_brute_force_at_boundaries(self):
         for rows in (1, 10, 42, 43, 364, 365, 366, 729_999, 730_000, 730_001):
