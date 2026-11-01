@@ -67,6 +67,10 @@ def run_bounded(command: list[str], *, timeout: float,
             raise
         if overflow.is_set():
             raise ValueError("SQL backend output budget exceeded")
+        try:
+            stdout = output.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("SQL backend output is not valid UTF-8") from error
         return subprocess.CompletedProcess(
-            command, process.returncode, output.decode("utf-8"), ""
+            command, process.returncode, stdout, ""
         )

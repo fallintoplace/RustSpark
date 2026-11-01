@@ -39,18 +39,28 @@ def index_results(report: dict, label: str) -> dict[int, dict]:
     count = report.get("queries_attempted")
     if type(count) is not int or len(results) != count:
         raise ValueError(f"{label}: inconsistent query count")
+    total = report.get("queries_total")
+    if total is not None and (type(total) is not int or total < count):
+        raise ValueError(f"{label}: invalid queries_total")
     indexed = {}
     for entry in results:
         if not isinstance(entry, dict) or type(entry.get("id")) is not int or entry["id"] <= 0:
             raise ValueError(f"{label}: invalid query entry")
         if entry["id"] in indexed:
             raise ValueError(f"{label}: duplicate query ID {entry['id']}")
+        if total is not None and entry["id"] > total:
+            raise ValueError(f"{label}: query ID exceeds queries_total")
         indexed[entry["id"]] = entry
     return indexed
 
 
 def is_duration(value) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def valid_digest(value) -> bool:
@@ -108,6 +118,10 @@ def compare_reports(reference: dict, candidate: dict, max_slowdown: float | None
         raise ValueError("Reports use different SQL workloads")
     left = index_results(reference, "Reference")
     right = index_results(candidate, "Candidate")
+    if (reference.get("queries_total") is not None
+            and candidate.get("queries_total") is not None
+            and reference["queries_total"] != candidate["queries_total"]):
+        raise ValueError("Reports declare different queries_total")
     errors = []
     slowdowns = []
     timings = []
