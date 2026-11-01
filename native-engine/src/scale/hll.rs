@@ -142,6 +142,20 @@ impl HyperLogLog {
         Ok(())
     }
 
+    /// Apply a window of worker sketches as a single commit. A late corrupt
+    /// payload must not publish partial aggregate state to downstream stages.
+    /// The shadow sketch costs a fixed 4 KiB regardless of window length.
+    pub fn merge_wire_batch<'a>(
+        &mut self, sketches: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        for encoded in sketches {
+            next.merge_wire_bytes(encoded)?;
+        }
+        *self = next;
+        Ok(())
+    }
+
     /// NULL is ignored, matching COUNT(DISTINCT expression) semantics.
     pub fn add(&mut self, value: &Value) {
         if value.is_null() { return; }
@@ -188,6 +202,46 @@ impl HyperLogLog {
 impl Default for HyperLogLog {
     fn default() -> Self { Self::new() }
 }
+
+#[cfg(test)]
+mod transactional_hll_worker_window_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_sparse_and_dense_worker_windows_match_regular_merges() {
+        let mut sparse = HyperLogLog::new();
+        for n in 0..120 { sparse.add(&Value::Integer(n)); }
+        let mut dense = HyperLogLog::new();
+        for n in 0..20_000 { dense.add(&Value::Integer(n)); }
+        let sparse_wire = sparse.to_wire_bytes();
+        let dense_wire = dense.to_wire_bytes();
+        assert!(sparse_wire.starts_with(SPARSE_WIRE_HEADER));
+        assert!(dense_wire.starts_with(WIRE_HEADER));
+        let mut expected = HyperLogLog::new();
+        expected.merge(&sparse);
+        expected.merge(&dense);
+        let mut actual = HyperLogLog::new();
+        actual.merge_wire_batch([sparse_wire.as_slice(), dense_wire.as_slice()]).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.to_wire_bytes(), expected.to_wire_bytes());
+    }
+
+    #[test]
+    fn late_malformed_worker_sketch_rolls_back_every_register() {
+        let mut sketch = HyperLogLog::new();
+        sketch.add(&Value::Text("previous worker".into()));
+        let before = sketch.clone();
+        let mut valid = HyperLogLog::new();
+        valid.add(&Value::Integer(123));
+        let wire = valid.to_wire_bytes();
+        let bad: &[u8] = b"RSH2\0";
+        assert!(sketch.merge_wire_batch([wire.as_slice(), bad]).is_err());
+        assert_eq!(sketch, before);
+        sketch.merge_wire_batch(std::iter::empty::<&[u8]>()).unwrap();
+        assert_eq!(sketch, before);
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
