@@ -92,6 +92,17 @@ class BenchmarkReportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bench_report.render_report(sample)
 
+    def test_unrepresentable_timing_in_measurements_is_rejected(self):
+        for field in ("median_ms", "p95_ms", "samples_ms"):
+            payload = report()
+            point = payload["results"]["rustspark"]["scan_count"]
+            if field == "samples_ms":
+                point[field][0] = 10**500
+            else:
+                point[field] = 10**500
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bench_report.render_report(payload)
+
     def test_rejects_p95_smaller_than_median(self):
         sample = report()
         sample["results"]["rustspark"]["scan_count"]["p95_ms"] = 5
