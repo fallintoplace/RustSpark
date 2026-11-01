@@ -395,7 +395,9 @@ where I: IntoIterator<Item = Result<Batch>>
         control.check()?;
         writer.write_batch(&incoming?, control)?;
     }
-    let files = writer.finish()?;
+    // Grouped aggregation does not need empty hash-bucket placeholders.
+    // Preserve complete shard lists only for join consumers.
+    let files = writer.finish_sparse()?;
     let mut result = GroupFiles { paths: Vec::new(), schema: output_schema.clone() };
     for shard in files.paths() {
         control.check()?;
