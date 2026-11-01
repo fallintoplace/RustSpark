@@ -55,6 +55,18 @@ class WarmTpchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Nondeterministic"):
             warm.parse_shell(stdout, stderr, requests, 1, 2)
 
+    def test_noninteger_controls_fail_before_sql_file_access(self):
+        missing = [(1, Path("missing-sql-file.sql"))]
+        for invalid in (True, False, 1.5, float("nan"), "2", None):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                warm.requests_for(missing, invalid, 2)
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                warm.requests_for(missing, 1, invalid)
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                warm.benchmark("rs", missing, Path("."), partitions=invalid)
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                warm.benchmark("rs", missing, Path("."), timeout=invalid)
+
     def test_input_validation(self):
         with self.assertRaises(ValueError):
             warm.requests_for([], 1, 3)

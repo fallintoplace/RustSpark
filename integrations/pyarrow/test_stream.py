@@ -32,6 +32,16 @@ class ArrowStreamCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_command("SELECT 1", query_timeout=0)
 
+    def test_rejects_invalid_unnamed_and_database_paths_early(self):
+        for invalid in ("", b"data.csv", 123):
+            for flag in ("csv", "parquet", "json_input"):
+                with self.subTest(flag=flag, value=invalid), self.assertRaisesRegex(
+                        ValueError, "Unnamed input paths"):
+                    build_command("SELECT 1", **{flag: invalid})
+            with self.subTest(database_dir=invalid), self.assertRaisesRegex(
+                    ValueError, "database_dir"):
+                build_command("SELECT 1", database_dir=invalid)
+
     def test_named_tables_enable_multi_file_queries(self):
         command = build_command("SELECT * FROM users JOIN orders ON users.id = orders.uid",
                                 csv_tables={"users": "/a b/users.csv"},
@@ -132,8 +142,46 @@ class NamedInputTextPathTests(unittest.TestCase):
         self.assertIn("events=events.json", build_command("SELECT 1", json_tables={"events": "events.json"}))
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+class StreamDeadlineTests(unittest.TestCase):
+    def test_process_timeout_is_validated_before_spawning(self):
+        for value in (0, -1, True, float("inf"), float("nan"), "2"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "process_timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=value))
+
+    def test_watchdog_reports_timeout_after_killing_child_group(self):
+        class FakeProcess:
+            pid = 123456
+            stdout = io.BytesIO()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return -9
+
+        class ImmediateTimer:
+            def __init__(self, _timeout, callback):
+                self.callback = callback
+                self.daemon = False
+
+            def start(self):
+                self.callback()
+
+            def cancel(self):
+                pass
+
+        process = FakeProcess()
+        arrow = SimpleNamespace(ipc=SimpleNamespace(open_stream=lambda _stream: nullcontext([])))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", return_value=process
+        ), patch("stream.threading.Timer", ImmediateTimer), patch(
+            "stream.os.killpg"
+        ) as kill_group:
+            with self.assertRaisesRegex(TimeoutError, "process timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=0.01))
+            if os.name == "posix":
+                kill_group.assert_called()
 
 class ArrowIPCByteBudgetTests(unittest.TestCase):
     def test_small_reads_and_exact_budget_eof(self):
@@ -172,3 +220,6 @@ class ArrowIPCByteBudgetTests(unittest.TestCase):
                 list(iter_arrow_batches("SELECT 1", max_ipc_bytes=10))
             if os.name == "posix":
                 kill_group.assert_called_once_with(FakeProcess.pid, signal.SIGKILL)
+
+if __name__ == "__main__":
+    unittest.main()

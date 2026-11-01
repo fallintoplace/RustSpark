@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 
 from mcp.server import MCPServer
-from query_templates import list_templates, make_command, parse_query_rows, template_path
+from query_templates import list_templates, make_command, parse_query_rows, template_path, pinned_template
 from bounded_backend import run_bounded
 
 mcp = MCPServer("RustSpark SQL templates")
@@ -38,10 +38,11 @@ def run_named_query(name: str, parameters: dict[str, str],
     """
     query_dir, database_dir, binary = settings()
     path = template_path(query_dir, name)
-    command = make_command(binary, database_dir, path, parameters,
-                           max_rows=max_rows, query_timeout=query_timeout)
     try:
-        result = run_bounded(command, timeout=query_timeout + 10)
+        with pinned_template(path) as snapshot:
+            command = make_command(binary, database_dir, snapshot, parameters,
+                                   max_rows=max_rows, query_timeout=query_timeout)
+            result = run_bounded(command, timeout=query_timeout + 10)
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         raise RuntimeError("RustSpark query backend unavailable") from error
     if result.returncode:

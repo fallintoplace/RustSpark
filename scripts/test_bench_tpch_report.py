@@ -29,12 +29,35 @@ class ReportTests(unittest.TestCase):
         self.assertIn("- Q20:", markdown)
         self.assertLess(markdown.index("Q22:"), markdown.index("Q21:"))
 
+    def test_extreme_finite_timings_do_not_produce_infinite_tail_ratios(self):
+        rows = [{"id": 1, "status": "ok", "median_ms": 5e-324,
+                 "p95_ms": 1e308}]
+        rendered = report.render({"results": rows})
+        self.assertNotIn("infx", rendered)
+        self.assertIn("| 01 | ok | 0.000 | 100000", rendered)
+        self.assertIn(" | - |", rendered)
+
+    def test_extreme_finite_suite_preserves_latency_percentages(self):
+        rows = [{"id": n, "status": "ok", "median_ms": 1e308,
+                 "p95_ms": 1e308} for n in range(1, 23)]
+        rendered = report.render({"results": rows})
+        self.assertIn("Latency concentration", rendered)
+        self.assertIn("4.5% of summed query medians", rendered)
+        self.assertNotIn("nan%", rendered)
+
     def test_rejects_invalid_times_and_ids(self):
         row = {"id": 1, "status": "ok", "median_ms": -1, "p95_ms": 2}
         with self.assertRaises(ValueError):
             report.render({"results": [row]})
         with self.assertRaisesRegex(ValueError, "duplicate"):
             report.render({"results": [{"id": 1, "status": "error"}, {"id": 1, "status": "error"}]})
+
+    def test_huge_timing_integer_is_validation_error(self):
+        for field in ("median_ms", "p95_ms"):
+            row = {"id": 1, "status": "ok", "median_ms": 1.0, "p95_ms": 2.0}
+            row[field] = 10**500
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "duration"):
+                report.render({"results": [row]})
 
     def test_rejects_non_object_rows(self):
         for row in (None, "wrong", 5, []):

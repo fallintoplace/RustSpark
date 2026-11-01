@@ -161,12 +161,35 @@ impl StageGraph {
         &self, completed: &HashSet<u64>,
         running: &HashSet<(u64, usize)>, max_tasks: usize,
     ) -> Vec<(u64, usize)> {
+        self.ready_tasks_in_order(&self.order_indices, completed, running, max_tasks)
+    }
+
+    /// Claim partition tasks from stages with the longest downstream path
+    /// first. Dependents remain blocked until upstream stages complete.
+    pub fn ready_tasks_by_critical_path(
+        &self, completed: &HashSet<u64>, max_tasks: usize,
+    ) -> Vec<(u64, usize)> {
+        self.ready_tasks_by_critical_path_excluding(completed, &HashSet::new(), max_tasks)
+    }
+
+    /// Critical-path worker window that excludes partitions already claimed.
+    pub fn ready_tasks_by_critical_path_excluding(
+        &self, completed: &HashSet<u64>,
+        running: &HashSet<(u64, usize)>, max_tasks: usize,
+    ) -> Vec<(u64, usize)> {
+        self.ready_tasks_in_order(&self.critical_order_indices, completed, running, max_tasks)
+    }
+
+    fn ready_tasks_in_order(
+        &self, order_indices: &[usize], completed: &HashSet<u64>,
+        running: &HashSet<(u64, usize)>, max_tasks: usize,
+    ) -> Vec<(u64, usize)> {
         let mut tasks = Vec::with_capacity(max_tasks.min(1024));
         if max_tasks == 0 { return tasks; }
         if running.is_empty() {
             // Initial dispatch has no exclusions. Fill windows by range,
             // avoiding one hash-table probe per partition.
-            for &index in &self.order_indices {
+            for &index in order_indices {
                 let stage = &self.stages[index];
                 if !Self::dependency_ready(stage, completed) { continue; }
                 let take = stage.partitions.min(max_tasks - tasks.len());
@@ -184,7 +207,7 @@ impl StageGraph {
                 excluded.entry(stage).or_default().push(partition);
             }
             for partitions in excluded.values_mut() { partitions.sort_unstable(); }
-            for &index in &self.order_indices {
+            for &index in order_indices {
                 let stage = &self.stages[index];
                 if !Self::dependency_ready(stage, completed) { continue; }
                 let mut next = 0usize;
@@ -205,7 +228,7 @@ impl StageGraph {
             }
             return tasks;
         }
-        for &index in &self.order_indices {
+        for &index in order_indices {
             let stage = &self.stages[index];
             if !Self::dependency_ready(stage, completed) {
                 continue;
@@ -569,5 +592,51 @@ mod dense_running_partition_windows_regressions {
             assert_eq!(graph.ready_tasks_excluding(&HashSet::new(), &running, window),
                 expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod critical_path_partition_dispatch_tests {
+    use super::*;
+
+    fn graph() -> StageGraph {
+        StageGraph::new(vec![
+            Stage { id: 20, dependencies: vec![], partitions: 2 },
+            Stage { id: 10, dependencies: vec![], partitions: 3 },
+            Stage { id: 11, dependencies: vec![10], partitions: 1 },
+            Stage { id: 12, dependencies: vec![11], partitions: 1 },
+        ]).unwrap()
+    }
+
+    #[test]
+    fn prioritizes_upstream_partitions_on_longest_chain() {
+        let graph = graph();
+        let completed = HashSet::new();
+        assert_eq!(graph.ready_tasks(&completed, 3),
+            vec![(20, 0), (20, 1), (10, 0)]);
+        assert_eq!(graph.ready_tasks_by_critical_path(&completed, 3),
+            vec![(10, 0), (10, 1), (10, 2)]);
+        assert_eq!(graph.ready_tasks_by_critical_path(&HashSet::from([10]), 3),
+            vec![(11, 0), (20, 0), (20, 1)]);
+    }
+
+    #[test]
+    fn critical_windows_respect_running_exclusions_and_depth_barriers() {
+        let graph = graph();
+        let completed = HashSet::new();
+        let running = HashSet::from([(10, 0), (10, 1), (20, 1)]);
+        assert_eq!(graph.ready_tasks_by_critical_path_excluding(
+            &completed, &running, 8), vec![(10, 2), (20, 0)]);
+        assert_eq!(graph.ready_tasks_by_critical_path_excluding(
+            &completed, &running, 0), Vec::<(u64, usize)>::new());
+        // Exercise the sorted-range fast path used for heavily occupied windows.
+        let big = StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![], partitions: 1024 },
+            Stage { id: 2, dependencies: vec![1], partitions: 1 },
+        ]).unwrap();
+        let exclusions = (0..900).map(|partition| (1, partition))
+            .collect::<HashSet<_>>();
+        assert_eq!(big.ready_tasks_by_critical_path_excluding(
+            &HashSet::new(), &exclusions, 2), vec![(1, 900), (1, 901)]);
     }
 }
