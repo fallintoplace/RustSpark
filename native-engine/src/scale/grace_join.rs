@@ -24,17 +24,22 @@ const MAX_OUTPUT_CELLS: usize = 4_000_000;
 /// boundaries. This avoids failing a large TEXT join after probing succeeds.
 fn write_join_batches<W: Write>(
     writer: &mut SpillWriter<W>, batch: &Batch,
-    max_rows: usize, max_wire_bytes: usize,
+    max_rows: usize, max_wire_bytes: usize, control: &QueryControl,
 ) -> Result<()> {
+    control.check()?;
     let max_rows = max_rows.min(MAX_OUTPUT_CELLS / batch.schema().len().max(1));
     if max_rows == 0 || max_wire_bytes < 4 {
         return Err(Error::Execution("join output spill budget too small".into()));
     }
     let mut start = 0usize;
     while start < batch.num_rows() {
+        control.check()?;
         let mut end = start;
         let mut wire_bytes = 4usize;
         while end < batch.num_rows() && end - start < max_rows {
+            // A joined batch can contain millions of rows. Cancellation must
+            // remain responsive while estimating output wire sizes.
+            if (end - start) % 1024 == 0 { control.check()?; }
             let mut row_bytes = batch.schema().len();
             for column in 0..batch.schema().len() {
                 let extra = match batch.value(end, column)? {
@@ -226,7 +231,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                     joined.into_widened_schema(result_schema.clone())?
                 } else { joined };
                 write_join_batches(
-                    &mut writer, &joined, io_batch_rows, MAX_OUTPUT_WIRE_BYTES,
+                    &mut writer, &joined, io_batch_rows, MAX_OUTPUT_WIRE_BYTES, control,
                 )?;
             }
         }
@@ -260,7 +265,7 @@ where L: IntoIterator<Item = Result<Batch>>,
                             result_schema.clone(), std::mem::take(&mut columns), rows,
                         )?;
                         write_join_batches(
-                            &mut writer, &batch, io_batch_rows, MAX_OUTPUT_WIRE_BYTES,
+                            &mut writer, &batch, io_batch_rows, MAX_OUTPUT_WIRE_BYTES, control,
                         )?;
                         columns = (0..result_schema.len()).map(|_| Vec::new()).collect();
                         rows = 0;
@@ -270,7 +275,7 @@ where L: IntoIterator<Item = Result<Batch>>,
             if rows != 0 {
                 let batch = Batch::from_validated_columns(result_schema.clone(), columns, rows)?;
                 write_join_batches(
-                    &mut writer, &batch, io_batch_rows, MAX_OUTPUT_WIRE_BYTES,
+                    &mut writer, &batch, io_batch_rows, MAX_OUTPUT_WIRE_BYTES, control,
                 )?;
             }
         }
@@ -705,7 +710,7 @@ mod grace_join_wire_budget_regressions {
             vec![Value::Text("b".repeat(20)), Value::Integer(3)],
         ]).unwrap();
         let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
-        write_join_batches(&mut writer, &batch, 10, 40).unwrap();
+        write_join_batches(&mut writer, &batch, 10, 40, &QueryControl::default()).unwrap();
         let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
         let first = reader.next_batch().unwrap().unwrap();
         let second = reader.next_batch().unwrap().unwrap();
@@ -724,7 +729,27 @@ mod grace_join_wire_budget_regressions {
         let batch = Batch::from_rows(schema.clone(),
             vec![vec![Value::Text("x".repeat(100))]]).unwrap();
         let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
-        assert!(matches!(write_join_batches(&mut writer, &batch, 10, 40),
+        assert!(matches!(write_join_batches(&mut writer, &batch, 10, 40, &QueryControl::default()),
             Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod interruptible_join_output_spill_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::io::Cursor;
+
+    #[test]
+    fn canceled_join_does_not_emit_partial_result_batches() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..4097)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        let control = QueryControl::default();
+        control.cancel();
+        assert!(write_join_batches(&mut writer, &batch, 300, 1024, &control).is_err());
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 100).unwrap();
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }
