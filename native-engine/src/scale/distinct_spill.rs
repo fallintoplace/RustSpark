@@ -67,6 +67,10 @@ where I: IntoIterator<Item = Result<Batch>>
         let mut seen: HashMap<u64, Vec<Vec<Value>>> = HashMap::new();
         let mut unique_rows = 0usize;
         let mut retained_bytes = 0usize;
+        // Cache the last observed owned key by stable fingerprint bucket and
+        // index. Unlike a borrow into the decoded batch, this survives its
+        // deletion and avoids cloning wide TEXT keys between spill chunks.
+        let mut recent_key: Option<(u64, usize)> = None;
         while let Some(batch) = reader.next_batch()? {
             control.check()?;
             // The spill decoder owns these columns. Move first-seen keys
@@ -88,13 +92,25 @@ where I: IntoIterator<Item = Result<Batch>>
                     next += 1;
                 }
                 index = next;
+                // Equality must still be checked against all columns; hash
+                // values alone cannot identify a row under collisions.
+                if recent_key.is_some_and(|(hash, position)|
+                    seen.get(&hash).and_then(|candidates| candidates.get(position))
+                        .is_some_and(|key| key.iter().zip(&columns).all(|(value, column)|
+                            value == &column[row]))
+                ) {
+                    continue;
+                }
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 columns.len().hash(&mut hasher);
                 for column in &columns { column[row].hash(&mut hasher); }
                 let fingerprint = hasher.finish();
-                if seen.get(&fingerprint).is_some_and(|rows| rows.iter().any(|candidate|
-                    candidate.iter().zip(&columns).all(|(value, column)|
-                        value == &column[row]))) {
+                if let Some(position) = seen.get(&fingerprint).and_then(|rows|
+                    rows.iter().position(|candidate|
+                        candidate.iter().zip(&columns).all(|(value, column)|
+                            value == &column[row]))
+                ) {
+                    recent_key = Some((fingerprint, position));
                     continue;
                 }
                 if unique_rows >= max_unique_rows_per_partition {
@@ -109,7 +125,10 @@ where I: IntoIterator<Item = Result<Batch>>
                 let row = columns.iter_mut()
                     .map(|column| std::mem::replace(&mut column[row], Value::Null))
                     .collect();
-                seen.entry(fingerprint).or_default().push(row);
+                let candidates = seen.entry(fingerprint).or_default();
+                let position = candidates.len();
+                candidates.push(row);
+                recent_key = Some((fingerprint, position));
                 unique_rows += 1;
                 retained_bytes = next_bytes;
             }
@@ -349,5 +368,62 @@ mod clustered_disk_distinct_tests {
         assert!(selected.contains(&vec![Value::Text("other".into()), Value::Integer(0)]));
         drop(output);
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cross_spill_disk_distinct_hot_key_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn wide_clustered_keys_remain_unique_across_many_tiny_spill_batches() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-distinct-cross-chunk-{}-{}", std::process::id(),
+            TEST_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("value", DataType::Integer, true),
+        ]).unwrap();
+        let first = vec![
+            Value::Text("🦀".repeat(1_024)), Value::Integer(1),
+        ];
+        let null = vec![Value::Null, Value::Null];
+        let second = vec![
+            Value::Text("é".repeat(1_500)), Value::Integer(2),
+        ];
+        let mut batches = Vec::new();
+        for index in 0..180 {
+            let row = if index < 90 || index >= 150 {
+                first.clone()
+            } else if index < 120 {
+                null.clone()
+            } else {
+                second.clone()
+            };
+            batches.push(Ok(Batch::from_rows(schema.clone(), vec![row]).unwrap()));
+            if index % 13 == 0 {
+                batches.push(Ok(Batch::empty(schema.clone())));
+            }
+        }
+        let output = distinct_to_disk(
+            batches, schema.clone(), &directory, 4, 8, 1,
+            &QueryControl::default(),
+        ).unwrap();
+        let mut observed = std::collections::HashSet::new();
+        for path in output.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 1).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                observed.extend(batch.rows().unwrap());
+            }
+        }
+        let expected = [first, null, second].into_iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(observed, expected);
+        drop(output);
+        fs::remove_dir_all(directory).unwrap();
     }
 }
