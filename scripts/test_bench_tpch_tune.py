@@ -25,6 +25,11 @@ class TuneTests(unittest.TestCase):
             with self.subTest(input=input_), self.assertRaises(ValueError):
                 tune.parse_variants(input_)
 
+    def test_invalid_timeouts_fail_before_reading_fixture(self):
+        for invalid in (True, False, 0, -1, 1.5, float("nan"), "120", None):
+            with self.subTest(timeout=invalid), self.assertRaisesRegex(ValueError, "Invalid timing"):
+                tune.run("rs", Path("missing_fixture"), [], [], timeout=invalid)
+
     def test_sweep_selects_fastest_only_with_full_query_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)

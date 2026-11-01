@@ -1,6 +1,8 @@
 """Reject incomplete or misleading billion-row benchmark artifacts."""
 
 import hashlib
+from pathlib import Path
+import tempfile
 import unittest
 
 import bench_tpch_evidence as evidence
@@ -41,6 +43,18 @@ def fixtures():
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_evidence_loader_rejects_duplicate_keys_and_nonfinite_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            for payload in ('{"rows": {}, "rows": {"lineitem": 1}}',
+                            '{"samples_ms": [1e999]}',
+                            '{"samples_ms": [NaN]}'):
+                path.write_text(payload, encoding="utf-8")
+                with self.subTest(payload=payload), self.assertRaises(ValueError):
+                    evidence.load_evidence(path)
+            path.write_text('{"value": 1.5}', encoding="utf-8")
+            self.assertEqual(evidence.load_evidence(path), {"value": 1.5})
+
     def test_valid_report_is_qualified_without_claiming_a_speedup(self):
         report = evidence.qualify(*fixtures())
         self.assertEqual(report["independent_duckdb_result_checks"], 22)
@@ -83,6 +97,26 @@ class EvidenceTests(unittest.TestCase):
         manifest, benchmark, verification = fixtures()
         benchmark["results"][0]["median_ms"] = 9.0
         with self.assertRaisesRegex(ValueError, "inconsistent"):
+            evidence.qualify(manifest, benchmark, verification)
+
+    def test_large_medians_cannot_hide_absolute_errors(self):
+        manifest, benchmark, verification = fixtures()
+        entry = benchmark["results"][0]
+        entry["samples_ms"] = [1e12] * 3
+        entry["median_ms"] = 1e12 - 1
+        entry["p95_ms"] = 1e12
+        with self.assertRaisesRegex(ValueError, "median is inconsistent"):
+            evidence.qualify(manifest, benchmark, verification)
+
+    def test_unrepresentable_timing_values_fail_with_validation_errors(self):
+        with self.assertRaisesRegex(ValueError, "positive finite"):
+            evidence.checked_number(10**500, "Timing")
+        manifest, benchmark, verification = fixtures()
+        for row in benchmark["results"]:
+            row["samples_ms"] = [1e308] * 3
+            row["median_ms"] = 1e308
+            row["p95_ms"] = 1e308
+        with self.assertRaisesRegex(ValueError, "median total"):
             evidence.qualify(manifest, benchmark, verification)
 
     def test_rejects_duplicate_query_ids_and_false_rows(self):

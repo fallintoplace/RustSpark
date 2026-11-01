@@ -3,8 +3,14 @@ import unittest
 import tempfile
 import subprocess
 import sys
+import os
+import time
+import socket
+import threading
+import urllib.request
+from http.server import HTTPServer
 from pathlib import Path
-from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend
+from server import command_for_template, list_query_templates, validate_params, parse_result_rows, run_bounded_backend, make_handler, BoundedThreadingHTTPServer
 
 
 class GatewayTests(unittest.TestCase):
@@ -54,6 +60,11 @@ class GatewayTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_result_rows(invalid)
 
+    def test_excessively_nested_request_is_invalid(self):
+        deep = b'{"params":' + b"[" * 20000 + b"0" + b"]" * 20000 + b"}"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            validate_params(deep)
+
     def test_only_safe_regular_templates_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
             queries = Path(directory)
@@ -65,7 +76,50 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(list_query_templates(queries), ["first", "second"])
 
 
+class PinnedGatewayTemplateTests(unittest.TestCase):
+    def test_template_snapshot_stays_immutable_after_source_replacement(self):
+        from server import pinned_query_template
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "approved.sql"
+            other = root / "other.sql"
+            approved.write_text("SELECT 1", encoding="utf-8")
+            other.write_text("SELECT 999", encoding="utf-8")
+            with pinned_query_template(approved) as copy:
+                approved.unlink()
+                approved.symlink_to(other)
+                self.assertEqual(copy.read_text(encoding="utf-8"), "SELECT 1")
+                self.assertEqual(copy.stat().st_mode & 0o077, 0)
+            with self.assertRaises(ValueError):
+                with pinned_query_template(approved):
+                    pass
+
+    def test_nonregular_and_oversized_templates_are_rejected(self):
+        from server import pinned_query_template, MAX_TEMPLATE_BYTES
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_query_template(root):
+                    pass
+            large = root / "large.sql"
+            large.write_bytes(b"x" * (MAX_TEMPLATE_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                with pinned_query_template(large):
+                    pass
+            if hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"):
+                fifo = root / "fifo.sql"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "regular file"):
+                    with pinned_query_template(fifo):
+                        pass
+
+
 class InvalidBackendJSONTests(unittest.TestCase):
+    def test_excessively_nested_backend_rows_are_invalid(self):
+        deep = '[{"value":' + "[" * 20000 + "0" + "]" * 20000 + "}]"
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            parse_result_rows(deep)
+
     def test_rejects_nonfinite_numbers_and_duplicate_result_keys(self):
         for payload in ('[{"n":NaN}]', '[{"n":Infinity}]', '[{"n":1e999}]',
                         '[{"id":1,"id":2}]', '[{"nested":{"x":1,"x":2}}]'):
@@ -76,6 +130,22 @@ class InvalidBackendJSONTests(unittest.TestCase):
 
 
 class BoundedBackendTests(unittest.TestCase):
+    def test_rejects_invalid_resource_limits_without_starting_backend(self):
+        command = [sys.executable, "-c", "print('ok')"]
+        for timeout in (float("nan"), float("inf"), float("-inf"), -1, 0, True, "10"):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded_backend(command, timeout=timeout, max_bytes=1024)
+        for size in (float("nan"), float("inf"), -1, 0, True, 1.5, "1024"):
+            with self.subTest(max_bytes=size), self.assertRaisesRegex(ValueError, "budget"):
+                run_bounded_backend(command, timeout=5, max_bytes=size)
+
+    def test_backend_invalid_utf8_is_checked_before_result_parsing(self):
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            run_bounded_backend([
+                sys.executable, "-c",
+                "import sys; sys.stdout.buffer.write(bytes([255]))",
+            ], timeout=5, max_bytes=1024)
+
     def test_backend_output_budget_and_timeout(self):
         valid = run_bounded_backend(
             [sys.executable, "-c", "print('ok')"], timeout=5, max_bytes=32
@@ -92,6 +162,161 @@ class BoundedBackendTests(unittest.TestCase):
                 [sys.executable, "-c", "import time; time.sleep(2)"],
                 timeout=0.1, max_bytes=32,
             )
+
+
+class BackendDescendantCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process-group signaling requires POSIX")
+    def test_timeout_closes_inherited_stdout_from_grandchildren(self):
+        script = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('started',flush=True);time.sleep(6)"
+        )
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded_backend([sys.executable, "-c", script],
+                                timeout=0.4, max_bytes=1024)
+        self.assertLess(time.monotonic() - started, 3.0)
+
+
+class BoundedGatewayResponsesTests(unittest.TestCase):
+    def test_json_encoder_rejects_escaped_output_expansion(self):
+        from server import encode_response_bounded
+        self.assertEqual(encode_response_bounded({"rows": [{"value": "ok"}]}, 100),
+                         b'{"rows":[{"value":"ok"}]}')
+        with self.assertRaisesRegex(ValueError, "output budget"):
+            encode_response_bounded({"rows": [{"text": "\\u0000" * 100}]}, 200)
+
+    def test_gateway_rejects_oversized_escaped_success_responses(self):
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(
+                secret="token-" * 5, queries=root, database=root,
+                binary="rustspark", max_rows=10, timeout=1,
+            ))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                body = b'{"params":{}}'
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/query/safe",
+                    data=body,
+                    headers={"Authorization": "Bearer " + "token-" * 5,
+                             "Content-Type": "application/json"},
+                )
+                with patch("server.run_bounded_backend",
+                           return_value=subprocess.CompletedProcess(
+                               [], 0, '[{"text":"' + "é" * 2_000_000 + '"}]', "",
+                           )):
+                    with self.assertRaises(HTTPError) as raised:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(raised.exception.code, 502)
+                    self.assertIn("output budget", raised.exception.read().decode())
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+
+class RequestFramingTests(unittest.TestCase):
+    def test_ambiguous_content_length_and_chunked_encoding_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(
+                secret="test-secret" * 3, queries=directory, database=directory,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+            ))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                headers = (
+                    b"POST /v1/query/safe HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"Authorization: Bearer test-secrettest-secrettest-secret\r\n"
+                    b"Content-Type: application/json\r\n"
+                )
+                for framing in (
+                    b"Content-Length: 2\r\nContent-Length: 2\r\n",
+                    b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n",
+                    b"Transfer-Encoding: chunked\r\n",
+                    b"Content-Length: +2\r\n",
+                    b"Content-Length: 2, 2\r\n",
+                    b"Content-Length: " + b"9" * 5000 + b"\r\n",
+                ):
+                    with self.subTest(framing=framing), socket.create_connection(
+                        server.server_address, timeout=2,
+                    ) as connection:
+                        connection.settimeout(2)
+                        connection.sendall(headers + framing + b"\r\n{}")
+                        response = connection.recv(4096).split(b"\r\n", 1)[0]
+                        self.assertTrue(b"400" in response or b"413" in response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+class BoundedGatewayConcurrencyTests(unittest.TestCase):
+    def test_slow_partial_body_does_not_block_health_and_times_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queries = Path(directory)
+            (queries / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            handler = make_handler(
+                secret="secret-token-" * 3, queries=queries, database=queries,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+                read_timeout=0.3,
+            )
+            server = BoundedThreadingHTTPServer(("127.0.0.1", 0), handler, max_clients=2)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(server.server_address, timeout=2) as connection:
+                    connection.settimeout(2)
+                    connection.sendall(
+                        b"POST /v1/query/safe HTTP/1.1\r\nHost: localhost\r\n"
+                        b"Authorization: Bearer " + b"secret-token-" * 3 +
+                        b"\r\nContent-Type: application/json\r\n"
+                        b"Content-Length: 100\r\n\r\n{}"
+                    )
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{server.server_port}/healthz", timeout=2,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                    self.assertIn(b"408", connection.recv(4096).split(b"\r\n", 1)[0])
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+    def test_connection_limit_returns_503_without_starting_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queries = Path(directory)
+            (queries / "safe.sql").write_text("SELECT 1", encoding="utf-8")
+            handler = make_handler(
+                secret="secret-token-" * 3, queries=queries, database=queries,
+                binary="nonexistent-rustspark", max_rows=10, timeout=1,
+                read_timeout=1.0,
+            )
+            server = BoundedThreadingHTTPServer(("127.0.0.1", 0), handler, max_clients=1)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(server.server_address, timeout=2) as slow:
+                    slow.sendall(b"POST /v1/query/safe HTTP/1.1\r\nHost: localhost\r\n")
+                    # Wait until the slow request occupies the only worker.
+                    time.sleep(0.1)
+                    with socket.create_connection(server.server_address, timeout=2) as other:
+                        other.settimeout(2)
+                        other.sendall(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                        self.assertIn(b"503", other.recv(4096).split(b"\r\n", 1)[0])
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

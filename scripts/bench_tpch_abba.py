@@ -37,6 +37,13 @@ def timed_command(command, timeout, ordered):
     return elapsed, fingerprint, rows
 
 
+def rounded_positive_speedup(value):
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Invalid ABBA speedup")
+    rounded = round(value, 4)
+    return rounded if rounded > 0 else float(f"{value:.4g}")
+
+
 def compare_query(commands, ordered, repeat, warmup, timeout):
     if type(repeat) is not int or repeat < 1 or type(warmup) is not int or warmup < 0:
         raise ValueError("Repeat must be positive; warmup nonnegative")
@@ -71,15 +78,21 @@ def compare_query(commands, ordered, repeat, warmup, timeout):
             "baseline_samples_ms": [round(x, 3) for x in samples["baseline"]],
             "candidate_samples_ms": [round(x, 3) for x in samples["candidate"]],
             "baseline_median_ms": round(old, 3), "candidate_median_ms": round(new, 3),
-            "baseline_over_candidate": round(old / new, 4),
-            "paired_speedups": [round(x, 4) for x in paired_speedups],
-            "paired_median_speedup": round(statistics.median(paired_speedups), 4)}
+            "baseline_over_candidate": rounded_positive_speedup(old / new),
+            "paired_speedups": [rounded_positive_speedup(x) for x in paired_speedups],
+            "paired_median_speedup": rounded_positive_speedup(statistics.median(paired_speedups))}
 
 
 def benchmark(baseline, candidate, parquet, queries, repeat=3, warmup=1,
               timeout=180, partitions=2):
-    if timeout < 1 or partitions < 1:
-        raise ValueError("Timeout and partitions must be positive")
+    if (type(repeat) is not int or repeat < 1
+            or type(warmup) is not int or warmup < 0):
+        raise ValueError("ABBA repeat and warmup must be valid integers")
+    if (type(timeout) not in (int, float)
+            or not math.isfinite(timeout) or timeout < 1):
+        raise ValueError("ABBA timeout must be positive and finite")
+    if type(partitions) is not int or partitions < 1:
+        raise ValueError("ABBA partitions must be a positive integer")
     hashes = {"baseline_sha256": binary_sha256(baseline),
               "candidate_sha256": binary_sha256(candidate)}
     inputs = input_arguments(parquet)

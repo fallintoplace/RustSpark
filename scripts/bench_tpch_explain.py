@@ -11,8 +11,8 @@ from tpch_run import input_arguments, query_paths
 
 
 def command(binary, table_arguments, sql_file, partitions):
-    if partitions < 1:
-        raise ValueError("Target partitions must be positive")
+    if type(partitions) is not int or partitions < 1:
+        raise ValueError("Target partitions must be a positive integer")
     return [str(binary), *table_arguments, "--sql-file", str(sql_file),
             "--target-partitions", str(partitions), "--explain"]
 
@@ -40,8 +40,12 @@ def save_explain_plan(destination, plan):
 def capture(binary, parquet, queries, output, timeout=120, partitions=2):
     if not queries:
         raise ValueError("At least one TPC-H query is required for EXPLAIN")
-    if timeout < 1 or output.exists():
-        raise ValueError("Timeout must be positive; output directory must not exist")
+    if type(timeout) is not int or timeout < 1:
+        raise ValueError("Timeout must be a positive integer")
+    if type(partitions) is not int or partitions < 1:
+        raise ValueError("Target partitions must be a positive integer")
+    if output.exists():
+        raise ValueError("Output directory must not exist")
     tables = input_arguments(parquet)
     output.mkdir(parents=True)
     results = []

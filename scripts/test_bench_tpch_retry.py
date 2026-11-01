@@ -22,6 +22,13 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(args[start + 1:start + 3], ["2", "4"])
         self.assertIn("--json-out", args)
 
+    def test_retry_admits_only_positive_integer_budgets(self):
+        for option in ("repeat", "timeout"):
+            for invalid in (True, False, 0, -1, 1.5, float("nan"), float("inf"), "2"):
+                kwargs = {option: invalid}
+                with self.subTest(option=option, value=invalid), self.assertRaisesRegex(ValueError, "retry parameters"):
+                    retry.retry_command("rs", "queries", "data", [2], "out.json", **kwargs)
+
     def test_no_empty_rerun_command(self):
         with self.assertRaises(ValueError):
             retry.retry_command("rs", "queries", "data", [], "out.json")
@@ -34,6 +41,27 @@ class RetryTests(unittest.TestCase):
             {"results": [None]}, [1]))
         self.assertFalse(retry.retry_completed(
             {"results": "not a result list"}, [1]))
+
+    def test_retries_require_same_sql_fingerprint_as_failed_report(self):
+        previous = {"results": [
+            {"id": 2, "status": "error", "sql_sha256": "a" * 64},
+        ]}
+        replay = {"results": [
+            {"id": 2, "status": "ok", "sql_sha256": "b" * 64},
+        ]}
+        self.assertFalse(retry.retry_completed(replay, [2], previous))
+        replay["results"][0]["sql_sha256"] = "a" * 64
+        self.assertTrue(retry.retry_completed(replay, [2], previous))
+        replay["results"][0].pop("sql_sha256")
+        self.assertFalse(retry.retry_completed(replay, [2], previous))
+        previous["results"][0].pop("sql_sha256")
+        self.assertTrue(retry.retry_completed(replay, [2], previous))
+
+    def test_malformed_previous_results_fail_with_validation_error(self):
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            retry.failed_ids(None)
+        with self.assertRaisesRegex(ValueError, "query result entry"):
+            retry.failed_ids({"results": [None]})
 
     def test_retry_does_not_reuse_old_output(self):
         import json

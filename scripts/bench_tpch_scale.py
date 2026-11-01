@@ -35,12 +35,21 @@ def commands(scale, binary, output):
     return fixture, report, prepare, run
 
 
+def finite_positive_duration(value):
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def valid_query_measurement(row):
     median = row.get("median_ms")
     rows = row.get("result_rows")
     hashes = (row.get("sql_sha256"), row.get("result_sha256"))
     return (row.get("status") == "ok"
-            and type(median) in (int, float) and math.isfinite(median) and median > 0
+            and finite_positive_duration(median)
             and type(rows) is int and rows >= 0
             and all(type(value) is str and len(value) == 64
                     and all(char in "0123456789abcdef" for char in value)
@@ -51,8 +60,11 @@ def run_scale(prepare, run, report):
     subprocess.run(prepare, check=True, timeout=1800)
     # Never consume a report left by an earlier invocation.
     report.unlink(missing_ok=True)
+    # Scale runs can produce large logs; success is determined by the JSON report.
+    # Do not buffer subprocess output that this runner never consumes.
     process = subprocess.run(
-        run, check=False, capture_output=True, text=True, timeout=7200,
+        run, check=False, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, timeout=7200,
     )
     rows = json.loads(report.read_text())["results"]
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):

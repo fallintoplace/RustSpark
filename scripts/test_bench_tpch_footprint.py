@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import bench_tpch_footprint as footprint
 from bench_tpch_manifest import TABLES
@@ -68,6 +69,28 @@ class FootprintTests(unittest.TestCase):
             data = b"PAR1" * (1024 * 1024)
             path.write_bytes(data)
             self.assertEqual(footprint.streamed_sha256(path), hashlib.sha256(data).hexdigest())
+
+    def test_profile_rejects_changed_hash_after_manifest_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "first"
+            make_fixture(root)
+            manifest = json.loads((root / "manifest.json").read_text())
+            with mock.patch.object(footprint, "streamed_sha256", return_value="0" * 64):
+                with self.assertRaisesRegex(ValueError, "changed while profiling"):
+                    footprint.profile_table(root, manifest, "customer")
+
+    def test_profile_rejects_mutation_during_hashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "first"
+            make_fixture(root)
+            manifest = json.loads((root / "manifest.json").read_text())
+            def mutate_file(path):
+                data = path.read_bytes()
+                path.write_bytes(data + b"x")
+                return hashlib.sha256(data).hexdigest()
+            with mock.patch.object(footprint, "streamed_sha256", side_effect=mutate_file):
+                with self.assertRaisesRegex(ValueError, "changed while profiling"):
+                    footprint.profile_table(root, manifest, "customer")
 
     def test_different_scale_factors_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
