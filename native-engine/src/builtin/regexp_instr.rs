@@ -35,6 +35,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return i64::try_from(count + 1).map(Value::Integer)
             .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
     }
+    if pattern == "[0-9]" || pattern == "[0-9]+" {
+        // An ASCII digit is a UTF-8 scalar boundary, but SQL positions
+        // count Unicode characters rather than bytes.
+        let Some(byte_index) = text.bytes().position(|byte| byte.is_ascii_digit())
+            else { return Ok(Value::Integer(0)); };
+        let position = super::char_length::character_count(&text[..byte_index])
+            .checked_add(1)
+            .and_then(|n| i64::try_from(n).ok())
+            .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
+        return Ok(Value::Integer(position));
+    }
     let pattern = regex_support::compile(pattern)?;
     let Some(matched) = pattern.find(text) else { return Ok(Value::Integer(0)) };
     let prefix = &text[..matched.start()];
@@ -180,5 +191,28 @@ mod greedy_dot_plus_instr_differential_tests {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text(".+".into()),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_digit_position_regressions {
+    use super::*;
+
+    #[test]
+    fn direct_digit_scan_preserves_unicode_character_offsets() {
+        for text in [
+            "", "123", "abc-321", "🙂éab12", "١٢٣", "hi\n22\nbye",
+            "é界🙂 a9 b8", "🙂12🙂34",
+        ] {
+            for pattern in ["[0-9]", "[0-9]+"] {
+                let re = regex_support::compile(pattern).unwrap();
+                let expected = re.find(text).map_or(0, |m|
+                    text[..m.start()].chars().count() + 1
+                ) as i64;
+                assert_eq!(evaluate(&[
+                    Value::Text(text.to_owned()), Value::Text(pattern.to_owned()),
+                ]).unwrap(), Value::Integer(expected), "{text:?} {pattern}");
+            }
+        }
     }
 }
