@@ -111,6 +111,18 @@ pub fn external_sort(
     })
 }
 
+// Bound integer keys need only a scalar machine comparison. Keep nullable,
+ // mixed numeric and NaN values on SQL's canonical comparison path.
+fn compare_bound_values(left: &Value, right: &Value, key: &SortKey) -> Ordering {
+    match (left, right) {
+        (Value::Integer(a), Value::Integer(b)) => {
+            let result = a.cmp(b);
+            if key.descending { result.reverse() } else { result }
+        }
+        _ => crate::sort::compare_values(left, right, key.descending, key.nulls_first),
+    }
+}
+
 fn compare_runs(left: &Run, right: &Run, keys: &[BoundSortKey]) -> Result<Ordering> {
     let a = left.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
     let b = right.batch.as_ref().ok_or_else(|| Error::Execution("empty sort run".into()))?;
@@ -127,7 +139,7 @@ fn compare_runs(left: &Run, right: &Run, keys: &[BoundSortKey]) -> Result<Orderi
                 .get_or_init(|| key.key.expression.evaluate(b, right.position))
                 .as_ref().map_err(Clone::clone)?,
         };
-        let order = crate::sort::compare_values(x, y, key.key.descending, key.key.nulls_first);
+        let order = compare_bound_values(x, y, &key.key);
         if order != Ordering::Equal { return Ok(order); }
     }
     Ok(Ordering::Equal)
@@ -708,5 +720,41 @@ mod external_sort_expression_budget_tests {
             std::env::temp_dir(), 1, 1);
         assert!(result.err().expect("deep key must fail").to_string()
             .contains("complexity budget"));
+    }
+}
+
+#[cfg(test)]
+mod numeric_external_comparator_regressions {
+    use super::*;
+    use crate::expr::Expr;
+
+    #[test]
+    fn integer_fast_path_matches_sql_order_with_nulls_floats_and_extremes() {
+        let values = [
+            Value::Integer(i64::MIN),
+            Value::Integer(-1),
+            Value::Integer(0),
+            Value::Integer(i64::MAX),
+            Value::Null,
+            Value::Float(f64::NAN),
+            Value::Float(-0.0),
+            Value::Float(5.0),
+        ];
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let key = SortKey {
+                    expression: Expr::Column("x".into()), descending, nulls_first,
+                };
+                for a in &values {
+                    for b in &values {
+                        assert_eq!(
+                            compare_bound_values(a, b, &key),
+                            crate::sort::compare_values(a, b, descending, nulls_first),
+                            "descending={descending} nulls_first={nulls_first} a={a:?} b={b:?}",
+                        );
+                    }
+                }
+            }
+        }
     }
 }
