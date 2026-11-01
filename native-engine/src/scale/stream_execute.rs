@@ -32,10 +32,11 @@ impl Iterator for SortedOutput {
     fn next(&mut self) -> Option<Self::Item> { self.reader.next() }
 }
 
-/// The shard file ownership must outlive the active spill reader.
+/// Rust drops fields in declaration order. Close the active reader before
+// GroupFiles attempts to unlink scratch files, including on Windows.
 struct GroupedOutput {
-    files: GroupFiles,
     reader: Option<SpillReader<BufReader<File>>>,
+    files: GroupFiles,
     next_file: usize,
     batch_rows: usize,
     control: QueryControl,
@@ -89,10 +90,11 @@ impl Iterator for GroupedOutput {
     }
 }
 
-/// Keep hash join shard paths owned until the active reader has finished.
+/// Close the active join reader before JoinFiles removes its scratch files.
+/// In particular, Windows cannot unlink an open spill file.
 struct JoinedOutput {
-    files: JoinFiles,
     reader: Option<SpillReader<BufReader<File>>>,
+    files: JoinFiles,
     next_file: usize,
     batch_rows: usize,
     control: QueryControl,
@@ -1402,5 +1404,81 @@ mod bounded_filter_limit_fusion_regressions {
                 .collect::<Vec<_>>();
             assert_eq!(fused_rows, old_rows);
         }
+    }
+}
+
+#[cfg(test)]
+mod early_stream_drop_cleans_spill_files_tests {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp}, expr::Expr,
+        join::JoinKind, schema::{DataType, Field}, scalar::Value};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn partially_read_grouped_stream_closes_reader_before_unlinking_scratch() {
+        let root = std::env::temp_dir().join(format!(
+            "rustspark-group-early-drop-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let scratch = root.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let csv = root.join("data.csv");
+        fs::write(&csv, b"g\n1\n2\n1\n2\n").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("g", DataType::Integer, false),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("data", &csv, schema, 1024).unwrap();
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("data")),
+            group_by: vec![(Expr::Column("g".into()), "g".into())],
+            aggregates: vec![AggregateItem::new(AggregateOp::CountAll, "rows")],
+        };
+        let options = StreamOptions {
+            batch_rows: 1, scratch_directory: scratch.clone(),
+            ..StreamOptions::default()
+        };
+        let mut stream = execute(&plan, &catalog, &options, QueryControl::default()).unwrap();
+        assert!(stream.next().unwrap().unwrap().num_rows() > 0);
+        drop(stream);
+        assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partially_read_join_stream_closes_reader_before_unlinking_scratch() {
+        let root = std::env::temp_dir().join(format!(
+            "rustspark-join-early-drop-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let scratch = root.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let left = root.join("left.csv");
+        let right = root.join("right.csv");
+        fs::write(&left, b"id\n1\n2\n3\n").unwrap();
+        fs::write(&right, b"id\n2\n3\n").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("lhs", &left, schema.clone(), 1024).unwrap();
+        catalog.register_csv("rhs", &right, schema, 1024).unwrap();
+        let plan = Plan::Join {
+            left: Box::new(Plan::scan("lhs")),
+            right: Box::new(Plan::scan("rhs")),
+            left_key: "id".into(), right_key: "id".into(), kind: JoinKind::Left,
+        };
+        let options = StreamOptions {
+            batch_rows: 1, scratch_directory: scratch.clone(),
+            ..StreamOptions::default()
+        };
+        let mut stream = execute(&plan, &catalog, &options, QueryControl::default()).unwrap();
+        let first = stream.next().unwrap().unwrap();
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(first.schema().len(), 2);
+        drop(stream);
+        assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 }
