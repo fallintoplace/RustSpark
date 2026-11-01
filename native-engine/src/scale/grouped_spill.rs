@@ -82,7 +82,18 @@ fn insert_distinct(
     if keys.len() >= MAX_DISTINCT_KEYS_PER_GROUP {
         return Err(Error::Execution("spill DISTINCT key limit exceeded".into()));
     }
-    let footprint = super::row_footprint::footprint(std::iter::once(value));
+    // Source strings may retain a large unused allocation. The distinct
+    // table owns a fresh clone, so admit its minimum possible size first.
+    let minimum = super::row_footprint::minimum_cloned_footprint(std::iter::once(value));
+    bytes.checked_add(minimum)
+        .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
+        .ok_or_else(|| Error::Execution("spill DISTINCT byte limit exceeded".into()))?;
+    retained_bytes.checked_add(minimum)
+        .filter(|size| *size <= max_retained_bytes)
+        .ok_or_else(|| Error::Execution("spill DISTINCT partition byte budget exceeded".into()))?;
+
+    let owned = value.clone();
+    let footprint = super::row_footprint::footprint(std::iter::once(&owned));
     let next = bytes.checked_add(footprint)
         .filter(|size| *size <= MAX_DISTINCT_BYTES_PER_GROUP)
         .ok_or_else(|| Error::Execution("spill DISTINCT byte limit exceeded".into()))?;
@@ -91,7 +102,7 @@ fn insert_distinct(
     let total = retained_bytes.checked_add(footprint)
         .filter(|size| *size <= max_retained_bytes)
         .ok_or_else(|| Error::Execution("spill DISTINCT partition byte budget exceeded".into()))?;
-    keys.insert(value.clone());
+    keys.insert(owned);
     *bytes = next;
     *retained_bytes = total;
     Ok(true)
@@ -1035,5 +1046,49 @@ mod consecutive_group_spill_tests {
         assert_eq!(results.get(&Value::Null), Some(&vec![Value::Null, Value::Integer(0)]));
         drop(files);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cloned_distinct_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn oversized_input_capacity_does_not_consume_the_owned_key_budget() {
+        let mut overallocated = String::with_capacity(32 * 1024);
+        overallocated.push_str("a small key");
+        let key = Value::Text(overallocated);
+        let mut keys = HashSet::new();
+        let mut group_bytes = 0;
+        let mut shard_bytes = 0;
+        assert!(insert_distinct(
+            &mut keys, &mut group_bytes, &key, &mut shard_bytes, 256,
+        ).unwrap());
+        assert_eq!(group_bytes, shard_bytes);
+        assert!(group_bytes <= 256);
+        assert_eq!(keys.len(), 1);
+        assert!(!insert_distinct(
+            &mut keys, &mut group_bytes, &key, &mut shard_bytes, 256,
+        ).unwrap());
+        assert_eq!(group_bytes, shard_bytes);
+    }
+
+    #[test]
+    fn real_text_overflow_fails_without_inserting_or_charging() {
+        let large = Value::Text("x".repeat(4096));
+        let mut keys = HashSet::new();
+        let mut bytes = 0;
+        let mut retained = 0;
+        assert!(insert_distinct(
+            &mut keys, &mut bytes, &large, &mut retained, 256,
+        ).is_err());
+        assert_eq!(bytes, 0);
+        assert_eq!(retained, 0);
+        assert!(keys.is_empty());
+        let small = Value::Text("okay".into());
+        assert!(insert_distinct(
+            &mut keys, &mut bytes, &small, &mut retained, 256,
+        ).unwrap());
+        assert!(retained > 0);
     }
 }
