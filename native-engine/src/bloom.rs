@@ -600,3 +600,26 @@ mod saturated_bloom_intersection_regressions {
         assert!(partial.intersect_with(&BloomFilter::new(128, 5).unwrap()).is_err());
     }
 }
+
+#[cfg(test)]
+mod saturated_bloom_union_regressions {
+    use super::*;
+
+    #[test]
+    fn saturated_union_is_identity_and_still_validates_layout() {
+        let mut full = BloomFilter::new(64, 5).unwrap();
+        for n in 0..10_000 {
+            if full.bits_set() == 64 { break; }
+            full.insert(&Value::Integer(n));
+        }
+        assert_eq!(full.bits_set(), 64);
+        let before = full.clone();
+        let mut other = BloomFilter::new(64, 5).unwrap();
+        other.insert(&Value::Text("different".into()));
+        full.union_with(&other).unwrap();
+        assert_eq!(full.words, before.words);
+        assert_eq!(full.bits_set(), 64);
+        assert!(full.might_contain(&Value::Integer(10_000_000)));
+        assert!(full.union_with(&BloomFilter::new(128, 5).unwrap()).is_err());
+    }
+}
