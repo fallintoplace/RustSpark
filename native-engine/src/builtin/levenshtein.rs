@@ -68,9 +68,49 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         }
         return distance_units(first.as_bytes(), second.as_bytes(), threshold);
     }
+    // Small thresholds need at most a handful of edits. Walk borrowed
+    // Unicode scalar slices directly, without allocating character vectors
+    // or dynamic-programming rows for the common fuzzy-match case.
+    if let Some(limit @ (1 | 2)) = threshold {
+        return Ok(Value::Integer(bounded_unicode_edits(
+            first, second, limit as u8,
+        )));
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     distance_units(&a, &b, threshold)
+}
+
+// Bounded Unicode search, operating on borrowed UTF-8 boundaries.
+// At most two edits gives at most nine branches and constant recursion depth.
+fn bounded_unicode_edits(a: &str, b: &str, max_edits: u8) -> i64 {
+    fn search(mut a: &str, mut b: &str, remaining: u8) -> Option<u8> {
+        if a.chars().count().abs_diff(b.chars().count()) > usize::from(remaining) {
+            return None;
+        }
+        loop {
+            let (Some(left), Some(right)) = (a.chars().next(), b.chars().next())
+                else { break };
+            if left != right { break; }
+            a = &a[left.len_utf8()..];
+            b = &b[right.len_utf8()..];
+        }
+        if a.is_empty() || b.is_empty() {
+            let tail = a.chars().count() + b.chars().count();
+            return (tail <= usize::from(remaining)).then_some(tail as u8);
+        }
+        if remaining == 0 { return None; }
+        let left = a.chars().next().expect("nonempty Unicode suffix");
+        let right = b.chars().next().expect("nonempty Unicode suffix");
+        [(&a[left.len_utf8()..], &b[right.len_utf8()..]),
+         (&a[left.len_utf8()..], b),
+         (a, &b[right.len_utf8()..])]
+            .into_iter()
+            .filter_map(|(first, second)| search(first, second, remaining - 1))
+            .min()
+            .map(|cost| cost + 1)
+    }
+    search(a, b, max_edits).map_or(-1, i64::from)
 }
 
 // A threshold of one permits at most one insertion, deletion, or
@@ -586,5 +626,43 @@ mod ascii_two_edit_threshold_regressions {
         assert_eq!(evaluate(&[
             Value::Text(left), Value::Text(right), Value::Integer(2)
         ]).unwrap(), Value::Integer(2));
+    }
+}
+
+#[cfg(test)]
+mod bounded_unicode_edit_search_regressions {
+    use super::*;
+
+    #[test]
+    fn small_thresholds_match_unicode_dynamic_programming() {
+        let cases = [
+            "", "é", "è", "🙂", "界", "aé", "éa", "é界🙂",
+            "界é", "🙂é界", "ééé", "🙂🙂a", "ø海a", "海øa",
+        ];
+        for first in cases {
+            for second in cases {
+                let left = first.chars().collect::<Vec<_>>();
+                let right = second.chars().collect::<Vec<_>>();
+                for threshold in [1usize, 2] {
+                    let expected = distance_units(&left, &right, Some(threshold)).unwrap();
+                    let observed = bounded_unicode_edits(first, second, threshold as u8);
+                    assert_eq!(Value::Integer(observed), expected,
+                        "{first:?} vs {second:?}, threshold {threshold}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_unicode_inputs_with_tiny_edits_do_not_need_dp_rows() {
+        let prefix = "🙂界".repeat(20_000);
+        let first = format!("{prefix}é{}", "ø".repeat(10_000));
+        let second = format!("{prefix}a{}", "ø".repeat(10_000));
+        assert_eq!(evaluate(&[
+            Value::Text(first.clone()), Value::Text(second.clone()), Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
+        assert_eq!(evaluate(&[
+            Value::Text(first), Value::Text(second), Value::Integer(2),
+        ]).unwrap(), Value::Integer(1));
     }
 }
