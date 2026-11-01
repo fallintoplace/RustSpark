@@ -84,6 +84,11 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
     }
     // Keep type validation above this shortcut, including when no rows are requested.
     if max_rows == 0 { return batch.slice_rows(0, 0); }
+    // No LIMIT truncation is possible in this batch. Reuse specialized
+    // vector comparisons and IN-list probes instead of evaluating row ASTs.
+    if max_rows >= batch.num_rows() {
+        return crate::vector_filter::filter(batch, predicate);
+    }
     let direct_column = match predicate {
         Expr::Column(name) => Some((name.as_str(), true)),
         Expr::Not(inner) => match inner.as_ref() {
@@ -128,6 +133,11 @@ pub fn filter_first_owned(batch: Batch, predicate: &Expr, max_rows: usize) -> Re
     if matches!(predicate, Expr::Literal(Value::Boolean(true))) {
         let end = max_rows.min(batch.num_rows());
         return batch.slice_rows_owned(0, end);
+    }
+    // The entire input is eligible. Run the vectorized evaluator, preserving
+    // owned column moves for partial selections and unmodified full matches.
+    if max_rows >= batch.num_rows() {
+        return filter_owned(batch, predicate);
     }
     let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
     let direct = match predicate {
@@ -451,5 +461,49 @@ mod owned_short_circuit_filter_regressions {
             .unwrap().rows().unwrap(), vec![vec![Value::Boolean(false)]]);
         assert_eq!(filter_first_owned(input, &Expr::Literal(Value::Boolean(false)), 1)
             .unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod full_batch_bounded_filter_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{Schema, Field, DataType}};
+
+    #[test]
+    fn complete_batches_match_scalar_oracle_for_nullable_numeric_ranges() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..300).map(|n| vec![
+            if n % 11 == 0 { Value::Null } else { Value::Integer(n % 37) },
+            Value::Text("payload".repeat(128)),
+        ]).collect()).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::GreaterEqual,
+            Expr::Literal(Value::Integer(23)),
+        );
+        let expected_rows = (0..batch.num_rows()).filter(|&row|
+            predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+        ).collect::<Vec<_>>();
+        let expected = batch.take(&expected_rows).unwrap();
+        for max_rows in [batch.num_rows(), usize::MAX] {
+            assert_eq!(filter_first(&batch, &predicate, max_rows).unwrap(), expected);
+            assert_eq!(filter_first_owned(batch.clone(), &predicate, max_rows).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn smaller_limits_still_stop_before_failing_later_rows() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(0)),
+        );
+        assert_eq!(filter_first(&batch, &predicate, 1).unwrap().num_rows(), 1);
+        assert_eq!(filter_first_owned(batch, &predicate, 1).unwrap().num_rows(), 1);
     }
 }
