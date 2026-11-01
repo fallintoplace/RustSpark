@@ -20,6 +20,7 @@ pub enum AggregateOp {
     AvgDistinct(Expr),
     Min(Expr),
     Max(Expr),
+    Last(Expr, bool),
     First(Expr, bool),
     BitXor(Expr),
     BitOr(Expr),
@@ -40,7 +41,8 @@ fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
             | AggregateOp::BitAnd(expr) 
             | AggregateOp::BitOr(expr) 
             | AggregateOp::BitXor(expr) 
-            | AggregateOp::First(expr, _) => expr.validate_budget()?,
+            | AggregateOp::First(expr, _) 
+            | AggregateOp::Last(expr, _) => expr.validate_budget()?,
         }
     }
     Ok(())
@@ -81,7 +83,8 @@ impl AggregateItem {
                 }
             }
             AggregateOp::Min(expr) | AggregateOp::Max(expr)
-            | AggregateOp::First(expr, _) => expr.output_type(schema),
+            | AggregateOp::First(expr, _) 
+            | AggregateOp::Last(expr, _) => expr.output_type(schema),
             AggregateOp::BitAnd(expr) => {
                 let kind = if matches!(expr, Expr::Literal(Value::Null)) {
                     DataType::Integer
@@ -123,6 +126,7 @@ enum State {
     AvgDistinct { seen: HashSet<Value>, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
+    Last(Option<Value>),
     First(Option<Value>),
     BitXor(Option<i64>),
     BitOr(Option<i64>),
@@ -141,6 +145,7 @@ impl State {
                 Self::AvgDistinct { seen: HashSet::new(), sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
+            AggregateOp::Last(_, _) => Self::Last(None),
             AggregateOp::First(_, _) => Self::First(None),
             AggregateOp::BitXor(_) => Self::BitXor(None),
             AggregateOp::BitOr(_) => Self::BitOr(None),
@@ -168,7 +173,8 @@ impl State {
             | AggregateOp::BitAnd(expr) 
             | AggregateOp::BitOr(expr) 
             | AggregateOp::BitXor(expr) 
-            | AggregateOp::First(expr, _) => match expr {
+            | AggregateOp::First(expr, _) 
+            | AggregateOp::Last(expr, _) => match expr {
                 Expr::Column(name) =>
                     Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
                 _ => Cow::Owned(expr.evaluate(batch, row)?),
@@ -252,6 +258,11 @@ impl State {
                     *slot = Some(value.into_owned());
                 }
             },
+            Self::Last(slot) => {
+                if (!matches!(op, AggregateOp::Last(_, true)) || !value.is_null()) {
+                    *slot = Some(value.into_owned());
+                }
+            },
         }
         Ok(())
     }
@@ -271,7 +282,7 @@ impl State {
             Self::BitAnd(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::BitOr(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::BitXor(value) => value.map(Value::Integer).unwrap_or(Value::Null),
-            Self::Sum(value) | Self::Min(value) | Self::Max(value) | Self::First(value) => {
+            Self::Sum(value) | Self::Min(value) | Self::Max(value) | Self::First(value) | Self::Last(value) => {
                 value.unwrap_or(Value::Null)
             }
         })

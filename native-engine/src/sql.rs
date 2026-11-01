@@ -94,6 +94,7 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
         AggregateOp::AvgDistinct(expr) => AggregateOp::AvgDistinct(filtered(expr)),
         AggregateOp::Min(expr) => AggregateOp::Min(filtered(expr)),
         AggregateOp::Max(expr) => AggregateOp::Max(filtered(expr)),
+        AggregateOp::Last(expr, ignore_nulls) => AggregateOp::Last(filtered(expr), ignore_nulls),
         AggregateOp::First(expr, ignore_nulls) => AggregateOp::First(filtered(expr), ignore_nulls),
         AggregateOp::BitXor(expr) => AggregateOp::BitXor(filtered(expr)),
         AggregateOp::BitOr(expr) => AggregateOp::BitOr(filtered(expr)),
@@ -593,7 +594,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST", "LAST"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -613,11 +614,11 @@ impl Parser {
                 AggregateOp::CountAll
             } else {
                 let expr = self.expression(0)?;
-                let ignore_nulls = if function == "FIRST" && self.take_symbol(',') {
+                let ignore_nulls = if (function == "FIRST" || function == "LAST") && self.take_symbol(',') {
                     match self.next() {
                         Some(Token::Word(flag)) if flag.eq_ignore_ascii_case("TRUE") => true,
                         Some(Token::Word(flag)) if flag.eq_ignore_ascii_case("FALSE") => false,
-                        _ => return Err(Error::Parse("FIRST ignoreNulls must be a boolean literal".into())),
+                        _ => return Err(Error::Parse(format!("{function} ignoreNulls must be a boolean literal"))),
                     }
                 } else { false };
                 match function.as_str() {
@@ -632,6 +633,7 @@ impl Parser {
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(expr)),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
+                    "LAST" => AggregateOp::Last(expr, ignore_nulls),
                     "FIRST" => AggregateOp::First(expr, ignore_nulls),
                     "BIT_XOR" => AggregateOp::BitXor(expr),
                     "BIT_OR" => AggregateOp::BitOr(expr),
@@ -641,8 +643,8 @@ impl Parser {
             };
             self.expect_symbol(')')?;
             let op = if self.take_word("FILTER") {
-                if matches!(&op, AggregateOp::First(_, _)) {
-                    return Err(Error::Unsupported("FIRST with FILTER is not supported".into()));
+                if matches!(&op, AggregateOp::First(_, _) | AggregateOp::Last(_, _)) {
+                    return Err(Error::Unsupported("FIRST/LAST with FILTER is not supported".into()));
                 }
                 self.expect_symbol('(')?;
                 self.expect_word("WHERE")?;
@@ -1215,13 +1217,13 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST"]
+            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST", "LAST"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
                 AggregateOp::CountAll
             } else {
-                let accepts_flag = name.eq_ignore_ascii_case("FIRST");
+                let accepts_flag = name.eq_ignore_ascii_case("FIRST") || name.eq_ignore_ascii_case("LAST");
                 let max_args = if accepts_flag { 2 } else { 1 };
                 if args.is_empty() || args.len() > max_args {
                     return Err(Error::Parse(format!("HAVING {name} expects at most {max_args} arguments")));
@@ -1231,7 +1233,7 @@ fn rewrite_having(
                 let ignore_nulls = match args.next() {
                     None => false,
                     Some(Expr::Literal(Value::Boolean(flag))) if accepts_flag => flag,
-                    _ => return Err(Error::Parse("FIRST ignoreNulls must be a boolean literal".into())),
+                    _ => return Err(Error::Parse(format!("{name} ignoreNulls must be a boolean literal"))),
                 };
                 match name.to_ascii_uppercase().as_str() {
                     "COUNT" => AggregateOp::Count(argument),
@@ -1242,6 +1244,7 @@ fn rewrite_having(
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(argument)),
                     "MIN" => AggregateOp::Min(argument),
                     "MAX" => AggregateOp::Max(argument),
+                    "LAST" => AggregateOp::Last(argument, ignore_nulls),
                     "FIRST" => AggregateOp::First(argument, ignore_nulls),
                     "BIT_XOR" => AggregateOp::BitXor(argument),
                     "BIT_OR" => AggregateOp::BitOr(argument),
