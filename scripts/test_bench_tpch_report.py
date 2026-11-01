@@ -52,6 +52,13 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             report.render({"results": [{"id": 1, "status": "error"}, {"id": 1, "status": "error"}]})
 
+    def test_huge_timing_integer_is_validation_error(self):
+        for field in ("median_ms", "p95_ms"):
+            row = {"id": 1, "status": "ok", "median_ms": 1.0, "p95_ms": 2.0}
+            row[field] = 10**500
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "duration"):
+                report.render({"results": [row]})
+
     def test_rejects_non_object_rows(self):
         for row in (None, "wrong", 5, []):
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, "JSON objects"):
