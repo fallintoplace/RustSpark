@@ -71,8 +71,11 @@ where I: Iterator<Item = Result<Vec<Value>>>
         // for a tiny final batch.
         let capacity = self.input.size_hint().1
             .map_or(limit.min(256), |upper| upper.min(limit));
+        // Do not allocate a potential 256-row buffer for every field until
+        // the first validated row arrives. Empty streams and a malformed
+        // first record should leave all column vectors unallocated.
         let mut columns = (0..self.schema.len())
-            .map(|_| Vec::with_capacity(capacity)).collect::<Vec<Vec<Value>>>();
+            .map(|_| Vec::new()).collect::<Vec<Vec<Value>>>();
         let mut row_count = 0usize;
         while row_count < limit {
             let next = self.pending_row.take().map(Ok).or_else(|| self.input.next());
@@ -118,6 +121,13 @@ where I: Iterator<Item = Result<Vec<Value>>>
                         retained_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
                         self.pending_row = Some(row);
                         break;
+                    }
+                    if row_count == 0 {
+                        // Preserve the original bounded reservation heuristic
+                        // after schema, type, and byte-budget admission.
+                        for column in &mut columns {
+                            column.reserve(capacity);
+                        }
                     }
                     retained_bytes += row_bytes;
                     for (column, value) in columns.iter_mut().zip(row) {
@@ -576,6 +586,51 @@ mod row_batch_retained_capacity_regressions {
         assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
         assert!(stream.next().unwrap().unwrap_err().to_string().contains("byte budget"));
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod lazy_row_batch_column_allocation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn wide_schema() -> Schema {
+        Schema::new((0..128).map(|index|
+            Field::new(format!("column_{index}"), DataType::Integer, false))
+            .collect()).unwrap()
+    }
+
+    #[test]
+    fn empty_and_first_row_error_streams_do_not_emit_phantom_batches() {
+        let schema = wide_schema();
+        let mut empty = RowBatcher::new(
+            std::iter::empty::<Result<Vec<Value>>>(), schema.clone(), 8192,
+        ).unwrap();
+        assert!(empty.next().is_none());
+        assert!(empty.next().is_none());
+        let mut invalid = RowBatcher::new(
+            std::iter::once(Ok(vec![Value::Integer(1)])),
+            schema, 8192,
+        ).unwrap();
+        assert!(invalid.next().unwrap().is_err());
+        assert!(invalid.next().is_none());
+    }
+
+    #[test]
+    fn starts_reserving_only_after_a_valid_row_and_preserves_late_failures() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)])
+            .unwrap();
+        let input = vec![
+            Ok(vec![Value::Integer(1)]),
+            Ok(vec![Value::Integer(2)]),
+            Ok(vec![Value::Null]),
+        ];
+        let mut batcher = RowBatcher::new(input.into_iter(), schema, 4096).unwrap();
+        assert_eq!(batcher.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]);
+        assert!(batcher.next().unwrap().is_err());
+        assert!(batcher.next().is_none());
     }
 }
 

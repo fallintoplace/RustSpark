@@ -45,6 +45,15 @@ impl QueryGuard {
         Ok(Self { cancellation, deadline: Some(deadline) })
     }
 
+    /// Create a child execution guard that shares cancellation and inherits
+    /// the earlier of the parent deadline and a new local timeout.
+    pub fn child_with_timeout(&self, timeout: Duration) -> Result<Self> {
+        let local = Instant::now().checked_add(timeout)
+            .ok_or_else(|| Error::Execution("query timeout overflow".into()))?;
+        let deadline = self.deadline.map_or(local, |parent| parent.min(local));
+        Ok(Self { cancellation: self.cancellation.clone(), deadline: Some(deadline) })
+    }
+
     /// Monotonic time left before the deadline, or None for unbounded queries.
     pub fn remaining_time(&self) -> Option<Duration> {
         self.deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
@@ -116,5 +125,34 @@ mod query_guard_remaining_deadline_tests {
         let remaining = bounded.remaining_time().unwrap();
         assert!(remaining <= Duration::from_secs(60));
         assert!(remaining > Duration::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod scoped_query_guard_tests {
+    use super::*;
+
+    #[test]
+    fn nested_timeouts_cannot_extend_the_parent_and_share_cancellation() {
+        let parent = QueryGuard::with_timeout(
+            Cancellation::new(), Duration::from_secs(30)).unwrap();
+        let child = parent.child_with_timeout(Duration::from_secs(1)).unwrap();
+        let grandchild = child.child_with_timeout(Duration::from_secs(60)).unwrap();
+        assert!(child.deadline.unwrap() <= parent.deadline.unwrap());
+        assert_eq!(grandchild.deadline, child.deadline);
+        assert!(grandchild.check().is_ok());
+        child.cancellation.cancel();
+        assert!(parent.check().unwrap_err().to_string().contains("cancelled"));
+        assert!(grandchild.check().is_err());
+    }
+
+    #[test]
+    fn expired_parent_stays_expired_and_invalid_timeout_rejects() {
+        let parent = QueryGuard::with_deadline(Cancellation::new(), Instant::now());
+        let child = parent.child_with_timeout(Duration::from_secs(600)).unwrap();
+        assert!(child.check().unwrap_err().to_string().contains("deadline"));
+        assert!(QueryGuard::default().child_with_timeout(Duration::MAX).is_err());
+        let unbounded = QueryGuard::default();
+        assert!(unbounded.child_with_timeout(Duration::from_secs(5)).unwrap().check().is_ok());
     }
 }

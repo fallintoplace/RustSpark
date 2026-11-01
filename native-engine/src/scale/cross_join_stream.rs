@@ -169,10 +169,12 @@ impl CrossJoinStream {
                 break;
             }
             output_bytes += next_bytes;
-            for (index, column) in output.iter_mut().take(self.left_schema.len()).enumerate() {
-                column.push(left.value(self.left_row, index)?.clone());
-            }
-            for (column, value) in output.iter_mut().skip(self.left_schema.len())
+            // The left row and schema were validated when the current input
+            // batch was installed. Append the full row directly from its
+            // columns, checking row bounds only once per joined output row.
+            let (left_output, right_output) = output.split_at_mut(self.left_schema.len());
+            left.append_row_to_columns(self.left_row, left_output)?;
+            for (column, value) in right_output.iter_mut()
                 .zip(&self.right_rows[self.right_row]) {
                 column.push(value.clone());
             }
@@ -556,5 +558,44 @@ mod cross_join_output_clone_accounting_regressions {
         ).unwrap();
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod columnar_cross_join_append_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn wide_left_rows_and_nullable_right_keys_match_materialized_product() {
+        let left_schema = Schema::new((0..24).map(|n| {
+            Field::new(format!("left_{n}"), if n % 3 == 0 { DataType::Text }
+                else { DataType::Integer }, true)
+        }).collect()).unwrap();
+        let right_schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(left_schema.clone(), (0..17).map(|row| {
+            (0..24).map(|column| {
+                if (row + column) % 11 == 0 { Value::Null }
+                else if column % 3 == 0 { Value::Text(format!("{row}-{}", "🦀".repeat(80))) }
+                else { Value::Integer((row * 100 + column) as i64) }
+            }).collect()
+        }).collect()).unwrap();
+        let right = Batch::from_rows(right_schema.clone(), vec![
+            vec![Value::Null, Value::Text("x".into())],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("é🙂".repeat(32))],
+        ]).unwrap();
+        let expected = join::cross_join(&left, &right).unwrap().rows().unwrap();
+        let joined = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            left_schema, right_schema, 5, QueryControl::default(),
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = joined.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, expected);
+        assert_eq!(rows.len(), 51);
     }
 }
