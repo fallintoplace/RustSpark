@@ -201,6 +201,42 @@ impl BloomFilter {
 }
 
 #[cfg(test)]
+mod selected_bloom_probe_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_selected_probes_match_scalar_probes_across_duplicate_and_unicode_keys() {
+        let keys = vec![
+            Value::Integer(10), Value::Text("é🙂".into()), Value::Integer(20),
+            Value::Null, Value::Float(-0.0), Value::Float(0.0),
+            Value::Text("Berlin".into()), Value::Float(f64::NAN),
+        ];
+        let selection = [2, 2, 1, 7, 0, 6, 5, 4, 4, 3, 0, 1];
+        for bits in [513, 1024, 8192] {
+            let mut filter = BloomFilter::new(bits, 5).unwrap();
+            for &index in &[0, 1, 3, 4, 7] { filter.insert(&keys[index]); }
+            let expected = selection.iter().map(|&index|
+                filter.might_contain(&keys[index])).collect::<Vec<_>>();
+            assert_eq!(filter.probe_selected(&keys, &selection).unwrap(), expected);
+            assert_eq!(filter.probe_selected(&keys, &[]).unwrap(), Vec::<bool>::new());
+        }
+    }
+
+    #[test]
+    fn empty_filter_and_invalid_selection_preserve_contract() {
+        let keys = [Value::Integer(1), Value::Text("x".into())];
+        let mut filter = BloomFilter::new(64, 3).unwrap();
+        assert_eq!(filter.probe_selected(&keys, &[1, 1, 0]).unwrap(),
+            vec![false, false, false]);
+        assert!(filter.probe_selected(&keys, &[0, 2]).is_err());
+        filter.insert(&keys[0]);
+        assert!(filter.probe_selected(&keys, &[0, usize::MAX]).is_err());
+        assert_eq!(filter.probe_selected(&keys, &[0]).unwrap(), vec![true]);
+    }
+}
+
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -862,40 +898,5 @@ mod fallible_bloom_admission_regressions {
             }
             assert!(filter.bits_set() <= bits);
         }
-    }
-}
-
-#[cfg(test)]
-mod selected_bloom_probe_tests {
-    use super::*;
-
-    #[test]
-    fn sparse_selected_probes_match_scalar_probes_across_duplicate_and_unicode_keys() {
-        let keys = vec![
-            Value::Integer(10), Value::Text("é🙂".into()), Value::Integer(20),
-            Value::Null, Value::Float(-0.0), Value::Float(0.0),
-            Value::Text("Berlin".into()), Value::Float(f64::NAN),
-        ];
-        let selection = [2, 2, 1, 7, 0, 6, 5, 4, 4, 3, 0, 1];
-        for bits in [513, 1024, 8192] {
-            let mut filter = BloomFilter::new(bits, 5).unwrap();
-            for &index in &[0, 1, 3, 4, 7] { filter.insert(&keys[index]); }
-            let expected = selection.iter().map(|&index|
-                filter.might_contain(&keys[index])).collect::<Vec<_>>();
-            assert_eq!(filter.probe_selected(&keys, &selection).unwrap(), expected);
-            assert_eq!(filter.probe_selected(&keys, &[]).unwrap(), Vec::<bool>::new());
-        }
-    }
-
-    #[test]
-    fn empty_filter_and_invalid_selection_preserve_contract() {
-        let keys = [Value::Integer(1), Value::Text("x".into())];
-        let mut filter = BloomFilter::new(64, 3).unwrap();
-        assert_eq!(filter.probe_selected(&keys, &[1, 1, 0]).unwrap(),
-            vec![false, false, false]);
-        assert!(filter.probe_selected(&keys, &[0, 2]).is_err());
-        filter.insert(&keys[0]);
-        assert!(filter.probe_selected(&keys, &[0, usize::MAX]).is_err());
-        assert_eq!(filter.probe_selected(&keys, &[0]).unwrap(), vec![true]);
     }
 }
