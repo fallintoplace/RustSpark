@@ -132,6 +132,10 @@ impl<W: Write> SpillWriter<W> {
         if batch.schema() != &self.schema {
             return Err(Error::Schema("spill batch schema mismatch".into()));
         }
+        // Zero-column batches have logical rows even without any encoded cells.
+        if rows.len() > MAX_CELLS {
+            return Err(Error::Execution("spill batch exceeds row limit".into()));
+        }
         let cells = rows.len().checked_mul(self.schema.len())
             .filter(|&cells| cells <= MAX_CELLS)
             .ok_or_else(|| Error::Execution("spill batch exceeds cell limit".into()))?;
@@ -281,6 +285,9 @@ impl<R: Read> SpillReader<R> {
         let mut remaining = [0u8; 3];
         self.input.read_exact(&mut remaining)?;
         let rows = u32::from_le_bytes([first[0], remaining[0], remaining[1], remaining[2]]) as usize;
+        if rows > MAX_CELLS {
+            return Err(Error::Execution("spill batch exceeds row limit".into()));
+        }
         let cells = rows.checked_mul(self.schema.len())
             .filter(|&cells| cells <= MAX_CELLS)
             .ok_or_else(|| Error::Execution("spill batch exceeds configured limits".into()))?;
@@ -870,6 +877,28 @@ mod reusable_spill_encoding_buffer_tests {
         assert_eq!(reader.next_batch().unwrap(), Some(batch.take(&[2, 0, 2]).unwrap()));
         assert_eq!(reader.next_batch().unwrap(), Some(batch.slice_rows(1, 2).unwrap()));
         assert_eq!(reader.next_batch().unwrap(), Some(Batch::empty(schema)));
+        assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod zero_width_spill_row_limit_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn rejects_too_many_logical_rows_without_column_payloads() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], MAX_CELLS + 1).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        assert!(matches!(writer.write_batch(&batch), Err(Error::Execution(_))));
+        // A forged row count has no cell tags for zero-width schemas.
+        // Validate the count itself before returning a logical giant batch.
+        let mut encoded = SpillWriter::new(Vec::new(), schema).unwrap().finish().unwrap();
+        encoded.extend_from_slice(&u32::try_from(MAX_CELLS + 1).unwrap().to_le_bytes());
+        let mut reader = SpillReader::new(Cursor::new(encoded), MAX_CELLS + 1).unwrap();
+        assert!(matches!(reader.next_batch(), Err(Error::Execution(_))));
         assert!(reader.next_batch().unwrap().is_none());
     }
 }
