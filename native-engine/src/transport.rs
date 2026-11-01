@@ -112,7 +112,11 @@ impl AttemptTracker {
     pub fn accept_batch(&mut self, frames: &[Frame]) -> Result<Vec<bool>> {
         let mut staged = std::collections::HashMap::new();
         let mut new_tasks = 0usize;
-        let mut accepted = Vec::with_capacity(frames.len());
+        // An incoming frame window is untrusted. Reserve decisions before
+        // changing any tracked attempts, and report allocation failure.
+        let mut accepted = Vec::new();
+        accepted.try_reserve_exact(frames.len())
+            .map_err(|_| Error::Execution("exchange batch decision allocation failed".into()))?;
         for frame in frames {
             let key = (frame.stage, frame.task);
             let previous = staged.get(&key).copied()
@@ -122,6 +126,10 @@ impl AttemptTracker {
                 Some(attempt) => {
                     accepted.push(true);
                     if frame.attempt > attempt {
+                        if !staged.contains_key(&key) {
+                            staged.try_reserve(1).map_err(|_| Error::Execution(
+                                "exchange batch staging allocation failed".into()))?;
+                        }
                         staged.insert(key, frame.attempt);
                     }
                 }
@@ -129,6 +137,8 @@ impl AttemptTracker {
                     if new_tasks >= self.max_tasks.saturating_sub(self.attempts.len()) {
                         return Err(Error::Execution("exchange task tracking budget exceeded".into()));
                     }
+                    staged.try_reserve(1).map_err(|_| Error::Execution(
+                        "exchange batch staging allocation failed".into()))?;
                     new_tasks += 1;
                     staged.insert(key, frame.attempt);
                     accepted.push(true);
@@ -986,5 +996,29 @@ mod fallible_frame_allocation_regressions {
             truncated.pop();
             assert!(read_frame(&mut truncated.as_slice(), 128).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_exchange_batch_admission_regressions {
+    use super::*;
+
+    #[test]
+    fn repeated_attempts_keep_order_and_capacity_failures_are_atomic() {
+        let frame = |task, attempt| Frame {
+            stage: 9, task, attempt, payload: Vec::new(),
+        };
+        let mut gate = AttemptTracker::new(2).unwrap();
+        assert_eq!(
+            gate.accept_batch(&[
+                frame(1, 2), frame(1, 5), frame(1, 4), frame(2, 1),
+            ]).unwrap(),
+            vec![true, true, false, true]
+        );
+        assert!(gate.accept_batch(&[frame(1, 8), frame(3, 1)]).is_err());
+        assert!(!gate.accept(&frame(1, 4)).unwrap());
+        assert!(gate.accept(&frame(1, 5)).unwrap());
+        assert!(!gate.accept(&frame(2, 0)).unwrap());
+        assert_eq!(gate.accept_batch(&[]).unwrap(), Vec::<bool>::new());
     }
 }
