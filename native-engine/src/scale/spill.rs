@@ -1,5 +1,5 @@
 //! Portable, schema-checked spill format. Callers own file paths and cleanup.
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use crate::{batch::Batch, scalar::Value, schema::{DataType, Field, Schema}, Error, Result};
 
 const MAGIC: &[u8; 8] = b"RSPILL01";
@@ -224,17 +224,20 @@ impl<W: Write> SpillWriter<W> {
 }
 
 pub struct SpillReader<R: Read> {
-    input: R,
+    input: BufReader<R>,
     schema: Schema,
     max_rows_per_batch: usize,
     stopped: bool,
 }
 
 impl<R: Read> SpillReader<R> {
-    pub fn new(mut input: R, max_rows_per_batch: usize) -> Result<Self> {
+    pub fn new(input: R, max_rows_per_batch: usize) -> Result<Self> {
         if max_rows_per_batch == 0 {
             return Err(Error::Execution("spill reader requires positive batch size limit".into()));
         }
+        // Scalar spill decoding reads one tag and several fixed-width values
+        // per row. Keep those reads in a bounded page-sized input buffer.
+        let mut input = BufReader::with_capacity(64 * 1024, input);
         let mut magic = [0; 8];
         input.read_exact(&mut magic)?;
         if &magic != MAGIC { return Err(Error::Parse("invalid spill file signature".into())); }
@@ -900,5 +903,47 @@ mod zero_width_spill_row_limit_regressions {
         let mut reader = SpillReader::new(Cursor::new(encoded), MAX_CELLS + 1).unwrap();
         assert!(matches!(reader.next_batch(), Err(Error::Execution(_))));
         assert!(reader.next_batch().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod buffered_spill_input_regressions {
+    use super::*;
+    use std::{cell::Cell, io::{self, Cursor, Read}, rc::Rc};
+
+    struct CountingReader {
+        source: Cursor<Vec<u8>>,
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            self.calls.set(self.calls.get() + 1);
+            self.source.read(output)
+        }
+    }
+
+    #[test]
+    fn dense_numeric_spill_uses_bounded_source_reads() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("value", DataType::Float, true),
+        ]).unwrap();
+        let rows = (0..10_000).map(|index| vec![
+            Value::Integer(index),
+            if index % 7 == 0 { Value::Null } else { Value::Float(index as f64) },
+        ]).collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let counting = CountingReader {
+            source: Cursor::new(writer.finish().unwrap()),
+            calls: Rc::clone(&calls),
+        };
+        let mut reader = SpillReader::new(counting, 10_000).unwrap();
+        assert_eq!(reader.next_batch().unwrap(), Some(batch));
+        assert!(reader.next_batch().unwrap().is_none());
+        assert!(calls.get() < 30, "buffered reader used {} source calls", calls.get());
     }
 }
