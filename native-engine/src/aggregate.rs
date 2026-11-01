@@ -441,9 +441,19 @@ pub fn aggregate_with_limits(
     // Reuse the key vector for repeated groups rather than allocating one
     // temporary vector per row in the common GROUP BY hot path.
     let mut key = Vec::with_capacity(group_by.len());
+    let direct_group_keys = bound_columns.iter().all(Option::is_some);
+    let mut previous_group: Option<usize> = None;
     for row in 0..batch.num_rows() {
         let index = if group_by.is_empty() {
             0
+        } else if direct_group_keys && row > 0 && bound_columns.iter().all(|column| {
+            let values = column.expect("all grouping keys are direct columns");
+            values[row] == values[row - 1]
+        }) {
+            // The same typed composite key as the previous row maps to the
+            // same group. Avoid hashing long clustered keys and probing the
+            // fingerprint index. Computed keys still evaluate on every row.
+            previous_group.expect("the previous row resolved a group")
         } else {
             key.clear();
             for ((expr, _), column) in group_by.iter().zip(&bound_columns) {
@@ -483,6 +493,9 @@ pub fn aggregate_with_limits(
                 index
             }
         };
+        previous_group = Some(index);
+        // Even when a group key is cached, every aggregate expression must
+        // be evaluated to preserve per-row counts, sums and execution errors.
         for (state, item) in groups[index].1.iter_mut().zip(items) {
             state.update(&item.op, batch, row, &mut retained_distinct_bytes,
                 max_key_state_bytes.saturating_sub(retained_group_bytes))?;
@@ -934,5 +947,79 @@ mod aggregate_distinct_global_memory_budget_tests {
         assert_eq!(result.num_rows(), 2);
         assert_eq!(result.row(0).unwrap(), vec![Value::Integer(1), Value::Integer(1)]);
         assert_eq!(result.row(1).unwrap(), vec![Value::Integer(2), Value::Integer(1)]);
+    }
+}
+
+#[cfg(test)]
+mod clustered_groupby_key_run_regressions {
+    use super::*;
+    use crate::expr::BinaryOp;
+
+    #[test]
+    fn composite_nullable_float_and_unicode_runs_update_all_aggregate_states() {
+        let schema = Schema::new(vec![
+            Field::new("number", DataType::Float, true),
+            Field::new("word", DataType::Text, true),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "🙂é".repeat(4096);
+        let mut rows = Vec::new();
+        for (number, word) in [
+            (Value::Null, Value::Null),
+            (Value::Float(-0.0), Value::Text(wide.clone())),
+            (Value::Float(0.0), Value::Text(wide.clone())),
+            (Value::Float(f64::NAN), Value::Text("nan".into())),
+            (Value::Float(-f64::NAN), Value::Text("nan".into())),
+            (Value::Float(1.0), Value::Text("one".into())),
+            (Value::Float(2.0), Value::Null),
+        ] {
+            for index in 0..40 {
+                rows.push(vec![number.clone(), word.clone(),
+                    Value::Integer((index % 3) + 1)]);
+            }
+        }
+        let batch = Batch::from_rows(schema, rows).unwrap();
+        let keys = [
+            (Expr::Column("number".into()), "number".into()),
+            (Expr::Column("word".into()), "word".into()),
+        ];
+        let items = [
+            AggregateItem::new(AggregateOp::CountAll, "rows"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("amount".into())), "total"),
+            AggregateItem::new(AggregateOp::CountDistinct(
+                Expr::Column("amount".into())), "distinct"),
+        ];
+        let output = aggregate_with_max_groups(&batch, &keys, &items, 5).unwrap();
+        let part_sum = (0..40).map(|index| (index % 3) + 1).sum::<i64>();
+        assert_eq!(output.rows().unwrap(), vec![
+            vec![Value::Null, Value::Null, Value::Integer(40),
+                Value::Integer(part_sum), Value::Integer(3)],
+            vec![Value::Float(-0.0), Value::Text(wide),
+                Value::Integer(80), Value::Integer(2 * part_sum), Value::Integer(3)],
+            vec![Value::Float(f64::NAN), Value::Text("nan".into()),
+                Value::Integer(80), Value::Integer(2 * part_sum), Value::Integer(3)],
+            vec![Value::Float(1.0), Value::Text("one".into()),
+                Value::Integer(40), Value::Integer(part_sum), Value::Integer(3)],
+            vec![Value::Float(2.0), Value::Null,
+                Value::Integer(40), Value::Integer(part_sum), Value::Integer(3)],
+        ]);
+        assert!(aggregate_with_max_groups(&batch, &keys, &items, 4).is_err());
+    }
+
+    #[test]
+    fn cached_group_does_not_hide_failing_per_row_expression() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("denominator", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Integer(1)],
+            vec![Value::Integer(1), Value::Integer(0)],
+        ]).unwrap();
+        let items = [AggregateItem::new(AggregateOp::Sum(Expr::binary(
+            Expr::Literal(Value::Integer(10)), BinaryOp::Divide,
+            Expr::Column("denominator".into()),
+        )), "sum")];
+        assert!(aggregate(&batch, &[(Expr::Column("key".into()), "key".into())], &items).is_err());
     }
 }
