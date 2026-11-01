@@ -120,9 +120,23 @@ impl HyperLogLog {
             .any(|&rank| u32::from(rank) > 65 - PRECISION) {
             return Err(Error::Parse("invalid HLL register rank".into()));
         }
-        for (index, &rank) in bytes[WIRE_HEADER.len()..].iter().enumerate() {
-            if rank != 0 { self.update_register(index, rank); }
+        // Merge all dense registers in one pass, then update the exact
+        // fixed-point harmonic sum once. Per-register updates create a long
+        // dependency chain on the distributed aggregation hot path.
+        let mut replaced_weight = 0u128;
+        let mut merged_weight = 0u128;
+        let mut new_nonempty = 0usize;
+        for (current, &incoming) in self.registers.iter_mut()
+            .zip(&bytes[WIRE_HEADER.len()..]) {
+            if incoming > *current {
+                replaced_weight += harmonic_weight(*current);
+                merged_weight += harmonic_weight(incoming);
+                new_nonempty += usize::from(*current == 0);
+                *current = incoming;
+            }
         }
+        self.harmonic_scaled = self.harmonic_scaled - replaced_weight + merged_weight;
+        self.nonempty += new_nonempty;
         Ok(())
     }
 
@@ -727,5 +741,35 @@ mod transactional_wire_merge_regressions {
         *dense.last_mut().unwrap() = u8::MAX;
         assert!(target.merge_wire_bytes(&dense).is_err());
         assert_eq!(target, original);
+    }
+}
+
+#[cfg(test)]
+mod dense_wire_batch_accumulator_tests {
+    use super::*;
+
+    #[test]
+    fn dense_payload_merge_matches_sketch_merge_and_is_idempotent() {
+        let mut left = HyperLogLog::new();
+        let mut right = HyperLogLog::new();
+        for value in 0..100_000 {
+            if value % 3 == 0 { left.add(&Value::Integer(value)); }
+            if value % 2 == 0 { right.add(&Value::Integer(value)); }
+        }
+        let mut reference = left.clone();
+        reference.merge(&right);
+        let mut wire = WIRE_HEADER.to_vec();
+        wire.extend_from_slice(&right.registers);
+        let mut actual = left;
+        actual.merge_wire_bytes(&wire).unwrap();
+        assert_eq!(actual, reference);
+        actual.merge_wire_bytes(&wire).unwrap();
+        assert_eq!(actual, reference);
+        assert_eq!(actual.estimate(), reference.estimate());
+
+        // A bad final register cannot apply earlier valid updates.
+        *wire.last_mut().unwrap() = u8::MAX;
+        assert!(actual.merge_wire_bytes(&wire).is_err());
+        assert_eq!(actual, reference);
     }
 }
