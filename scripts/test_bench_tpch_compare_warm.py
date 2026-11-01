@@ -60,6 +60,12 @@ class CompareWarmTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare.compare(rs, dd, verification())
 
+    def test_rejects_unrepresentable_integer_medians(self):
+        candidate = report(20, "duckdb")
+        candidate["results"][0]["median_ms"] = 10**500
+        with self.assertRaisesRegex(ValueError, "Invalid or incomplete"):
+            compare.compare(report(10, "rs"), candidate, verification())
+
     def test_rejects_fabricated_matching_reference_rows(self):
         for invalid in (2, -1, None, True):
             with self.subTest(invalid=invalid):
