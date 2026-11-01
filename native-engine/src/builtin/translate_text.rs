@@ -279,7 +279,7 @@ mod unicode_text_ascii_mapping_regressions {
             Value::Text(input.into()), Value::Text(from.into()), Value::Text(to.into()),
         ]).unwrap();
         assert_eq!(translate("éa🙂bab東京", "ab", "XY"), Value::Text("éX🙂YXY東京".into()));
-        assert_eq!(translate("éa🙂bab東京", "ab", "Z"), Value::Text("éZ🙂ZZ東京".into()));
+        assert_eq!(translate("éa🙂bab東京", "ab", "Z"), Value::Text("éZ🙂Z東京".into()));
         assert_eq!(translate("éa🙂bab東京", "aab", "XYZ"), Value::Text("éX🙂ZXZ東京".into()));
         assert_eq!(translate("é🙂東京", "ab", "XY"), Value::Text("é🙂東京".into()));
     }
