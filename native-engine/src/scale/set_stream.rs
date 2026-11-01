@@ -119,19 +119,32 @@ impl SetStream {
         })
     }
 
+    // An exhausted bag key can no longer suppress or produce a left row.
+    // Release the actual owned key capacity, never the probing row's capacity.
+    fn remove_exhausted_right_key(&mut self, row: &[Value]) {
+        if self.right_counts.get(row) != Some(&0) { return; }
+        if let Some((owned, _)) = self.right_counts.remove_entry(row) {
+            self.retained_bytes -= super::row_footprint::footprint(owned.iter());
+        }
+    }
+
     fn select_row(&mut self, row: &[Value]) -> Result<bool> {
         let selected = match self.mode {
             SetMode::IntersectAll => {
-                if let Some(remaining) = self.right_counts.get_mut(row) {
-                    if *remaining == 0 { false }
-                    else { *remaining -= 1; true }
-                } else { false }
+                let matched = if let Some(remaining) = self.right_counts.get_mut(row) {
+                    *remaining -= 1;
+                    true
+                } else { false };
+                if matched { self.remove_exhausted_right_key(row); }
+                matched
             }
             SetMode::ExceptAll => {
-                if let Some(remaining) = self.right_counts.get_mut(row) {
-                    if *remaining == 0 { true }
-                    else { *remaining -= 1; false }
-                } else { true }
+                let suppressed = if let Some(remaining) = self.right_counts.get_mut(row) {
+                    *remaining -= 1;
+                    true
+                } else { false };
+                if suppressed { self.remove_exhausted_right_key(row); }
+                !suppressed
             }
             SetMode::IntersectDistinct => {
                 // Right-hand membership already holds every qualifying key.
@@ -192,9 +205,9 @@ impl Iterator for SetStream {
             self.stopped = true;
             return Some(Err(error));
         }
-        // An empty INTERSECT build side cannot match any left row. For
-        // INTERSECT DISTINCT, removing admitted keys also lets us stop as
-        // soon as every possible distinct result has been emitted.
+        // An empty INTERSECT build side cannot match any left row. Removing
+        // exhausted keys in both INTERSECT modes lets us stop as soon as
+        // every possible result has been emitted.
         // Avoid scanning expensive remaining left partitions in either case.
         if matches!(self.mode, SetMode::IntersectDistinct | SetMode::IntersectAll)
             && self.right_counts.is_empty()
@@ -723,6 +736,60 @@ mod owned_set_output_tests {
         ).unwrap();
         assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![vec![Value::Integer(3)]]);
         assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod exhausted_bag_key_eviction_tests {
+    use super::*;
+
+    #[test]
+    fn intersect_all_releases_consumed_keys_and_does_not_poll_later_batches() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Text, true)]).unwrap();
+        let batch = |values: Vec<Value>| Batch::from_rows(
+            schema.clone(), values.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        let right = batch(vec![Value::Text("wide".repeat(200)), Value::Null]);
+        let first = batch(vec![Value::Null, Value::Text("wide".repeat(200))]);
+        let left: BatchStream = Box::new([
+            Ok(first),
+            Err(Error::Execution("must not poll exhausted intersection".into())),
+        ].into_iter());
+        let mut stream = SetStream::new(
+            left, Box::new([Ok(right)].into_iter()), schema.clone(), schema,
+            SetMode::IntersectAll, QueryControl::default(), 4, 4096,
+        ).unwrap();
+        assert_eq!(stream.right_counts.len(), 2);
+        let rows = stream.next().unwrap().unwrap().rows().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![Value::Null]);
+        assert_eq!(rows[1], vec![Value::Text("wide".repeat(200))]);
+        assert!(stream.right_counts.is_empty());
+        assert_eq!(stream.retained_bytes, 0);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn except_all_removes_exhausted_keys_without_losing_left_multiplicity() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let batch = |values: Vec<Value>| Batch::from_rows(
+            schema.clone(), values.into_iter().map(|v| vec![v]).collect(),
+        ).unwrap();
+        let right = batch(vec![Value::Integer(1), Value::Integer(1), Value::Null]);
+        let left = batch(vec![
+            Value::Integer(1), Value::Null, Value::Integer(1),
+            Value::Integer(1), Value::Null, Value::Integer(2),
+        ]);
+        let mut stream = SetStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, SetMode::ExceptAll, QueryControl::default(),
+            4, 4096,
+        ).unwrap();
+        let values = stream.next().unwrap().unwrap().column(0).unwrap().to_vec();
+        assert_eq!(values, vec![Value::Integer(1), Value::Null, Value::Integer(2)]);
+        assert!(stream.right_counts.is_empty());
+        assert_eq!(stream.retained_bytes, 0);
         assert!(stream.next().is_none());
     }
 }
