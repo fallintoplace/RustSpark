@@ -1994,3 +1994,34 @@ mod spark_filtered_aggregations_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod spark_mean_aggregate_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn values() -> Catalog {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("v", DataType::Integer, true)]).unwrap();
+        let rows = vec![
+            vec![Value::Integer(2)], vec![Value::Integer(4)],
+            vec![Value::Integer(4)], vec![Value::Null],
+        ];
+        catalog.register("numbers", Batch::from_rows(schema, rows).unwrap()).unwrap();
+        catalog
+    }
+
+    #[test]
+    fn mean_agrees_with_avg_for_distinct_and_having() {
+        let run = |query| executor::execute(&parse_sql(query).unwrap(), &values())
+            .unwrap().rows().unwrap();
+        assert_eq!(run("SELECT MEAN(v) AS average FROM numbers"),
+            vec![vec![Value::Float(10.0 / 3.0)]]);
+        assert_eq!(run("SELECT MEAN(DISTINCT v) AS average FROM numbers"),
+            vec![vec![Value::Float(3.0)]]);
+        assert_eq!(run("SELECT AVG(v) AS average FROM numbers"),
+            run("SELECT MEAN(v) AS average FROM numbers"));
+        assert_eq!(run("SELECT COUNT(*) AS total FROM numbers HAVING MEAN(v) > 3"),
+            vec![vec![Value::Integer(4)]]);
+    }
+}
