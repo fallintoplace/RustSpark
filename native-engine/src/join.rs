@@ -524,11 +524,17 @@ impl<'a> PreparedHashJoin<'a> {
         if left.schema() != &self.left_schema {
             return Err(Error::Schema("prepared join probe schema mismatch".into()));
         }
+        let probe_keys = left.column(self.left_column)?;
         if matches!(self.kind, JoinKind::Semi | JoinKind::Anti) {
             let mut selected = Vec::new();
+            let mut previous: Option<&Value> = None;
+            let mut matched = false;
             for row in start..end {
-                let key = left.value(row, self.left_column)?;
-                let matched = joinable(key) && self.right_hash.contains_key(key);
+                let key = &probe_keys[row];
+                if previous != Some(key) {
+                    matched = joinable(key) && self.right_hash.contains_key(key);
+                }
+                previous = Some(key);
                 if (self.kind == JoinKind::Semi && matched) ||
                     (self.kind == JoinKind::Anti && !matched) {
                     if selected.len() >= MAX_JOIN_ROWS {
@@ -554,13 +560,18 @@ impl<'a> PreparedHashJoin<'a> {
         let possible_rows = probe_rows.checked_mul(self.right.num_rows().max(1));
         if possible_rows.is_none_or(|limit| limit > MAX_JOIN_ROWS) {
             let mut planned_rows = 0usize;
+            let mut previous: Option<&Value> = None;
+            let mut matches = 0usize;
             for row in start..end {
-                let key = left.value(row, self.left_column)?;
-                let matches = if joinable(key) {
-                    self.right_hash.get(key).map_or(0, Vec::len)
-                } else {
-                    0
-                };
+                let key = &probe_keys[row];
+                if previous != Some(key) {
+                    matches = if joinable(key) {
+                        self.right_hash.get(key).map_or(0, Vec::len)
+                    } else {
+                        0
+                    };
+                }
+                previous = Some(key);
                 let output = if matches == 0 && self.kind == JoinKind::Left {
                     1
                 } else {
@@ -582,9 +593,19 @@ impl<'a> PreparedHashJoin<'a> {
         let right_text = join_text_columns(self.right)?;
         let mut bytes = 0usize;
         let mut rows = 0usize;
+        let mut previous: Option<&Value> = None;
+        let mut previous_matches: Option<&Vec<usize>> = None;
         for left_row in start..end {
-            let key = &left_columns[self.left_column][left_row];
-            let matches = if joinable(key) { self.right_hash.get(key) } else { None };
+            let key = &probe_keys[left_row];
+            let matches = if previous == Some(key) {
+                previous_matches
+            } else if joinable(key) {
+                self.right_hash.get(key)
+            } else {
+                None
+            };
+            previous = Some(key);
+            previous_matches = matches;
             if let Some(right_rows) = matches {
                 if let Some(flags) = matched.as_deref_mut() {
                     for &right_row in right_rows { flags[right_row] = true; }
@@ -974,6 +995,66 @@ mod materialized_cross_join_byte_budget_regressions {
         assert_eq!(output.value(0, 0).unwrap(), left.value(0, 0).unwrap());
         assert_eq!(output.value(3, 0).unwrap(), &Value::Null);
         assert_eq!(output.value(3, 1).unwrap(), &Value::Integer(2));
+    }
+}
+
+#[cfg(test)]
+mod prepared_probe_key_run_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn repeated_long_keys_keep_fanout_and_probe_window_semantics() {
+        let payload = "🙂".repeat(1536);
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Text, true),
+            Field::new("v", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), (0..4096).map(|n| vec![
+            if n % 256 < 12 { Value::Null }
+            else if n % 256 < 120 { Value::Text(payload.clone()) }
+            else { Value::Text(format!("unmatched-{}", n / 256)) },
+            Value::Integer(n),
+        ]).collect()).unwrap();
+        let right = Batch::from_rows(schema.clone(), (0..320).map(|n| vec![
+            if n < 3 { Value::Text(payload.clone()) }
+            else { Value::Text(format!("other-{n}")) },
+            Value::Integer(10000 + n),
+        ]).collect()).unwrap();
+
+        for kind in [JoinKind::Inner, JoinKind::Left, JoinKind::Semi, JoinKind::Anti] {
+            let prepared = PreparedHashJoin::new(
+                schema.clone(), &right, "k", "k", kind,
+            ).unwrap();
+            let whole = prepared.probe(&left).unwrap();
+            let mut slices = Vec::new();
+            for start in (0..left.num_rows()).step_by(257) {
+                let end = (start + 257).min(left.num_rows());
+                slices.push(prepared.probe_range_with_matches(&left, start, end, None).unwrap());
+            }
+            let merged = crate::batch_utils::concat(whole.schema(), slices, 1_000_000).unwrap();
+            assert_eq!(whole, merged, "mode: {kind:?}");
+            assert_eq!(whole, hash_join(&left, &right, "k", "k", kind).unwrap());
+        }
+    }
+
+    #[test]
+    fn null_and_nan_key_runs_keep_anti_and_semi_results() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Float, true)]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null], vec![Value::Null],
+            vec![Value::Float(f64::NAN)], vec![Value::Float(-f64::NAN)],
+            vec![Value::Float(-0.0)], vec![Value::Float(0.0)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(f64::NAN)], vec![Value::Float(0.0)],
+        ]).unwrap();
+        let semi = PreparedHashJoin::new(schema.clone(), &right, "k", "k", JoinKind::Semi)
+            .unwrap().probe(&left).unwrap();
+        assert_eq!(semi.num_rows(), 4);
+        let anti = PreparedHashJoin::new(schema, &right, "k", "k", JoinKind::Anti)
+            .unwrap().probe(&left).unwrap();
+        assert_eq!(anti.column(0).unwrap(), &[Value::Null, Value::Null]);
     }
 }
 
