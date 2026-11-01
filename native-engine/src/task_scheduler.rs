@@ -94,11 +94,11 @@ impl TaskScheduler {
             counts: TaskCounts { queued, ..TaskCounts::default() } })
     }
 
-    fn forget_worker_lease(&mut self, worker: u64, id: u64) {
-        if let Some(leases) = self.leased_by_worker.get_mut(&worker) {
+    fn forget_worker_lease(by_worker: &mut HashMap<u64, BTreeSet<u64>>, worker: u64, id: u64) {
+        if let Some(leases) = by_worker.get_mut(&worker) {
             leases.remove(&id);
             if leases.is_empty() {
-                self.leased_by_worker.remove(&worker);
+                by_worker.remove(&worker);
             }
         }
     }
@@ -157,7 +157,7 @@ impl TaskScheduler {
                 _ => unreachable!("deadline index contains only leased tasks"),
             };
             if task.expire_if_needed(now, self.max_attempts) {
-                self.forget_worker_lease(worker, id);
+                Self::forget_worker_lease(&mut self.leased_by_worker, worker, id);
                 self.counts.leased -= 1;
                 if task.status == TaskStatus::Queued {
                     self.counts.queued += 1;
@@ -231,7 +231,7 @@ impl TaskScheduler {
             _ => return false,
         };
         self.deadlines.remove(&(until, lease.task));
-        self.forget_worker_lease(lease.worker, lease.task);
+        Self::forget_worker_lease(&mut self.leased_by_worker, lease.worker, lease.task);
         self.counts.leased -= 1;
         if now >= until {
             task.status = if task.attempts >= self.max_attempts {
@@ -300,7 +300,7 @@ impl TaskScheduler {
             if let TaskStatus::Leased { worker, until, .. } = &task.status {
                 self.deadlines.remove(&(*until, id));
                 let owner = *worker;
-                self.forget_worker_lease(owner, id);
+                Self::forget_worker_lease(&mut self.leased_by_worker, owner, id);
             }
             task.status = TaskStatus::Failed;
             return true;
@@ -801,8 +801,8 @@ mod reverse_worker_index_tests {
     fn check_index(scheduler: &TaskScheduler) {
         let mut expected: HashMap<u64, BTreeSet<u64>> = HashMap::new();
         for (&id, task) in &scheduler.tasks {
-            if let TaskStatus::Leased { worker, .. } = task.status {
-                expected.entry(worker).or_default().insert(id);
+            if let TaskStatus::Leased { worker, .. } = &task.status {
+                expected.entry(*worker).or_default().insert(id);
             }
         }
         assert_eq!(scheduler.leased_by_worker, expected);
