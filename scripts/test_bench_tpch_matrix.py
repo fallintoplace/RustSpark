@@ -10,6 +10,48 @@ import bench_tpch_matrix as matrix
 
 
 class MatrixTests(unittest.TestCase):
+    def test_matrix_rejects_non_integer_timing_budgets(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "results"
+            for field, invalid in (
+                ("repeat", True), ("repeat", 1.5),
+                ("warmup", False), ("warmup", "1"),
+            ):
+                with self.subTest(field=field, invalid=invalid):
+                    options = {"repeat": 1, "warmup": 0, field: invalid}
+                    with self.assertRaisesRegex(ValueError, "Repeat and warmup"):
+                        matrix.matrix("rs", "queries", "data", folder, [1], **options)
+                    self.assertFalse(folder.exists())
+
+    def test_run_configuration_rejects_ambiguous_json_evidence(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            def run(command, **kwargs):
+                output = Path(command[command.index("--json-out") + 1])
+                output.write_text('{"results":[],"results":[{"id":1,"status":"ok"}]}')
+                return mock.Mock(returncode=0)
+            with mock.patch.object(matrix.subprocess, "run", side_effect=run):
+                with self.assertRaisesRegex(ValueError, "Duplicate"):
+                    matrix.run_configuration("rs", "queries", "data", folder,
+                                             1, 1, 0, {})
+
+    def test_rejects_oversized_medians_and_nonfinite_suite_total(self):
+        for median in (10 ** 500, 1e308):
+            with self.subTest(median=median), TemporaryDirectory() as tmp:
+                folder = Path(tmp)
+                def run(command, **kwargs):
+                    output = Path(command[command.index("--json-out") + 1])
+                    rows = [
+                        {"id": n, "status": "ok", "median_ms": median,
+                         "result_sha256": "a" * 64} for n in range(1, 23)
+                    ]
+                    output.write_text(json.dumps({"results": rows}))
+                    return mock.Mock(returncode=0)
+                with mock.patch.object(matrix.subprocess, "run", side_effect=run):
+                    with self.assertRaisesRegex(ValueError, "median|total"):
+                        matrix.run_configuration("rs", "queries", "data", folder,
+                                                 1, 1, 0, {})
+
     def test_rejects_invalid_partition_specification(self):
         for value in ("", "0", "1,0", "1,1", "one", "1,,2"):
             with self.subTest(value=value), self.assertRaises(ValueError):
