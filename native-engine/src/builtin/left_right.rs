@@ -42,6 +42,9 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
             .map_or(text.len(), |(byte, _)| byte);
         &text[..end]
     };
+    if result.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("LEFT/RIGHT result exceeds native 16 MiB budget".into()));
+    }
     Ok(Value::Text(result.to_owned()))
 }
 
@@ -73,6 +76,9 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
     if left == right {
+        if left.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
+        }
         // Compare bytes once instead of decoding every matching Unicode scalar.
         return Ok(Value::Text(left.to_owned()));
     }
@@ -84,6 +90,9 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     // Different Unicode scalars may share leading UTF-8 bytes. Exclude any
     // partial scalar from the returned prefix.
     while !left.is_char_boundary(end) { end -= 1; }
+    if end > 16 * 1024 * 1024 {
+        return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
+    }
     Ok(Value::Text(left[..end].to_string()))
 }
 
@@ -238,5 +247,32 @@ mod byte_oriented_text_fast_path_tests {
         assert_eq!(reverse(&[Value::Text("a🙂é".into())]).unwrap(),
             Value::Text("é🙂a".into()));
         assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_text_output_regressions {
+    use super::*;
+    #[test]
+    fn short_slices_remain_usable_for_large_inputs() {
+        let oversized = Value::Text("x".repeat(16 * 1024 * 1024 + 1));
+        assert_eq!(left(&[oversized.clone(), Value::Integer(1)]).unwrap(),
+            Value::Text("x".into()));
+        assert_eq!(right(&[oversized.clone(), Value::Integer(1)]).unwrap(),
+            Value::Text("x".into()));
+        assert!(matches!(left(&[oversized.clone(), Value::Integer(i64::MAX)]),
+            Err(Error::Execution(_))));
+        assert!(matches!(right(&[oversized, Value::Integer(i64::MAX)]),
+            Err(Error::Execution(_))));
+    }
+    #[test]
+    fn shared_prefix_checks_output_not_just_input() {
+        let long = "x".repeat(16 * 1024 * 1024 + 1);
+        assert_eq!(common_prefix(&[Value::Text(long.clone()),
+            Value::Text("x".into())]).unwrap(), Value::Text("x".into()));
+        assert!(matches!(common_prefix(&[Value::Text(long.clone()),
+            Value::Text(long)]), Err(Error::Execution(_))));
+        assert_eq!(common_prefix(&[Value::Null, Value::Text("a".into())]).unwrap(),
+            Value::Null);
     }
 }

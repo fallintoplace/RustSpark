@@ -2,6 +2,7 @@ package rustsparklocal
 
 import (
     "context"
+    "bytes"
     "encoding/json"
     "errors"
     "fmt"
@@ -91,4 +92,23 @@ func TestScanNDJSONRowsAcceptsExactByteLimit(t *testing.T) {
     }); err == nil {
         t.Fatal("expected oversized row to be rejected")
     }
+}
+
+
+func TestScanNDJSONRowsRejectsInvalidUTF8(t *testing.T) {
+    invalid := append([]byte("{\"text\":\""), 0xff)
+    invalid = append(invalid, []byte("\"}\n")...)
+    called := false
+    err := scanNDJSONRows(bytes.NewReader(invalid), func(map[string]any) error {
+        called = true
+        return nil
+    })
+    if err == nil || !strings.Contains(err.Error(), "UTF-8") || called {
+        t.Fatalf("malformed UTF-8 reached visitor: called=%v error=%v", called, err)
+    }
+    valid := []byte("{\"text\":\"é🙂\"}\n")
+    if err := scanNDJSONRows(bytes.NewReader(valid), func(row map[string]any) error {
+        if row["text"] != "é🙂" { t.Errorf("lost text: %v", row) }
+        return nil
+    }); err != nil { t.Fatal(err) }
 }

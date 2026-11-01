@@ -8,6 +8,8 @@ import (
     "fmt"
     "reflect"
     "strings"
+    "os"
+    "path/filepath"
     "testing"
 )
 
@@ -255,5 +257,19 @@ func TestOutputBudgetCancelsChildBeforeWaitingForMoreStdout(t *testing.T) {
     }
     if output.Len() != 0 {
         t.Fatal("overflow must not append any bytes")
+    }
+}
+
+
+func TestQueryRejectsInvalidUTF8InsteadOfReplacingSQLText(t *testing.T) {
+    if os.PathSeparator != '/' { t.Skip("test uses a POSIX fake CLI") }
+    script := filepath.Join(t.TempDir(), "invalid-rustspark")
+    if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '[{\"text\":\"\\377\"}]'\n"), 0700); err != nil {
+        t.Fatal(err)
+    }
+    client := Client{Binary: script}
+    if _, err := client.Query(context.Background(), "SELECT text", Options{}); err == nil ||
+        !strings.Contains(err.Error(), "UTF-8") {
+        t.Fatalf("expected strict UTF-8 error, got %v", err)
     }
 }
