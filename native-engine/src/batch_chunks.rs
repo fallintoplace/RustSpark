@@ -155,11 +155,17 @@ pub fn concatenate_owned(batches: Vec<Batch>) -> Result<Batch> {
         total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
     }
-    let mut columns: Vec<Vec<Value>> = (0..schema.len())
-        .map(|_| Vec::with_capacity(total)).collect();
-    for batch in batches {
-        for (target, mut source) in columns.iter_mut().zip(batch.into_columns()) {
-            target.append(&mut source);
+    // Reuse the first batch's owned column vectors rather than allocating
+    // a second full-width set and moving all its cells into it. Reserve once
+    // after validating every input, so reallocations cannot grow per chunk.
+    let mut inputs = batches.into_iter();
+    let mut columns = inputs.next().expect("nonempty owned batches").into_columns();
+    for column in &mut columns {
+        column.reserve(total - column.len());
+    }
+    for batch in inputs {
+        for (target, source) in columns.iter_mut().zip(batch.into_columns()) {
+            target.extend(source);
         }
     }
     Batch::from_validated_columns(schema, columns, total)
@@ -437,5 +443,62 @@ mod owned_batch_chunk_regressions {
         let mut iter = chunks_owned(input, 2).unwrap();
         assert!(iter.nth(usize::MAX).is_none());
         assert_eq!(iter.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_concat_column_buffer_reuse_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn retains_first_column_allocation_when_capacity_is_available() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let mut original = Vec::with_capacity(8);
+        original.push(Value::Text("🙂".repeat(2048)));
+        let left = Batch::new(schema.clone(), vec![original]).unwrap();
+        let original_cells = left.column(0).unwrap().as_ptr();
+        let original_text = match left.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null], vec![Value::Text("tail".into())],
+        ]).unwrap();
+        let combined = concatenate_owned(vec![left, right]).unwrap();
+        assert_eq!(combined.num_rows(), 3);
+        assert_eq!(combined.column(0).unwrap().as_ptr(), original_cells);
+        assert_eq!(match combined.value(0, 0).unwrap() {
+            Value::Text(text) => text.as_ptr(), _ => unreachable!(),
+        }, original_text);
+        assert_eq!(combined.value(1, 0).unwrap(), &Value::Null);
+    }
+
+    #[test]
+    fn multi_chunk_owned_concat_preserves_order_schema_and_empty_columns() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let chunks = (0..64).map(|i| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(i), if i % 3 == 0 {
+                Value::Null
+            } else {
+                Value::Text(format!("é-{i}"))
+            }]]).unwrap()).collect::<Vec<_>>();
+        let expected = concatenate(&chunks).unwrap();
+        assert_eq!(concatenate_owned(chunks).unwrap(), expected);
+
+        let empty = Schema::new(vec![]).unwrap();
+        let inputs = vec![
+            Batch::new_with_row_count(empty.clone(), vec![], 2).unwrap(),
+            Batch::new_with_row_count(empty.clone(), vec![], 5).unwrap(),
+        ];
+        assert_eq!(concatenate_owned(inputs).unwrap().num_rows(), 7);
+
+        let mismatched = Schema::new(vec![Field::new("other", DataType::Text, true)]).unwrap();
+        assert!(concatenate_owned(vec![
+            Batch::empty(schema), Batch::empty(mismatched),
+        ]).is_err());
     }
 }
