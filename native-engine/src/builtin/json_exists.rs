@@ -39,6 +39,44 @@ impl<'de> DeserializeSeed<'de> for ContainsSeed<'_> {
     }
 }
 
+// A direct root-object member lookup does not need a materialized JSON tree.
+// Even after finding a key, validate every later member and trailing token.
+struct RootObjectField<'a>(&'a str);
+
+impl<'de> DeserializeSeed<'de> for RootObjectField<'_> {
+    type Value = bool;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D)
+        -> std::result::Result<Self::Value, D::Error>
+    {
+        struct FieldVisitor<'a>(&'a str);
+        impl<'de> Visitor<'de> for FieldVisitor<'_> {
+            type Value = bool;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A)
+                -> std::result::Result<bool, A::Error>
+            {
+                while let Some(name) = map.next_key::<String>()? {
+                    let found = name == self.0;
+                    map.next_value::<IgnoredAny>()?;
+                    if found {
+                        while map.next_key::<IgnoredAny>()?.is_some() {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+        deserializer.deserialize_map(FieldVisitor(self.0))
+    }
+}
+
 fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Boolean)
@@ -56,6 +94,25 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         serde_json::from_str::<IgnoredAny>(text)
             .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
         return Ok(Value::Boolean(true));
+    }
+    if let Some(key) = path.strip_prefix("$.") {
+        // Only simple, valid one-level member paths can skip tree parsing.
+        // Escaped, indexed and nested paths retain the general JSONPath walker.
+        if path.len() <= 4096 && !key.is_empty() &&
+            key.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') &&
+            text.trim_start().starts_with('{')
+        {
+            if text.len() > 16 * 1024 * 1024 {
+                return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+            }
+            let mut deserializer = serde_json::Deserializer::from_str(text);
+            let found = RootObjectField(key).deserialize(&mut deserializer)
+                .and_then(|found| deserializer.end().map(|()| found))
+                .map_err(|error| Error::Execution(format!(
+                    "invalid native JSON input: {error}"
+                )))?;
+            return Ok(Value::Boolean(found));
+        }
     }
     let doc = json_path::parse(text)?;
     Ok(Value::Boolean(json_path::lookup(Some(&doc), path)?.is_some()))
@@ -187,5 +244,52 @@ mod streaming_root_json_exists_tests {
         }
         assert!(matches!(evaluate(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1)),
             Value::Text("$".into())]), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod streamed_root_object_json_exists_regressions {
+    use super::*;
+
+    fn exists(input: &str, path: &str) -> Result<Value> {
+        evaluate(&[Value::Text(input.into()), Value::Text(path.into())])
+    }
+
+    #[test]
+    fn handles_null_duplicate_and_escaped_root_member_names() {
+        assert_eq!(exists(r#"{"present":null,"other":{"x":1}}"#, "$.present").unwrap(),
+            Value::Boolean(true));
+        assert_eq!(exists(r#"{"present":null,"other":{"x":1}}"#, "$.absent").unwrap(),
+            Value::Boolean(false));
+        assert_eq!(exists(r#"{"x":1,"x":null}"#, "$.x").unwrap(),
+            Value::Boolean(true));
+        assert_eq!(exists(r#"{"\\u0061":1}"#.replace("\\\\u", "\\u").as_str(),
+            "$.a").unwrap(), Value::Boolean(true));
+        assert_eq!(exists(r#"{"root":{"nested":[1]}}"#, "$.root.nested[0]").unwrap(),
+            Value::Boolean(true));
+        assert_eq!(exists(r#"{"a.b":1}"#, r#"$["a.b"]"#).unwrap(),
+            Value::Boolean(true));
+    }
+
+    #[test]
+    fn large_objects_do_not_materialize_nested_values_but_validate_entire_input() {
+        let mut document = String::from(r#"{"first":null"#);
+        for index in 0..10_000 {
+            document.push_str(&format!(r#","padding_{index}":{{"nested":[1,2,3]}}"#));
+        }
+        document.push('}');
+        assert_eq!(exists(&document, "$.first").unwrap(), Value::Boolean(true));
+        assert_eq!(exists(&document, "$.missing").unwrap(), Value::Boolean(false));
+
+        for invalid in [
+            r#"{"first":null,"bad":[1,]}"#,
+            r#"{"first":null,"unfinished":"#,
+            r#"{"first":null} trailing"#,
+        ] {
+            assert!(exists(invalid, "$.first").is_err(), "{invalid}");
+        }
+        assert!(exists(r#"{"key":1}"#, "$.bad-name").is_err());
+        assert_eq!(evaluate(&[Value::Null, Value::Text("$.first".into())]).unwrap(),
+            Value::Null);
     }
 }
