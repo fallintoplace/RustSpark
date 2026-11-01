@@ -14,6 +14,16 @@ class ReportTests(unittest.TestCase):
         self.assertIn("1/2", result)
         self.assertIn("Q02: unsupported function", result)
 
+    def test_failure_diagnostics_cannot_inject_html_or_table_cells(self):
+        result = reporter.render({"results": [{
+            "id": 1, "status": "error",
+            "error": "<script>x</script> & | next\nline\rmore",
+        }]})
+        self.assertNotIn("<script>", result)
+        self.assertIn("&lt;script&gt;x&lt;/script&gt; &amp;", result)
+        self.assertIn(r"\| next", result)
+        self.assertNotIn("\r", result)
+
     def test_bad_timings_rejected(self):
         with self.assertRaisesRegex(ValueError, "Invalid"):
             reporter.render({"results": [
