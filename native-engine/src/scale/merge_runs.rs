@@ -31,9 +31,13 @@ struct InputRun {
 }
 
 impl InputRun {
-    fn fill(&mut self) -> Result<()> {
+    fn fill(&mut self, control: &QueryControl) -> Result<()> {
         while !self.exhausted &&
             self.batch.as_ref().is_none_or(|batch| self.position >= batch.num_rows()) {
+            // A spill can contain arbitrarily many empty wire batches.
+            // Without a check here, a merge can ignore cancellation while
+            // draining them before reaching its first nonempty row.
+            control.check()?;
             match self.reader.next_batch()? {
                 Some(batch) => {
                     self.batch = Some(batch);
@@ -107,9 +111,11 @@ impl RunMerger {
             input_batch_rows > 65_536 || output_batch_rows > 65_536 {
             return Err(Error::Execution("invalid external sort fan-in or batch size".into()));
         }
+        control.check()?;
         let selected = bind_sort_keys(&schema, keys)?;
         let mut runs = Vec::new();
         for path in paths {
+            control.check()?;
             let reader = SpillReader::new(
                 BufReader::new(File::open(path)?), input_batch_rows)?;
             if reader.schema() != &schema {
@@ -182,7 +188,7 @@ impl RunMerger {
         output_bytes: &mut usize, output_has_rows: bool) -> Result<AppendStatus> {
         self.control.check()?;
         if !self.heap_ready {
-            for run in &mut self.runs { run.fill()?; }
+            for run in &mut self.runs { run.fill(&self.control)?; }
             self.heap = (0..self.runs.len())
                 .filter(|&index| self.runs[index].peek(self.keys[0].column).is_some()).collect();
             for parent in (0..self.heap.len() / 2).rev() {
@@ -193,7 +199,7 @@ impl RunMerger {
         if let Some(index) = self.pending_refill.take() {
             debug_assert_eq!(self.heap.first().copied(), Some(index));
             let selected = &mut self.runs[index];
-            selected.fill()?;
+            selected.fill(&self.control)?;
             if selected.peek(self.keys[0].column).is_none() {
                 self.heap.swap_remove(0);
             }
@@ -663,5 +669,59 @@ mod composite_integer_heap_fast_path_tests {
             drop(runs);
         }
         fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cancellable_empty_run_draining {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use crate::scale::spill::SpillWriter;
+    use std::{fs, io::{BufReader, Write}};
+
+    #[test]
+    fn stopped_query_does_not_scan_empty_batches_before_first_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-merge-empty-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos(),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("empty.rspill");
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = SpillWriter::new(file, schema.clone()).unwrap();
+        for _ in 0..1000 {
+            writer.write_batch(&Batch::empty(schema.clone())).unwrap();
+        }
+        writer.finish().unwrap();
+        // The trailing broken length is reached only if all empty batches
+        // are consumed despite the cancelled query.
+        let mut append = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        append.write_all(&[1, 2]).unwrap();
+        drop(append);
+        let reader = SpillReader::new(
+            BufReader::new(File::open(&path).unwrap()), 1).unwrap();
+        let mut run = InputRun {
+            reader, batch: None, position: 0, exhausted: false,
+        };
+        let control = QueryControl::default();
+        control.cancel();
+        let error = run.fill(&control).err().unwrap();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!run.exhausted);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_constructor_rejects_before_opening_nonexistent_runs() {
+        let schema = Schema::new(vec![Field::new("k", DataType::Integer, false)]).unwrap();
+        let key = SortKey::ascending(Expr::Column("k".into()));
+        let control = QueryControl::default();
+        control.cancel();
+        let missing = std::env::temp_dir().join("rustspark-nonexistent-merge-test.rspill");
+        let error = RunMerger::new(
+            &[missing], schema, &[key], 8, 8, control).err().unwrap();
+        assert!(error.to_string().contains("cancelled"));
     }
 }

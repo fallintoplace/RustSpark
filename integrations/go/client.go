@@ -14,6 +14,7 @@ import (
     "sort"
     "strconv"
     "strings"
+    "time"
     "unicode/utf8"
 )
 
@@ -106,6 +107,16 @@ func (c Client) arguments(sql string, opts Options) ([]string, error) {
     if count > 0 && (len(opts.CSVTables)+len(opts.ParquetTables)+len(opts.JSONTables) > 0) {
         return nil, errors.New("named and unnamed inputs cannot be mixed")
     }
+    // A SQL table must have exactly one source format.
+    namedTables := make(map[string]struct{})
+    for _, tables := range []map[string]string{opts.CSVTables, opts.ParquetTables, opts.JSONTables} {
+        for name := range tables {
+            if _, exists := namedTables[name]; exists {
+                return nil, fmt.Errorf("duplicate named table %q across input formats", name)
+            }
+            namedTables[name] = struct{}{}
+        }
+    }
     var err error
     if args, err = addNamed(args, "--csv-table", opts.CSVTables); err != nil { return nil, err }
     if args, err = addNamed(args, "--parquet-table", opts.ParquetTables); err != nil { return nil, err }
@@ -145,12 +156,17 @@ func (c Client) Query(ctx context.Context, sql string, opts Options) ([]map[stri
     childCtx, cancel := context.WithCancel(ctx)
     defer cancel()
     command := exec.CommandContext(childCtx, binary, args...)
+    // Descendants may retain stdout/stderr even after their CLI parent exits.
+    // Avoid waiting indefinitely for Go's output-copy goroutines.
+    command.WaitDelay = 2 * time.Second
+    configureCLIProcess(command)
     output := boundedOutput{limit: opts.MaxOutputBytes, onLimit: cancel}
     if output.limit == 0 { output.limit = 64 * 1024 * 1024 }
     stderr := boundedStderr()
     stderr.onLimit = cancel
     command.Stdout, command.Stderr = &output, &stderr
     if err := command.Run(); err != nil {
+        if errors.Is(err, exec.ErrWaitDelay) { killCLIProcessGroup(command) }
         if ctx.Err() != nil { return nil, ctx.Err() }
         if output.exceeded || stderr.exceeded { return nil, errOutputLimit }
         return nil, fmt.Errorf("RustSpark query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
@@ -281,6 +297,10 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     childCtx, cancel := context.WithCancel(ctx)
     defer cancel()
     command := exec.CommandContext(childCtx, binary, args...)
+    // Descendants may retain stdout/stderr even after their CLI parent exits.
+    // Avoid waiting indefinitely for Go's output-copy goroutines.
+    command.WaitDelay = 2 * time.Second
+    configureCLIProcess(command)
     var limited *ndjsonByteLimit
     if opts.MaxOutputBytes > 0 {
         limited = &ndjsonByteLimit{output: output, remaining: opts.MaxOutputBytes, onLimit: cancel}
@@ -292,6 +312,7 @@ func (c Client) QueryNDJSON(ctx context.Context, sql string, opts Options, outpu
     stderr.onLimit = cancel
     command.Stderr = &stderr
     if err := command.Run(); err != nil {
+        if errors.Is(err, exec.ErrWaitDelay) { killCLIProcessGroup(command) }
         if ctx.Err() != nil { return ctx.Err() }
         if (limited != nil && limited.exceeded) || stderr.exceeded { return errOutputLimit }
         return fmt.Errorf("RustSpark NDJSON query failed: %w: %s", err, strings.TrimSpace(stderr.String()))

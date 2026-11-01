@@ -47,6 +47,23 @@ impl BloomFilter {
         Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes, populated: false, occupied_bits: 0 })
     }
 
+    // Double hashing needs a stride coprime to the bit count. An odd stride
+    // is sufficient for powers of two but can repeat probes on other layouts.
+    fn coprime_stride(&self, mut step: u64) -> u64 {
+        if self.bits.is_power_of_two() { return step; }
+        let bits = self.bits as u64;
+        loop {
+            let (mut left, mut right) = (step % bits, bits);
+            while right != 0 {
+                let remainder = left % right;
+                left = right;
+                right = remainder;
+            }
+            if left == 1 { return step; }
+            step = step.wrapping_add(2);
+        }
+    }
+
     fn hash_pair(&self, key: &Value) -> (u64, u64) {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
@@ -59,7 +76,7 @@ impl BloomFilter {
             let mut mixed = first.wrapping_add(0x9e37_79b9_7f4a_7c15);
             mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            (mixed ^ (mixed >> 31)) | 1
+            self.coprime_stride((mixed ^ (mixed >> 31)) | 1)
         } else {
             0
         };
@@ -755,5 +772,37 @@ mod bloom_optimal_sizing_tests {
         let tight = BloomFilter::for_expected_items(1000, 0.001).unwrap();
         assert!(loose.bits < medium.bits && medium.bits < tight.bits);
         assert!(loose.hashes <= medium.hashes && medium.hashes <= tight.hashes);
+    }
+}
+
+#[cfg(test)]
+mod irregular_bloom_stride_regressions {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn every_probe_visits_a_distinct_position_when_capacity_allows() {
+        for bits in [17, 21, 30, 33, 35, 63, 65, 127, 255] {
+            let mut filter = BloomFilter::new(bits, 16).unwrap();
+            for value in 0..120 {
+                let key = Value::Integer(value);
+                let (first, step) = filter.hash_pair(&key);
+                let positions = (0..16)
+                    .map(|index| filter.probe(first, step, index))
+                    .collect::<HashSet<_>>();
+                assert_eq!(positions.len(), 16, "duplicate probe for {bits} bits");
+                filter.insert(&key);
+                assert!(filter.might_contain(&key));
+            }
+        }
+    }
+
+    #[test]
+    fn power_of_two_layout_keeps_the_original_odd_stride() {
+        let filter = BloomFilter::new(64, 8).unwrap();
+        for value in 0..100 {
+            let (_, stride) = filter.hash_pair(&Value::Integer(value));
+            assert_eq!(stride & 1, 1);
+        }
     }
 }

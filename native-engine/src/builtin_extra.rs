@@ -326,7 +326,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             _ => Err(Error::Type("CONTAINS requires text".into())),
         },
         "REVERSE" => match args {
-            [Value::Text(value)] => Ok(Value::Text(value.chars().rev().collect())),
+            [Value::Text(value)] => {
+                if value.len() > 16 * 1024 * 1024 {
+                    return Err(Error::Execution("REVERSE result exceeds native 16 MiB budget".into()));
+                }
+                Ok(Value::Text(value.chars().rev().collect()))
+            },
             [Value::Null] => Ok(Value::Null),
             _ => Err(Error::Type("REVERSE requires text".into())),
         },
@@ -470,6 +475,24 @@ mod bounded_replace_output_regressions {
         assert_eq!(evaluate("REPLACE", &[
             Value::Text("xy".into()), Value::Text("".into()), Value::Text("-".into()),
         ]).unwrap(), Value::Text("-x-y-".into()));
+    }
+}
+
+#[cfg(test)]
+mod reverse_result_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn reverse_is_unicode_safe_and_does_not_allocate_oversized_output() {
+        assert_eq!(evaluate("REVERSE", &[Value::Text("a🙂é".into())]).unwrap(),
+            Value::Text("é🙂a".into()));
+        assert_eq!(evaluate("REVERSE", &[Value::Null]).unwrap(), Value::Null);
+        assert!(evaluate("REVERSE", &[
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
+        ]).is_err());
+        let exact = "x".repeat(16 * 1024 * 1024);
+        assert_eq!(evaluate("REVERSE", &[Value::Text(exact.clone())]).unwrap(),
+            Value::Text(exact));
     }
 }
 
