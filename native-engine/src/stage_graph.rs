@@ -30,7 +30,15 @@ impl StageGraph {
         }
         let mut index = HashMap::new();
         let mut total_partitions = 0usize;
+        // A bounded stage count alone does not bound a dense DAG. Reject
+        // excessive fan-in before allocating successor adjacency lists.
+        let mut total_edges = 0usize;
         for (position, stage) in stages.iter().enumerate() {
+            total_edges = total_edges.checked_add(stage.dependencies.len())
+                .filter(|&total| total <= 1_000_000)
+                .ok_or_else(|| Error::Execution(
+                    "execution graph dependency edge budget exceeded".into()
+                ))?;
             if stage.partitions == 0 || stage.partitions > 65_536 {
                 return Err(Error::Execution("stage partition count must be in 1..=65536".into()));
             }
@@ -794,5 +802,31 @@ mod fast_range_dispatch_regressions {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dependency_edge_budget_tests {
+    use super::*;
+
+    #[test]
+    fn admits_normal_dags_and_bounds_dense_fan_in() {
+        let small = StageGraph::new(vec![
+            Stage { id: 0, dependencies: vec![], partitions: 1 },
+            Stage { id: 1, dependencies: vec![0], partitions: 1 },
+            Stage { id: 2, dependencies: vec![0, 1], partitions: 1 },
+        ]).unwrap();
+        assert_eq!(small.topological_order(), &[0, 1, 2]);
+
+        // 2,001 stages are below the stage limit, but 1,001,000 edges
+        // would otherwise create large successor lists and scan costs.
+        let mut dense = (0u64..1000).map(|id| Stage {
+            id, dependencies: Vec::new(), partitions: 1,
+        }).collect::<Vec<_>>();
+        dense.extend((1000u64..2001).map(|id| Stage {
+            id, dependencies: (0u64..1000).collect(), partitions: 1,
+        }));
+        let error = StageGraph::new(dense).unwrap_err();
+        assert!(error.to_string().contains("dependency edge budget"));
     }
 }

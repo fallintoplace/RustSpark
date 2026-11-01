@@ -199,8 +199,19 @@ impl DictionaryColumn {
     }
 
     pub fn estimated_bytes(&self) -> usize {
-        self.encoded_string_bytes
-            .saturating_add(self.indices.len().saturating_mul(std::mem::size_of::<Option<u32>>()))
+        // Retained heap memory includes the index allocation, each String
+        // header and its backing bytes, and the shared Arc<Vec<String>>.
+        // Charge the entire shared table per column as a conservative upper
+        // bound when callers account for independently held columns.
+        let strings = self.dictionary.iter().fold(0usize, |bytes, text| {
+            bytes.saturating_add(text.capacity())
+        });
+        self.indices.capacity().saturating_mul(std::mem::size_of::<Option<u32>>())
+            .saturating_add(self.dictionary.capacity()
+                .saturating_mul(std::mem::size_of::<String>()))
+            .saturating_add(strings)
+            .saturating_add(std::mem::size_of::<Vec<String>>() +
+                2 * std::mem::size_of::<usize>())
     }
 }
 
@@ -672,5 +683,26 @@ mod run_dictionary_encoding_tests {
             .map(|value| vec![Value::Text((*value).to_owned())]).collect()).unwrap();
         let encoded = DictionaryColumn::from_batch(&batch, "key", 2, 2, 7).unwrap();
         assert_eq!(encoded.indices, vec![Some(0), Some(0), Some(1), Some(0), Some(1), Some(1), Some(0)]);
+    }
+}
+
+#[cfg(test)]
+mod dictionary_retained_heap_accounting_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn estimate_includes_dictionary_headers_capacity_and_index_allocation() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, vec![
+            vec![Value::Text("alpha".into())], vec![Value::Text("beta".into())],
+            vec![Value::Text("alpha".into())], vec![Value::Null],
+        ]).unwrap();
+        let encoded = DictionaryColumn::from_batch(&input, "label", 2, 9, 4).unwrap();
+        let payload_only = encoded.encoded_string_bytes()
+            + encoded.row_count() * std::mem::size_of::<Option<u32>>();
+        assert_eq!(encoded.encoded_string_bytes(), 9);
+        assert!(encoded.estimated_bytes() >= payload_only + 2 * std::mem::size_of::<String>());
+        assert_eq!(encoded.decode().unwrap().as_slice(), input.column(0).unwrap());
     }
 }

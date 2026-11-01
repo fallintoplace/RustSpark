@@ -333,6 +333,12 @@ fn fast_boolean_in_list<'a>(
 fn fast_distinct_literal<'a>(
     batch: &'a Batch, predicate: &'a Expr,
 ) -> Result<Option<(&'a [Value], &'a Value, bool)>> {
+    // A NOT wrapper reverses the null-safe comparison without requiring
+    // row-wise expression evaluation or constructing an inverse expression.
+    let (predicate, inverse) = match predicate {
+        Expr::Not(inner) => (inner.as_ref(), true),
+        _ => (predicate, false),
+    };
     let Expr::IsDistinctFrom { left, right, negated } = predicate else {
         return Ok(None);
     };
@@ -342,7 +348,7 @@ fn fast_distinct_literal<'a>(
         _ => return Ok(None),
     };
     let index = batch.schema().column(name)?;
-    Ok(Some((batch.column(index)?, literal, *negated)))
+    Ok(Some((batch.column(index)?, literal, *negated ^ inverse)))
 }
 
 /// Return matching row offsets; NULL predicates are not included.
@@ -509,19 +515,6 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         for (row, value) in column.iter().enumerate() {
             if value.is_null() == select_null { selected.push(row); }
         }
-    } else if let Expr::Not(inner) = predicate {
-        if let Expr::Column(name) = inner.as_ref() {
-            let index = batch.schema().column(name)?;
-            if batch.schema().field(index)?.data_type == DataType::Boolean {
-                for (row, value) in batch.column(index)?.iter().enumerate() {
-                    if matches!(value, Value::Boolean(false)) { selected.push(row); }
-                }
-                return Ok(selected);
-            }
-        }
-        for row in 0..batch.num_rows() {
-            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
-        }
     } else if let Some((column, literal, negated)) =
         fast_distinct_literal(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -534,6 +527,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
             if if negated { !distinct } else { distinct } {
                 selected.push(row);
             }
+        }
+    } else if let Expr::Not(inner) = predicate {
+        if let Expr::Column(name) = inner.as_ref() {
+            let index = batch.schema().column(name)?;
+            if batch.schema().field(index)?.data_type == DataType::Boolean {
+                for (row, value) in batch.column(index)?.iter().enumerate() {
+                    if matches!(value, Value::Boolean(false)) { selected.push(row); }
+                }
+                return Ok(selected);
+            }
+        }
+        for row in 0..batch.num_rows() {
+            if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
         }
     } else if let Some((column, op, rhs)) = fast_text_comparison(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -1387,5 +1393,54 @@ mod negated_boolean_vector_pair_regressions {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod negated_nullsafe_vector_tests {
+    use super::*;
+    use crate::{expr::Expr, schema::{Schema, Field, DataType}};
+
+    #[test]
+    fn negated_distinct_preserves_nullable_and_nan_comparisons() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Float, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Float(f64::NAN)],
+            vec![Value::Float(-0.0)], vec![Value::Float(1.0)],
+            vec![Value::Float(f64::NAN)], vec![Value::Float(0.0)],
+        ]).unwrap();
+        for literal in [Value::Null, Value::Float(f64::NAN), Value::Float(0.0)] {
+            for direct_negated in [true, false] {
+                let inner = Expr::IsDistinctFrom {
+                    left: Box::new(Expr::Column("n".into())),
+                    right: Box::new(Expr::Literal(literal.clone())),
+                    negated: direct_negated,
+                };
+                for predicate in [inner.clone(), Expr::Not(Box::new(inner))] {
+                    let expected = (0..batch.num_rows()).filter(|&row|
+                        predicate.evaluate(&batch, row).unwrap().as_boolean().unwrap() == Some(true)
+                    ).collect::<Vec<_>>();
+                    assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negated_distinct_handles_large_unicode_and_sql_nulls() {
+        let long = "é🐱".repeat(1024);
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(long.clone())], vec![Value::Null],
+            vec![Value::Text("other".into())], vec![Value::Text(long.clone())],
+        ]).unwrap();
+        let predicate = Expr::Not(Box::new(Expr::IsDistinctFrom {
+            left: Box::new(Expr::Column("s".into())),
+            right: Box::new(Expr::Literal(Value::Text(long))),
+            negated: false,
+        }));
+        assert_eq!(select_indices(&batch, &predicate).unwrap(), vec![0, 3]);
     }
 }
