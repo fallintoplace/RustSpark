@@ -154,14 +154,17 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
         std::iter::repeat_with(|| None).take(partitions).collect();
     let mut row_counts = vec![0usize; partitions];
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
+    // A clustered key can span input batch boundaries. Keep only the last
+    // row coordinate, avoiding rehashing long TEXT keys on every tiny batch.
+    let mut previous_key: Option<(usize, usize)> = None;
+    let mut previous_bucket = 0usize;
     for (batch_index, batch) in input.iter().enumerate() {
         let bound = &sources[batch_index];
-        let mut previous_bucket = 0usize;
         for row in 0..batch.num_rows() {
-            // Duplicate consecutive composite keys always have identical
-            // FNV hashes. Reuse the shard ID for clustered join inputs.
-            let bucket = if row > 0 && key_columns.iter().all(|&column|
-                bound[column][row] == bound[column][row - 1]) {
+            let bucket = if previous_key.is_some_and(|(previous_batch, previous_row)|
+                key_columns.iter().all(|&column|
+                    bound[column][row] == sources[previous_batch][column][previous_row])
+            ) {
                 previous_bucket
             } else {
                 let mut hasher = PartitionHasher::default();
@@ -175,6 +178,7 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
                 }
             };
             previous_bucket = bucket;
+            previous_key = Some((batch_index, row));
             let columns = buckets[bucket].get_or_insert_with(|| {
                 (0..schema.len()).map(|_| Vec::new()).collect::<Vec<_>>()
             });
@@ -236,14 +240,22 @@ pub fn partition_batches_owned(
     let mut counts = vec![0usize; partitions];
     let mut placements = Vec::with_capacity(input.len());
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
-    for batch in &input {
-        let columns = key_columns.iter().map(|&index| batch.column(index))
-            .collect::<Result<Vec<_>>>()?;
+    // Bind key slices across all incoming batches before moving their cells.
+    // Preserve the final key of each nonempty batch for the next batch.
+    let bound_keys = input.iter().map(|batch|
+        key_columns.iter().map(|&index| batch.column(index))
+            .collect::<Result<Vec<_>>>()
+    ).collect::<Result<Vec<_>>>()?;
+    let mut previous_key: Option<(usize, usize)> = None;
+    let mut previous_bucket = 0usize;
+    for (batch_index, batch) in input.iter().enumerate() {
+        let columns = &bound_keys[batch_index];
         let mut destinations = Vec::with_capacity(batch.num_rows());
-        let mut previous_bucket = 0usize;
         for row in 0..batch.num_rows() {
-            let bucket = if row > 0 && columns.iter().all(|column|
-                column[row] == column[row - 1]) {
+            let bucket = if previous_key.is_some_and(|(previous_batch, previous_row)|
+                columns.iter().zip(&bound_keys[previous_batch])
+                    .all(|(current, previous)| current[row] == previous[previous_row])
+            ) {
                 previous_bucket
             } else {
                 let mut hasher = PartitionHasher::default();
@@ -255,6 +267,7 @@ pub fn partition_batches_owned(
                 }
             };
             previous_bucket = bucket;
+            previous_key = Some((batch_index, row));
             counts[bucket] = counts[bucket].checked_add(1)
                 .ok_or_else(|| Error::Execution("partition row count overflow".into()))?;
             destinations.push(bucket);
@@ -262,6 +275,8 @@ pub fn partition_batches_owned(
         placements.push(destinations);
     }
 
+    // Release borrowed key slices before consuming the owned batches.
+    drop(bound_keys);
     let width = schema.len();
     let mut output = counts.iter().map(|&count| {
         (count != 0).then(|| (0..width)
@@ -755,5 +770,43 @@ mod adjacent_composite_key_hash_run_tests {
             matches!(batch.value(index, 1).unwrap(),
                 Value::Text(text) if text.as_ptr() == pointer)
         })));
+    }
+}
+
+#[cfg(test)]
+mod cross_batch_clustered_partition_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn many_tiny_clustered_batches_match_one_combined_input() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Integer, false),
+        ]).unwrap();
+        let repeated = "🙂cluster".repeat(1_000);
+        let mut parts = Vec::new();
+        for index in 0..96 {
+            let key = if index % 29 == 0 {
+                Value::Null
+            } else if index < 48 {
+                Value::Text(repeated.clone())
+            } else {
+                Value::Text("different-key".into())
+            };
+            let rows = vec![
+                vec![key.clone(), Value::Integer(index)],
+                vec![key, Value::Integer(index + 1000)],
+            ];
+            parts.push(Batch::from_rows(schema.clone(), rows).unwrap());
+            if index % 13 == 0 { parts.push(Batch::empty(schema.clone())); }
+        }
+        let combined = Batch::from_rows(schema,
+            parts.iter().flat_map(|part| part.rows().unwrap()).collect()).unwrap();
+        for fanout in [2, 7, 64, 257] {
+            let expected = partition(&combined, &["key"], fanout).unwrap();
+            assert_eq!(partition_batches(&parts, &["key"], fanout).unwrap(), expected);
+            assert_eq!(partition_batches_owned(parts.clone(), &["key"], fanout).unwrap(), expected);
+        }
     }
 }

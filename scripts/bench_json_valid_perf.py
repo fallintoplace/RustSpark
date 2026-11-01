@@ -61,7 +61,7 @@ def run_case(binary, csv_path, expected, timeout):
     start = time.perf_counter()
     output = subprocess.run(
         [
-            str(binary), "--csv", str(csv_path), "--csv-schema", "payload:utf8",
+            str(binary), "--csv", str(csv_path),
             "--sql", QUERY, "--stdout-format", "json",
         ],
         capture_output=True, text=True, check=True, timeout=timeout,

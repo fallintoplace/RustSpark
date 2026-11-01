@@ -111,18 +111,26 @@ fn load_build_bounded(
         let next_rows = rows.checked_add(batch.num_rows())
             .filter(|total| *total <= max_rows)
             .ok_or_else(|| Error::Execution("join build partition exceeds row budget".into()))?;
+        // Reject the fixed native slots immediately. During TEXT scanning,
+        // stop at the first budget breach instead of visiting every value in
+        // an oversized shard. Large batches also need cooperative deadlines.
+        let remaining_bytes = max_build_bytes.checked_sub(retained_bytes)
+            .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         let mut batch_bytes = batch.num_rows().checked_mul(fixed_row_bytes)
-            .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
+            .filter(|&bytes| bytes <= remaining_bytes)
+            .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         for column in 0..schema.len() {
-            for value in batch.column(column)? {
+            for (index, value) in batch.column(column)?.iter().enumerate() {
+                if index % 1024 == 0 { control.check()?; }
                 if let Value::Text(text) = value {
                     batch_bytes = batch_bytes.checked_add(text.len())
-                        .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
+                        .filter(|&bytes| bytes <= remaining_bytes)
+                        .ok_or_else(|| Error::Execution(
+                            "join build partition exceeds byte budget".into()))?;
                 }
             }
         }
         let next_bytes = retained_bytes.checked_add(batch_bytes)
-            .filter(|total| *total <= max_build_bytes)
             .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         // The spill reader transfers ownership of each decoded batch.
         // Move heap-backed TEXT values into the build columns rather than
@@ -146,12 +154,22 @@ fn load_build_bounded(
 // when the join kind does not need them for outer or anti semantics.
 // Selected rows are moved, including heap-backed TEXT payloads.
 fn discard_null_join_keys(batch: Batch, key_column: usize) -> Result<Option<Batch>> {
+    let keys = batch.column(key_column)?;
+    // The common non-NULL partition can move through unchanged. Do not
+    // allocate and populate an O(rows) selection vector merely to discover
+    // that every row survives the NULL-key pruning pass.
+    let Some(first_null) = keys.iter().position(Value::is_null) else {
+        return Ok(Some(batch));
+    };
+    // All preceding rows are known to survive. Start the selection only at
+    // the first NULL, avoiding both a second scan and allocations for an
+    // all-NULL partition.
     let mut selected = Vec::new();
-    for (row, key) in batch.column(key_column)?.iter().enumerate() {
-        if !key.is_null() { selected.push(row); }
+    selected.extend(0..first_null);
+    for (index, value) in keys.iter().enumerate().skip(first_null + 1) {
+        if !value.is_null() { selected.push(index); }
     }
     if selected.is_empty() { return Ok(None); }
-    if selected.len() == batch.num_rows() { return Ok(Some(batch)); }
     Ok(Some(batch.take_sorted_owned(&selected)?))
 }
 
@@ -866,5 +884,107 @@ mod pruned_null_key_grace_join_regressions {
             _ => unreachable!(),
         };
         assert_eq!(pointer, after);
+    }
+}
+
+#[cfg(test)]
+mod preemptive_build_memory_and_cancel_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::fs;
+
+    #[test]
+    fn rejects_fixed_and_text_bytes_at_their_first_budget_breach() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-join-preempt-{}-{}", std::process::id(),
+            JOIN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("build.rspill");
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..64).map(|index| vec![
+            Value::Integer(index),
+            Value::Text("🙂".repeat(200)),
+        ]).collect();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let file = super::super::private_files::create_private(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish().unwrap();
+
+        let rejected_fixed = load_build_bounded(
+            &path, &schema, 64, 64, 1, &QueryControl::default(),
+        ).err().expect("fixed slots must exceed budget");
+        assert!(rejected_fixed.to_string().contains("byte budget"));
+
+        let rejected_text = load_build_bounded(
+            &path, &schema, 64, 64, 15_000, &QueryControl::default(),
+        ).err().expect("TEXT must exceed budget");
+        assert!(rejected_text.to_string().contains("byte budget"));
+
+        let loaded = load_build_bounded(
+            &path, &schema, 64, 64, 100_000, &QueryControl::default(),
+        ).unwrap();
+        assert_eq!(loaded, batch);
+
+        let cancelled = QueryControl::default();
+        cancelled.cancel();
+        assert!(load_build_bounded(
+            &path, &schema, 64, 64, 100_000, &cancelled,
+        ).unwrap_err().to_string().contains("cancelled"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod null_join_partition_selection_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn input(keys: &[Option<i64>]) -> Batch {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        Batch::from_rows(schema, keys.iter().enumerate().map(|(i, key)| {
+            vec![key.map_or(Value::Null, Value::Integer),
+                Value::Text(format!("payload-{i}"))]
+        }).collect()).unwrap()
+    }
+
+    #[test]
+    fn nonnull_and_all_null_partitions_have_no_selection_copy() {
+        let untouched = input(&[Some(1), Some(2), Some(3)]);
+        let ptr = match untouched.value(1, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let output = discard_null_join_keys(untouched, 0).unwrap().unwrap();
+        assert_eq!(output.num_rows(), 3);
+        let new_ptr = match output.value(1, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        assert_eq!(ptr, new_ptr);
+        assert!(discard_null_join_keys(input(&[None, None, None]), 0)
+            .unwrap().is_none());
+    }
+
+    #[test]
+    fn sparse_null_keys_keep_original_row_order_and_payloads() {
+        for keys in [
+            vec![Some(1), None, Some(2), None, Some(3)],
+            vec![None, Some(10), Some(20), None],
+            vec![Some(1), Some(2), None],
+        ] {
+            let before = input(&keys);
+            let expected = before.rows().unwrap().into_iter()
+                .filter(|row| !row[0].is_null()).collect::<Vec<_>>();
+            let output = discard_null_join_keys(before, 0).unwrap().unwrap();
+            assert_eq!(output.rows().unwrap(), expected);
+        }
     }
 }
