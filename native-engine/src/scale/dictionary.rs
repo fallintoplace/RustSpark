@@ -96,7 +96,7 @@ impl DictionaryColumn {
             }
             let expanded = count.checked_mul(self.dictionary[0].len())
                 .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
-            used = used.checked_add(expanded)
+            used.checked_add(expanded)
                 .filter(|bytes| *bytes <= max_bytes)
                 .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
         } else {
