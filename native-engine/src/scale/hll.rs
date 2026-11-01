@@ -5,6 +5,8 @@ use crate::{scalar::Value, Error, Result};
 const PRECISION: u32 = 12;
 const REGISTERS: usize = 1 << PRECISION;
 const WIRE_HEADER: &[u8; 4] = b"RSH1";
+const SPARSE_WIRE_HEADER: &[u8; 4] = b"RSH2";
+const SPARSE_HEADER_BYTES: usize = SPARSE_WIRE_HEADER.len() + 2;
 const WIRE_BYTES: usize = WIRE_HEADER.len() + REGISTERS;
 // Use exact fixed-point harmonic weights. Every reachable HLL rank has
 // a power-of-two reciprocal, so register updates are lossless in u128.
@@ -50,19 +52,57 @@ impl HyperLogLog {
             harmonic_scaled: REGISTERS as u128 * HARMONIC_SCALE }
     }
 
-    /// Encode an in-process sketch for exchange with workers using the same
-    /// native hash implementation. This is not a persistent cross-version format.
+    /// Compact low-cardinality sketches on the worker exchange path. RSH1
+    /// remains the dense format and can still be read from older workers.
+    /// Neither format is persistent across native hash implementation changes.
     pub fn to_wire_bytes(&self) -> Vec<u8> {
+        let sparse_bytes = SPARSE_HEADER_BYTES + self.nonempty * 3;
+        if sparse_bytes < WIRE_BYTES {
+            let mut encoded = Vec::with_capacity(sparse_bytes);
+            encoded.extend_from_slice(SPARSE_WIRE_HEADER);
+            encoded.extend_from_slice(&(self.nonempty as u16).to_le_bytes());
+            for (index, &rank) in self.registers.iter().enumerate() {
+                if rank != 0 {
+                    encoded.extend_from_slice(&(index as u16).to_le_bytes());
+                    encoded.push(rank);
+                }
+            }
+            return encoded;
+        }
         let mut encoded = Vec::with_capacity(WIRE_BYTES);
         encoded.extend_from_slice(WIRE_HEADER);
         encoded.extend_from_slice(&self.registers);
         encoded
     }
 
-    /// Decode a bounded sketch, validating every rank before admitting it.
-    /// Derive cached harmonic and population state from the wire registers.
+    /// Reject duplicate, out-of-order, zero, or unreachable sparse entries.
+    /// Cached population and harmonic state are always derived from registers.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() != WIRE_BYTES || &bytes[..WIRE_HEADER.len()] != WIRE_HEADER {
+        if bytes.starts_with(SPARSE_WIRE_HEADER) {
+            if bytes.len() < SPARSE_HEADER_BYTES {
+                return Err(Error::Parse("truncated sparse HLL header".into()));
+            }
+            let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+            if count > REGISTERS || bytes.len() != SPARSE_HEADER_BYTES + count * 3 {
+                return Err(Error::Parse("invalid sparse HLL entry count".into()));
+            }
+            let mut sketch = Self::new();
+            let mut previous = None;
+            for entry in bytes[SPARSE_HEADER_BYTES..].chunks_exact(3) {
+                let index = u16::from_le_bytes([entry[0], entry[1]]) as usize;
+                let rank = entry[2];
+                if index >= REGISTERS || previous.is_some_and(|old| index <= old) {
+                    return Err(Error::Parse("duplicate or unordered HLL register".into()));
+                }
+                if rank == 0 || u32::from(rank) > 65 - PRECISION {
+                    return Err(Error::Parse("invalid HLL register rank".into()));
+                }
+                sketch.update_register(index, rank);
+                previous = Some(index);
+            }
+            return Ok(sketch);
+        }
+        if bytes.len() != WIRE_BYTES || !bytes.starts_with(WIRE_HEADER) {
             return Err(Error::Parse("unsupported HLL sketch wire layout".into()));
         }
         let mut sketch = Self::new();
@@ -507,7 +547,7 @@ mod hll_wire_exchange_regressions {
         let empty = HyperLogLog::new();
         for sketch in [&empty, &a, &b] {
             let wire = sketch.to_wire_bytes();
-            assert_eq!(wire.len(), WIRE_BYTES);
+            assert!(wire.len() <= WIRE_BYTES);
             assert_eq!(HyperLogLog::from_wire_bytes(&wire).unwrap(), *sketch);
         }
         let mut merged = HyperLogLog::from_wire_bytes(&a.to_wire_bytes()).unwrap();
@@ -521,13 +561,13 @@ mod hll_wire_exchange_regressions {
     #[test]
     fn rejects_bad_version_lengths_and_unreachable_register_ranks() {
         let mut wire = HyperLogLog::new().to_wire_bytes();
-        assert!(HyperLogLog::from_wire_bytes(&wire[..WIRE_BYTES - 1]).is_err());
+        assert!(HyperLogLog::from_wire_bytes(&wire[..wire.len() - 1]).is_err());
         let mut trailing = wire.clone();
         trailing.push(0);
         assert!(HyperLogLog::from_wire_bytes(&trailing).is_err());
         wire[0] ^= 0xff;
         assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
-        wire = HyperLogLog::new().to_wire_bytes();
+        wire = [WIRE_HEADER.as_slice(), &[0u8; REGISTERS]].concat();
         wire[WIRE_HEADER.len()] = (65 - PRECISION + 1) as u8;
         assert!(HyperLogLog::from_wire_bytes(&wire).is_err());
     }
@@ -572,5 +612,61 @@ mod adjacent_hll_run_dedup_regressions {
         let first = batch.slice_rows(0, 1700).unwrap();
         let second = batch.slice_rows(1700, 3000).unwrap();
         assert_eq!(approximate_distinct_batches(&[first, second], "key").unwrap(), expected.estimate());
+    }
+}
+
+
+#[cfg(test)]
+mod sparse_worker_wire_tests {
+    use super::*;
+
+    #[test]
+    fn compact_sketches_and_legacy_dense_payloads_roundtrip() {
+        let mut small = HyperLogLog::new();
+        assert_eq!(small.to_wire_bytes().len(), SPARSE_HEADER_BYTES);
+        for n in 0..200 {
+            small.add(&Value::Integer(n));
+        }
+        let sparse = small.to_wire_bytes();
+        assert!(sparse.starts_with(SPARSE_WIRE_HEADER));
+        assert!(sparse.len() < WIRE_BYTES);
+        assert_eq!(HyperLogLog::from_wire_bytes(&sparse).unwrap(), small);
+        let legacy = [WIRE_HEADER.as_slice(), small.registers.as_slice()].concat();
+        assert_eq!(HyperLogLog::from_wire_bytes(&legacy).unwrap(), small);
+
+        let mut dense = HyperLogLog::new();
+        for n in 0..30_000 {
+            dense.add(&Value::Integer(n));
+        }
+        assert_eq!(dense.to_wire_bytes().len(), WIRE_BYTES);
+        assert_eq!(HyperLogLog::from_wire_bytes(&dense.to_wire_bytes()).unwrap(), dense);
+    }
+
+    #[test]
+    fn rejects_malformed_sparse_register_streams() {
+        let empty = HyperLogLog::new().to_wire_bytes();
+        assert!(HyperLogLog::from_wire_bytes(&empty[..5]).is_err());
+        let mut wrong_count = empty.clone();
+        wrong_count[4] = 1;
+        assert!(HyperLogLog::from_wire_bytes(&wrong_count).is_err());
+        let encode = |entries: &[(u16, u8)]| {
+            let mut bytes = SPARSE_WIRE_HEADER.to_vec();
+            bytes.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+            for &(index, rank) in entries {
+                bytes.extend_from_slice(&index.to_le_bytes());
+                bytes.push(rank);
+            }
+            bytes
+        };
+        for entries in [
+            vec![(0, 0)], vec![(0, 54)], vec![(REGISTERS as u16, 1)],
+            vec![(1, 1), (1, 2)], vec![(10, 1), (9, 2)],
+        ] {
+            assert!(HyperLogLog::from_wire_bytes(&encode(&entries)).is_err());
+        }
+        assert_eq!(
+            HyperLogLog::from_wire_bytes(&encode(&[(1, 2), (9, 3)]))
+                .unwrap().nonempty_registers(), 2,
+        );
     }
 }
