@@ -111,18 +111,26 @@ fn load_build_bounded(
         let next_rows = rows.checked_add(batch.num_rows())
             .filter(|total| *total <= max_rows)
             .ok_or_else(|| Error::Execution("join build partition exceeds row budget".into()))?;
+        // Reject the fixed native slots immediately. During TEXT scanning,
+        // stop at the first budget breach instead of visiting every value in
+        // an oversized shard. Large batches also need cooperative deadlines.
+        let remaining_bytes = max_build_bytes.checked_sub(retained_bytes)
+            .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         let mut batch_bytes = batch.num_rows().checked_mul(fixed_row_bytes)
-            .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
+            .filter(|&bytes| bytes <= remaining_bytes)
+            .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         for column in 0..schema.len() {
-            for value in batch.column(column)? {
+            for (index, value) in batch.column(column)?.iter().enumerate() {
+                if index % 1024 == 0 { control.check()?; }
                 if let Value::Text(text) = value {
                     batch_bytes = batch_bytes.checked_add(text.len())
-                        .ok_or_else(|| Error::Execution("join build byte estimate overflow".into()))?;
+                        .filter(|&bytes| bytes <= remaining_bytes)
+                        .ok_or_else(|| Error::Execution(
+                            "join build partition exceeds byte budget".into()))?;
                 }
             }
         }
         let next_bytes = retained_bytes.checked_add(batch_bytes)
-            .filter(|total| *total <= max_build_bytes)
             .ok_or_else(|| Error::Execution("join build partition exceeds byte budget".into()))?;
         // The spill reader transfers ownership of each decoded batch.
         // Move heap-backed TEXT values into the build columns rather than
@@ -876,6 +884,58 @@ mod pruned_null_key_grace_join_regressions {
             _ => unreachable!(),
         };
         assert_eq!(pointer, after);
+    }
+}
+
+#[cfg(test)]
+mod preemptive_build_memory_and_cancel_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::fs;
+
+    #[test]
+    fn rejects_fixed_and_text_bytes_at_their_first_budget_breach() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-join-preempt-{}-{}", std::process::id(),
+            JOIN_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("build.rspill");
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..64).map(|index| vec![
+            Value::Integer(index),
+            Value::Text("🙂".repeat(200)),
+        ]).collect();
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let file = super::super::private_files::create_private(&path).unwrap();
+        let mut writer = SpillWriter::new(BufWriter::new(file), schema.clone()).unwrap();
+        writer.write_batch(&batch).unwrap();
+        writer.finish().unwrap();
+
+        let rejected_fixed = load_build_bounded(
+            &path, &schema, 64, 64, 1, &QueryControl::default(),
+        ).err().expect("fixed slots must exceed budget");
+        assert!(rejected_fixed.to_string().contains("byte budget"));
+
+        let rejected_text = load_build_bounded(
+            &path, &schema, 64, 64, 15_000, &QueryControl::default(),
+        ).err().expect("TEXT must exceed budget");
+        assert!(rejected_text.to_string().contains("byte budget"));
+
+        let loaded = load_build_bounded(
+            &path, &schema, 64, 64, 100_000, &QueryControl::default(),
+        ).unwrap();
+        assert_eq!(loaded, batch);
+
+        let cancelled = QueryControl::default();
+        cancelled.cancel();
+        assert!(load_build_bounded(
+            &path, &schema, 64, 64, 100_000, &cancelled,
+        ).unwrap_err().to_string().contains("cancelled"));
+        fs::remove_dir_all(directory).unwrap();
     }
 }
 
