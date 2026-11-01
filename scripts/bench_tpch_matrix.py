@@ -9,6 +9,17 @@ from pathlib import Path
 import subprocess
 import sys
 
+from tpch_run import reject_nonfinite, unique_keys
+
+
+def finite_positive_ms(value):
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
 
 def parse_partitions(value):
     result = []
@@ -76,7 +87,9 @@ def run_configuration(binary, queries, parquet, output, n, repeat, warmup, finge
                              capture_output=True, text=True, check=False)
     if not path.is_file():
         raise RuntimeError(f"No benchmark report for {n} partitions: {process.stderr[-400:]}")
-    report = json.loads(path.read_text(encoding="utf-8"))
+    report = json.loads(path.read_text(encoding="utf-8"),
+                        object_pairs_hook=unique_keys,
+                        parse_constant=reject_nonfinite)
     if not isinstance(report, dict):
         raise ValueError("Partition matrix report must be a JSON object")
     results = report.get("results")
@@ -95,17 +108,23 @@ def run_configuration(binary, queries, parquet, output, n, repeat, warmup, finge
     total = None
     if complete:
         times = [row.get("median_ms") for row in results]
-        if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
-               for value in times):
+        if any(not finite_positive_ms(value) for value in times):
             raise ValueError(f"Invalid median in {n}-partition full-suite report")
-        total = round(math.fsum(times), 3)
+        try:
+            total_ms = math.fsum(times)
+        except OverflowError as error:
+            raise ValueError("TPC-H partition total exceeds finite numeric range") from error
+        if not math.isfinite(total_ms):
+            raise ValueError("TPC-H partition total exceeds finite numeric range")
+        total = round(total_ms, 3)
     return {"partitions": n, "queries_attempted": len(results),
                            "queries_ok": ok, "runner_exit": process.returncode,
                            "sum_median_ms": total, "report": path.name}
 
 
 def matrix(binary, queries, parquet, output, partitions, repeat=3, warmup=1):
-    if repeat < 1 or warmup < 0:
+    if (type(repeat) is not int or repeat < 1
+            or type(warmup) is not int or warmup < 0):
         raise ValueError("Repeat and warmup must be valid")
     output.mkdir(parents=True, exist_ok=True)
     configurations = []
