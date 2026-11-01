@@ -186,40 +186,57 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, json_array, max_rows }))
 }
 
-fn escape_field(input: &str) -> String {
-    if input.chars().any(|character| matches!(character, ',' | '"' | '\r' | '\n')) {
-        format!("\"{}\"", input.replace('"', "\"\""))
-    } else {
-        input.to_string()
+
+fn write_csv_text(input: &str, output: &mut impl Write) -> Result<()> {
+    let bytes = input.as_bytes();
+    if !bytes.iter().any(|byte| matches!(byte, b',' | b'"' | b'\r' | b'\n')) {
+        output.write_all(bytes)?;
+        return Ok(());
     }
+    output.write_all(b"\"")?;
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'"' {
+            output.write_all(&bytes[start..index])?;
+            output.write_all(b"\"\"")?;
+            start = index + 1;
+        }
+    }
+    output.write_all(&bytes[start..])?;
+    output.write_all(b"\"")?;
+    Ok(())
 }
 
-fn csv_value(value: &Value) -> String {
+fn write_csv_value(value: &Value, output: &mut impl Write) -> Result<()> {
     match value {
-        Value::Null => String::new(),
-        Value::Boolean(value) => value.to_string(),
-        Value::Integer(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Text(value) => escape_field(value),
+        Value::Null => Ok(()),
+        Value::Boolean(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Integer(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Float(value) => { write!(output, "{value}")?; Ok(()) },
+        Value::Text(value) => write_csv_text(value, output),
     }
 }
 
 fn print_header(schema: &Schema, output: &mut impl Write) -> Result<()> {
-    let header = schema
-        .fields()
-        .iter()
-        .map(|field| escape_field(&field.name))
-        .collect::<Vec<_>>()
-        .join(",");
-    writeln!(output, "{header}")?;
+    for (index, field) in schema.fields().iter().enumerate() {
+        if index != 0 { output.write_all(b",")?; }
+        write_csv_text(&field.name, output)?;
+    }
+    output.write_all(b"\n")?;
     Ok(())
 }
 
 fn print_csv_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
-    for row_idx in 0..batch.num_rows() {
-        let row = batch.row(row_idx)?;
-        let line = row.iter().map(csv_value).collect::<Vec<_>>().join(",");
-        writeln!(output, "{line}")?;
+    // Borrow native scalar cells in place. Batch::row() allocates an owned
+    // Vec and clones each STRING only for the printer to discard it.
+    let columns = (0..batch.schema().len())
+        .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
+    for row in 0..batch.num_rows() {
+        for (index, column) in columns.iter().enumerate() {
+            if index != 0 { output.write_all(b",")?; }
+            write_csv_value(&column[row], output)?;
+        }
+        output.write_all(b"\n")?;
     }
     Ok(())
 }
@@ -229,25 +246,64 @@ fn print_csv(batch: &Batch, output: &mut impl Write) -> Result<()> {
     print_csv_rows(batch, output)
 }
 
-fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
-    for row_index in 0..batch.num_rows() {
-        let row = batch.row(row_index)?;
-        let mut record = serde_json::Map::new();
-        for (field, value) in batch.schema().fields().iter().zip(&row) {
-            let json = match value {
-                Value::Null => serde_json::Value::Null,
-                Value::Boolean(value) => serde_json::Value::Bool(*value),
-                Value::Integer(value) => serde_json::Value::Number((*value).into()),
-                Value::Float(value) => serde_json::Number::from_f64(*value)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| Error::Execution(
-                        "nonfinite SQL float cannot be encoded as JSON".into()
-                    ))?,
-                Value::Text(value) => serde_json::Value::String(value.clone()),
-            };
-            record.insert(field.name.clone(), json);
+
+fn json_columns(batch: &Batch) -> Result<(Vec<&[Value]>, Vec<usize>)> {
+    let columns = (0..batch.schema().len())
+        .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
+    // serde_json::Map uses lexicographically sorted keys by default.
+    // Preserve the CLI's existing byte-level JSON object ordering.
+    let mut order = (0..columns.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&a, &b|
+        batch.schema().fields()[a].name.cmp(&batch.schema().fields()[b].name));
+    Ok((columns, order))
+}
+
+fn validate_json_row(columns: &[&[Value]], row: usize) -> Result<()> {
+    if columns.iter().any(|column|
+        matches!(&column[row], Value::Float(value) if !value.is_finite())) {
+        return Err(Error::Execution("nonfinite SQL float cannot be encoded as JSON".into()));
+    }
+    Ok(())
+}
+
+fn json_write_error(error: serde_json::Error) -> Error {
+    Error::Io(format!("serialize native JSON: {error}"))
+}
+
+fn write_json_row(
+    schema: &Schema, columns: &[&[Value]], order: &[usize],
+    row: usize, output: &mut impl Write,
+) -> Result<()> {
+    // Check the complete row before emitting an object prefix, keeping
+    // invalid floating-point results from leaving half a JSON record.
+    validate_json_row(columns, row)?;
+    output.write_all(b"{")?;
+    for (position, &index) in order.iter().enumerate() {
+        if position != 0 { output.write_all(b",")?; }
+        serde_json::to_writer(&mut *output, &schema.fields()[index].name)
+            .map_err(json_write_error)?;
+        output.write_all(b":")?;
+        match &columns[index][row] {
+            Value::Null => output.write_all(b"null")?,
+            Value::Boolean(value) =>
+                serde_json::to_writer(&mut *output, value).map_err(json_write_error)?,
+            Value::Integer(value) =>
+                serde_json::to_writer(&mut *output, value).map_err(json_write_error)?,
+            Value::Float(value) =>
+                serde_json::to_writer(&mut *output, value).map_err(json_write_error)?,
+            Value::Text(value) =>
+                serde_json::to_writer(&mut *output, value).map_err(json_write_error)?,
         }
-        writeln!(output, "{}", serde_json::Value::Object(record))?;
+    }
+    output.write_all(b"}")?;
+    Ok(())
+}
+
+fn print_jsonl_rows(batch: &Batch, output: &mut impl Write) -> Result<()> {
+    let (columns, order) = json_columns(batch)?;
+    for row in 0..batch.num_rows() {
+        write_json_row(batch.schema(), &columns, &order, row, output)?;
+        output.write_all(b"\n")?;
     }
     Ok(())
 }
@@ -264,25 +320,12 @@ impl<'a, W: Write> JsonArrayPrinter<'a, W> {
     }
 
     fn print_batch(&mut self, batch: &Batch) -> Result<()> {
-        for row_index in 0..batch.num_rows() {
-            let row = batch.row(row_index)?;
-            let mut record = serde_json::Map::new();
-            for (field, value) in batch.schema().fields().iter().zip(&row) {
-                let json = match value {
-                    Value::Null => serde_json::Value::Null,
-                    Value::Boolean(value) => serde_json::Value::Bool(*value),
-                    Value::Integer(value) => serde_json::Value::Number((*value).into()),
-                    Value::Float(value) => serde_json::Number::from_f64(*value)
-                        .map(serde_json::Value::Number)
-                        .ok_or_else(|| Error::Execution(
-                            "nonfinite SQL float cannot be encoded as JSON".into()
-                        ))?,
-                    Value::Text(value) => serde_json::Value::String(value.clone()),
-                };
-                record.insert(field.name.clone(), json);
-            }
+        let (columns, order) = json_columns(batch)?;
+        for row in 0..batch.num_rows() {
+            // Do not append a separator for rows that cannot be encoded.
+            validate_json_row(&columns, row)?;
             if !self.first { self.output.write_all(b",")?; }
-            write!(self.output, "{}", serde_json::Value::Object(record))?;
+            write_json_row(batch.schema(), &columns, &order, row, self.output)?;
             self.first = false;
         }
         Ok(())
@@ -391,7 +434,6 @@ fn run_stream(args: &Args) -> Result<()> {
     output.flush()?;
     Ok(())
 }
-
 
 const MAX_PARQUET_ROWS: usize = 1_000_000;
 const MAX_PARQUET_RETAINED_BYTES: usize = 256 * 1024 * 1024;
@@ -683,8 +725,92 @@ mod tests {
 
     #[test]
     fn quote_text_fields_for_csv_export() {
-        assert_eq!(csv_value(&Value::Text("a,\"b\"".into())), "\"a,\"\"b\"\"\"");
-        assert_eq!(csv_value(&Value::Null), "");
+        let mut output = Vec::new();
+        write_csv_value(&Value::Text("a,\"b\"".into()), &mut output).unwrap();
+        assert_eq!(output, b"\"a,\"\"b\"\"\"");
+        output.clear();
+        write_csv_value(&Value::Null, &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod zero_copy_cli_csv_regressions {
+    use super::*;
+
+    #[test]
+    fn wide_unicode_text_quotes_crlf_and_nullable_values_preserve_bytes() {
+        let schema = Schema::new(vec![
+            Field::new("message", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let wide = "é🙂".repeat(4096);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(format!("{wide},\"quoted\"\r\nline")), Value::Integer(8)],
+            vec![Value::Null, Value::Integer(-3)],
+        ]).unwrap();
+        let mut output = Vec::new();
+        print_csv(&batch, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(),
+            format!("message,id\n\"{wide},\"\"quoted\"\"\r\nline\",8\n,-3\n"));
+    }
+
+    #[test]
+    fn zero_width_batches_print_one_line_per_logical_row() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema, vec![], 3).unwrap();
+        let mut output = Vec::new();
+        print_csv(&batch, &mut output).unwrap();
+        assert_eq!(output, b"\n\n\n\n");
+    }
+}
+
+#[cfg(test)]
+mod borrowed_json_output_regressions {
+    use super::*;
+
+    #[test]
+    fn jsonl_and_array_keep_sorted_fields_and_escaped_wide_text() {
+        let schema = Schema::new(vec![
+            Field::new("z", DataType::Text, true),
+            Field::new("a", DataType::Integer, false),
+            Field::new("b", DataType::Boolean, true),
+        ]).unwrap();
+        let wide = "é🙂\\\"".repeat(4096);
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Text(wide.clone()), Value::Integer(17), Value::Boolean(true)],
+            vec![Value::Null, Value::Integer(-1), Value::Null],
+        ]).unwrap();
+        let expected = format!(
+            "{{\"a\":17,\"b\":true,\"z\":{}}}\n{{\"a\":-1,\"b\":null,\"z\":null}}\n",
+            serde_json::to_string(&wide).unwrap(),
+        );
+        let mut jsonl = Vec::new();
+        print_jsonl_rows(&batch, &mut jsonl).unwrap();
+        assert_eq!(String::from_utf8(jsonl).unwrap(), expected);
+        let mut json_array = Vec::new();
+        let mut printer = JsonArrayPrinter::new(&mut json_array).unwrap();
+        printer.print_batch(&batch).unwrap();
+        printer.finish().unwrap();
+        assert_eq!(String::from_utf8(json_array).unwrap(),
+            format!("[{}]\n", expected.trim_end().replace("\n", ",")));
+    }
+
+    #[test]
+    fn rejects_nonfinite_float_before_writing_the_invalid_record() {
+        let schema = Schema::new(vec![
+            Field::new("f", DataType::Float, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Float(2.5)], vec![Value::Float(f64::NAN)],
+        ]).unwrap();
+        let mut output = Vec::new();
+        assert!(print_jsonl_rows(&batch, &mut output).is_err());
+        assert_eq!(output, b"{\"f\":2.5}\n");
+        let mut array = Vec::new();
+        let mut printer = JsonArrayPrinter::new(&mut array).unwrap();
+        assert!(printer.print_batch(&batch).is_err());
+        assert_eq!(array, b"[{\"f\":2.5}");
     }
 }
 

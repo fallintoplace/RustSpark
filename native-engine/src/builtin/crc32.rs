@@ -33,6 +33,11 @@ const TABLES: [[u32; 256]; 8] = {
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
+    // Match the bounded native digest functions. A valid SQL row must not
+    // trigger an unbounded checksum scan on worker threads.
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(crate::Error::Execution("CRC32 input exceeds native 16 MiB budget".into()));
+    }
     let mut crc = !0_u32;
     let mut blocks = text.as_bytes().chunks_exact(8);
     for block in &mut blocks {
@@ -96,6 +101,28 @@ mod slicing_by_eight_crc_reference_tests {
             assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(),
                 Value::Integer(i64::from(reference(text))));
         }
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_crc32_input_regressions {
+    use super::*;
+    use crate::Error;
+
+    #[test]
+    fn crc32_rejects_oversized_text_before_hashing() {
+        assert!(matches!(evaluate(&[
+            Value::Text("x".repeat(16 * 1024 * 1024 + 1)),
+        ]), Err(Error::Execution(_))));
+        assert!(matches!(evaluate(&[
+            Value::Text("é".repeat(8 * 1024 * 1024 + 1)),
+        ]), Err(Error::Execution(_))));
+        assert!(matches!(evaluate(&[
+            Value::Text("x".repeat(16 * 1024 * 1024)),
+        ]), Ok(Value::Integer(_))));
+        assert_eq!(evaluate(&[Value::Text("123456789".into())]).unwrap(),
+            Value::Integer(0xCBF4_3926));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }

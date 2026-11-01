@@ -17,6 +17,36 @@ fn claim_batch_size(partitions: usize, workers: usize) -> usize {
     TASK_CLAIM_BATCH.min(partitions.div_ceil(workers))
 }
 
+// Use the same task drain path for OS workers and for synchronous fallback
+// when the operating system refuses to create another thread.
+fn drain_tasks<F>(
+    tasks: &Mutex<std::iter::Enumerate<std::vec::IntoIter<Batch>>>,
+    output: &[OnceLock<Result<Batch>>],
+    failed: &AtomicBool,
+    operator: &F,
+    claim_size: usize,
+)
+where
+    F: Fn(Batch) -> Result<Batch> + Sync,
+{
+    loop {
+        if failed.load(Ordering::Acquire) { break; }
+        // Claim several adjacent partitions under one mutex acquisition.
+        let claimed: [Option<(usize, Batch)>; TASK_CLAIM_BATCH] = {
+            let mut queue = tasks.lock().unwrap_or_else(|e| e.into_inner());
+            std::array::from_fn(|index| if index < claim_size { queue.next() } else { None })
+        };
+        if claimed[0].is_none() { break; }
+        for (index, batch) in claimed.into_iter().flatten() {
+            if failed.load(Ordering::Acquire) { break; }
+            let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
+                .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
+            if result.is_err() { failed.store(true, Ordering::Release); }
+            let _ = output[index].set(result);
+        }
+    }
+}
+
 /// Execute a partition-local physical operator across at most max_workers
 /// OS threads. Results are emitted in input order irrespective of completion order.
 pub fn map_partitions<F>(input: Vec<Batch>, max_workers: usize, operator: F) -> Result<Vec<Batch>>
@@ -50,25 +80,17 @@ where
             let output = &output;
             let operator = &operator;
             let failed = &failed;
-            scope.spawn(move || loop {
-                if failed.load(Ordering::Acquire) { break; }
-                // Claim several adjacent partitions under one mutex
-                // acquisition, then run all operators outside the lock.
-                // Use a bounded stack array instead of allocating a Vec
-                // for every claim, especially costly for tiny partitions.
-                let claimed: [Option<(usize, Batch)>; TASK_CLAIM_BATCH] = {
-                    let mut queue = tasks.lock().unwrap_or_else(|e| e.into_inner());
-                    std::array::from_fn(|index| if index < claim_size { queue.next() } else { None })
-                };
-                if claimed[0].is_none() { break; }
-                for (index, batch) in claimed.into_iter().flatten() {
-                    if failed.load(Ordering::Acquire) { break; }
-                    let result = catch_unwind(AssertUnwindSafe(|| operator(batch)))
-                        .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())));
-                    if result.is_err() { failed.store(true, Ordering::Release); }
-                    let _ = output[index].set(result);
-                }
-            });
+            // Scoped thread creation can fail under process/thread limits.
+            // Run remaining work on the caller rather than unwinding the query.
+            if std::thread::Builder::new()
+                .spawn_scoped(scope, move || drain_tasks(
+                    tasks, output, failed, operator, claim_size,
+                ))
+                .is_err()
+            {
+                drain_tasks(tasks, output, failed, operator, claim_size);
+                break;
+            }
         }
     });
     // A cancelled task may precede the failed task in input order.
@@ -369,5 +391,48 @@ mod owned_parallel_error_regressions {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("operator failed: "));
         assert!(error.contains(&"x".repeat(8192)));
+    }
+}
+
+#[cfg(test)]
+mod scoped_spawn_fallback_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    fn input(index: i64) -> Batch {
+        Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false)
+        ]).unwrap(), vec![vec![Value::Integer(index)]]).unwrap()
+    }
+
+    #[test]
+    fn synchronous_drain_preserves_indexed_results_without_spawning() {
+        let queue = Mutex::new((0..37).map(input).collect::<Vec<_>>().into_iter().enumerate());
+        let output: Vec<OnceLock<Result<Batch>>> =
+            std::iter::repeat_with(OnceLock::new).take(37).collect();
+        let failed = AtomicBool::new(false);
+        drain_tasks(&queue, &output, &failed, &Ok, 4);
+        assert!(!failed.load(Ordering::Acquire));
+        for (index, item) in output.iter().enumerate() {
+            assert_eq!(item.get().unwrap().as_ref().unwrap().value(0, 0).unwrap(),
+                &Value::Integer(index as i64));
+        }
+    }
+
+    #[test]
+    fn synchronous_drain_retains_the_real_operator_failure() {
+        let queue = Mutex::new((0..20).map(input).collect::<Vec<_>>().into_iter().enumerate());
+        let output: Vec<OnceLock<Result<Batch>>> =
+            std::iter::repeat_with(OnceLock::new).take(20).collect();
+        let failed = AtomicBool::new(false);
+        drain_tasks(&queue, &output, &failed, &|batch: Batch| -> Result<Batch> {
+            if batch.value(0, 0)? == &Value::Integer(0) {
+                return Err(Error::Execution("fallback operator failure".into()));
+            }
+            Ok(batch)
+        }, 8);
+        assert!(failed.load(Ordering::Acquire));
+        assert!(output[0].get().unwrap().as_ref().unwrap_err().to_string()
+            .contains("fallback operator failure"));
     }
 }

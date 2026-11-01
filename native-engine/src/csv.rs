@@ -17,6 +17,9 @@ const MAX_CSV_ROWS: usize = 1_000_000;
 // Keep a single CSV record from allocating millions of tiny String objects.
 // The native spill format supports at most 4096 fields as well.
 const MAX_CSV_COLUMNS: usize = 4096;
+// The file byte limit alone cannot bound allocations for millions of empty
+// comma-delimited fields. Cap total materialized cells across all records.
+const MAX_CSV_CELLS: usize = 4_000_000;
 
 fn finish_field(row: &mut Vec<String>, field: &mut String) -> Result<()> {
     if row.len() >= MAX_CSV_COLUMNS {
@@ -26,13 +29,27 @@ fn finish_field(row: &mut Vec<String>, field: &mut String) -> Result<()> {
     Ok(())
 }
 
-fn finish_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut String, quoted_empty: bool) -> Result<()> {
+fn admit_record(
+    records: &mut Vec<Vec<String>>, row: Vec<String>,
+    total_cells: &mut usize, max_cells: usize,
+) -> Result<()> {
+    *total_cells = total_cells.checked_add(row.len())
+        .filter(|&count| count <= max_cells)
+        .ok_or_else(|| Error::Execution("CSV total cell count exceeds memory budget".into()))?;
+    records.push(row);
+    Ok(())
+}
+
+fn finish_record(
+    records: &mut Vec<Vec<String>>, row: &mut Vec<String>,
+    field: &mut String, quoted_empty: bool,
+    total_cells: &mut usize, max_cells: usize,
+) -> Result<()> {
     if row.is_empty() && field.is_empty() && !quoted_empty {
         return Ok(());
     }
     finish_field(row, field)?;
-    records.push(std::mem::take(row));
-    Ok(())
+    admit_record(records, std::mem::take(row), total_cells, max_cells)
 }
 
 /// CSV reader for small local datasets. Supports UTF-8, CRLF, escaped quotes,
@@ -42,6 +59,12 @@ pub fn parse_records(input: &str) -> Result<Vec<Vec<String>>> {
 }
 
 fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<String>>> {
+    parse_records_with_limits(input, max_records, MAX_CSV_CELLS)
+}
+
+fn parse_records_with_limits(
+    input: &str, max_records: usize, max_cells: usize,
+) -> Result<Vec<Vec<String>>> {
     if input.len() as u64 > MAX_CSV_BYTES {
         return Err(Error::Execution("CSV input exceeds 64 MiB limit".into()));
     }
@@ -49,6 +72,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
     // parser state. Empty physical lines are ignored by the general scanner.
     if !input.as_bytes().iter().any(|&byte| byte == b'"' || byte == b'\r') {
         let mut records = Vec::new();
+        let mut total_cells = 0usize;
         for line in input.split('\n').filter(|line| !line.is_empty()) {
             // Stop at the first impossible column before allocating all
             // fields from an otherwise byte-bounded but extremely wide line.
@@ -57,7 +81,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
             if fields.len() > MAX_CSV_COLUMNS {
                 return Err(Error::Execution("CSV column count exceeds 4096 limit".into()));
             }
-            records.push(fields);
+            admit_record(&mut records, fields, &mut total_cells, max_cells)?;
             if records.len() > max_records {
                 return Err(Error::Execution("CSV row count limit exceeded".into()));
             }
@@ -77,6 +101,7 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
     let mut row = Vec::new();
     let mut field = String::new();
     let mut records = Vec::new();
+    let mut total_cells = 0usize;
     while let Some(character) = chars.next() {
         match state {
             State::Quoted => {
@@ -100,7 +125,8 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
                     if character == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote)?;
+                    finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote,
+                        &mut total_cells, max_cells)?;
                     if records.len() > max_records {
                         return Err(Error::Execution("CSV row count limit exceeded".into()));
                     }
@@ -122,7 +148,8 @@ fn parse_records_with_limit(input: &str, max_records: usize) -> Result<Vec<Vec<S
         return Err(Error::Parse("unterminated CSV quote".into()));
     }
     if !row.is_empty() || !field.is_empty() || state == State::AfterQuote {
-        finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote)?;
+        finish_record(&mut records, &mut row, &mut field, state == State::AfterQuote,
+                        &mut total_cells, max_cells)?;
     }
     if records.len() > max_records {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
@@ -527,5 +554,38 @@ mod quoted_empty_csv_record_regressions {
             vec![Value::Null],
             vec![Value::Integer(7)],
         ]);
+    }
+}
+
+#[cfg(test)]
+mod csv_total_cells_budget_regressions {
+    use super::*;
+
+    #[test]
+    fn enforces_admission_for_fast_and_quoted_record_parsers() {
+        let fast = "a,b\n1,2\n3,4\n";
+        let quoted = "a,b\n\"1\",2\n\"3\",4\n";
+        for input in [fast, quoted] {
+            assert_eq!(parse_records_with_limits(input, 100, 6).unwrap().len(), 3);
+            let error = parse_records_with_limits(input, 100, 5).err().unwrap();
+            assert!(error.to_string().contains("cell count"));
+        }
+    }
+
+    #[test]
+    fn empty_lines_do_not_consume_the_cell_budget() {
+        let input = "\n\na,b\n\r\n1,2\n\n";
+        assert_eq!(parse_records_with_limits(input, 100, 4).unwrap().len(), 2);
+        assert!(parse_records_with_limits(input, 100, 3).is_err());
+    }
+
+    #[test]
+    fn rejects_many_empty_fields_despite_small_input_byte_count() {
+        let input = format!("{}\n{}\n", "x,".repeat(100), ",".repeat(100));
+        let rows = parse_records_with_limits(&input, 100, 300).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].len(), 101);
+        assert_eq!(rows[1].len(), 101);
+        assert!(parse_records_with_limits(&input, 100, 201).is_err());
     }
 }
