@@ -1,4 +1,6 @@
 use crate::{batch::Batch, schema::Schema, Error, Result};
+#[cfg(test)]
+use crate::scalar::Value;
 
 pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     if rows_per_batch == 0 {
