@@ -75,7 +75,13 @@ def check(root):
     if not isinstance(manifest, dict):
         raise ValueError("TPC-H fixture manifest must be a JSON object")
     scale = manifest.get("scale_factor")
-    if isinstance(scale, bool) or not isinstance(scale, (float, int)) or not math.isfinite(scale) or scale <= 0:
+    if isinstance(scale, bool) or not isinstance(scale, (float, int)) or scale <= 0:
+        raise ValueError("Invalid TPC-H scale factor")
+    try:
+        finite_scale = math.isfinite(scale)
+    except OverflowError:
+        finite_scale = False
+    if not finite_scale:
         raise ValueError("Invalid TPC-H scale factor")
     require_table_mapping(manifest, "tables", "Expected exactly eight TPC-H tables")
     hashes = require_table_mapping(manifest, "table_sha256", "Missing TPC-H Parquet checksums")

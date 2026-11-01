@@ -5,6 +5,15 @@ use parquet::arrow::{ProjectionMask, arrow_reader::{ParquetRecordBatchReader, Pa
 
 use crate::{arrow_bridge, batch::Batch, Error, Result};
 
+// Bound native Value slots per decoded batch, even for a very wide Parquet
+// schema. The caller's batch_size remains an upper limit, not a target.
+const MAX_NATIVE_VALUE_SLOT_BYTES: usize = 64 * 1024 * 1024;
+
+fn bounded_native_batch_rows(requested: usize, columns: usize) -> usize {
+    let per_row = columns.max(1).saturating_mul(std::mem::size_of::<crate::scalar::Value>());
+    requested.min((MAX_NATIVE_VALUE_SLOT_BYTES / per_row.max(1)).max(1))
+}
+
 pub struct ParquetScan {
     inner: ParquetRecordBatchReader,
     finished: bool,
@@ -73,7 +82,8 @@ fn scan_with_expected_schema(
             ));
         }
     }
-    let reader = builder.with_batch_size(batch_size)
+    let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+    let reader = builder.with_batch_size(rows)
         .build()
         .map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
     Ok(ParquetScan { inner: reader, finished: false })
@@ -102,6 +112,11 @@ fn projection_indices(
     if columns.is_empty() {
         return Err(Error::Schema("Parquet projection must have at least one column".into()));
     }
+    // More requests than available physical fields must contain an unknown
+    // or duplicate name. Reject before allocating selection hash tables.
+    if columns.len() > fields.len() {
+        return Err(Error::Schema("Parquet projection exceeds available columns".into()));
+    }
     let indexed = if columns.len().saturating_mul(fields.len()) >= 2048 {
         let mut indices = std::collections::HashMap::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
@@ -129,6 +144,21 @@ fn projection_indices(
     Ok(selected)
 }
 
+fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
+    // Unique selected groups cannot outnumber file groups. This preflight
+    // also prevents a huge untrusted list from preallocating a huge HashSet.
+    if indices.len() > available {
+        return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(indices.len());
+    for &index in indices {
+        if index >= available || !seen.insert(index) {
+            return Err(Error::Execution("invalid or repeated Parquet row group".into()));
+        }
+    }
+    Ok(())
+}
+
 pub fn scan_with_options(
     path: impl AsRef<Path>, batch_size: usize, options: ParquetScanOptions<'_>,
 ) -> Result<ParquetScan> {
@@ -148,20 +178,16 @@ pub fn scan_with_options(
         builder = builder.with_projection(mask);
     }
     if let Some(row_groups) = options.row_groups {
-        let count = builder.metadata().num_row_groups();
-        let mut seen = std::collections::HashSet::with_capacity(row_groups.len());
-        for &index in row_groups {
-            if index >= count || !seen.insert(index) {
-                return Err(Error::Execution("invalid or repeated Parquet row group".into()));
-            }
-        }
+        validate_row_groups(row_groups, builder.metadata().num_row_groups())?;
         builder = builder.with_row_groups(row_groups.to_vec());
     }
     builder = builder.with_offset(options.offset);
     if let Some(limit) = options.limit {
         builder = builder.with_limit(limit);
     }
-    let inner = builder.with_batch_size(batch_size)
+    let projected_width = options.columns.map_or(builder.schema().fields().len(), |columns| columns.len());
+    let rows = bounded_native_batch_rows(batch_size, projected_width);
+    let inner = builder.with_batch_size(rows)
         .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
     Ok(ParquetScan { inner, finished: false })
 }
@@ -741,5 +767,58 @@ mod parquet_projection_index_regressions {
             .collect::<Vec<_>>();
         assert_eq!(projection_indices(&fields, &wanted).unwrap(), expected);
         assert_eq!(projection_indices(&fields, &["column_0"]).unwrap(), vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod parquet_selection_preflight_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn rejects_impossible_projection_width_before_building_lookup_tables() {
+        let fields: Vec<arrow_schema::FieldRef> = vec![
+            Arc::new(arrow_schema::Field::new(
+                "ID", arrow_schema::DataType::Int64, false)),
+            Arc::new(arrow_schema::Field::new(
+                "payload", arrow_schema::DataType::Utf8, true)),
+        ];
+        assert_eq!(projection_indices(&fields, &["id", "PAYLOAD"]).unwrap(), [0, 1]);
+        assert!(projection_indices(&fields, &["id", "ID", "payload"]).is_err());
+        assert!(projection_indices(&fields, &["id", "id"]).is_err());
+        assert!(projection_indices(&fields, &["missing"]).is_err());
+    }
+
+    #[test]
+    fn validates_oversized_row_group_windows_without_allocating_hash_tables() {
+        assert!(validate_row_groups(&[], 0).is_ok());
+        assert!(validate_row_groups(&[0, 2], 3).is_ok());
+        assert!(validate_row_groups(&[0, 0], 3).is_err());
+        assert!(validate_row_groups(&[3], 3).is_err());
+        assert!(validate_row_groups(&[0, 1, 2, 3, 4], 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_wide_parquet_batch_regressions {
+    use super::*;
+
+    #[test]
+    fn huge_row_requests_are_capped_by_decoded_column_width() {
+        let requested = 1_000_000;
+        let one = bounded_native_batch_rows(requested, 1);
+        let wide = bounded_native_batch_rows(requested, 1024);
+        assert_eq!(one, requested);
+        assert!(wide < one);
+        assert!(wide > 0);
+        for columns in [1, 8, 128, 1024, 4096] {
+            let rows = bounded_native_batch_rows(requested, columns);
+            assert!(rows <= requested);
+            assert!(rows > 0);
+            let slots = rows * columns * std::mem::size_of::<crate::scalar::Value>();
+            assert!(slots <= MAX_NATIVE_VALUE_SLOT_BYTES);
+        }
+        assert_eq!(bounded_native_batch_rows(5, 1024), 5);
+        assert_eq!(bounded_native_batch_rows(5, 0), 5);
     }
 }

@@ -135,6 +135,18 @@ class WarmComparisonTests(unittest.TestCase):
         self.assertIn("read_csv", command.call_args.args[0][2])
         self.assertEqual(warm.summarize(values, requests, 16, 0, 1)["scan_count"]["median_ms"], 1.0)
 
+    def test_warm_ratio_rejects_float_overflow_and_preserves_tiny_values(self):
+        baseline = {name: {"median_ms": 5e-324} for name in WORKLOADS}
+        candidate = {name: {"median_ms": 1e308} for name in WORKLOADS}
+        with self.assertRaisesRegex(ValueError, "Nonfinite warm benchmark ratio"):
+            warm.competitor_median_ratios(
+                {"rustspark": baseline, "spark": candidate}, "spark")
+        baseline = {name: {"median_ms": 1.0} for name in WORKLOADS}
+        candidate = {name: {"median_ms": 1e-7} for name in WORKLOADS}
+        ratios = warm.competitor_median_ratios(
+            {"rustspark": baseline, "duckdb": candidate}, "duckdb")
+        self.assertEqual(set(ratios.values()), {1e-7})
+
     def test_duckdb_ratio_direction(self):
         measurements = []
         def fake_summarize(samples, requests, rows, warmup, repeat):

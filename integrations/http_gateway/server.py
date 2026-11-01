@@ -10,8 +10,13 @@ import hmac
 import json
 import math
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import signal
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from contextlib import contextmanager
+import socket
 from pathlib import Path
+import stat
+import tempfile
 import re
 import subprocess
 import threading
@@ -20,7 +25,9 @@ import time
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TEMPLATE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_TEMPLATE_BYTES = 1024 * 1024
 MAX_BACKEND_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = MAX_BACKEND_OUTPUT_BYTES
 
 
 def _reject_duplicate_json_fields(pairs):
@@ -42,15 +49,33 @@ def parse_result_rows(text: str) -> list[dict]:
     def reject_constant(value):
         raise ValueError(f"Nonfinite SQL result constant: {value}")
 
-    rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
-                      parse_constant=reject_constant, parse_float=finite_float)
+    try:
+        rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_fields,
+                          parse_constant=reject_constant, parse_float=finite_float)
+    except RecursionError as error:
+        raise ValueError("SQL result exceeds JSON nesting limit") from error
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError("SQL result must be a list of objects")
     return rows
 
 
+def encode_response_bounded(payload, max_bytes: int = MAX_RESPONSE_BYTES) -> bytes:
+    """Build JSON without retaining a response larger than the wire budget."""
+    output = bytearray()
+    encoder = json.JSONEncoder(separators=(",", ":"))
+    for piece in encoder.iterencode(payload):
+        data = piece.encode("utf-8")
+        if len(data) > max_bytes - len(output):
+            raise ValueError("JSON response exceeds gateway output budget")
+        output.extend(data)
+    return bytes(output)
+
+
 def validate_params(body: bytes) -> dict[str, str]:
-    payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
+    try:
+        payload = json.loads(body, object_pairs_hook=_reject_duplicate_json_fields)
+    except RecursionError as error:
+        raise ValueError("JSON request exceeds nesting limit") from error
     if not isinstance(payload, dict) or set(payload) != {"params"}:
         raise ValueError("Expected JSON object containing only params")
     params = payload["params"]
@@ -72,6 +97,39 @@ def list_query_templates(directory: Path) -> list[str]:
     )
 
 
+@contextmanager
+def pinned_query_template(template: Path):
+    """Execute a private snapshot of the approved regular SQL file."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif template.is_symlink():
+        raise ValueError("SQL template cannot be a symlink")
+    try:
+        fd = os.open(template, flags)
+    except OSError as error:
+        raise ValueError("Unable to open SQL template") from error
+    # fdopen() can itself fail for directories, so validate the descriptor first.
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template must be a bounded regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as source:
+        sql = source.read(MAX_TEMPLATE_BYTES + 1)
+        if len(sql) > MAX_TEMPLATE_BYTES:
+            raise ValueError("SQL template exceeds byte limit")
+    with tempfile.TemporaryDirectory(prefix="rustspark-gateway-sql-") as directory:
+        snapshot = Path(directory) / "query.sql"
+        snapshot.write_bytes(sql)
+        snapshot.chmod(0o600)
+        yield snapshot
+
+
 def command_for_template(binary: str, database: Path, template: Path,
                          params: dict[str, str], max_rows: int, timeout: int) -> list[str]:
     args = [
@@ -85,15 +143,32 @@ def command_for_template(binary: str, database: Path, template: Path,
 
 
 
+
+
+def _kill_backend_group(process: subprocess.Popen) -> None:
+    """Kill inherited pipe holders as well as the immediate SQL process."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
 def run_bounded_backend(command: list[str], timeout: float,
                         max_bytes: int = MAX_BACKEND_OUTPUT_BYTES) -> subprocess.CompletedProcess:
     """Drain stdout with a hard memory limit. Discard backend diagnostics."""
-    if timeout <= 0 or max_bytes <= 0:
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or timeout <= 0 or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("Invalid query execution budget")
     output = bytearray()
     exceeded = threading.Event()
     with subprocess.Popen(command, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL) as process:
+                          stderr=subprocess.DEVNULL,
+                          start_new_session=(os.name == "posix")) as process:
         assert process.stdout is not None
 
         def drain():
@@ -103,10 +178,7 @@ def run_bounded_backend(command: list[str], timeout: float,
                     return
                 if len(output) + len(chunk) > max_bytes:
                     exceeded.set()
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
+                    _kill_backend_group(process)
                     return
                 output.extend(chunk)
 
@@ -115,26 +187,80 @@ def run_bounded_backend(command: list[str], timeout: float,
         deadline = time.monotonic() + timeout
         thread.join(max(0.0, deadline - time.monotonic()))
         if thread.is_alive():
-            process.kill()
+            _kill_backend_group(process)
             thread.join()
             raise subprocess.TimeoutExpired(command, timeout)
         try:
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            process.kill()
+            _kill_backend_group(process)
             process.wait()
             raise
         if exceeded.is_set():
             raise ValueError("SQL result exceeds backend output budget")
+        try:
+            stdout = output.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("SQL backend output is not valid UTF-8") from error
         return subprocess.CompletedProcess(
-            command, process.returncode, output.decode("utf-8"), ""
+            command, process.returncode, stdout, ""
         )
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Keep slow local clients from blocking other requests or spawning unlimited threads."""
+
+    daemon_threads = True
+
+    def __init__(self, address, handler, *, max_clients: int = 16):
+        if type(max_clients) is not int or max_clients < 1:
+            raise ValueError("max_clients must be positive")
+        self._available = threading.BoundedSemaphore(max_clients)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._available.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._available.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._available.release()
+
+
 def make_handler(*, secret: str, queries: Path, database: Path,
-                 binary: str, max_rows: int, timeout: int):
+                 binary: str, max_rows: int, timeout: int,
+                 read_timeout: float = 5.0):
+    if (type(read_timeout) not in (int, float) or not math.isfinite(read_timeout)
+            or read_timeout <= 0):
+        raise ValueError("read_timeout must be finite and positive")
+
     class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            self.request.settimeout(read_timeout)
+            super().setup()
+
         def send_json(self, status, payload):
-            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            try:
+                data = encode_response_bounded(payload)
+            except ValueError:
+                # Never send a partial success body or allocate an expanded
+                # JSON response beyond the gateway's byte budget.
+                status = 502
+                data = b'{"error":"JSON response exceeds output budget"}'
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -164,19 +290,47 @@ def make_handler(*, secret: str, queries: Path, database: Path,
             if not hmac.compare_digest(token, "Bearer " + secret):
                 self.send_json(401, {"error": "Unauthorized"})
                 return
-            try:
-                length = int(self.headers.get("Content-Length", ""))
-            except ValueError:
+            # Never guess a request body boundary from ambiguous HTTP framing.
+            lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get_all("Transfer-Encoding"):
+                self.close_connection = True
+                self.send_json(400, {"error": "Ambiguous request framing"})
+                return
+            if not lengths:
+                self.close_connection = True
                 self.send_json(411, {"error": "Content-Length required"})
                 return
+            if len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
+                self.close_connection = True
+                self.send_json(400, {"error": "Ambiguous request framing"})
+                return
+            # int() itself rejects extremely long decimal strings on modern
+            # Python. Reject oversized framing deterministically first.
+            if len(lengths[0]) > len(str(MAX_REQUEST_BYTES)):
+                self.close_connection = True
+                self.send_json(413, {"error": "Request too large"})
+                return
+            length = int(lengths[0])
             if not 0 <= length <= MAX_REQUEST_BYTES:
+                self.close_connection = True
                 self.send_json(413, {"error": "Request too large"})
                 return
             if self.headers.get_content_type() != "application/json":
+                self.close_connection = True
                 self.send_json(415, {"error": "application/json required"})
                 return
             try:
-                params = validate_params(self.rfile.read(length))
+                request_body = self.rfile.read(length)
+            except (TimeoutError, socket.timeout):
+                self.close_connection = True
+                self.send_json(408, {"error": "Request body timeout"})
+                return
+            if len(request_body) != length:
+                self.close_connection = True
+                self.send_json(400, {"error": "Incomplete request body"})
+                return
+            try:
+                params = validate_params(request_body)
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 self.send_json(400, {"error": "Invalid request"})
                 return
@@ -185,10 +339,11 @@ def make_handler(*, secret: str, queries: Path, database: Path,
                 self.send_json(404, {"error": "Unknown query"})
                 return
             try:
-                result = run_bounded_backend(
-                    command_for_template(binary, database, template, params, max_rows, timeout),
-                    timeout + 10,
-                )
+                with pinned_query_template(template) as pinned:
+                    result = run_bounded_backend(
+                        command_for_template(binary, database, pinned, params, max_rows, timeout),
+                        timeout + 10,
+                    )
                 if result.returncode:
                     self.send_json(422, {"error": "Query failed"})
                     return
@@ -227,7 +382,7 @@ def main():
         max_rows=args.max_rows, timeout=args.query_timeout,
     )
     # Intentionally loopback only; use TLS and a trusted reverse proxy for remote use.
-    with HTTPServer(("127.0.0.1", args.port), handler) as server:
+    with BoundedThreadingHTTPServer(("127.0.0.1", args.port), handler) as server:
         print(f"RustSpark SQL template gateway listening on 127.0.0.1:{args.port}")
         server.serve_forever()
 

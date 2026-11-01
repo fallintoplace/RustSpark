@@ -20,6 +20,22 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(len(report["checks"]), 2)
         self.assertNotIn("/some/private/path", json.dumps(report))
 
+    @patch("scripts.rustspark_doctor.invoke")
+    def test_rejects_mistyped_and_ambiguous_sql_probe_results(self, invoke):
+        for output in (
+            '[{"probe":42.0}]', '[{"probe":42,"probe":42}]',
+            '[{"probe":42,"unexpected":0}]', '[{"probe":"42"}]',
+            '[{"probe":1e999}]',
+        ):
+            with self.subTest(output=output):
+                invoke.side_effect = [
+                    subprocess.CompletedProcess([], 0, "rustspark 0.1.0", ""),
+                    subprocess.CompletedProcess([], 0, output, ""),
+                ]
+                report = diagnose("rustspark")
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["checks"][1]["ok"])
+
     @patch("scripts.rustspark_doctor.invoke", side_effect=FileNotFoundError())
     def test_missing_binary_is_a_failure_without_path_disclosure(self, run):
         report = diagnose("/secret/rustspark")

@@ -172,25 +172,23 @@ impl Expr {
                     }
                     Ok(DataType::Boolean)
                 },
-                BinaryOp::Divide => {
+                BinaryOp::Divide | BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
+                    // Bare NULL is untyped and may join a numeric expression.
+                    // Do not let a FLOAT operand make unrelated TEXT arithmetic
+                    // appear valid: both non-NULL operands must be numeric.
                     let a = left.output_type(schema)?;
                     let b = right.output_type(schema)?;
-                    if matches!(a, DataType::Integer | DataType::Float)
-                        && matches!(b, DataType::Integer | DataType::Float) {
-                        Ok(DataType::Float)
-                    } else {
-                        Err(Error::Type("division requires numeric operands".into()))
+                    let left_numeric = matches!(a, DataType::Integer | DataType::Float)
+                        || matches!(left.as_ref(), Expr::Literal(Value::Null));
+                    let right_numeric = matches!(b, DataType::Integer | DataType::Float)
+                        || matches!(right.as_ref(), Expr::Literal(Value::Null));
+                    if !left_numeric || !right_numeric {
+                        return Err(Error::Type("arithmetic requires numeric operands".into()));
                     }
-                },
-                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    let a = left.output_type(schema)?;
-                    let b = right.output_type(schema)?;
-                    if a == DataType::Float || b == DataType::Float {
+                    if *op == BinaryOp::Divide || a == DataType::Float || b == DataType::Float {
                         Ok(DataType::Float)
-                    } else if a == DataType::Integer && b == DataType::Integer {
-                        Ok(DataType::Integer)
                     } else {
-                        Err(Error::Type("arithmetic requires numeric operands".into()))
+                        Ok(DataType::Integer)
                     }
                 }
             },
@@ -920,5 +918,62 @@ mod borrowed_binary_operands_regressions {
                 Expr::Literal(Value::Integer(0))),
         );
         assert_eq!(short_circuit.evaluate(&batch, 0).unwrap(), Value::Boolean(false));
+    }
+}
+
+#[cfg(test)]
+mod numeric_null_type_validation_tests {
+    use super::*;
+
+    #[test]
+    fn untyped_null_arithmetic_preserves_numeric_result_types() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::new_with_row_count(schema.clone(), vec![], 1).unwrap();
+        for op in [
+            BinaryOp::Add, BinaryOp::Subtract, BinaryOp::Multiply, BinaryOp::Divide,
+        ] {
+            let left_null = Expr::binary(Expr::Literal(Value::Null), op,
+                Expr::Literal(Value::Integer(2)));
+            let right_null = Expr::binary(Expr::Literal(Value::Float(1.5)), op,
+                Expr::Literal(Value::Null));
+            assert_eq!(left_null.output_type(&schema).unwrap(),
+                if op == BinaryOp::Divide { DataType::Float } else { DataType::Integer });
+            assert_eq!(right_null.output_type(&schema).unwrap(), DataType::Float);
+            assert_eq!(left_null.evaluate(&batch, 0).unwrap(), Value::Null);
+            assert_eq!(right_null.evaluate(&batch, 0).unwrap(), Value::Null);
+        }
+        let both_null = Expr::binary(Expr::Literal(Value::Null), BinaryOp::Add,
+            Expr::Literal(Value::Null));
+        assert_eq!(both_null.output_type(&schema).unwrap(), DataType::Integer);
+        assert_eq!(both_null.evaluate(&batch, 0).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn mixed_numeric_and_text_arithmetic_fails_during_type_inference() {
+        let schema = Schema::new(vec![]).unwrap();
+        for op in [
+            BinaryOp::Add, BinaryOp::Subtract, BinaryOp::Multiply, BinaryOp::Divide,
+        ] {
+            for expr in [
+                Expr::binary(Expr::Literal(Value::Float(1.0)), op,
+                    Expr::Literal(Value::Text("x".into()))),
+                Expr::binary(Expr::Literal(Value::Text("x".into())), op,
+                    Expr::Literal(Value::Float(1.0))),
+                Expr::binary(Expr::Literal(Value::Null), op,
+                    Expr::Literal(Value::Text("x".into()))),
+            ] {
+                assert!(expr.output_type(&schema).is_err(), "{op:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sql_nullable_arithmetic_executes_without_invalid_type_rejections() {
+        let catalog = crate::catalog::Catalog::new();
+        let plan = crate::sql::parse_sql(
+            "SELECT 1 + NULL AS a, NULL * 2 AS b, NULL / 2 AS c"
+        ).unwrap();
+        let rows = crate::executor::execute(&plan, &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Null, Value::Null, Value::Null]]);
     }
 }
