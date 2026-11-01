@@ -76,6 +76,24 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             first, second, limit as u8,
         )));
     }
+    // The DP work budget must be enforced before expanding UTF-8 into
+    // heap-allocated char vectors. A rejected multi-megabyte input should
+    // never allocate two complete Unicode copies just to discover its cost.
+    let first_len = first.chars().count();
+    let second_len = second.chars().count();
+    let (longer, shorter) = if first_len >= second_len {
+        (first_len, second_len)
+    } else {
+        (second_len, first_len)
+    };
+    if shorter != 0 {
+        let band_width = threshold.map_or(shorter, |limit| {
+            limit.saturating_mul(2).saturating_add(1).min(shorter)
+        });
+        if longer.checked_mul(band_width).is_none_or(|cells| cells > 2_000_000) {
+            return Err(Error::Execution("LEVENSHTEIN exceeds native edit-distance work budget".into()));
+        }
+    }
     let a = first.chars().collect::<Vec<_>>();
     let b = second.chars().collect::<Vec<_>>();
     distance_units(&a, &b, threshold)
@@ -664,5 +682,30 @@ mod bounded_unicode_edit_search_regressions {
         assert_eq!(evaluate(&[
             Value::Text(first), Value::Text(second), Value::Integer(2),
         ]).unwrap(), Value::Integer(1));
+    }
+}
+
+#[cfg(test)]
+mod unicode_dp_budget_admission_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_excessive_unicode_work_before_materializing_char_vectors() {
+        let long = "🙂".repeat(1_000_001);
+        assert!(matches!(
+            evaluate(&[Value::Text(long), Value::Text("éé".into())]),
+            Err(Error::Execution(message)) if message.contains("work budget")
+        ));
+    }
+
+    #[test]
+    fn wide_matching_unicode_edges_leave_a_small_valid_dp_problem() {
+        let edge = "🙂".repeat(20_000);
+        let a = format!("{edge}abc{edge}");
+        let b = format!("{edge}adc{edge}");
+        assert_eq!(
+            evaluate(&[Value::Text(a), Value::Text(b)]).unwrap(),
+            Value::Integer(1)
+        );
     }
 }
