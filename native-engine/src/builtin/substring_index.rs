@@ -20,16 +20,29 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(text.split_once(delimiter).map_or(text, |(head, _)| head).to_owned()));
     }
     if count == -1 {
-        return Ok(Value::Text(text.rsplit_once(delimiter).map_or(text, |(_, tail)| tail).to_owned()));
+        // Reversing a non-overlapping search changes the matches for
+        // self-overlapping delimiters (e.g. "aaaaa" split on "aa").
+        // SUBSTRING_INDEX must agree with the forward split fields.
+        let tail = text.match_indices(delimiter).last()
+            .map_or(text, |(position, _)| &text[position + delimiter.len()..]);
+        return Ok(Value::Text(tail.to_owned()));
     }
     let index = usize::try_from(count.unsigned_abs() - 1).ok();
     let result = match index {
         None => text,
         Some(index) if count > 0 =>
             text.match_indices(delimiter).nth(index).map_or(text, |(position, _)| &text[..position]),
-        Some(index) =>
-            text.rmatch_indices(delimiter).nth(index)
-                .map_or(text, |(position, _)| &text[position + delimiter.len()..]),
+        Some(index) => {
+            // Count forward non-overlapping matches, then locate the selected
+            // one with a second forward scan. This is O(n), O(1) memory and
+            // preserves SQL split semantics even with overlapping patterns.
+            let matches = text.match_indices(delimiter).count();
+            if index >= matches { text } else {
+                let selected = matches - index - 1;
+                text.match_indices(delimiter).nth(selected)
+                    .map_or(text, |(position, _)| &text[position + delimiter.len()..])
+            }
+        },
     };
     Ok(Value::Text(result.to_string()))
 }
@@ -165,5 +178,44 @@ mod impossible_multibyte_delimiter_tests {
             ]).unwrap(),
             Value::Text(String::new())
         );
+    }
+}
+
+#[cfg(test)]
+mod overlapping_substring_index_regressions {
+    use super::*;
+
+    fn run(input: &str, delimiter: &str, count: i64) -> String {
+        let Value::Text(result) = evaluate(&[
+            Value::Text(input.into()), Value::Text(delimiter.into()), Value::Integer(count),
+        ]).unwrap() else { panic!("expected TEXT") };
+        result
+    }
+
+    #[test]
+    fn negative_indices_follow_left_to_right_nonoverlapping_matches() {
+        for (input, delimiter) in [
+            ("aaaaa", "aa"), ("abababa", "aba"), ("aaaaaa", "aaa"),
+            ("ééééé", "éé"), ("abcabcab", "abcab"), ("banana", "ana"),
+            ("a,a,a", ","), ("no separators", "xx"),
+        ] {
+            let fields = input.split(delimiter).collect::<Vec<_>>();
+            for count in -8_i64..=8 {
+                let expected = if count == 0 { String::new() }
+                    else if count > 0 {
+                        fields.iter().take(count as usize).copied().collect::<Vec<_>>()
+                            .join(delimiter)
+                    } else {
+                        let requested = count.unsigned_abs() as usize;
+                        fields.iter().skip(fields.len().saturating_sub(requested))
+                            .copied().collect::<Vec<_>>().join(delimiter)
+                    };
+                assert_eq!(run(input, delimiter, count), expected,
+                    "input={input:?}, delimiter={delimiter:?}, count={count}");
+            }
+        }
+        assert_eq!(run("aaaaa", "aa", -1), "a");
+        assert_eq!(run("aaaaa", "aa", -2), "aaa");
+        assert_eq!(run("aaaaa", "aa", -3), "aaaaa");
     }
 }
