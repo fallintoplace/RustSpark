@@ -13,6 +13,17 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
+    fn allocate_words(count: usize) -> Result<Vec<u64>> {
+        // A valid filter layout can still exceed the host's available RAM.
+        // Fail with a native execution error instead of a capacity panic or
+        // allocator abort on the exchange/join admission path.
+        let mut words = Vec::new();
+        words.try_reserve_exact(count)
+            .map_err(|_| Error::Execution("Bloom filter bitset allocation failed".into()))?;
+        words.resize(count, 0);
+        Ok(words)
+    }
+
     fn bit_position(bit: usize) -> (usize, u64) {
         (bit / 64, 1_u64 << (bit % 64))
     }
@@ -44,7 +55,8 @@ impl BloomFilter {
         if bits == 0 || bits > 1 << 29 || !(1..=16).contains(&hashes) {
             return Err(Error::Execution("invalid Bloom filter sizing".into()));
         }
-        Ok(Self { words: vec![0; bits.div_ceil(64)], bits, hashes, populated: false, occupied_bits: 0 })
+        Ok(Self { words: Self::allocate_words(bits.div_ceil(64))?,
+            bits, hashes, populated: false, occupied_bits: 0 })
     }
 
     fn hash_pair(&self, key: &Value) -> (u64, u64) {
@@ -755,5 +767,31 @@ mod bloom_optimal_sizing_tests {
         let tight = BloomFilter::for_expected_items(1000, 0.001).unwrap();
         assert!(loose.bits < medium.bits && medium.bits < tight.bits);
         assert!(loose.hashes <= medium.hashes && medium.hashes <= tight.hashes);
+    }
+}
+
+#[cfg(test)]
+mod fallible_bloom_admission_regressions {
+    use super::*;
+
+    #[test]
+    fn capacity_overflow_is_a_recoverable_error() {
+        let err = BloomFilter::allocate_words(usize::MAX).unwrap_err();
+        assert!(err.to_string().contains("allocation failed"));
+    }
+
+    #[test]
+    fn exact_tail_word_allocation_preserves_membership_and_size() {
+        for bits in [1, 63, 64, 65, 129, 513] {
+            let mut filter = BloomFilter::new(bits, 7).unwrap();
+            assert_eq!(filter.byte_size(), bits.div_ceil(64) * 8);
+            for value in 0..100 {
+                filter.insert(&Value::Integer(value));
+            }
+            for value in 0..100 {
+                assert!(filter.might_contain(&Value::Integer(value)));
+            }
+            assert!(filter.bits_set() <= bits);
+        }
     }
 }
