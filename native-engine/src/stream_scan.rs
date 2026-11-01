@@ -651,7 +651,7 @@ mod scan_offset_pushdown_regressions {
     fn filtered_offset_skips_matches_without_materializing_payloads() {
         let source = input();
         let predicate = Expr::binary(
-            Expr::Column("n".into()), BinaryOp::Gt,
+            Expr::Column("n".into()), BinaryOp::Greater,
             Expr::Literal(Value::Integer(23)),
         );
         let mut cursor = scan_window(
