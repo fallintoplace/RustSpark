@@ -7,10 +7,14 @@ import "io"
 type ndjsonByteLimit struct {
     output io.Writer
     remaining int
+    onLimit func()
+    exceeded bool
 }
 
 func (w *ndjsonByteLimit) Write(data []byte) (int, error) {
     if len(data) > w.remaining {
+        w.exceeded = true
+        if w.onLimit != nil { w.onLimit() }
         return 0, errOutputLimit
     }
     written, err := w.output.Write(data)
