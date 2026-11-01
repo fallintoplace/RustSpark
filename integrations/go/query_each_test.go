@@ -92,3 +92,21 @@ func TestScanNDJSONRowsAcceptsExactByteLimit(t *testing.T) {
         t.Fatal("expected oversized row to be rejected")
     }
 }
+
+
+func TestScanNDJSONRowsRejectsNonJSONWhitespace(t *testing.T) {
+    for _, raw := range []string{
+        "\u00a0{\"n\":1}\n", "{\"n\":1}\u00a0\n",
+        "\u2028{\"n\":1}\n", "{\"n\":1}\u2003\n",
+    } {
+        if err := scanNDJSONRows(strings.NewReader(raw),
+            func(map[string]any) error { return nil }); err == nil {
+            t.Fatalf("accepted Unicode whitespace outside JSON: %q", raw)
+        }
+    }
+    visits := 0
+    if err := scanNDJSONRows(strings.NewReader(" \t{\"n\":1} \r\n"),
+        func(map[string]any) error { visits++; return nil }); err != nil || visits != 1 {
+        t.Fatalf("rejected valid JSON whitespace: visits=%d err=%v", visits, err)
+    }
+}
