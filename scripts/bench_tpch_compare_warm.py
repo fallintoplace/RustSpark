@@ -8,6 +8,13 @@ import re
 from pathlib import Path
 
 
+def finite_duration(value):
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def checked_medians(report):
     if "warm" not in str(report.get("metric", "")).lower():
         raise ValueError("Only warm-session reports may be compared")
@@ -22,7 +29,7 @@ def checked_medians(report):
         value = row.get("median_ms")
         if (type(number) is not int or number not in range(1, 23) or number in out
                 or row.get("status") != "ok" or type(value) not in (float, int)
-                or not math.isfinite(value) or value <= 0):
+                or value <= 0 or not finite_duration(value)):
             raise ValueError("Invalid or incomplete warm TPC-H timings")
         out[number] = value
     return out
