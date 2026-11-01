@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from tpch_run import reject_nonfinite, unique_keys
+
 SCRIPTS = Path(__file__).resolve().parent
 
 
@@ -30,6 +32,15 @@ def commands(binary, fixture, report, scale, partitions, timeout):
     return prepare, run
 
 
+def valid_positive_ms(value):
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def complete_query_results(records):
     if not isinstance(records, list) or len(records) != 22:
         return False
@@ -41,8 +52,8 @@ def complete_query_results(records):
         rows = entry.get("result_rows")
         hashes = (entry.get("sql_sha256"), entry.get("result_sha256"))
         return (
-            type(median) in (int, float) and math.isfinite(median) and median > 0
-            and type(p95) in (int, float) and math.isfinite(p95) and p95 >= median
+            valid_positive_ms(median)
+            and valid_positive_ms(p95) and p95 >= median
             and type(rows) is int and rows >= 0
             and all(type(value) is str and len(value) == 64
                     and all(char in "0123456789abcdef" for char in value)
@@ -55,7 +66,9 @@ def complete_query_results(records):
 
 
 def smoke_report_succeeded(report, exit_code):
-    data = json.loads(report.read_text(encoding="utf-8"))
+    data = json.loads(report.read_text(encoding="utf-8"),
+                      object_pairs_hook=unique_keys,
+                      parse_constant=reject_nonfinite)
     if not isinstance(data, dict):
         return False
     records = data.get("results", [])
