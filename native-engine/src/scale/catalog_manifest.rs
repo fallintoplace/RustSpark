@@ -111,30 +111,37 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
     if names.len() > MAX_TABLES {
         return Err(Error::Execution("catalog table count limit exceeded".into()));
     }
-    let mut tables = Vec::with_capacity(names.len());
-    for name in names {
-        if let Some(parquet) = catalog.get_parquet(name)? {
-            tables.push(Table::Parquet {
+    // Serialize each table immediately. Holding a Vec<Table> for 1024 wide
+    // schemas can allocate far beyond the 4 MiB manifest output budget.
+    let mut writer = LimitedManifestWriter { bytes: Vec::new() };
+    writer.write_all(b"{\"version\":")?;
+    serde_json::to_writer(&mut writer, &VERSION)
+        .map_err(|err| Error::Execution(format!("encode catalog manifest: {err}")))?;
+    writer.write_all(b",\"tables\":[")?;
+    for (index, name) in names.into_iter().enumerate() {
+        let table = if let Some(parquet) = catalog.get_parquet(name)? {
+            Table::Parquet {
                 name: name.to_string(),
                 path: canonical_source(parquet.path())?,
                 fields: encode_fields(parquet.schema())?,
-            });
+            }
         } else {
             let csv = catalog.get(name)?;
             if csv.max_record_bytes() > MAX_CSV_RECORD_BYTES {
                 return Err(Error::Execution("catalog CSV record limit too large".into()));
             }
-            tables.push(Table::Csv {
+            Table::Csv {
                 name: name.to_string(),
                 path: canonical_source(csv.path())?,
                 fields: encode_fields(csv.schema())?,
                 max_record_bytes: csv.max_record_bytes(),
-            });
-        }
+            }
+        };
+        if index != 0 { writer.write_all(b",")?; }
+        serde_json::to_writer(&mut writer, &table)
+            .map_err(|err| Error::Execution(format!("encode catalog manifest: {err}")))?;
     }
-    let mut writer = LimitedManifestWriter { bytes: Vec::new() };
-    serde_json::to_writer(&mut writer, &Manifest { version: VERSION, tables })
-        .map_err(|err| Error::Execution(format!("encode catalog manifest: {err}")))?;
+    writer.write_all(b"]}")?;
     Ok(writer.bytes)
 }
 
@@ -414,5 +421,45 @@ mod manifest_regular_file_validation_tests {
         fs::write(&path, vec![b' '; MAX_MANIFEST_BYTES as usize + 1]).unwrap();
         assert!(load(&path).unwrap_err().to_string().contains("byte limit"));
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod streaming_manifest_serialization_regressions {
+    use super::*;
+
+    #[test]
+    fn incremental_snapshot_is_byte_identical_to_serde_manifest() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-manifest-stream-{}-{}",
+            std::process::id(), TEMP_ID.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("data.csv");
+        std::fs::write(&source, b"id\n1\n").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("data", &source, schema.clone(), 1024).unwrap();
+        let expected = serde_json::to_vec(&Manifest {
+            version: VERSION,
+            tables: vec![Table::Csv {
+                name: "data".into(),
+                path: canonical_source(&source).unwrap(),
+                fields: encode_fields(&schema).unwrap(),
+                max_record_bytes: 1024,
+            }],
+        }).unwrap();
+        assert_eq!(snapshot(&catalog).unwrap(), expected);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn empty_catalog_keeps_the_existing_wire_contract() {
+        let expected = serde_json::to_vec(&Manifest {
+            version: VERSION,
+            tables: Vec::new(),
+        }).unwrap();
+        assert_eq!(snapshot(&FileCatalog::new()).unwrap(), expected);
     }
 }
