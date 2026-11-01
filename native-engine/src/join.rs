@@ -97,6 +97,61 @@ pub fn cross_join_with_max_rows(
     Batch::from_validated_columns(schema, columns, count)
 }
 
+// Count the retained output, not merely row cardinality. One joined key can
+// duplicate a large TEXT value millions of times.
+fn join_text_columns(batch: &Batch) -> Result<Vec<&[Value]>> {
+    batch.schema().fields().iter().enumerate()
+        .filter(|(_, field)| field.data_type == crate::schema::DataType::Text)
+        .map(|(column, _)| batch.column(column))
+        .collect()
+}
+
+fn join_fixed_row_bytes(schema: &Schema) -> Result<usize> {
+    schema.len().checked_mul(std::mem::size_of::<Value>())
+        .ok_or_else(|| Error::Execution("join output byte estimate overflow".into()))
+}
+
+fn charge_join_row(
+    used: &mut usize, fixed: usize,
+    left_text: &[&[Value]], left_row: Option<usize>,
+    right_text: &[&[Value]], right_row: Option<usize>,
+    limit: usize,
+) -> Result<()> {
+    let mut bytes = fixed;
+    for (columns, row) in [(left_text, left_row), (right_text, right_row)] {
+        if let Some(row) = row {
+            for column in columns {
+                if let Value::Text(value) = &column[row] {
+                    bytes = bytes.checked_add(value.len())
+                        .ok_or_else(|| Error::Execution("join output byte estimate overflow".into()))?;
+                }
+            }
+        }
+    }
+    *used = used.checked_add(bytes).filter(|size| *size <= limit)
+        .ok_or_else(|| Error::Execution("join output exceeds byte limit".into()))?;
+    Ok(())
+}
+
+// RIGHT/FULL append build-only rows after probing. Reclaim the exact budget
+// already spent by the matched prefix before considering the unmatched tail.
+fn materialized_join_bytes(batch: &Batch) -> Result<usize> {
+    let mut used = batch.num_rows()
+        .checked_mul(join_fixed_row_bytes(batch.schema())?)
+        .filter(|size| *size <= MAX_MATERIALIZED_JOIN_BYTES)
+        .ok_or_else(|| Error::Execution("join output exceeds byte limit".into()))?;
+    for column in join_text_columns(batch)? {
+        for value in column {
+            if let Value::Text(text) = value {
+                used = used.checked_add(text.len())
+                    .filter(|size| *size <= MAX_MATERIALIZED_JOIN_BYTES)
+                    .ok_or_else(|| Error::Execution("join output exceeds byte limit".into()))?;
+            }
+        }
+    }
+    Ok(used)
+}
+
 pub fn hash_join(
     left: &Batch,
     right: &Batch,
@@ -128,12 +183,17 @@ pub fn hash_join(
             left_key, right_key, kind,
         )?.schema().clone();
         let mut count = probed.num_rows();
+        let mut bytes = materialized_join_bytes(&probed)?;
+        let fixed = join_fixed_row_bytes(&schema)?;
+        let right_text = join_text_columns(right)?;
         let mut columns = probed.into_columns();
         for (right_row, matched) in matched_right.into_iter().enumerate() {
             if matched { continue; }
             if count >= MAX_JOIN_ROWS {
                 return Err(Error::Execution("join output exceeds safety limit".into()));
             }
+            charge_join_row(&mut bytes, fixed, &[], None, &right_text,
+                Some(right_row), MAX_MATERIALIZED_JOIN_BYTES)?;
             for destination in columns.iter_mut().take(left.schema().len()) {
                 destination.push(Value::Null);
             }
@@ -169,6 +229,14 @@ pub fn hash_join(
                 indices.push(row);
             }
         }
+
+        let fixed = join_fixed_row_bytes(left.schema())?;
+        let text = join_text_columns(left)?;
+        let mut bytes = 0usize;
+        for &row in &indices {
+            charge_join_row(&mut bytes, fixed, &text, Some(row), &[], None,
+                MAX_MATERIALIZED_JOIN_BYTES)?;
+        }
         return left.take(&indices);
     }
     let mut used: HashSet<String> = left
@@ -202,6 +270,10 @@ pub fn hash_join(
         }
     }
     let mut output = Vec::new();
+    let mut output_bytes = 0usize;
+    let fixed = join_fixed_row_bytes(&schema)?;
+    let left_text = join_text_columns(left)?;
+    let right_text = join_text_columns(right)?;
     let mut matched_right = if matches!(kind, JoinKind::Right | JoinKind::Full) {
         vec![false; right.num_rows()]
     } else {
@@ -219,6 +291,8 @@ pub fn hash_join(
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
+                charge_join_row(&mut output_bytes, fixed, &left_text, Some(left_row),
+                    &right_text, Some(right_row), MAX_MATERIALIZED_JOIN_BYTES)?;
                 let mut row = if match_index + 1 == right_rows.len() {
                     std::mem::take(&mut left_values)
                 } else {
@@ -231,6 +305,8 @@ pub fn hash_join(
             if output.len() >= MAX_JOIN_ROWS {
                 return Err(Error::Execution("join output exceeds safety limit".into()));
             }
+            charge_join_row(&mut output_bytes, fixed, &left_text, Some(left_row),
+                &right_text, None, MAX_MATERIALIZED_JOIN_BYTES)?;
             let mut row = left.row(left_row)?;
             row.extend(vec![Value::Null; right.schema().len()]);
             output.push(row);
@@ -242,6 +318,8 @@ pub fn hash_join(
                 if output.len() >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
+                charge_join_row(&mut output_bytes, fixed, &left_text, None,
+                    &right_text, Some(right_row), MAX_MATERIALIZED_JOIN_BYTES)?;
                 let mut row = vec![Value::Null; left.schema().len()];
                 row.extend(right.row(right_row)?);
                 output.push(row);
@@ -459,6 +537,14 @@ impl<'a> PreparedHashJoin<'a> {
                     selected.push(row);
                 }
             }
+
+            let fixed = join_fixed_row_bytes(left.schema())?;
+            let text = join_text_columns(left)?;
+            let mut bytes = 0usize;
+            for &row in &selected {
+                charge_join_row(&mut bytes, fixed, &text, Some(row), &[], None,
+                    MAX_MATERIALIZED_JOIN_BYTES)?;
+            }
             return left.take(&selected);
         }
         // On high-fanout joins, reject oversized output before cloning a
@@ -491,6 +577,10 @@ impl<'a> PreparedHashJoin<'a> {
             .map(|col| self.right.column(col)).collect::<Result<Vec<_>>>()?;
         let mut columns: Vec<Vec<Value>> =
             (0..self.output_schema.len()).map(|_| Vec::new()).collect();
+        let fixed = join_fixed_row_bytes(&self.output_schema)?;
+        let left_text = join_text_columns(left)?;
+        let right_text = join_text_columns(self.right)?;
+        let mut bytes = 0usize;
         let mut rows = 0usize;
         for left_row in start..end {
             let key = &left_columns[self.left_column][left_row];
@@ -503,6 +593,8 @@ impl<'a> PreparedHashJoin<'a> {
                     if rows >= MAX_JOIN_ROWS {
                         return Err(Error::Execution("join output exceeds safety limit".into()));
                     }
+                    charge_join_row(&mut bytes, fixed, &left_text, Some(left_row),
+                        &right_text, Some(right_row), MAX_MATERIALIZED_JOIN_BYTES)?;
                     for (source, dest) in left_columns.iter().zip(&mut columns) {
                         dest.push(source[left_row].clone());
                     }
@@ -516,6 +608,8 @@ impl<'a> PreparedHashJoin<'a> {
                 if rows >= MAX_JOIN_ROWS {
                     return Err(Error::Execution("join output exceeds safety limit".into()));
                 }
+                charge_join_row(&mut bytes, fixed, &left_text, Some(left_row),
+                    &right_text, None, MAX_MATERIALIZED_JOIN_BYTES)?;
                 for (source, dest) in left_columns.iter().zip(&mut columns) {
                     dest.push(source[left_row].clone());
                 }
@@ -880,5 +974,70 @@ mod materialized_cross_join_byte_budget_regressions {
         assert_eq!(output.value(0, 0).unwrap(), left.value(0, 0).unwrap());
         assert_eq!(output.value(3, 0).unwrap(), &Value::Null);
         assert_eq!(output.value(3, 1).unwrap(), &Value::Integer(2));
+    }
+}
+
+#[cfg(test)]
+mod bounded_hash_join_output_bytes_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn charges_exact_text_lengths_and_null_extended_cells() {
+        let left = [Value::Text("long left".into()), Value::Null];
+        let right = [Value::Text("right".into()), Value::Text("R".into())];
+        let left_text: &[&[Value]] = &[&left];
+        let right_text: &[&[Value]] = &[&right];
+        let fixed = 2 * std::mem::size_of::<Value>();
+        let cost = fixed + "long left".len() + "right".len();
+        let mut bytes = 0usize;
+        charge_join_row(&mut bytes, fixed, left_text, Some(0),
+            right_text, Some(0), cost).unwrap();
+        assert_eq!(bytes, cost);
+        assert!(charge_join_row(&mut bytes, fixed, left_text, Some(0),
+            right_text, Some(1), cost).is_err());
+        assert_eq!(bytes, cost, "rejected output must not consume budget");
+        let mut tail = 0usize;
+        charge_join_row(&mut tail, fixed, &[], None, right_text, Some(0),
+            fixed + "right".len()).unwrap();
+        assert_eq!(tail, fixed + "right".len());
+        let mut all_null = 0usize;
+        charge_join_row(&mut all_null, fixed, left_text, Some(1), &[], None,
+            fixed).unwrap();
+        assert_eq!(all_null, fixed);
+    }
+
+    #[test]
+    fn prepared_and_outer_joins_preserve_results_with_nullable_text() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("l".into())],
+            vec![Value::Null, Value::Text("n".into())],
+            vec![Value::Integer(2), Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("r".into())],
+            vec![Value::Integer(3), Value::Text("extra".into())],
+        ]).unwrap();
+        for (kind, expected_rows) in [
+            (JoinKind::Inner, 1), (JoinKind::Left, 3),
+            (JoinKind::Right, 2), (JoinKind::Full, 4),
+            (JoinKind::Semi, 1), (JoinKind::Anti, 2),
+        ] {
+            let joined = hash_join(&left, &right, "key", "key", kind).unwrap();
+            assert_eq!(joined.num_rows(), expected_rows, "kind={kind:?}");
+            assert!(materialized_join_bytes(&joined).unwrap() <= MAX_MATERIALIZED_JOIN_BYTES);
+        }
+    }
+
+    #[test]
+    fn bounded_helper_rejects_fixed_width_overflows_before_cloning() {
+        let mut used = usize::MAX - 5;
+        let rejected = charge_join_row(&mut used, 10, &[], None, &[], None, usize::MAX);
+        assert!(rejected.is_err());
+        assert_eq!(used, usize::MAX - 5);
     }
 }
