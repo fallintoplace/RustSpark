@@ -168,6 +168,22 @@ impl HyperLogLog {
         self.update_register(index, rank);
     }
 
+    /// Add an arbitrary row selection without materializing an intermediate
+    /// column or hashing adjacent repeated values. A bad index never
+    /// partially updates a live worker sketch.
+    pub fn add_selected(&mut self, values: &[Value], selected: &[usize]) -> Result<()> {
+        if selected.iter().any(|&index| index >= values.len()) {
+            return Err(Error::Execution("selected HLL row out of bounds".into()));
+        }
+        let mut previous: Option<&Value> = None;
+        for &index in selected {
+            let value = &values[index];
+            if previous != Some(value) { self.add(value); }
+            previous = Some(value);
+        }
+        Ok(())
+    }
+
     pub fn merge(&mut self, other: &Self) {
         if other.nonempty == 0 { return; }
         if self.nonempty == 0 {
@@ -321,13 +337,7 @@ pub fn approximate_distinct_selected(
     let index = batch.schema().column(column)?;
     let values = batch.column(index)?;
     let mut sketch = HyperLogLog::new();
-    let mut previous: Option<&Value> = None;
-    for &row in selected {
-        let value = values.get(row)
-            .ok_or_else(|| Error::Execution("selected HLL row out of bounds".into()))?;
-        if previous != Some(value) { sketch.add(value); }
-        previous = Some(value);
-    }
+    sketch.add_selected(values, selected)?;
     Ok(sketch.estimate())
 }
 
@@ -782,6 +792,41 @@ mod transactional_wire_merge_regressions {
         *dense.last_mut().unwrap() = u8::MAX;
         assert!(target.merge_wire_bytes(&dense).is_err());
         assert_eq!(target, original);
+    }
+}
+
+#[cfg(test)]
+mod selected_hll_update_tests {
+    use super::*;
+
+    #[test]
+    fn selected_updates_match_reference_hashing_and_sparse_wire_format() {
+        let values = vec![
+            Value::Null, Value::Integer(7), Value::Integer(8), Value::Text("é🙂".into()),
+            Value::Float(-0.0), Value::Float(0.0), Value::Float(f64::NAN),
+            Value::Integer(7), Value::Text("Berlin".into()),
+        ];
+        let indices = [1, 1, 3, 4, 5, 0, 2, 6, 6, 7, 8];
+        let mut actual = HyperLogLog::new();
+        let mut reference = HyperLogLog::new();
+        actual.add_selected(&values, &indices).unwrap();
+        for &index in &indices { reference.add(&values[index]); }
+        assert_eq!(actual, reference);
+        assert_eq!(actual.to_wire_bytes(), reference.to_wire_bytes());
+        assert!(actual.estimate() > 0.0);
+        assert!(actual.add_selected(&values, &[]).is_ok());
+    }
+
+    #[test]
+    fn out_of_bounds_selection_is_transactional() {
+        let values = [Value::Integer(5), Value::Integer(6)];
+        let mut sketch = HyperLogLog::new();
+        sketch.add(&Value::Text("already present".into()));
+        let before = sketch.clone();
+        assert!(sketch.add_selected(&values, &[0, 2]).is_err());
+        assert_eq!(sketch, before);
+        assert!(sketch.add_selected(&values, &[usize::MAX]).is_err());
+        assert_eq!(sketch, before);
     }
 }
 
