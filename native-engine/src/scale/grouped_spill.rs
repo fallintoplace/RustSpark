@@ -276,40 +276,50 @@ fn aggregate_shard_with_budget(
         control.check()?;
         let key_columns = keys.iter().map(|&index| batch.column(index))
             .collect::<Result<Vec<_>>>()?;
+        let mut previous_group: Option<usize> = None;
         for row in 0..batch.num_rows() {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            key_columns.len().hash(&mut hasher);
-            for column in &key_columns { column[row].hash(&mut hasher); }
-            let fingerprint = hasher.finish();
-            let existing = by_hash.get(&fingerprint).and_then(|positions| {
-                positions.iter().copied().find(|&position| {
-                    matches_group_row(&groups[position].0, &key_columns, row)
-                })
-            });
-            let position = if let Some(position) = existing {
-                position
+            // Repeated adjacent groups are typical after hash-partitioned
+            // sorting. Probe their retained key before hashing every cell.
+            let position = if let Some(last) = previous_group.filter(|&position|
+                matches_group_row(&groups[position].0, &key_columns, row)
+            ) {
+                last
             } else {
-                if groups.len() >= max_groups {
-                    return Err(Error::Execution("group state count exceeds partition budget".into()));
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                key_columns.len().hash(&mut hasher);
+                for column in &key_columns { column[row].hash(&mut hasher); }
+                let fingerprint = hasher.finish();
+                let existing = by_hash.get(&fingerprint).and_then(|positions| {
+                    positions.iter().copied().find(|&position| {
+                        matches_group_row(&groups[position].0, &key_columns, row)
+                    })
+                });
+                if let Some(position) = existing {
+                    position
+                } else {
+                    if groups.len() >= max_groups {
+                        return Err(Error::Execution("group state count exceeds partition budget".into()));
+                    }
+                    // Charge only unique group keys before cloning any TEXT values.
+                    let footprint = super::row_footprint::footprint(
+                        key_columns.iter().map(|column| &column[row])
+                    ).saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
+                    let next_bytes = retained_key_state_bytes.checked_add(footprint)
+                        .filter(|total| *total <= max_key_state_bytes)
+                        .ok_or_else(|| Error::Execution(
+                            "group key state byte budget exceeded".into()))?;
+                    let initial = items.iter().map(|item| new_state(&item.op))
+                        .collect::<Result<Vec<_>>>()?;
+                    let key = key_columns.iter().map(|column| column[row].clone())
+                        .collect::<Vec<_>>();
+                    let position = groups.len();
+                    groups.push((key, initial));
+                    by_hash.entry(fingerprint).or_default().push(position);
+                    retained_key_state_bytes = next_bytes;
+                    position
                 }
-                // Charge only unique group keys before cloning any TEXT values.
-                let footprint = super::row_footprint::footprint(
-                    key_columns.iter().map(|column| &column[row])
-                ).saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
-                let next_bytes = retained_key_state_bytes.checked_add(footprint)
-                    .filter(|total| *total <= max_key_state_bytes)
-                    .ok_or_else(|| Error::Execution(
-                        "group key state byte budget exceeded".into()))?;
-                let initial = items.iter().map(|item| new_state(&item.op))
-                    .collect::<Result<Vec<_>>>()?;
-                let key = key_columns.iter().map(|column| column[row].clone())
-                    .collect::<Vec<_>>();
-                let position = groups.len();
-                groups.push((key, initial));
-                by_hash.entry(fingerprint).or_default().push(position);
-                retained_key_state_bytes = next_bytes;
-                position
             };
+            previous_group = Some(position);
             for ((state, item), &direct_column) in groups[position].1.iter_mut()
                 .zip(items).zip(&direct_columns) {
                 add_to_state(state, &item.op, &batch, row, direct_column,
@@ -974,5 +984,56 @@ mod bound_group_aggregate_columns_regressions {
         ]);
         drop(result);
         fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod consecutive_group_spill_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64 as TestAtomic, Ordering as TestOrdering};
+
+    static NEXT_DIR: TestAtomic = TestAtomic::new(1);
+
+    #[test]
+    fn sorted_unicode_groups_keep_sum_and_distinct_across_spill_windows() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustspark-group-runs-{}-{}", std::process::id(),
+            NEXT_DIR.fetch_add(1, TestOrdering::Relaxed),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let a = Value::Text("🦀".repeat(512));
+        let b = Value::Text("x".repeat(1000));
+        let mut rows = Vec::new();
+        for _ in 0..300 { rows.push(vec![a.clone(), Value::Integer(2)]); }
+        for _ in 0..200 { rows.push(vec![Value::Null, Value::Null]); }
+        for _ in 0..200 { rows.push(vec![b.clone(), Value::Integer(3)]); }
+        for _ in 0..150 { rows.push(vec![a.clone(), Value::Integer(4)]); }
+        let batch = Batch::from_rows(schema.clone(), rows).unwrap();
+        let items = [
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("amount".into())), "total"),
+            AggregateItem::new(AggregateOp::CountDistinct(Expr::Column("amount".into())), "unique"),
+        ];
+        let files = grouped_aggregate(
+            [Ok(batch)], schema, &[("key".into(), "key".into())],
+            &items, &directory, 4, 10, 1024, &QueryControl::default(),
+        ).unwrap();
+        let mut results = std::collections::HashMap::new();
+        for path in files.paths() {
+            let mut reader = SpillReader::new(BufReader::new(File::open(path).unwrap()), 1024).unwrap();
+            while let Some(batch) = reader.next_batch().unwrap() {
+                for mut row in batch.rows().unwrap() {
+                    results.insert(row.remove(0), row);
+                }
+            }
+        }
+        assert_eq!(results.get(&a), Some(&vec![Value::Integer(1200), Value::Integer(2)]));
+        assert_eq!(results.get(&b), Some(&vec![Value::Integer(600), Value::Integer(1)]));
+        assert_eq!(results.get(&Value::Null), Some(&vec![Value::Null, Value::Integer(0)]));
+        drop(files);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
