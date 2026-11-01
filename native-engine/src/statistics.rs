@@ -286,6 +286,45 @@ impl ColumnStatistics {
                         else if seen_false { Some(Value::Boolean(false)) } else { None },
                 });
             }
+            if first.schema().field(index)?.data_type == DataType::Float {
+                let mut rows = 0u64;
+                let mut nulls = 0u64;
+                let mut min: Option<f64> = None;
+                let mut max: Option<f64> = None;
+                for batch in batches {
+                    let column = batch.schema().column(name)?;
+                    if batch.schema().field(column)?.data_type != DataType::Float {
+                        return Err(Error::Type("statistics batches disagree on column type".into()));
+                    }
+                    rows = rows.checked_add(u64::try_from(batch.num_rows())
+                        .map_err(|_| Error::Execution("statistics row count overflow".into()))?)
+                        .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
+                    for value in batch.column(column)? {
+                        match value {
+                            Value::Null => {
+                                nulls = nulls.checked_add(1)
+                                    .ok_or_else(|| Error::Execution("statistics NULL count overflow".into()))?;
+                            }
+                            Value::Float(number) => {
+                                if min.is_none_or(|old|
+                                    !number.is_nan() && (old.is_nan() || *number < old)) {
+                                    min = Some(*number);
+                                }
+                                if max.is_none_or(|old|
+                                    (number.is_nan() && !old.is_nan()) ||
+                                    (!number.is_nan() && *number > old)) {
+                                    max = Some(*number);
+                                }
+                            }
+                            _ => unreachable!("native batch schema was validated"),
+                        }
+                    }
+                }
+                return Ok(Self {
+                    rows, nulls,
+                    min: min.map(Value::Float), max: max.map(Value::Float),
+                });
+            }
             if first.schema().field(index)?.data_type == DataType::Text {
                 let mut rows = 0u64;
                 let mut nulls = 0u64;
@@ -708,3 +747,47 @@ mod direct_boolean_multibatch_stats_regressions {
         assert!(ColumnStatistics::from_batches(&[bools, numbers], "flag").is_err());
     }
 }
+#[cfg(test)]
+mod direct_float_multibatch_stats_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn matches_merge_with_nan_signed_zero_nulls_and_empty_batches() {
+        let schema = Schema::new(vec![Field::new("number", DataType::Float, true)]).unwrap();
+        let batches = vec![
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Float(f64::NAN)], vec![Value::Null],
+            ]).unwrap(),
+            Batch::empty(schema.clone()),
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Float(-0.0)], vec![Value::Float(2.0)],
+                vec![Value::Float(f64::NAN)],
+            ]).unwrap(),
+            Batch::from_rows(schema, vec![
+                vec![Value::Float(-4.0)], vec![Value::Null],
+            ]).unwrap(),
+        ];
+        let mut expected = ColumnStatistics::default();
+        for batch in &batches {
+            expected.merge(&ColumnStatistics::from_batch(batch, "number").unwrap()).unwrap();
+        }
+        let actual = ColumnStatistics::from_batches(&batches, "number").unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!((actual.rows, actual.nulls), (7, 2));
+        assert_eq!(actual.min, Some(Value::Float(-4.0)));
+        assert_eq!(actual.max, Some(Value::Float(f64::NAN)));
+    }
+
+    #[test]
+    fn refuses_mixed_types_even_for_empty_batches() {
+        let floats = Batch::empty(Schema::new(vec![
+            Field::new("n", DataType::Float, true),
+        ]).unwrap());
+        let texts = Batch::empty(Schema::new(vec![
+            Field::new("n", DataType::Text, true),
+        ]).unwrap());
+        assert!(ColumnStatistics::from_batches(&[floats, texts], "n").is_err());
+    }
+}
+
