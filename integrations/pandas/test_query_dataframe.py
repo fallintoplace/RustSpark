@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 import os
 import signal
 import sys
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 from pathlib import Path
-from query_dataframe import build_command, query_dataframe
+from query_dataframe import build_command, query_dataframe, _export_arrow
 
 
 class DataFrameCommandTests(unittest.TestCase):
@@ -145,6 +146,36 @@ class FailedPandasExportStartupTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "Unable to start"):
                 query_dataframe("SELECT 1")
+
+
+
+class ArrowDiskBudgetTests(unittest.TestCase):
+    def test_rejects_invalid_arrow_limits(self):
+        for invalid in (0, -1, True, 1.5, "1024"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "max_arrow_bytes"):
+                query_dataframe("SELECT 1", max_arrow_bytes=invalid)
+
+    @unittest.skipUnless(os.name == "posix", "process group cleanup requires POSIX")
+    def test_kills_exporter_after_temporary_output_exceeds_budget(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as diagnostics:
+            output = Path(directory) / "result.arrow"
+            script = (
+                "from pathlib import Path; import sys, time;"
+                "Path(sys.argv[1]).write_bytes(b'x' * 8192);time.sleep(3)"
+            )
+            with self.assertRaisesRegex(RuntimeError, "max_arrow_bytes"):
+                _export_arrow([sys.executable, "-c", script, str(output)],
+                              diagnostics, 2, output, 1024)
+
+    def test_exact_size_export_fits(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile() as diagnostics:
+            output = Path(directory) / "result.arrow"
+            script = (
+                "from pathlib import Path; import sys;"
+                "Path(sys.argv[1]).write_bytes(b'x' * 128)"
+            )
+            self.assertEqual(_export_arrow([sys.executable, "-c", script, str(output)],
+                                           diagnostics, 2, output, 128), 0)
 
 
 if __name__ == "__main__":
