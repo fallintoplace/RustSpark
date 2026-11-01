@@ -30,6 +30,24 @@ pub fn optimize(plan: Plan) -> Plan {
                 if inner == &predicate && repeatable_filter(&predicate)) {
                 // The inner predicate already admitted exactly these rows.
                 input
+            } else if let Plan::Filter { input: grandchild, predicate: inner } = input {
+                if repeatable_filter(&inner) && repeatable_filter(&predicate) {
+                    // Two filters skip the outer predicate when the inner
+                    // predicate is FALSE or NULL. Bare AND would still
+                    // evaluate the outer expression for NULL.
+                    Plan::Filter {
+                        input: grandchild,
+                        predicate: Expr::Case {
+                            branches: vec![(inner, predicate)],
+                            else_expr: Some(Box::new(Expr::Literal(Value::Boolean(false)))),
+                        },
+                    }
+                } else {
+                    Plan::Filter {
+                        input: Box::new(Plan::Filter { input: grandchild, predicate: inner }),
+                        predicate,
+                    }
+                }
             } else {
                 Plan::Filter { input: Box::new(input), predicate }
             }
@@ -301,5 +319,62 @@ mod volatile_sort_optimizer_regressions {
         };
         let twice = Plan::Sort { input: Box::new(once.clone()), keys };
         assert_eq!(optimize(twice), once);
+    }
+}
+
+#[cfg(test)]
+mod fused_filter_plan_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor, expr::BinaryOp,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn adjacent_pure_filters_share_one_scan_and_preserve_nulls() {
+        let low = Expr::binary(Expr::Column("x".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(2)));
+        let high = Expr::binary(Expr::Column("x".into()), BinaryOp::Less,
+            Expr::Literal(Value::Integer(8)));
+        let source = Plan::scan("t");
+        let original = source.clone().filter(low.clone()).filter(high.clone());
+        let optimized = optimize(original.clone());
+        assert_eq!(optimized, source.filter(Expr::Case {
+            branches: vec![(low, high)],
+            else_expr: Some(Box::new(Expr::Literal(Value::Boolean(false)))),
+        }));
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap();
+        let rows = (0..11).map(|x| vec![Value::Integer(x)])
+            .chain([vec![Value::Null]]).collect();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, rows).unwrap()).unwrap();
+        assert_eq!(executor::execute(&original, &catalog).unwrap(),
+            executor::execute(&optimized, &catalog).unwrap());
+    }
+
+    #[test]
+    fn null_or_false_inner_predicate_skips_erroring_outer_expression() {
+        let failing = Expr::binary(
+            Expr::binary(Expr::Literal(Value::Integer(1)), BinaryOp::Divide,
+                Expr::Literal(Value::Integer(0))),
+            BinaryOp::Greater, Expr::Literal(Value::Integer(0)));
+        let original = Plan::scan("t")
+            .filter(Expr::Column("active".into()))
+            .filter(failing);
+        let optimized = optimize(original.clone());
+        assert_ne!(optimized, original);
+        let schema = Schema::new(vec![Field::new("active", DataType::Boolean, true)]).unwrap();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Boolean(false)],
+        ]).unwrap()).unwrap();
+        assert_eq!(executor::execute(&optimized, &catalog).unwrap(),
+            executor::execute(&original, &catalog).unwrap());
+    }
+
+    #[test]
+    fn do_not_fuse_uncertain_function_expressions() {
+        let pure = Expr::Column("is_active".into());
+        let uncertain = Expr::Call { name: "random".into(), args: vec![] };
+        let plan = Plan::scan("t").filter(pure).filter(uncertain);
+        assert_eq!(optimize(plan.clone()), plan);
     }
 }
