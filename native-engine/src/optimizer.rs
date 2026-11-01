@@ -30,6 +30,21 @@ pub fn optimize(plan: Plan) -> Plan {
                 if inner == &predicate && repeatable_filter(&predicate)) {
                 // The inner predicate already admitted exactly these rows.
                 input
+            } else if let Plan::Filter { input: grandchild, predicate: inner } = input {
+                if repeatable_filter(&inner) && repeatable_filter(&predicate) {
+                    // One WHERE pass is enough for ordered, repeatable filters.
+                    // Keep the inner expression on the left: AND short-circuits
+                    // rejected rows before evaluating the outer predicate.
+                    Plan::Filter {
+                        input: grandchild,
+                        predicate: Expr::binary(inner, crate::expr::BinaryOp::And, predicate),
+                    }
+                } else {
+                    Plan::Filter {
+                        input: Box::new(Plan::Filter { input: grandchild, predicate: inner }),
+                        predicate,
+                    }
+                }
             } else {
                 Plan::Filter { input: Box::new(input), predicate }
             }
@@ -301,5 +316,39 @@ mod volatile_sort_optimizer_regressions {
         };
         let twice = Plan::Sort { input: Box::new(once.clone()), keys };
         assert_eq!(optimize(twice), once);
+    }
+}
+
+#[cfg(test)]
+mod fused_filter_plan_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor, expr::BinaryOp,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn adjacent_pure_filters_share_one_scan_and_preserve_nulls() {
+        let low = Expr::binary(Expr::Column("x".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(2)));
+        let high = Expr::binary(Expr::Column("x".into()), BinaryOp::Less,
+            Expr::Literal(Value::Integer(8)));
+        let source = Plan::scan("t");
+        let original = source.clone().filter(low.clone()).filter(high.clone());
+        let optimized = optimize(original.clone());
+        assert_eq!(optimized, source.filter(Expr::binary(low, BinaryOp::And, high)));
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, true)]).unwrap();
+        let rows = (0..11).map(|x| vec![Value::Integer(x)])
+            .chain([vec![Value::Null]]).collect();
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(schema, rows).unwrap()).unwrap();
+        assert_eq!(executor::execute(&original, &catalog).unwrap(),
+            executor::execute(&optimized, &catalog).unwrap());
+    }
+
+    #[test]
+    fn do_not_fuse_uncertain_function_expressions() {
+        let pure = Expr::Column("is_active".into());
+        let uncertain = Expr::Call { name: "random".into(), args: vec![] };
+        let plan = Plan::scan("t").filter(pure).filter(uncertain);
+        assert_eq!(optimize(plan.clone()), plan);
     }
 }
