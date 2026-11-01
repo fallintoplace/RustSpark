@@ -9,7 +9,13 @@ from pathlib import Path
 
 
 def timing(value, label):
-    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
+    if type(value) not in (int, float) or value < 0:
+        raise ValueError(f"Invalid {label} timing")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
         raise ValueError(f"Invalid {label} timing")
     return float(value)
 

@@ -30,6 +30,13 @@ class ReportTests(unittest.TestCase):
                 {"id": 1, "status": "executed", "median_ms": -1, "p95_ms": 0},
             ]})
 
+    def test_unrepresentable_integer_timings_are_validation_errors(self):
+        for field in ("median_ms", "p95_ms"):
+            row = {"id": 1, "status": "executed", "median_ms": 1.0, "p95_ms": 2.0}
+            row[field] = 10**500
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "Invalid"):
+                reporter.render({"results": [row]})
+
     def test_duplicate_ids_rejected(self):
         with self.assertRaisesRegex(ValueError, "duplicated"):
             reporter.render({"results": [
